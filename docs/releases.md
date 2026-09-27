@@ -166,6 +166,41 @@ platforms, but **any failure blocks release creation**. Per-ref concurrency uses
 `cancel-in-progress: false`; a newer run must not interrupt an in-progress draft
 upload. This is not a guarantee that every pending run will be queued forever.
 
+### Windows linker selection and preflight
+
+Git for Windows includes an unrelated `usr\bin\link.exe`. Release commands run
+in Git Bash, whose `PATH` can find that utility instead of Visual Studio's MSVC
+linker. Release run `36301066140`, job `108568689470`, failed this way while
+linking dependency build scripts during RTK installation, before Windows workspace
+builds or tests had started.
+
+The Windows setup initializes the native x64 Visual Studio developer shell,
+derives `bin\Hostx64\x64` from `VCToolsInstallDir`, and requires both `cl.exe` and
+`link.exe` there. It exports the resolved, unquoted absolute linker path as
+`CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER` through `GITHUB_ENV` for subsequent
+steps, while retaining the compiler/library environment and Git Bash verification.
+It does not rely on PATH ordering, a fixed Visual Studio edition/toolset version,
+global `RUSTFLAGS`, or nightly Rust options.
+
+Before the pinned RTK installation, a Windows-only Bash preflight:
+
+- Validates the inherited linker setting against the expected MSVC file and tests
+  rejection of missing, empty, relative, quoted, nonexistent, directory, and Git
+  utility paths. It reports the configured linker and PATH-resolved `link.exe`
+  separately; finding Git's utility on PATH is not itself a failure.
+- Builds a temporary dependency-free executable with a real `build.rs` twice:
+  once in Cargo's implicit-host mode (as used by RTK installation), and once with
+  `--target x86_64-pc-windows-msvc` (as used by workspace release commands). Both
+  builds are offline with separate clean output directories. Each executable must
+  print a known marker supplied by the build script.
+- Puts Git's `usr\bin` first on PATH **only in the probe subprocess environment**
+  to exercise the original collision. Subprocesses have timeouts and preserve
+  compiler diagnostics on failure; temporary files are cleaned up without touching
+  repository manifests or `Cargo.lock`.
+
+This preflight does not replace RTK installation/behavior probes or any workspace,
+provider-prefix, production-build, extracted-binary, or checksum release gates.
+
 ## Manual build-only dry run
 
 Once `release.yml` is present on the repository's default branch, open **Actions →
@@ -183,9 +218,12 @@ Actions artifacts and inspect its four files/checksums. A dry run does not promo
 its artifacts into a later tag run; the tag run independently builds its source.
 
 Do not treat a workflow merely being added or statically linted as hosted
-acceptance. Require all three native jobs and assembly to succeed, and confirm
-that dispatch created no release. Real draft creation needs a separately
-authorized version-tag push.
+acceptance. Require all three native jobs and assembly to succeed, including the
+Windows linker preflight, RTK installation, workspace tests, production build,
+extracted-binary smoke tests, and checksum verification. Confirm the draft job was
+skipped and dispatch created no release. Record the tested source commit and run
+ID; local linting or mocked probes do not establish Windows acceptance. Real draft
+creation needs a separately authorized version-tag push.
 
 ## Retry and recovery
 
@@ -197,6 +235,10 @@ authorized version-tag push.
   jobs** on the original run. The same run can reuse already successful target
   artifacts; rerun targets replace only their target-specific artifact. Assembly
   revalidates the complete inventory. If artifacts have expired, rerun all jobs.
+  Reruns retain the original commit SHA and ref: rerunning a failed tag workflow
+  does **not** pick up a later workflow commit. To test corrected source/workflow
+  code, use a new build-only dispatch selecting the corrected ref after separate
+  push/dispatch authorization, and verify its recorded source SHA.
 - A partial create/upload failure may leave an **incomplete, unpublished draft**.
   Rerun the failed draft job after fixing the operational problem and while the
   bundle is retained. A full rerun may resolve a newer stable Rust version;
@@ -220,7 +262,9 @@ authorized version-tag push.
   files. **Never publish while a run/retry is in progress or after a failed
   upload.** Wait for the final complete-asset verification and a successful job.
 - If source or workflow code must change, commit the fix and choose a new aligned
-  package version/tag. Do not move a published tag or reuse a published version.
+  package version/tag. Do not move `v0.0.1` or another existing release tag to repair
+  a failure, or reuse a published version. Version selection, tagging, and
+  publication are separate maintainer decisions, not part of a workflow fix.
   An unmarked/conflicting draft requires explicit maintainer investigation; the
   workflow will not claim ownership or silently overwrite it. Manually dispatching
   the tag is not a release-repair shortcut because dispatch cannot write releases.

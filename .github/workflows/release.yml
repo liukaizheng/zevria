@@ -128,7 +128,25 @@ jobs:
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Native MSVC C/C++ tools are required' }
           & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          Get-Command cl.exe, link.exe -ErrorAction Stop
+          if (-not $env:VCToolsInstallDir) {
+            throw 'MSVC setup did not set VCToolsInstallDir; check the Visual Studio x64 C++ tools and developer shell initialization'
+          }
+          $nativeTools = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64'
+          if (-not (Test-Path -LiteralPath $nativeTools -PathType Container)) {
+            throw "Native x64 MSVC tool directory is missing: $nativeTools; check the Visual Studio C++ toolset installation"
+          }
+          $nativeTools = (Resolve-Path -LiteralPath $nativeTools -ErrorAction Stop).ProviderPath
+          $compiler = Join-Path $nativeTools 'cl.exe'
+          $linker = Join-Path $nativeTools 'link.exe'
+          foreach ($tool in @($compiler, $linker)) {
+            if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "Required native x64 MSVC tool is missing: $tool; repair the Visual Studio C++ toolset installation"
+            }
+          }
+          Write-Host "Selected MSVC compiler: $compiler"
+          Write-Host "Selected MSVC linker: $linker"
+          # An unquoted absolute path: Git Bash may put Git's unrelated link.exe first on PATH.
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
           foreach ($name in @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR', 'VCToolsInstallDir', 'WindowsSdkDir', 'WindowsSDKVersion')) {
             $value = [Environment]::GetEnvironmentVariable($name)
             if (-not $value) { throw "Missing native compiler environment: $name" }
@@ -153,6 +171,112 @@ jobs:
         with:
           prefix-key: release-v1
           key: ${{ runner.os }}-${{ matrix.target }}-${{ needs.prepare.outputs.toolchain }}-${{ hashFiles('Cargo.lock') }}
+      - name: Verify Cargo MSVC linking from Git Bash
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import tempfile
+
+          target = 'x86_64-pc-windows-msvc'
+          setting = 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER'
+          guidance = 'Check the native MSVC setup step and its GITHUB_ENV exports; do not rely on PATH ordering.'
+          env = os.environ.copy()
+          print(f'Configured Cargo linker: {env.get(setting)!r}', flush=True)
+          print(f'PATH-resolved link.exe (diagnostic only): {shutil.which("link.exe")!r}', flush=True)
+          vc_tools = env.get('VCToolsInstallDir')
+          if not vc_tools or not Path(vc_tools).is_absolute():
+              raise SystemExit(f'MSVC linker preflight: missing or invalid VCToolsInstallDir. {guidance}')
+          expected = Path(vc_tools, 'bin', 'Hostx64', 'x64', 'link.exe')
+
+          def validate_linker(value):
+              if not value or not Path(value).is_absolute():
+                  raise ValueError(f'{setting} must be an unquoted absolute native path, got {value!r}')
+              try:
+                  linker = Path(value).resolve(strict=True)
+                  expected_linker = expected.resolve(strict=True)
+              except (OSError, ValueError) as error:
+                  raise ValueError(f'Cannot resolve configured or expected MSVC linker: {error}') from error
+              if not linker.is_file() or linker != expected_linker:
+                  raise ValueError(f'Expected MSVC linker {expected_linker}, got {linker}')
+              return linker
+
+          try:
+              linker = validate_linker(env.get(setting))
+          except ValueError as error:
+              raise SystemExit(f'MSVC linker preflight: {error}. {guidance}') from error
+
+          git_bash = env.get('ZEVRIA_GIT_BASH')
+          if not git_bash:
+              raise SystemExit(f'MSVC linker preflight: missing ZEVRIA_GIT_BASH. {guidance}')
+          git_link = Path(git_bash).parent.parent / 'usr' / 'bin' / 'link.exe'
+          if not git_link.is_file():
+              raise SystemExit(f'Cannot exercise the Git/MSVC linker collision: missing {git_link}')
+
+          def run(command, cwd, child_env, timeout, expected_stdout=None):
+              print(f'Running {command!r}', flush=True)
+              try:
+                  result = subprocess.run(command, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
+                                          capture_output=True, text=True, errors='replace', timeout=timeout)
+              except subprocess.TimeoutExpired as error:
+                  raise SystemExit(f'MSVC linker preflight: {command!r} timed out after {error.timeout}s; '
+                                   f'stdout={error.stdout!r}; stderr={error.stderr!r}') from error
+              except OSError as error:
+                  raise SystemExit(f'MSVC linker preflight: cannot execute {command!r}: {error}') from error
+              actual = f'{command!r}: exit status {result.returncode}; stdout={result.stdout!r}; stderr={result.stderr!r}'
+              if result.returncode != 0 or (expected_stdout is not None and result.stdout != expected_stdout):
+                  raise SystemExit(f'MSVC linker preflight failed: {actual}; expected success'
+                                   f' and stdout={expected_stdout!r} (None means unchecked)')
+              print(actual, flush=True)
+
+          with tempfile.TemporaryDirectory(prefix='zevria-msvc-linker-') as temp:
+              root = Path(temp).resolve(strict=True)
+              # Reject bad settings without changing the inherited environment or invoking a wrong linker.
+              for label, value in (
+                  ('missing', None), ('empty', ''), ('relative', 'link.exe'),
+                  ('nonexistent', str(root / 'missing-link.exe')),
+                  ('directory', str(linker.parent)), ('quoted', f'"{linker}"'),
+                  ('Git utility', str(git_link)),
+              ):
+                  try:
+                      validate_linker(value)
+                  except ValueError:
+                      print(f'Rejected {label} linker setting as expected', flush=True)
+                  else:
+                      raise SystemExit(f'MSVC linker preflight accepted an invalid {label} setting: {value!r}')
+
+              # Reproduce the collision only in probe subprocesses, never in GITHUB_ENV or later steps.
+              probe_env = env.copy()
+              probe_env['PATH'] = str(git_link.parent) + os.pathsep + env['PATH']
+              path_link = shutil.which('link.exe', path=probe_env['PATH'])
+              if not path_link or Path(path_link).resolve(strict=True) != git_link.resolve(strict=True):
+                  raise SystemExit(f'Could not put Git link.exe first on the probe PATH: {path_link!r}')
+              print(f'Probe PATH-resolved link.exe: {path_link}; Cargo still uses {linker}', flush=True)
+
+              (root / 'Cargo.toml').write_text(
+                  '[package]\nname = "zevria-msvc-linker-probe"\nversion = "0.0.0"\nedition = "2021"\n'
+                  'build = "build.rs"\n\n[workspace]\n', encoding='utf-8')
+              (root / 'build.rs').write_text(
+                  'fn main() { println!("cargo:rustc-env=ZEVRIA_MSVC_LINKER_PROBE=ZEVRIA_MSVC_LINKER_OK"); }\n',
+                  encoding='utf-8')
+              (root / 'src').mkdir()
+              (root / 'src' / 'main.rs').write_text(
+                  'fn main() { println!("{}", env!("ZEVRIA_MSVC_LINKER_PROBE")); }\n', encoding='utf-8')
+              # Separate clean outputs force host build-script linking in both Cargo modes.
+              for mode, target_args, binary in (
+                  ('implicit-host', [], Path('debug', 'zevria-msvc-linker-probe.exe')),
+                  ('explicit-target', ['--target', target], Path(target, 'debug', 'zevria-msvc-linker-probe.exe')),
+              ):
+                  output = root / mode
+                  run(['cargo', 'build', '--offline', '--verbose', '--color', 'never',
+                       '--target-dir', str(output), *target_args], root, probe_env, 180)
+                  run([str(output / binary)], root, probe_env, 15, 'ZEVRIA_MSVC_LINKER_OK\n')
+                  print(f'MSVC linker preflight passed: {mode} build script and executable', flush=True)
+          PY
       - name: Install RTK for command-environment tests
         # RTK v0.49.0 provides the raw `run` command required by inspection fixtures.
         # Keep aligned with test.yml; never resolve RTK's moving default branch.
