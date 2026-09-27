@@ -73,6 +73,93 @@ fn explicit_native_offline_commands_do_not_require_a_command_backend() {
 }
 
 #[cfg(windows)]
+fn missing_wsl_distro(home: &Path) -> String {
+    // The temporary home's random name keeps the probe independent of installed distros.
+    format!(
+        "zevria-nonexistent-{}-{}",
+        std::process::id(),
+        home.file_name().unwrap().to_str().unwrap()
+    )
+}
+
+#[cfg(windows)]
+#[test]
+fn automatic_wsl_readiness_failure_is_quiet_and_runs_native_offline_command() {
+    for runtime in [&[][..], &["--runtime", "auto"][..]] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let distro = missing_wsl_distro(home.path());
+        let output = command(home.path(), workspace.path())
+            .args(runtime)
+            .args(["--wsl-distro", &distro, "skills", "list", "--json"])
+            .env("ZEVRIA_GIT_BASH", home.path().join("nonexistent.exe"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "runtime {runtime:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "runtime {runtime:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let view: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(view["entries"], serde_json::json!([]));
+        assert_eq!(
+            Path::new(view["global_location"].as_str().unwrap()),
+            home.path().join(".zevria").join("skills")
+        );
+        assert_eq!(
+            Path::new(view["project_location"].as_str().unwrap()),
+            workspace.path().join(".zevria").join("skills")
+        );
+        for path in [home.path(), workspace.path()] {
+            assert!(std::fs::read_dir(path).unwrap().next().is_none());
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn explicit_wsl_readiness_failure_retains_details_without_native_fallback() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let distro = missing_wsl_distro(home.path());
+    let output = command(home.path(), workspace.path())
+        .args([
+            "--runtime",
+            "wsl",
+            "--wsl-distro",
+            &distro,
+            "skills",
+            "list",
+            "--json",
+        ])
+        .env("ZEVRIA_GIT_BASH", home.path().join("nonexistent.exe"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("requested WSL runtime is not ready; no fallback was attempted"),
+        "{stderr}"
+    );
+    let (_, cause) = stderr.split_once("Caused by:").expect(&stderr);
+    assert!(!cause.trim().is_empty(), "{stderr}");
+    assert!(
+        cause.contains("WSL readiness failed (")
+            || cause.contains("WSL distribution/bootstrap unavailable"),
+        "{stderr}"
+    );
+    for path in [home.path(), workspace.path()] {
+        assert!(std::fs::read_dir(path).unwrap().next().is_none());
+    }
+}
+
+#[cfg(windows)]
 #[test]
 fn native_home_falls_back_to_userprofile_without_home() {
     let home = tempfile::tempdir().unwrap();

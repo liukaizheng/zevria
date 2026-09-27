@@ -10,7 +10,7 @@ part of the initial acceptance claim.
 
 | Invocation from Windows | Selected runtime |
 | --- | --- |
-| `zevria` or `zevria --runtime auto` | Ready default WSL distribution; otherwise native, with an explanatory stderr notice |
+| `zevria` or `zevria --runtime auto` | Ready default WSL distribution; otherwise silent native fallback |
 | `zevria --runtime wsl` | Require ready WSL; never fall back |
 | `zevria --runtime native` | Native; do not probe WSL |
 | `zevria --acp` (including `--ensemble-worker`) | Native by default |
@@ -19,10 +19,11 @@ part of the initial acceptance claim.
 
 `--wsl-distro NAME` chooses exactly that distribution to probe. It does not scan
 other distributions or change the user's default. In automatic mode, a missing
-or unready selected distribution produces a diagnostic and native fallback;
-combine it with `--runtime wsl` to require that distribution instead. Invalid
-option syntax is always an error. With ACP, a distribution override requires
-`--runtime wsl`. `--runtime native --wsl-distro NAME` is invalid.
+or unready selected distribution silently falls back to native Windows;
+combine it with `--runtime wsl` to require that distribution and see detailed
+readiness errors instead. Invalid option syntax is always an error. With ACP, a
+distribution override requires `--runtime wsl`.
+`--runtime native --wsl-distro NAME` is invalid.
 
 Help, version, and the private machine-readable compatibility probe run before
 configuration/logging/terminal initialization. Offline management operations need
@@ -35,6 +36,12 @@ source, bounded output and deadlines, and positional arguments. They perform no
 installation or application configuration. The Linux bootstrap needs `/bin/sh`,
 `timeout`, `readlink`, `od`, `tr`, `head`, `wc`, `grep`, and (for Windows drive
 paths) `wslpath`. It never sources shell profiles.
+
+All automatic readiness failures are quiet, including missing distributions,
+missing or incompatible Linux companions, missing dependencies, and timeouts.
+Captured probe help/error output is not printed. Normal startup diagnostics,
+including the `zevria: runtime windows; configuration …; state …` line, and native
+Git Bash/RTK errors remain visible.
 
 **After handoff there is no native retry.** The Linux child's stdout, stderr,
 terminal handles and exit status belong to that invocation. First-run config,
@@ -112,8 +119,8 @@ profiles or evaluate locator text.
 
 A malformed, unreadable, nonregular, linked/dangling or stale locator **fails WSL
 readiness**, rather than silently running another Linux Zevria. Automatic mode
-may still use its existing native fallback; explicit `--runtime wsl` fails. Repair
-inside the selected distribution by rerunning the matching Linux installer with
+falls back silently to native Windows; explicit `--runtime wsl` reports the error.
+Repair inside the selected distribution by rerunning the matching Linux installer with
 the intended `ZEVRIA_INSTALL`. Or, after inspecting the record, remove only
 `~/.zevria/install-root` to deliberately restore fallback discovery. Do not delete
 the shared `.zevria` directory or credentials. An unavailable/non-ELF recorded
@@ -244,8 +251,10 @@ does not rewrite ACP messages. See [ACP agent setup](acp-agent.md).
 
 ## Troubleshooting and acceptance
 
-- No distribution / companion / RTK / timeout: read the readiness stderr notice;
-  use `--runtime wsl` to see a required-runtime error instead of automatic fallback.
+- WSL not ready (missing distribution/companion/dependencies, incompatibility or
+  timeout): automatic mode falls back silently. Use `--runtime wsl` (with
+  `--wsl-distro NAME` if needed) for detailed readiness errors without fallback,
+  or `--runtime native` to skip probing.
 - Wrong companion: install the matching Linux version; do not point at zevria.exe.
 - Stale/custom root: repair the selected distro's `~/.zevria/install-root` as above;
   do not assume a Cargo copy or profile PATH will override it.
@@ -270,6 +279,10 @@ Windows machine, also record:
   stdout/stderr/nonzero status, timeouts, cancellation and aborted workers;
 - [ ] default/explicit/stopped/absent WSL distribution; missing/incompatible Linux
   companion; bounded readiness; no native retry after first-run/provider failure;
+- [ ] quiet automatic fallback (implicit, `--runtime auto`, and `--wsl-distro`):
+  no WSL warning or help/error dump, with the normal runtime/configuration/state
+  startup line preserved; explicit `--runtime wsl` retains detailed readiness
+  errors and never runs the native command;
 - [ ] matching installer-produced Windows/Linux versions, both default and custom
   Linux roots, a competing Cargo copy, stale-locator repair, and no profile sourcing;
 - [ ] local workspace with spaces/Unicode and a WSL-hosted checkout;

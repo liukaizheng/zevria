@@ -89,12 +89,16 @@ select the Git root.
 
 On Windows, `zevria.exe` prefers a ready WSL installation containing a compatible
 **Linux Zevria** and the tools required by the operation. It hands off the entire
-application, not individual commands. Otherwise it explains the unavailable
-prerequisite on stderr and runs natively with **Git for Windows Bash**. Launching
-from PowerShell is fine; PowerShell is not the agent-command backend.
+application, not individual commands. Otherwise it silently falls back to native
+Windows with **Git for Windows Bash**, without a WSL warning or captured probe
+help/error output. Launching from PowerShell is fine; PowerShell is not the
+agent-command backend.
 
-Use `--runtime native` to skip WSL, `--runtime wsl` to require it, and
-`--wsl-distro <name>` to select a distribution without changing the default.
+Use `--runtime native` to skip WSL probing, `--runtime wsl` to require WSL and see
+detailed readiness errors, and `--wsl-distro <name>` to select a distribution
+without changing the default. Automatic mode also falls back silently when that
+selected distribution is missing or unready. Normal runtime/configuration/state
+startup diagnostics and native Git Bash/RTK errors remain visible.
 Windows `--acp` defaults to native. Native history lives under `.zevria/windows/`;
 WSL history and global configuration remain separate. Nothing is installed,
 upgraded, copied, or migrated by the launcher, and an invocation is **never

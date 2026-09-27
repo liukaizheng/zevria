@@ -163,10 +163,8 @@ pub async fn dispatch(args: Vec<String>) -> anyhow::Result<Launch> {
                 let status = handoff.command(&wsl).status().await.context("failed to hand control to Linux Zevria; invocation will not be retried natively")?;
                 return Ok(Launch::Exit(status.code().unwrap_or(1)));
             }
-            Err(error) if controls.permits_native_fallback() => {
-                eprintln!(
-                    "zevria: WSL is not ready ({error:#}); using native Windows with Git Bash. Use --runtime native to skip probing or --runtime wsl to require WSL."
-                )
+            Err(_) if controls.permits_native_fallback() => {
+                // Unsuccessful optional WSL probes are intentionally quiet.
             }
             Err(error) => {
                 return Err(
