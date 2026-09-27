@@ -5,7 +5,7 @@ prepare a plan for approval, edit files, run commands, and delegate independent
 work—all from an interactive terminal UI. It also runs as a headless
 Agent Client Protocol (ACP) agent for editors and other clients.
 
-![Illustration of Zevria working on a coding task in an interactive terminal](docs/images/zevria-intro.png)
+<video src="https://github.com/user-attachments/assets/fab67791-6691-473a-b342-975c9924bc7f" controls width="100%" aria-label="Zevria working on a coding task in an interactive terminal"></video>
 
 > **Under active development.** APIs, configuration, protocols, and saved-session
 > formats may change without backward compatibility.
