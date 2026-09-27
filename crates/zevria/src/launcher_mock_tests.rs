@@ -10,6 +10,41 @@ fn transport(directory: &Path, script: &str) -> std::path::PathBuf {
     executable
 }
 #[cfg(unix)]
+fn is_executable_file_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ExecutableFileBusy)
+    })
+}
+#[cfg(unix)]
+async fn prepare_transport_with_busy_retry(
+    wsl: &Path,
+    controls: &Controls,
+    cwd: &Path,
+    config: Option<&Path>,
+) -> anyhow::Result<Handoff> {
+    // GitHub's Linux runner once returned ETXTBSY while starting this temporary
+    // executable. Retry only that spawn error; command failures remain visible.
+    for attempt in 0..4 {
+        match prepare(wsl, controls, cwd, config).await {
+            Err(error) if is_executable_file_busy(&error) && attempt < 3 => {
+                tokio::time::sleep(Duration::from_millis(10u64 << attempt)).await;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the final attempt always returns")
+}
+#[cfg(unix)]
+#[test]
+fn executable_file_busy_is_the_only_retried_error() {
+    let busy = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy));
+    let missing = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound));
+    assert!(is_executable_file_busy(&busy));
+    assert!(!is_executable_file_busy(&missing));
+}
+#[cfg(unix)]
 #[tokio::test]
 async fn probe_transport_reports_unavailable_distro_missing_dependencies_and_incompatibility() {
     let temp = tempfile::tempdir().unwrap();
@@ -33,20 +68,19 @@ async fn probe_transport_reports_unavailable_distro_missing_dependencies_and_inc
             temp.path(),
             &format!("printf '%s' '{message}' >&2; exit {status}"),
         );
-        let error = prepare(&exe, &controls, Path::new(r"C:\work space"), None)
-            .await
-            .unwrap_err();
+        let error =
+            prepare_transport_with_busy_retry(&exe, &controls, Path::new(r"C:\work space"), None)
+                .await
+                .unwrap_err();
         assert!(
             format!("{error:#}").contains(message),
             "expected {message:?} for mock exit status {status}; got: {error:#}"
         );
     }
     let exe = transport(temp.path(), "printf 'not a compatible probe'");
-    assert!(
-        prepare(&exe, &controls, Path::new(r"C:\work space"), None)
-            .await
-            .is_err()
-    );
+    let incompatible =
+        prepare_transport_with_busy_retry(&exe, &controls, Path::new(r"C:\work space"), None).await;
+    assert!(incompatible.is_err());
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -74,7 +108,7 @@ async fn ready_probe_forwards_literal_arguments_config_and_final_exit_status() {
         .into(),
     )
     .unwrap();
-    let handoff = prepare(
+    let handoff = prepare_transport_with_busy_retry(
         &exe,
         &controls,
         Path::new(r"C:\work space"),
