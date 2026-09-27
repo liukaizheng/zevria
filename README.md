@@ -1,5 +1,7 @@
 # Zevria
 
+English | [简体中文](README.zh-CN.md)
+
 Zevria is a terminal coding agent written in Rust. It can investigate a codebase,
 prepare a plan for approval, edit files, run commands, and delegate independent
 work—all from an interactive terminal UI. It also runs as a headless
@@ -21,6 +23,36 @@ Agent Client Protocol (ACP) agent for editors and other clients.
   transcript items and turns with familiar Vim-inspired controls.
 
 ## Getting started
+
+### Preparation
+
+Install these prerequisites before running Zevria; its installer does not bundle them:
+
+- **[ripgrep (`rg`)](https://github.com/BurntSushi/ripgrep)** searches files and source
+  code for text or patterns, recursively and quickly. It is Zevria's search tool
+  for locating relevant files and code; by default it respects ignore rules.
+- **[RTK](https://github.com/rtk-ai/rtk)** routes shell commands and filters or
+  compresses their output, keeping command results concise. Zevria's command
+  workflow expects it; for example, search with `rtk rg "pattern" src`.
+- **Windows only — [Git for Windows](https://gitforwindows.org/)** provides Git
+  Bash, the shell Zevria uses for native Windows commands. You do not need Git
+  Bash when running Zevria in WSL.
+
+**Terminal support:** Zevria's status markers (such as `○`, `◐`, `✓`, and `✗`)
+are colored Unicode characters, not special image icons. Any terminal with Unicode
+glyph and color support can render them. For full TUI input behavior, choose a
+terminal that supports enhanced keyboard reporting, which lets Zevria distinguish
+`Ctrl+Enter` from `Enter` (otherwise it may be reported as plain `Enter`):
+
+- **[Ghostty](https://ghostty.org/)** — a supported choice on macOS and Linux;
+  it supports this enhanced keyboard input and colored Unicode glyphs.
+- **[WezTerm](https://wezterm.org/)** — a supported choice on macOS, Linux, and
+  Windows, with the same keyboard and glyph support.
+- **Other Windows terminals** — use one compatible with Zevria's enhanced
+  keyboard input and Unicode/color rendering.
+
+The terminal choices are recommendations for reliable display and key handling;
+status markers themselves do not depend on a proprietary icon protocol.
 
 ### 1. Install Zevria
 
@@ -60,11 +92,10 @@ ARM64/musl and Windows ARM64 are not packaged.
   To roll back, rerun with the desired version. Other roots and provider files are
   left alone. Linux installs also record the root for Windows-to-WSL discovery.
 
-Install runtime prerequisites separately: **RTK** for command tools, **Git for
-Windows Bash** for native Windows commands, a terminal that distinguishes
-`Ctrl+Enter`, and a model endpoint implementing the **OpenAI Responses wire
-protocol** (not Chat Completions alone). The installer does not install RTK, Git
-Bash, WSL, Rust, or provider credentials. See [command conventions](docs/instructions/command-conventions.md).
+Configure a model endpoint implementing the **OpenAI Responses wire protocol**
+(not Chat Completions alone).
+The installer does not install the tools listed in [Preparation](#preparation),
+WSL, Rust, or provider credentials. See [command conventions](docs/instructions/command-conventions.md).
 
 **Source-build alternative:** with Rust/Cargo (Rust 2024 support), Git, network
 access, and native build tools, run this from a checkout:
@@ -565,3 +596,9 @@ provider's cacheable prompt prefix.
 - [Terminal themes](docs/themes.md)
 - [Inspection policy and its limits](docs/instructions/inspection-policy.md)
 - [Architecture](docs/architecture.md)
+
+## Acknowledgments
+
+Thanks to the [linux.do community](https://linux.do/) for sharing so much AI
+knowledge, and to [Rig](https://github.com/liukaizheng/rig), the framework that
+powers Zevria.
