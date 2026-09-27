@@ -1790,7 +1790,7 @@ struct ElicitationFieldMapping {
     kind: ElicitationFieldKind,
 }
 
-/// Native companions return a primary Other token as well as custom text.
+/// Native and Codex user-note companions return a primary Other token plus text.
 /// Legacy Codex/Claude companions return only text (and normal multi tokens).
 #[derive(Debug, Clone)]
 struct CustomAnswerCompanion {
@@ -1802,6 +1802,7 @@ struct CustomAnswerCompanion {
 struct CustomCompanionTarget {
     question_id: String,
     other_value: Option<String>,
+    codex_user_note: bool,
 }
 
 #[derive(Debug)]

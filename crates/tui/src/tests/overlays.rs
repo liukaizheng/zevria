@@ -3551,6 +3551,116 @@ fn question_modal_is_global_collects_the_batch_and_dismisses_with_escape() {
 }
 
 #[test]
+fn question_modal_codex_three_questions_use_inline_other_without_note_steps() {
+    let mut root = App::new();
+    start_empty_turn(&mut root, TEST_TURN_ID, SessionMode::Build);
+    root.set_input_for_test("hidden draft", 6);
+    let mut views = test_session_views(root);
+    // Host-normalized Codex ACP 1.13.1 shape: six wire properties have already
+    // become three required selects. The TUI never sees note IDs or wire tokens.
+    let request = QuestionRequest {
+        id: QuestionRequestId::new("codex-three"),
+        questions: (0..3)
+            .map(|index| QuestionPrompt {
+                id: format!("question_{index}"),
+                header: format!("Scope {index}"),
+                question: format!("How broad should change {index} be?"),
+                options: vec![
+                    QuestionOption {
+                        label: "Focused".into(),
+                        description: "Keep it narrow.".into(),
+                    },
+                    QuestionOption {
+                        label: "Broad".into(),
+                        description: String::new(),
+                    },
+                ],
+                kind: QuestionPromptKind::SingleSelect { allow_other: true },
+                required: true,
+                default: None,
+            })
+            .collect(),
+        source_label: Some("Codex ACP".into()),
+        dismissible: true,
+    };
+    views.apply(SessionEvent::QuestionAsked {
+        turn_id: TEST_TURN_ID,
+        request,
+    });
+
+    for index in 0..3 {
+        let rendered = rendered_views_text(&mut views, 100, 28);
+        assert!(
+            rendered.contains(&format!("Codex ACP · Scope {index} · {}/3", index + 1)),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Other"));
+        for absent in [
+            "Additional answer or note",
+            "None of the above",
+            "Skip",
+            "/6",
+            "4/3",
+        ] {
+            assert!(
+                !rendered.contains(absent),
+                "unexpected {absent:?}: {rendered}"
+            );
+        }
+        match index {
+            0 => assert_eq!(views.handle_event(key(KeyCode::Enter)), None),
+            1 => {
+                assert_eq!(views.handle_event(key(KeyCode::End)), None);
+                assert_eq!(views.handle_event(key(KeyCode::Enter)), None);
+                assert_eq!(
+                    views.handle_event(Event::Paste("Custom scope".into())),
+                    None
+                );
+                let editing = rendered_views_text(&mut views, 100, 28);
+                assert!(editing.contains("Scope 1 · 2/3"));
+                assert!(editing.contains("Custom scope▌"), "{editing}");
+                assert!(!editing.contains("Additional answer or note"));
+                assert_eq!(views.handle_event(key(KeyCode::Enter)), None);
+            }
+            2 => {
+                assert_eq!(views.handle_event(key(KeyCode::Down)), None);
+                assert_eq!(
+                    views.handle_event(key(KeyCode::Enter)),
+                    Some(UiAction::AnswerQuestion {
+                        request_id: QuestionRequestId::new("codex-three"),
+                        response: QuestionResponse::Answered {
+                            answers: ["Focused", "Custom scope", "Broad"]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, answer)| QuestionAnswer {
+                                    id: format!("question_{index}"),
+                                    answer: Some(QuestionAnswerValue::String(answer.into())),
+                                })
+                                .collect(),
+                        },
+                    })
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(views.root().input(), "hidden draft");
+        assert_eq!(views.root().input_cursor(), 6);
+    }
+    let completed = rendered_views_text(&mut views, 100, 28);
+    for absent in [
+        "Codex ACP",
+        "How broad should",
+        "Additional answer or note",
+        "4/3",
+    ] {
+        assert!(
+            !completed.contains(absent),
+            "unexpected fourth step: {completed}"
+        );
+    }
+}
+
+#[test]
 fn question_modal_preserves_ctrl_c_and_clears_on_terminal_events() {
     let mut root = App::new();
     start_empty_turn(&mut root, TurnId::new(42), SessionMode::Build);

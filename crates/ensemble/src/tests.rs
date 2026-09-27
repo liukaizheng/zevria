@@ -6733,15 +6733,30 @@ for line in sys.stdin:
 
 #[tokio::test]
 async fn fake_stdio_form_elicitation_round_trips_for_plan_and_review() {
-    stdio_form_elicitation_round_trips(false).await;
+    stdio_form_elicitation_round_trips(StdioElicitationFixture::Generic).await;
 }
 
 #[tokio::test]
 async fn fake_stdio_native_companions_round_trip_and_persist_only_visible_decisions() {
-    stdio_form_elicitation_round_trips(true).await;
+    stdio_form_elicitation_round_trips(StdioElicitationFixture::Native).await;
 }
 
-async fn stdio_form_elicitation_round_trips(native: bool) {
+#[tokio::test]
+async fn fake_stdio_codex_1_13_1_notes_round_trip_and_persist_only_visible_decisions() {
+    stdio_form_elicitation_round_trips(StdioElicitationFixture::Codex).await;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdioElicitationFixture {
+    Generic,
+    Native,
+    Codex,
+}
+
+async fn stdio_form_elicitation_round_trips(fixture_kind: StdioElicitationFixture) {
+    let native = fixture_kind == StdioElicitationFixture::Native;
+    let codex = fixture_kind == StdioElicitationFixture::Codex;
+    let field_count = if native || codex { 3 } else { 5 };
     let directory = tempfile::tempdir().expect("temporary directory");
     let workspace = directory.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -6782,7 +6797,7 @@ for line in sys.stdin:
             "sessionId":"elicitation-session",
             "toolCallId":"question-tool",
             "message":"Please answer\r\nthe review questions.\r",
-            "requestedSchema":json.loads(os.environ.get("NATIVE_SCHEMA", "null")) or {
+            "requestedSchema":json.loads(os.environ.get("ELICITATION_SCHEMA", "null")) or {
                 "type":"object",
                 "properties":{
                     "choice":{"type":"string","title":"Choi\rce","oneOf":[{"const":"wire_a\r\n","title":"Visible A\r"},{"const":"wire_b","title":"Visible B"}]},
@@ -6825,12 +6840,18 @@ for line in sys.stdin:
         properties["question_0"]["oneOf"][0]["title"] = serde_json::json!("Focu\rsed");
         properties["question_0"]["oneOf"][0]["const"] = serde_json::json!("option_0\r\n");
         env.insert(
-            "NATIVE_SCHEMA".to_string(),
+            "ELICITATION_SCHEMA".to_string(),
             fixture["requestedSchema"].to_string(),
         );
+    } else if codex {
+        env.insert(
+            "ELICITATION_SCHEMA".to_string(),
+            codex_acp_1_13_1_elicitation_fixture()["requestedSchema"].to_string(),
+        );
     }
+    let source_label = if codex { "Codex ACP" } else { "Question ACP" };
     let agent = EnsembleAgentConfig {
-        label: "Question ACP".to_string(),
+        label: source_label.to_string(),
         command: PYTHON_COMMAND.to_string(),
         args: vec!["-u".to_string(), script.display().to_string()],
         plan_mode: Some("read-only".to_string()),
@@ -6857,6 +6878,7 @@ for line in sys.stdin:
         (11, EnsembleWorkflow::Plan, false),
         (12, EnsembleWorkflow::Review, false),
         (13, EnsembleWorkflow::Review, true),
+        (14, EnsembleWorkflow::Plan, true),
     ] {
         let start = zevria_workflow::EnsembleStart {
             run_id: EnsembleRunId::new(),
@@ -6900,8 +6922,8 @@ for line in sys.stdin:
         })
         .await
         .expect("ACP question appears");
-        assert_eq!(request.source_label.as_deref(), Some("Question ACP"));
-        assert_eq!(request.questions.len(), if native { 3 } else { 5 });
+        assert_eq!(request.source_label.as_deref(), Some(source_label));
+        assert_eq!(request.questions.len(), field_count);
         for question in &request.questions {
             assert!(!question.header.contains('\r'));
             assert!(!question.question.contains('\r'));
@@ -6910,18 +6932,24 @@ for line in sys.stdin:
                 assert!(!option.description.contains('\r'));
             }
         }
-        if native {
+        if native || codex {
             for question in &request.questions {
                 assert!(!question.id.ends_with("_other"));
+                assert!(!question.id.ends_with("_note"));
+                if codex {
+                    assert_eq!(
+                        question.kind,
+                        QuestionPromptKind::SingleSelect { allow_other: true }
+                    );
+                }
                 assert!(question.required);
                 assert_eq!(question.options.len(), 2);
-                assert!(
-                    question
-                        .options
-                        .iter()
-                        .all(|option| option.label != "Other" && option.label != NATIVE_OTHER)
-                );
+                assert!(question.options.iter().all(|option| option.label != "Other"
+                    && option.label != NATIVE_OTHER
+                    && option.label != "None of the above"));
             }
+        }
+        if native {
             assert_eq!(
                 request.questions[2].default,
                 Some(QuestionAnswerValue::Strings(vec![
@@ -6941,6 +6969,7 @@ for line in sys.stdin:
                     answer: match question.id.as_str() {
                         "question_0" => Some(QuestionAnswerValue::String("Focused".into())),
                         "question_1" => Some(QuestionAnswerValue::String("Custom scope".into())),
+                        "question_2" if codex => Some(QuestionAnswerValue::String("Broad".into())),
                         "question_2" => question.default.clone(),
                         "choice" => Some(QuestionAnswerValue::String("Visible A".to_string())),
                         "confirmed" => Some(QuestionAnswerValue::String("Yes".to_string())),
@@ -6960,7 +6989,8 @@ for line in sys.stdin:
         let outcomes = launch.await.expect("launch task").expect("ensemble launch");
         let path = agent_run_path(&logs, &start.run_id, &outcomes[0].descriptor.id);
         let records = load_agent_run(&path).expect("worker records");
-        let scenario = format!("native={native}, workflow={workflow:?}, dismiss={dismiss}");
+        let scenario =
+            format!("fixture={fixture_kind:?}, workflow={workflow:?}, dismiss={dismiss}");
         assert_eq!(
             outcomes[0].status,
             if workflow == EnsembleWorkflow::Plan {
@@ -6996,7 +7026,17 @@ for line in sys.stdin:
             response["result"]["action"],
             if dismiss { "decline" } else { "accept" }
         );
-        if !dismiss && native {
+        if dismiss {
+            assert!(response["result"].get("content").is_none());
+        } else if codex {
+            assert_eq!(
+                response["result"]["content"],
+                serde_json::json!({
+                    "question_0": "Focused", "question_1": "None of the above",
+                    "question_1_note": "Custom scope", "question_2": "Broad"
+                })
+            );
+        } else if native {
             assert_eq!(
                 response["result"]["content"],
                 serde_json::json!({
@@ -7004,7 +7044,7 @@ for line in sys.stdin:
                     "question_2": ["option_0", NATIVE_OTHER], "question_2_other": "Custom target"
                 })
             );
-        } else if !dismiss {
+        } else {
             assert_eq!(response["result"]["content"]["choice"], "wire_a\r\n");
             assert_eq!(response["result"]["content"]["confirmed"], true);
             assert_eq!(
@@ -7035,11 +7075,13 @@ for line in sys.stdin:
             })
             .expect("safe elicitation diagnostic");
         assert!(!diagnostic.contains("wire_a"));
-        if native {
+        let event: serde_json::Value = serde_json::from_str(&diagnostic).unwrap();
+        assert_eq!(event["field_count"], field_count);
+        if native || codex {
             assert!(!diagnostic.contains(NATIVE_OTHER));
             assert!(!diagnostic.contains("_other"));
-            let event: serde_json::Value = serde_json::from_str(&diagnostic).unwrap();
-            assert_eq!(event["field_count"], 3);
+            assert!(!diagnostic.contains("None of the above"));
+            assert!(!diagnostic.contains("_note"));
         } else {
             assert!(!diagnostic.contains("Keep it narrow"));
         }
@@ -7050,7 +7092,13 @@ for line in sys.stdin:
         } else {
             let captured = captured.expect("accepted display decision is durable");
             assert_eq!(captured.request_id, request.id);
-            assert_eq!(captured.answers.len(), if native { 3 } else { 5 });
+            assert_eq!(captured.answers.len(), field_count);
+            for answer in &captured.answers {
+                assert_eq!(
+                    answer.decision_id,
+                    AgentUserDecisionId::from_question(&request.id, &answer.question_id)
+                );
+            }
             assert!(
                 captured
                     .answers
@@ -7090,7 +7138,7 @@ for line in sys.stdin:
                 accepted < response_sent,
                 "decision must be synced before accept is sent"
             );
-            if native {
+            if native || codex {
                 assert_eq!(
                     captured
                         .answers
@@ -7113,8 +7161,14 @@ for line in sys.stdin:
                 );
                 assert_eq!(
                     captured.answers[2].answer,
-                    AgentUserDecisionValue::Strings {
-                        values: vec!["Focused".into(), "Custom target".into()]
+                    if codex {
+                        AgentUserDecisionValue::String {
+                            value: "Broad".into(),
+                        }
+                    } else {
+                        AgentUserDecisionValue::Strings {
+                            values: vec!["Focused".into(), "Custom target".into()],
+                        }
                     }
                 );
             } else {

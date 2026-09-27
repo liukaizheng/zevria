@@ -2,6 +2,8 @@
 
 use super::*;
 
+const CODEX_OTHER_OPTION: &str = "None of the above";
+
 impl ConvertedElicitation {
     pub(super) fn normalized_decision(
         &self,
@@ -100,8 +102,9 @@ impl ConvertedElicitation {
                     } else if let Some(companion) = companion {
                         if let Some(token) = &companion.other_value {
                             if value.trim().is_empty() {
-                                return Err("the frontend returned a blank native custom answer"
-                                    .to_string());
+                                return Err(
+                                    "the frontend returned a blank custom answer".to_string()
+                                );
                             }
                             content.insert(
                                 field.property.clone(),
@@ -138,8 +141,9 @@ impl ConvertedElicitation {
                     if let (Some(companion), Some(custom)) = (companion, custom) {
                         if let Some(token) = &companion.other_value {
                             if custom.trim().is_empty() {
-                                return Err("the frontend returned a blank native custom answer"
-                                    .to_string());
+                                return Err(
+                                    "the frontend returned a blank custom answer".to_string()
+                                );
                             }
                             wire_values.push(token.clone());
                         }
@@ -338,6 +342,31 @@ pub(super) fn convert_elicitation_form(
                 field_count,
                 "custom-answer companion metadata is inconsistent",
             ));
+        }
+        if target.codex_user_note {
+            // Codex ACP 1.13.1 uses a note alongside an isOther string select.
+            // Do not infer this linkage from a field name or presentation text.
+            let Some(ElicitationPropertySchema::String(primary)) =
+                properties.get(&target.question_id)
+            else {
+                return Err(ElicitationConversionError::decline(
+                    field_count,
+                    "Codex user-note companion target must be a string select",
+                ));
+            };
+            if primary
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("codex"))
+                .and_then(|codex| codex.get("isOther"))
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                return Err(ElicitationConversionError::decline(
+                    field_count,
+                    "Codex user-note companion target must be marked isOther",
+                ));
+            }
         }
         companion_names.insert(name.clone());
         companions.insert(
@@ -596,7 +625,7 @@ pub(super) fn convert_string_field(
     for (value, _, _) in &raw_options {
         validate_text_default(value, min_length, max_length, field_count)?;
     }
-    let raw_options = filter_native_other(raw_options, companion.as_ref(), field_count)?;
+    let raw_options = filter_companion_other(raw_options, companion.as_ref(), field_count)?;
     let (options, values) = display_options(raw_options, field_count)?;
     let default = schema
         .default
@@ -687,7 +716,7 @@ pub(super) fn convert_multi_field(
             ));
         }
     };
-    let raw_options = filter_native_other(raw_options, companion.as_ref(), field_count)?;
+    let raw_options = filter_companion_other(raw_options, companion.as_ref(), field_count)?;
     let (options, values) = display_options(raw_options, field_count)?;
     if min_selections
         .is_some_and(|minimum| minimum > options.len() + usize::from(companion.is_some()))
@@ -749,7 +778,7 @@ pub(super) fn convert_multi_field(
 }
 
 /// Remove only the explicitly marked wire option, before display disambiguation.
-pub(super) fn filter_native_other(
+pub(super) fn filter_companion_other(
     mut options: Vec<(String, String, String)>,
     companion: Option<&CustomAnswerCompanion>,
     field_count: usize,
@@ -763,7 +792,7 @@ pub(super) fn filter_native_other(
         {
             return Err(ElicitationConversionError::decline(
                 field_count,
-                "native Other token must occur exactly once in select choices",
+                "custom-answer Other token must occur exactly once in select choices",
             ));
         }
         options.retain(|(value, _, _)| value != token);
@@ -784,13 +813,13 @@ pub(super) fn select_default_label(
         let custom = companion.default.as_ref().ok_or_else(|| {
             ElicitationConversionError::decline(
                 field_count,
-                "native Other default requires companion text",
+                "custom-answer Other default requires companion text",
             )
         })?;
         if custom.trim().is_empty() || values.contains_key(custom.trim()) {
             return Err(ElicitationConversionError::decline(
                 field_count,
-                "native Other default must be nonblank and distinct from display choices",
+                "custom-answer Other default must be nonblank and distinct from display choices",
             ));
         }
         return Ok(custom.clone());
@@ -915,6 +944,7 @@ pub(super) fn custom_companion_target(
     let Some(meta) = meta else {
         return Ok(None);
     };
+    let mut target = None;
     for (namespace, flag) in [
         ("zevria", "isOtherAnswer"),
         ("codex", "isOtherAnswer"),
@@ -926,14 +956,33 @@ pub(super) fn custom_companion_target(
         let Some(object) = value.as_object() else {
             return Err("custom-answer metadata must be an object");
         };
-        let Some(flag_value) = object.get(flag) else {
-            continue;
+        let codex_user_note = if namespace == "codex" {
+            match object.get("role") {
+                Some(role) if role.as_str() == Some("user_note") => true,
+                // Unknown roles remain independent fields, not legacy companions.
+                Some(_) => continue,
+                None => false,
+            }
+        } else {
+            false
         };
-        let Some(enabled) = flag_value.as_bool() else {
-            return Err("custom-answer metadata flag must be boolean");
-        };
-        if !enabled {
-            continue;
+        if codex_user_note {
+            if object
+                .get(flag)
+                .is_some_and(|value| value.as_bool() != Some(true))
+            {
+                return Err("Codex user-note companion metadata is contradictory");
+            }
+        } else {
+            let Some(flag_value) = object.get(flag) else {
+                continue;
+            };
+            let Some(enabled) = flag_value.as_bool() else {
+                return Err("custom-answer metadata flag must be boolean");
+            };
+            if !enabled {
+                continue;
+            }
         }
         let Some(question_id) = object.get("questionId").and_then(serde_json::Value::as_str) else {
             return Err("custom-answer metadata is missing questionId");
@@ -941,7 +990,9 @@ pub(super) fn custom_companion_target(
         if question_id.trim().is_empty() {
             return Err("custom-answer metadata questionId must not be blank");
         }
-        let other_value = if namespace == "zevria" {
+        let other_value = if codex_user_note {
+            Some(CODEX_OTHER_OPTION.to_string())
+        } else if namespace == "zevria" {
             let Some(token) = object.get("otherValue").and_then(serde_json::Value::as_str) else {
                 return Err("native custom-answer metadata is missing otherValue");
             };
@@ -952,12 +1003,16 @@ pub(super) fn custom_companion_target(
         } else {
             None
         };
-        return Ok(Some(CustomCompanionTarget {
+        if target.is_some() {
+            return Err("custom-answer metadata has multiple companion markers");
+        }
+        target = Some(CustomCompanionTarget {
             question_id: question_id.to_string(),
             other_value,
-        }));
+            codex_user_note,
+        });
     }
-    Ok(None)
+    Ok(target)
 }
 
 pub(super) fn meta_marks_secret(meta: Option<&Meta>) -> bool {
