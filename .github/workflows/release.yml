@@ -188,7 +188,8 @@ jobs:
           env = os.environ.copy()
           print(f'Configured Cargo linker: {env.get(setting)!r}', flush=True)
           print(f'PATH-resolved link.exe (diagnostic only): {shutil.which("link.exe")!r}', flush=True)
-          vc_tools = env.get('VCToolsInstallDir')
+          # Keep Windows' case-insensitive lookup: the copied dict has uppercase keys.
+          vc_tools = os.environ.get('VCToolsInstallDir')
           if not vc_tools or not Path(vc_tools).is_absolute():
               raise SystemExit(f'MSVC linker preflight: missing or invalid VCToolsInstallDir. {guidance}')
           expected = Path(vc_tools, 'bin', 'Hostx64', 'x64', 'link.exe')
