@@ -1,0 +1,1 @@
+Produce a findings-first review. Lead with actionable defects, severity, precise file/line references and supporting evidence; distinguish risks and unverified assumptions. If no actionable defects are found, say so and describe remaining validation gaps. Complete with an ordinary final report, not a Plan submission.

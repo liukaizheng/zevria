@@ -1,0 +1,702 @@
+[
+  {
+    "name": "command",
+    "description": "Run a non-interactive shell command with Zevria's startup workspace as its working directory and return its exit status, stdout, and stderr. Commands execute with the application's permissions and are not sandboxed, read-only, or confined to the workspace. Commands time out after 300 seconds. Captured output is bounded to 1048576 bytes total, and stdout/stderr are each elided in the middle beyond 16384 bytes before entering model history.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "The shell command to execute."
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "description": "Arguments accepted by the [`CommandTool`].",
+      "title": "CommandArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "task",
+    "description": "Maintain the live task list for substantial multi-step Build work.\n\nEach call supplies the complete replacement list of 1-20 items, not a partial patch. Keep steps concise and outcome-oriented, move an item to `in_progress` before working on it, and mark it `completed` as soon as it is verified. At most one item may be `in_progress` at a time. Use `pending` for work that has not started.\n\nUse this for work with several meaningful implementation or validation steps. Skip it for a simple request that can be completed directly. Update the list when the approach changes, and finish with every completed item marked `completed`. `explanation` is optional and should briefly explain a material list change.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "explanation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Optional short reason for this update.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "description": "One concise implementation step in a task-list snapshot.",
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "status": {
+                "description": "Lifecycle state of one task-list item.",
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "step",
+              "status"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "tasks"
+      ],
+      "description": "Complete replacement snapshot supplied to the `task` tool.",
+      "title": "TaskList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "launch_subtasks",
+    "description": "Run a nonempty batch of independent Explore or Build subtasks and return all final outcomes in input order.\n\nInclude ALL ready independent tasks in one `tasks` array so they run concurrently, subject to the configured execution limit. Do not make separate blocking calls expecting them to overlap. A single-entry array delegates one task. Use later calls for tasks that depend on earlier results or when sequential execution was explicitly requested.\n\nOnly the final report comes back. Intermediate conversation and findings are discarded and never enter your context. Build artifacts remain on disk, including partial artifacts after failure or cancellation; no rollback or automatic cleanup is performed.\n\nWhen to use:\n- Delegate independent directory-owning generation or implementation to Build children, one non-overlapping workspace per child. Existing populated directories are supported; children must preserve unrelated content.\n- For Explore, delegate only complex, self-contained investigations: broad or open-ended questions spanning several files or subsystems, where many searches would be needed and only the conclusion matters to you.\n- Do simple lookups yourself with direct commands: finding a file or symbol, reading a known file, or anything one or two targeted searches can answer. A subtask is slower and wasteful for these.\n- Do not delegate investigation whose underlying details you will need yourself — e.g. code you are about to modify. The report cannot substitute for context you must hold anyway, and you would repeat the same reading.\n\nUsage:\n- Consult the workflow policy's `subtasks` declaration and typed request directive for permitted kinds. Conditional Builder eligibility alone is not authorization: without an explicit orchestration request, use `explore` where permitted or ask the user to submit `/orchestrate <prompt>` in Build. An orchestrated request requires at least two meaningful independent accepted children in one batch; the tool itself still permits later single-entry dependency batches. Build requires `workspace`, a relative strict subdirectory of the startup workspace (not `.zevria`, an absolute path, or a path containing `.` or `..` segments). Missing directories are created without resetting existing content. Equal, ancestor, and descendant workspaces conflict; siblings do not. Leave reserved child trees untouched until their blocking calls finish. Ownership is per parent, not a cross-process lock or sandbox.\n- Build children implement inside their workspace and cannot ask questions, use skills, or delegate; state any git, package, parent-build, or network authorization in the prompt.\n- `type: \"explore\"` must omit `workspace` or set it to null. Explore children run under their own source-read-only inspection policy and cannot mutate the project.\n- `title` must be nonblank and is shown to the user. Prefer a concise 3-5 word label; this word count is guidance, not a requirement.\n- `prompt` is the complete, self-contained task. The subtask does not see this conversation, so include every path, term, and question it needs, and state how broad or exhaustive the investigation should be.\n\nBoth kinds share the configured execution limit (default ten). Accepted children may wait as Starting; a full launch queue waits for capacity rather than rejecting a burst.\n\nEach launch_subtasks call blocks until every entry has a terminal outcome. The complete batch is validated before any child launches. After launch begins, a per-entry failure does not discard successful sibling reports or stop waiting for accepted children. Parent-turn cancellation cancels queued and running children; all available reports and accepted identities are retained. The result states requested/launched counts and each entry's status. Build directory creation is not transactional: preparation failure may leave newly created empty directories.\n\nKeep each assistant tool-call response homogeneous: if it contains launch_subtasks, it contains only launch_subtasks calls. Do ordinary tool work before the launch response or after all reports return.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "items": {
+            "description": "A self-contained independent task within one launch batch.",
+            "type": "object",
+            "properties": {
+              "title": {
+                "description": "A nonblank title for the subtask, shown to the user. Prefer 3-5 words for brevity; the word count is advisory.",
+                "type": "string"
+              },
+              "prompt": {
+                "description": "The complete, self-contained task for the subtask agent.",
+                "type": "string"
+              },
+              "type": {
+                "description": "The kind of subtask agent to launch.",
+                "type": "string",
+                "enum": [
+                  "explore",
+                  "build"
+                ]
+              },
+              "workspace": {
+                "description": "Build-only owned directory, relative to startup. Omit or use null for Explore.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "title",
+              "prompt",
+              "type"
+            ]
+          },
+          "description": "All ready independent tasks, in desired result order. Use one entry for a single child.",
+          "minItems": 1
+        }
+      },
+      "required": [
+        "tasks"
+      ],
+      "description": "Arguments accepted by the [`LaunchSubtasksTool`].",
+      "title": "LaunchSubtasksArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "edit",
+    "description": "Edit one existing UTF-8 text file with sed-style literal replacements.\n\nCall shape:\n{\"file_path\":\"path/to/file.rs\",\"replacements\":[{\"old_string\":\"exact text to find\",\"new_string\":\"replacement text\",\"replace_all\":false}],\"move_to\":\"optional/new/path.rs\"}\n\nUsage:\n- `file_path` may be absolute or relative to the startup workspace, but must resolve inside it.\n- The target must be an existing UTF-8 file. Use `write` to create files and `delete` to remove files.\n- `replacements` are applied sequentially to the in-memory file content before any filesystem mutation.\n- `old_string` is a literal string, not a regex or shell/sed script. It may span multiple lines and must not be empty.\n- `new_string` is inserted exactly as provided and may be empty to delete text.\n- `replace_all` defaults to false. When false, `old_string` must match exactly once; when true, every match is replaced and at least one match is required.\n- Include enough surrounding text in `old_string` to make a targeted replacement unique, or set `replace_all` to true for a deliberate global replacement.\n- Optional `move_to` renames the file after replacements. The target must not already exist unless it is the same path as `file_path`.\n- Empty `replacements` are allowed only when `move_to` performs a real move.\n- Edits that do not change content or move the file fail. Content-only edits are atomically replaced. Edit-plus-move installs staged final content at the destination and attempts to roll the source move back if that install fails; any change surviving a failed rollback is reported as partial mutation metadata.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Absolute path to an existing UTF-8 file, or a path relative to the startup workspace."
+        },
+        "replacements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReplacementArgs"
+          },
+          "description": "Ordered sed-style literal substitutions to apply before any optional move.",
+          "default": []
+        },
+        "move_to": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Optional destination path for a rename/move. The target must not already exist unless it is the same path as file_path."
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "title": "EditArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ReplacementArgs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "old_string": {
+              "type": "string",
+              "description": "Literal text to find. This is not a regex and may span multiple lines."
+            },
+            "new_string": {
+              "type": "string",
+              "description": "Replacement text. May be empty to delete the matched text."
+            },
+            "replace_all": {
+              "type": "boolean",
+              "description": "Replace every match. If false or omitted, old_string must match exactly once.",
+              "default": false
+            }
+          },
+          "required": [
+            "old_string",
+            "new_string"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "write",
+    "description": "Write a UTF-8 text file to the local filesystem.\n\nUsage:\n- `file_path` may be an absolute path, or a path relative to the startup workspace, but must resolve inside it.\n- If a file already exists at that path, it is overwritten.\n- The parent directory must already exist; this tool does not create missing directories.\n- Prefer using `edit` to modify existing files, `delete` to remove files, and `write` for new files or intentional full rewrites.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Absolute path to the file, or a path relative to the startup workspace."
+        },
+        "content": {
+          "type": "string",
+          "description": "UTF-8 content to write to the file. Existing files at this path are overwritten."
+        }
+      },
+      "required": [
+        "file_path",
+        "content"
+      ],
+      "title": "WriteArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "delete",
+    "description": "Delete an existing file from the local filesystem.\n\nUsage:\n- `file_path` may be an absolute path, or a path relative to the startup workspace, but must resolve inside it.\n- This tool deletes files only. It rejects missing paths and directories.\n- Use this tool for source file removals to record structured deletion metadata.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Absolute path to the file, or a path relative to the startup workspace."
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "title": "DeleteArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "skill",
+    "description": "Apply a skill by its exact validated name from the complete engine-provided eligible catalog. `args` optionally restates this application. Invoke/reapply only skill calls in this response and wait for the resulting instructions before task tools or completion; mixed batches execute nothing. The accepted result is bodyless. A direct typed invocation already supplies application. On failure inspect the error and do not claim application.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skill": {
+          "type": "string",
+          "description": "Exact validated skill name."
+        },
+        "args": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Optional application-specific arguments."
+        }
+      },
+      "required": [
+        "skill"
+      ],
+      "title": "SkillRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "skill_read",
+    "description": "Read a live UTF-8 auxiliary resource of an active, enabled package skill. Resources are package-relative; paths, symlinks, and aliases cannot escape the package or read its main SKILL.md. Files are capped at 1 MiB and paged at 32 KiB. Pagination binds the full content digest; restart if the file changes. This does not execute scripts or grant permissions.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skill": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "skill",
+        "resource"
+      ],
+      "title": "SkillReadRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "reconcile_reports",
+    "description": "Declare typed resolutions for worker-report disagreements and Zevria-captured decisions.\n\nClassify each disagreement as `factual` or `preference_tradeoff` and supply its resolution. An empty disagreement list is valid. Use exact decision IDs and unavailable-decision markers from ReportsReady in the corresponding accounting arrays.\n\n`baseline_precedence` is valid only for a `preference_tradeoff` and its `worker_id` must be the exact selected confirmation.target.worker_id, never a display label. Its nonblank `application` must explain the baseline's actual stated position and how it resolves the disagreement; do not invent a stance. Disambiguate repeated labels with worker IDs.\n\nThe result identifies the next valid workflow step: `question` or `submit_plan`.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "disagreements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReportDisagreement"
+          }
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecordedDecisionAccounting"
+          }
+        },
+        "unavailable_decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnavailableDecisionAccounting"
+          }
+        }
+      },
+      "required": [
+        "disagreements",
+        "decisions",
+        "unavailable_decisions"
+      ],
+      "description": "Durable declaration the root model must make after repository inspection\nand before any optional root question or Plan submission.",
+      "title": "ReportReconciliation",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ReportDisagreement": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "positions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ReportPosition"
+              }
+            },
+            "classification": {
+              "$ref": "#/$defs/ReportDisagreementClassification"
+            },
+            "resolution": {
+              "$ref": "#/$defs/ReportDisagreementResolution"
+            }
+          },
+          "required": [
+            "id",
+            "summary",
+            "positions",
+            "classification",
+            "resolution"
+          ]
+        },
+        "ReportPosition": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "position": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "position"
+          ]
+        },
+        "ReportDisagreementClassification": {
+          "type": "string",
+          "enum": [
+            "factual",
+            "preference_tradeoff"
+          ]
+        },
+        "ReportDisagreementResolution": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "$ref": "#/$defs/RepositoryEvidenceResolutionKind"
+                },
+                "evidence": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "repository_evidence"
+                }
+              },
+              "required": [
+                "type",
+                "kind",
+                "evidence"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "requirement": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "explicit_user_requirement"
+                }
+              },
+              "required": [
+                "type",
+                "requirement"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "decision_ids": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/AgentUserDecisionId"
+                  }
+                },
+                "application": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "recorded_user_decisions"
+                }
+              },
+              "required": [
+                "type",
+                "decision_ids",
+                "application"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "worker_id": {
+                  "type": "string"
+                },
+                "application": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "baseline_precedence"
+                }
+              },
+              "required": [
+                "type",
+                "worker_id",
+                "application"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "root_question"
+                }
+              },
+              "required": [
+                "type",
+                "reason"
+              ]
+            }
+          ]
+        },
+        "RepositoryEvidenceResolutionKind": {
+          "type": "string",
+          "enum": [
+            "factual_claim",
+            "objective_equivalence",
+            "infeasible",
+            "incorrect"
+          ]
+        },
+        "AgentUserDecisionId": {
+          "type": "string",
+          "description": "Stable root-visible identity for one exact answer in a Zevria question\nrequest. The digest keeps identifiers compact while deriving them solely\nfrom the durable request and question identifiers."
+        },
+        "RecordedDecisionAccounting": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "decision_id": {
+              "$ref": "#/$defs/AgentUserDecisionId"
+            },
+            "disposition": {
+              "$ref": "#/$defs/RecordedDecisionDisposition"
+            }
+          },
+          "required": [
+            "decision_id",
+            "disposition"
+          ]
+        },
+        "RecordedDecisionDisposition": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "explanation": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "applied"
+                }
+              },
+              "required": [
+                "status",
+                "explanation"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "evidence": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "objectively_inapplicable"
+                }
+              },
+              "required": [
+                "status",
+                "evidence"
+              ]
+            }
+          ]
+        },
+        "UnavailableDecisionAccounting": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "unavailable_decision_id": {
+              "$ref": "#/$defs/AgentUnavailableDecisionId"
+            },
+            "disposition": {
+              "$ref": "#/$defs/UnavailableDecisionDisposition"
+            }
+          },
+          "required": [
+            "unavailable_decision_id",
+            "disposition"
+          ]
+        },
+        "AgentUnavailableDecisionId": {
+          "type": "string",
+          "description": "Stable identity for an accepted answer batch whose exact normalized value\ncould not be retained."
+        },
+        "UnavailableDecisionDisposition": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "root_question_required"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "evidence": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "objectively_inapplicable"
+                }
+              },
+              "required": [
+                "status",
+                "evidence"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "question",
+    "description": "Ask the user for one to three consequential Plan decisions and continue this turn with their answers.\n\nUse this only for a consequential user preference or tradeoff that remains unresolved after repository inspection and any recorded user decisions are applied. Repository evidence should settle factual claims, feasibility, equivalence, and objectively invalid alternatives, but the status quo, existing tests, a smaller diff, worker consensus, or model preference cannot choose what the user wants among multiple viable options. Prefer one batch of related questions over repeated interruptions.\n\nEach question needs a stable snake_case `id`, a non-blank `header` label of any length, clear question text, and zero or more mutually exclusive options. Put the recommended option first and suffix its label with `(Recommended)`. Do not add an Other option; the terminal adds a free-form Other choice automatically.\n\nThe call blocks until the entire batch is answered or dismissed. Issue exactly one `question` call in an assistant response and do not mix it with other tool calls. A dismissal is a successful structured result; respect it and continue without repeating the same question.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionSpec"
+          }
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "title": "QuestionArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "QuestionSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Stable snake_case identifier used to correlate the answer."
+            },
+            "header": {
+              "type": "string",
+              "description": "Terminal label shown with the question progress."
+            },
+            "question": {
+              "type": "string"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/QuestionOptionArgs"
+              }
+            }
+          },
+          "required": [
+            "id",
+            "header",
+            "question",
+            "options"
+          ]
+        },
+        "QuestionOptionArgs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "label": {
+              "type": "string",
+              "description": "Concise 1-5 word answer label."
+            },
+            "description": {
+              "type": "string",
+              "description": "One short sentence explaining the impact or tradeoff."
+            }
+          },
+          "required": [
+            "label",
+            "description"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "submit_plan",
+    "description": "Submit the complete canonical Plan artifact for explicit user approval.\n\nUse this only when planning is complete. The title must contain 3–8 words. Markdown must begin with exactly `# <title>` and contain nonempty `## Goal`, `## Decisions`, `## Implementation`, `## Validation`, and `## Risks` sections. The configured Markdown limit is 131072 bytes. After this tool accepts the artifact, make no more tool calls and provide only a short final confirmation.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "markdown": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "markdown"
+      ],
+      "title": "SubmitPlanArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  }
+]

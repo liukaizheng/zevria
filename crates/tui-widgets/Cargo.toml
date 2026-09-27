@@ -1,0 +1,17 @@
+[package]
+name = "zevria-tui-widgets"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-theme = { workspace = true }
+zevria-foundation = { workspace = true }
+ratatui = { workspace = true }
+diffy = { workspace = true }
+pulldown-cmark = { workspace = true }
+syntect = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

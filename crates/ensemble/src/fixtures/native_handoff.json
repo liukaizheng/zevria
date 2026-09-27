@@ -1,0 +1,52 @@
+{
+  "write": {
+    "sessionUpdate": "tool_call", "toolCallId": "write-GENERATION", "title": "Write plan",
+    "kind": "edit", "status": "in_progress", "rawInput": {"file_path": "ARTIFACT", "content": "# Frozen proposal\n\n- Preserve Plan mode.\n"},
+    "_meta": {"claudeCode": {"toolName": "Write"}}
+  },
+  "exit": {
+    "sessionUpdate": "tool_call", "toolCallId": "exit-GENERATION", "title": "Propose plan",
+    "kind": "switch_mode", "status": "pending", "rawInput": {}, "content": [],
+    "_meta": {"claudeCode": {"toolName": "ExitPlanMode"}}
+  },
+  "permission": {
+    "sessionId": "native-session",
+    "toolCall": {"toolCallId": "exit-GENERATION", "kind": "switch_mode", "rawInput": {}, "content": [], "_meta": {"claudeCode": {"toolName": "ExitPlanMode"}}},
+    "options": [
+      {"optionId": "implement-now", "name": "Approve", "kind": "allow_once"},
+      {"optionId": "stay-planning-exact-id", "name": "Reject", "kind": "reject_once"}
+    ]
+  },
+  "write_terminal": {"sessionUpdate": "tool_call_update", "toolCallId": "write-GENERATION", "status": "completed", "_meta": {"claudeCode": {"toolName": "Write"}}},
+  "edit_initial_markdown": "# Frozen proposal\n\n## Approach\n\n- Preserve Plan mode.\n- Draft detail.\n\n## Validation\n\n- Run checks.\n",
+  "edited_markdown": "# Frozen proposal\n\n## Approach\n\n- Preserve Plan mode.\n- Refined detail.\n\n## Validation\n\n- Run checks.\n",
+  "edit_announcement": {
+    "sessionUpdate": "tool_call", "toolCallId": "edit-GENERATION", "title": "Preparing edit",
+    "kind": "edit", "status": "pending", "rawInput": {}, "content": [], "locations": [],
+    "_meta": {"claudeCode": {"toolName": "Edit"}}
+  },
+  "edit_path": {
+    "sessionUpdate": "tool_call_update", "toolCallId": "edit-GENERATION",
+    "rawInput": {"file_path": "ARTIFACT"}, "locations": [{"path": "ARTIFACT"}],
+    "_meta": {"claudeCode": {"toolName": "Edit"}}
+  },
+  "edit_preview": {
+    "sessionUpdate": "tool_call_update", "toolCallId": "edit-GENERATION",
+    "rawInput": {"file_path": "ARTIFACT", "old_string": "Draft detail.", "new_string": "Refined detail."},
+    "content": [{"type": "diff", "path": "ARTIFACT", "oldText": "Draft detail.", "newText": "Refined detail."}],
+    "_meta": {"claudeCode": {"toolName": "Edit"}}
+  },
+  "edit_result": {
+    "sessionUpdate": "tool_call_update", "toolCallId": "edit-GENERATION",
+    "rawOutput": {"toolResponse": "Plan detail refined."},
+    "content": [{"type": "diff", "path": "ARTIFACT", "oldText": "- Preserve Plan mode.\n- Draft detail.\n", "newText": "- Preserve Plan mode.\n- Refined detail.\n"}],
+    "_meta": {"claudeCode": {"toolName": "Edit"}}
+  },
+  "edit_terminal": {"sessionUpdate": "tool_call_update", "toolCallId": "edit-GENERATION", "status": "completed", "_meta": {"claudeCode": {"toolName": "Edit"}}},
+  "timeout_error": {"code": -32603, "message": "Internal error: Request timed out", "data": {"errorKind": "server_error"}},
+  "exit_terminal": {
+    "sessionUpdate": "tool_call_update", "toolCallId": "exit-GENERATION", "status": "failed",
+    "content": [{"type": "content", "content": {"type": "text", "text": "ExitPlanMode was rejected; this is not Markdown proof."}}],
+    "_meta": {"claudeCode": {"toolName": "ExitPlanMode"}}
+  }
+}

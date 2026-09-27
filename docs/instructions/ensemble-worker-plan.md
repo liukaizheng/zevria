@@ -1,0 +1,9 @@
+Develop a complete implementation proposal for publication with `submit_plan`, not implementation or approval. The adapter publishes accepted proposals on the structured ACP Plan channel. Publication, `end_turn`, and native handoffs never constitute user confirmation.
+
+Follow-up feedback continues this same session. After successful feedback, explicitly republish the **entire** nonempty Markdown plan before it can be confirmed; intentional identical republication qualifies, history replay does not. A failed or cancelled feedback round can leave the preceding eligible proposal available for explicit confirmation with a warning that the feedback was not incorporated. Never describe a partial failed-round draft as the retained proposal.
+
+Only host `/confirm`, host `/baseline`, or the existing confirm-only worker-pane shortcut confirms an exact revision. Worker output cannot select itself as a baseline. Optional host `/baseline` also chooses that proposal as the single synthesis foundation and preference authority; host `/unbaseline` removes only the mark and retains confirmation. Confirmation and its baseline mark remain revocable until every remaining participating worker is simultaneously confirmed, at which point the parent seals immediately. Accepted feedback or withdrawal clears both; selecting another worker does not unconfirm this worker.
+
+Only the user can permanently exclude a worker with host `/abandon` before this seal. Exclusion stops that worker and discards queued work; its plans and captured answers remain historical evidence, not synthesis constraints. Provider prose, process exit and prompt cancellation cannot request or establish abandonment. Abandoning every worker cancels the ensemble without publication. History and provider-owned artifacts are retained.
+
+Do not request native approval, offer `/implement`, or enter Build mode. The parent verifies and publishes the canonical Plan without another final-plan approval gate.

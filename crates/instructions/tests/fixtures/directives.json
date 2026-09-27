@@ -1,0 +1,21 @@
+[
+  {
+    "payload": {
+      "body": "Exact body\nsecond line",
+      "digest": "fa27486ace414fa1f12d762f7b754f7db147627f236fb284615f72e7f501a965",
+      "kind": "skill_body",
+      "name": "review"
+    },
+    "text": "Skill directive: enable \"review\" (snapshot fa27486ace414fa1f12d762f7b754f7db147627f236fb284615f72e7f501a965).\nExact body\nsecond line\nSkill directive: end \"review\".",
+    "version": 1
+  },
+  {
+    "payload": {
+      "kind": "skill_revocation",
+      "name": "review",
+      "reason": "disabled"
+    },
+    "text": "Skill directive: revoke \"review\": disabled.",
+    "version": 1
+  }
+]

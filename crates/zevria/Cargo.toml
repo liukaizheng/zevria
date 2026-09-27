@@ -1,0 +1,41 @@
+[package]
+name = "zevria"
+version.workspace = true
+edition.workspace = true
+
+# Temporary; release profile alone does not disable explicit feature activation.
+[features]
+cache-diagnostics = ["zevria-app/cache-diagnostics"]
+
+[dependencies]
+zevria-app = { workspace = true }
+zevria-tui-widgets = { workspace = true }
+zevria-theme = { workspace = true }
+zevria-foundation = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-transcript = { workspace = true }
+zevria-workflow = { workspace = true }
+zevria-acp = { workspace = true }
+zevria-tui = { workspace = true }
+
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+agent-client-protocol = { workspace = true, features = ["unstable_plan_operations"] }
+# Direct activation keeps package-local and workspace builds on the same
+# plan-operation wire schema.
+agent-client-protocol-schema = { workspace = true, features = ["unstable_plan_operations"] }
+zevria-ensemble = { workspace = true }
+zevria-content = { workspace = true }
+zevria-model = { workspace = true }
+zevria-session-api = { workspace = true }
+rig-core = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+tempfile = { workspace = true }
+zevria-app = { workspace = true, features = ["test-support"] }

@@ -1,0 +1,29 @@
+[package]
+name = "zevria-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-foundation = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-session-api = { workspace = true }
+zevria-workflow = { workspace = true }
+
+anyhow = { workspace = true }
+diffy = { workspace = true }
+futures-util = { workspace = true }
+libc = { workspace = true }
+rig-agent = { workspace = true }
+rig-core = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+zevria-model = { workspace = true }
+zevria-core = { workspace = true }
+zevria-transcript = { workspace = true }

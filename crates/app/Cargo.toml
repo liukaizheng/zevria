@@ -1,0 +1,42 @@
+[package]
+name = "zevria-app"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-support = []
+# Temporary; never enable by default.
+cache-diagnostics = ["zevria-provider/cache-diagnostics"]
+
+[dependencies]
+zevria-core = { workspace = true }
+zevria-provider = { workspace = true }
+zevria-tools = { workspace = true }
+zevria-acp = { workspace = true }
+zevria-ensemble = { workspace = true }
+zevria-theme = { workspace = true }
+zevria-content = { workspace = true }
+zevria-foundation = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-model = { workspace = true }
+zevria-session-api = { workspace = true }
+zevria-transcript = { workspace = true }
+zevria-workflow = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true }
+rig-agent = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonc-parser = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+tracing = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+zevria-core = { workspace = true, features = ["test-support"] }
+rig-core = { workspace = true }
+zevria-responses = { workspace = true }

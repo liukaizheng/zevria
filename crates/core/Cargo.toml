@@ -1,0 +1,43 @@
+[package]
+name = "zevria-core"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Synthetic benchmarks and root injection for cross-crate lifecycle fixtures.
+# Neither feature is enabled in production. Allocation probes run in a separate executable.
+test-support = ["zevria-instructions/test-support", "zevria-model/test-support", "zevria-transcript/test-support", "dep:tempfile", "dep:uuid"]
+allocation-probe = ["test-support"]
+
+[dependencies]
+zevria-session-api = { workspace = true }
+zevria-transcript = { workspace = true }
+zevria-model = { workspace = true }
+zevria-workflow = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-content = { workspace = true }
+zevria-foundation = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+rig-agent = { workspace = true }
+rig-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+zevria-transcript = { workspace = true, features = ["test-support"] }
+zevria-instructions = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
+zevria-model = { workspace = true, features = ["test-support"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "transcript"
+harness = false
+required-features = ["test-support"]

@@ -1,0 +1,82 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+
+[workspace.dependencies]
+zevria-app = { path = "crates/app" }
+zevria-ensemble = { path = "crates/ensemble" }
+zevria-tui-input = { path = "crates/tui-input" }
+zevria-tui-widgets = { path = "crates/tui-widgets" }
+zevria-theme = { path = "crates/theme" }
+zevria-responses = { path = "crates/responses" }
+zevria-session-api = { path = "crates/session-api" }
+zevria-transcript = { path = "crates/transcript" }
+zevria-model = { path = "crates/model" }
+zevria-workflow = { path = "crates/workflow" }
+zevria-instructions = { path = "crates/instructions" }
+zevria-content = { path = "crates/content" }
+zevria-foundation = { path = "crates/foundation" }
+zevria-acp = { path = "crates/acp" }
+zevria-core = { path = "crates/core" }
+zevria-provider = { path = "crates/provider" }
+zevria-tools = { path = "crates/tools" }
+zevria-tui = { path = "crates/tui" }
+
+anyhow = "1.0.103"
+base64 = "=0.22.1"
+# MIT OR Apache-2.0; only the input raster codecs are enabled here.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# MIT OR Apache-2.0; native bitmap reads, X11 and optional Wayland data-control.
+arboard = { version = "=3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
+# The crates.io 2.0.0 SDK pins schema 1.5.0. This exact upstream 2.0.0
+# revision is its schema 1.7.0 compatibility point.
+agent-client-protocol = { version = "2.0.0", git = "https://github.com/agentclientprotocol/rust-sdk", rev = "40058b71d47d85d7d6818aa21a4181585cc2af9f" }
+agent-client-protocol-schema = "1.7.0"
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+crossterm = "0.29.0"
+diffy = "0.5.2"
+eventsource-stream = "0.2.3"
+futures-util = "0.3.32"
+# MIT OR Unlicense; UI-only workspace path discovery with standard ignore rules.
+ignore = "0.4.33"
+libc = "0.2"
+pulldown-cmark = "0.13.4"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
+rig-agent = { git = "https://github.com/liukaizheng/rig", version = "0.42.0" }
+rig-core = { git = "https://github.com/liukaizheng/rig", version = "0.42.0" }
+rig-reqwest = { git = "https://github.com/liukaizheng/rig", version = "0.42.0", features = ["websocket"] }
+schemars = "1.2.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# MIT; comment-preserving JSONC reads and in-place edits for models.jsonc.
+jsonc-parser = { version = "=0.33.2", default-features = false, features = ["cst", "serde"] }
+# MIT OR Apache-2.0; bounded pure-Rust YAML, with all include/I/O features disabled.
+serde-saphyr = { version = "1.2.0", default-features = false, features = ["deserialize"] }
+sha2 = "0.11.0"
+syntect = { version = "5.3.0", default-features = false, features = [
+    "default-syntaxes",
+    "default-themes",
+    "regex-onig",
+] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+toml = "1.1.4"
+# MIT OR Apache-2.0; formatting-preserving behavioral config transactions.
+toml_edit = "0.25.12"
+tracing = "0.1.44"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "0.1"
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
+url = "2.5"
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
+which = "8.0.5"

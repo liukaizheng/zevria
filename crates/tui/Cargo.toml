@@ -1,0 +1,35 @@
+[package]
+name = "zevria-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-tui-input = { workspace = true }
+zevria-tui-widgets = { workspace = true }
+zevria-theme = { workspace = true }
+zevria-content = { workspace = true }
+zevria-foundation = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-model = { workspace = true }
+zevria-session-api = { workspace = true }
+zevria-transcript = { workspace = true }
+zevria-workflow = { workspace = true }
+
+anyhow = { workspace = true }
+arboard = { workspace = true }
+# EventStream only exists on ratatui's crossterm re-export when the
+# "event-stream" feature is unified in via this direct dependency.
+crossterm = { workspace = true, features = ["event-stream", "osc52"] }
+futures-util = { workspace = true }
+ignore = { workspace = true }
+ratatui = { workspace = true }
+rig-core = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+unicode-segmentation = { workspace = true }
+
+[dev-dependencies]
+diffy = { workspace = true }
+zevria-tui-input = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }

@@ -1,0 +1,29 @@
+[package]
+name = "zevria-acp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-content = { workspace = true }
+zevria-foundation = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-model = { workspace = true }
+zevria-session-api = { workspace = true }
+zevria-transcript = { workspace = true }
+zevria-workflow = { workspace = true }
+
+anyhow = { workspace = true }
+agent-client-protocol = { workspace = true, features = ["unstable_plan_operations"] }
+# Direct activation keeps package-local and workspace builds on the same
+# plan-operation wire schema.
+agent-client-protocol-schema = { workspace = true, features = ["unstable_plan_operations"] }
+rig-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+toml = { workspace = true }

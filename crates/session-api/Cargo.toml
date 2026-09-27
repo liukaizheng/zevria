@@ -1,0 +1,20 @@
+[package]
+name = "zevria-session-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-foundation = { workspace = true }
+zevria-content = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-model = { workspace = true }
+zevria-workflow = { workspace = true }
+anyhow = { workspace = true }
+rig-core = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+futures-util = { workspace = true }
+tempfile = { workspace = true }

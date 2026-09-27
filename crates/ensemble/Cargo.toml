@@ -1,0 +1,31 @@
+[package]
+name = "zevria-ensemble"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-acp = { workspace = true }
+zevria-content = { workspace = true }
+zevria-foundation = { workspace = true }
+zevria-session-api = { workspace = true }
+zevria-transcript = { workspace = true }
+zevria-workflow = { workspace = true }
+agent-client-protocol = { workspace = true, features = ["unstable_plan_operations"] }
+agent-client-protocol-schema = { workspace = true, features = ["unstable_plan_operations"] }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+toml = { workspace = true }
+rig-core = { workspace = true }
+zevria-model = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

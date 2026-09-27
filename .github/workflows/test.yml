@@ -1,0 +1,76 @@
+name: Cross-platform checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  workspace:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+      - name: Install RTK for command-environment tests
+        # Explicit CI setup, never performed by the application launcher.
+        # RTK v0.49.0 provides the raw `run` command required by inspection fixtures.
+        # Keep aligned with release.yml; never resolve RTK's moving default branch.
+        run: cargo install --git https://github.com/rtk-ai/rtk --rev b1c0dc00649c50fbe8930f849c800d4d6ca12091 --locked
+      - name: Verify RTK version and raw run support
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          def probe(arguments, expected_status, expected_stdout=None):
+              command = ['rtk', *arguments]
+              guidance = 'Ensure the pinned RTK v0.49.0 binary is first on PATH.'
+              try:
+                  result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                          text=True, timeout=15)
+              except subprocess.TimeoutExpired as error:
+                  raise SystemExit(f'RTK CI prerequisite failed: {command!r} timed out after {error.timeout}s; '
+                                   f'stdout={error.stdout!r}; stderr={error.stderr!r}. {guidance}') from error
+              except OSError as error:
+                  raise SystemExit(f'RTK CI prerequisite failed: cannot execute {command!r}: {error}. '
+                                   f'{guidance}') from error
+              actual = f'{command!r}: exit status {result.returncode}; stdout={result.stdout!r}; stderr={result.stderr!r}'
+              # text=True normalizes native Windows CRLF output before comparison.
+              if result.returncode != expected_status or (expected_stdout is not None and result.stdout != expected_stdout):
+                  raise SystemExit(f'RTK CI prerequisite failed: {actual}; expected exit status {expected_status}'
+                                   f' and stdout={expected_stdout!r} (None means unchecked). {guidance}')
+              print(actual, flush=True)
+
+          probe(['--version'], 0, 'rtk 0.49.0\n')
+          probe(['run', 'echo ZEVRIA_RTK_RUN_OK'], 0, 'ZEVRIA_RTK_RUN_OK\n')
+          probe(['run', 'exit 7'], 7)
+          PY
+      - name: Verify Git Bash on native Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bash = 'C:\Program Files\Git\bin\bash.exe'
+          if (-not (Test-Path $bash)) { throw 'Git for Windows is required by native tests' }
+          "ZEVRIA_GIT_BASH=$bash" >> $env:GITHUB_ENV
+      - run: cargo fmt --all -- --check
+      - run: cargo check --locked --workspace --all-targets
+      - name: Build the real executable used by ACP process fixtures
+        run: cargo build --locked -p zevria
+      - run: cargo test --locked --workspace
+      - name: Provider continuation and cache-prefix feature regressions
+        run: cargo test --locked -p zevria-provider -p zevria-app --features cache-diagnostics

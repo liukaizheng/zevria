@@ -1,0 +1,25 @@
+[package]
+name = "zevria-transcript"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-foundation = { workspace = true }
+zevria-content = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-model = { workspace = true }
+zevria-workflow = { workspace = true }
+anyhow = { workspace = true }
+rig-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+test-support = ["zevria-model/test-support"]
+
+[dev-dependencies]
+zevria-model = { workspace = true, features = ["test-support"] }
+toml = { workspace = true }

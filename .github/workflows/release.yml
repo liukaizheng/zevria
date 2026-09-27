@@ -1,0 +1,510 @@
+name: Release packages
+
+on:
+  push:
+    tags: ['v*']
+  # Always build-only, even when the selected ref is a version tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_INCREMENTAL: '0'
+  # Keep native debug/test builds within hosted-runner disk budgets.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    outputs:
+      source: ${{ steps.identity.outputs.source }}
+      version: ${{ steps.identity.outputs.version }}
+      toolchain: ${{ steps.identity.outputs.toolchain }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - name: Resolve stable Rust once
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Validate release identity
+        id: identity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_REF: ${{ github.ref }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          def output(*args):
+              return subprocess.check_output(args, text=True).strip()
+
+          metadata = json.loads(output('cargo', '+stable', 'metadata', '--locked', '--no-deps', '--format-version', '1'))
+          packages = [p for p in metadata['packages'] if p['name'] == 'zevria' and p['id'] in metadata['workspace_members']]
+          if len(packages) != 1:
+              raise SystemExit('Expected exactly one zevria workspace package')
+          version = packages[0]['version']
+          # Cargo validates SemVer; also constrain values used in filenames/outputs.
+          if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?', version):
+              raise SystemExit('Invalid package version')
+          event = os.environ['EVENT_NAME']
+          if event == 'push':
+              if os.environ['SOURCE_REF'] != f'refs/tags/v{version}':
+                  raise SystemExit(f'Tag must equal v{version} exactly')
+          elif event != 'workflow_dispatch':
+              raise SystemExit('Unsupported release event')
+          source = output('git', 'rev-parse', 'HEAD^{commit}')
+          trigger = output('git', 'rev-parse', os.environ['TRIGGER_SHA'] + '^{commit}')
+          if source != trigger or not re.fullmatch(r'[0-9a-f]{40}', source):
+              raise SystemExit('Checkout does not match the triggering commit')
+          toolchain = output('rustc', '+stable', '--version').split()[1]
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', toolchain):
+              raise SystemExit('Expected an exact stable Rust release')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f'source={source}\nversion={version}\ntoolchain={toolchain}\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write(f'## Release identity\n\nSource: `{source}`\n\nVersion: `{version}`\n\nRust: `{toolchain}`\n\n')
+              f.write('Mode: build-only (no release writes)\n' if event == 'workflow_dispatch' else 'Mode: version-tag draft release\n')
+          PY
+
+  build:
+    name: Build and test (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            extension: zip
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            extension: tar.gz
+          - os: macos-15
+            target: aarch64-apple-darwin
+            extension: tar.gz
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.toolchain }}
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - name: Activate native MSVC tools and verify Git for Windows Bash
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Native MSVC C/C++ tools are required' }
+          & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          Get-Command cl.exe, link.exe -ErrorAction Stop
+          foreach ($name in @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR', 'VCToolsInstallDir', 'WindowsSdkDir', 'WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if (-not $value) { throw "Missing native compiler environment: $name" }
+            "$name=$value" >> $env:GITHUB_ENV
+          }
+          $bash = 'C:\Program Files\Git\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'Git for Windows Bash is required' }
+          & $bash --noprofile --norc -c 'case "$(uname -s)" in MINGW*|MSYS*) git --version ;; *) exit 1 ;; esac'
+          if ($LASTEXITCODE -ne 0) { throw 'Git for Windows Bash verification failed' }
+          "ZEVRIA_GIT_BASH=$bash" >> $env:GITHUB_ENV
+      - name: Verify native Unix C/C++ tools
+        if: runner.os != 'Windows'
+        run: |
+          cc --version
+          c++ --version
+      - name: Install the resolved Rust toolchain and native target
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --target "$TARGET" --no-self-update
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          test "$host" = "$TARGET"
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          prefix-key: release-v1
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ needs.prepare.outputs.toolchain }}-${{ hashFiles('Cargo.lock') }}
+      - name: Install RTK for command-environment tests
+        # RTK v0.49.0 provides the raw `run` command required by inspection fixtures.
+        # Keep aligned with test.yml; never resolve RTK's moving default branch.
+        run: cargo install --git https://github.com/rtk-ai/rtk --rev b1c0dc00649c50fbe8930f849c800d4d6ca12091 --locked
+      - name: Verify RTK version and raw run support
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          def probe(arguments, expected_status, expected_stdout=None):
+              command = ['rtk', *arguments]
+              guidance = 'Ensure the pinned RTK v0.49.0 binary is first on PATH.'
+              try:
+                  result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                          text=True, timeout=15)
+              except subprocess.TimeoutExpired as error:
+                  raise SystemExit(f'RTK CI prerequisite failed: {command!r} timed out after {error.timeout}s; '
+                                   f'stdout={error.stdout!r}; stderr={error.stderr!r}. {guidance}') from error
+              except OSError as error:
+                  raise SystemExit(f'RTK CI prerequisite failed: cannot execute {command!r}: {error}. '
+                                   f'{guidance}') from error
+              actual = f'{command!r}: exit status {result.returncode}; stdout={result.stdout!r}; stderr={result.stderr!r}'
+              # text=True normalizes native Windows CRLF output before comparison.
+              if result.returncode != expected_status or (expected_stdout is not None and result.stdout != expected_stdout):
+                  raise SystemExit(f'RTK CI prerequisite failed: {actual}; expected exit status {expected_status}'
+                                   f' and stdout={expected_stdout!r} (None means unchecked). {guidance}')
+              print(actual, flush=True)
+
+          probe(['--version'], 0, 'rtk 0.49.0\n')
+          probe(['run', 'echo ZEVRIA_RTK_RUN_OK'], 0, 'ZEVRIA_RTK_RUN_OK\n')
+          probe(['run', 'exit 7'], 7)
+          PY
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - name: Check the locked workspace
+        run: cargo check --locked --workspace --all-targets --target "$TARGET"
+      - name: Build the real executable used by ACP process fixtures
+        run: cargo build --locked -p zevria --bin zevria --target "$TARGET"
+      - name: Test the locked workspace with default features
+        run: cargo test --locked --workspace --target "$TARGET"
+      - name: Enforce the five default-feature provider-prefix release gates
+        if: runner.os == 'Linux'
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+
+          gates = [
+              ('zevria-provider', 'native_output_items_survive_capture_and_full_replay_after_reconnect'),
+              ('zevria-provider', 'second_prompt'),
+              ('zevria-provider', 'engine_skill_lifecycle_is_incremental_with_both_explicit_wire_roles'),
+              ('zevria-core', 'second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix'),
+              ('zevria-core', 'resumed_session_reuses_the_pre_shutdown_prefix_after_tool_activation'),
+          ]
+          for package, name in gates:
+              args = ['cargo', 'test', '--locked', '-p', package, '--target', os.environ['TARGET'], name]
+              # Raw libtest output is needed to reject a silently empty filter.
+              listing = subprocess.check_output([*args, '--', '--list', '--format', 'terse'], text=True)
+              selected = [line for line in listing.splitlines() if line.endswith(': test')]
+              if not selected:
+                  raise SystemExit(f'Release gate selected no tests: {package} {name}')
+              print(f'{package} {name}: {len(selected)} selected test(s)', flush=True)
+              subprocess.run(args, check=True)
+          PY
+      - name: Provider/app cache-diagnostics regressions (tests only)
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p zevria-provider -p zevria-app --features cache-diagnostics --target "$TARGET"
+      - name: Build the production binary with default features
+        # A separate invocation: never add cache-diagnostics or --all-features.
+        run: cargo build --locked --release -p zevria --bin zevria --target "$TARGET"
+      - name: Smoke-test, archive, and smoke-test the extracted executable
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tarfile
+          import tempfile
+          import zipfile
+
+          target, version = os.environ['TARGET'], os.environ['VERSION']
+          windows = target == 'x86_64-pc-windows-msvc'
+          executable = 'zevria.exe' if windows else 'zevria'
+          binary = Path('target', target, 'release', executable).resolve(strict=True)
+          extension = 'zip' if windows else 'tar.gz'
+          dist = Path('dist')
+          dist.mkdir()
+          archive = dist / f'zevria-v{version}-{target}.{extension}'
+
+          def smoke(path):
+              with tempfile.TemporaryDirectory(prefix='zevria-smoke-') as temp:
+                  home, workspace = Path(temp, 'home'), Path(temp, 'workspace')
+                  home.mkdir()
+                  workspace.mkdir()
+                  env = {k: v for k, v in os.environ.items()
+                         if not k.upper().startswith(('ZEVRIA_', '_ZEVRIA_'))
+                         and k.upper() not in ('HOME', 'USERPROFILE', 'BASH_ENV', 'ENV')}
+                  env.update(HOME=str(home), USERPROFILE=str(home))
+                  def invoke(*args):
+                      result = subprocess.run([str(path), *args], cwd=workspace, env=env,
+                                              stdin=subprocess.DEVNULL, capture_output=True,
+                                              text=True, timeout=30, check=True)
+                      return result.stdout
+                  if 'usage: zevria' not in invoke('--help'):
+                      raise SystemExit('Unexpected --help output')
+                  if invoke('--version').strip() != f'zevria {version}':
+                      raise SystemExit('Binary version does not match package/tag version')
+                  json.loads(invoke('--runtime', 'native', 'skills', 'list', '--json'))
+
+          smoke(binary)
+          if windows:
+              with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+                  z.write(binary, arcname=executable)
+          else:
+              if not os.access(binary, os.X_OK):
+                  raise SystemExit('Unix binary is not executable')
+              with tarfile.open(archive, 'w:gz') as t:
+                  t.add(binary, arcname=executable)
+          with tempfile.TemporaryDirectory(prefix='zevria-extracted-') as temp:
+              if windows:
+                  with zipfile.ZipFile(archive) as z:
+                      if z.namelist() != [executable]:
+                          raise SystemExit('Unexpected ZIP inventory')
+                      z.extractall(temp)
+              else:
+                  with tarfile.open(archive, 'r:gz') as t:
+                      members = t.getmembers()
+                      if len(members) != 1 or members[0].name != executable or not members[0].isfile() or not members[0].mode & 0o111:
+                          raise SystemExit('Unexpected tar inventory or executable mode')
+                      t.extractall(temp, filter='data')
+                  if not os.access(Path(temp, executable), os.X_OK):
+                      raise SystemExit('Extraction lost executable permissions')
+              smoke(Path(temp, executable).resolve(strict=True))
+          with archive.open('rb') as f:
+              digest = hashlib.file_digest(f, 'sha256').hexdigest()
+          Path(str(archive) + '.sha256').write_bytes(f'{digest}  {archive.name}\n'.encode('ascii'))
+          PY
+      - name: Upload this target's archive and checksum only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/zevria-v${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.extension }}
+            dist/zevria-v${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.extension }}.sha256
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 14
+
+  assemble:
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source }}
+      TOOLCHAIN: ${{ needs.prepare.outputs.toolchain }}
+    steps:
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - name: Download target artifacts from this run without merging
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: release-*
+          path: incoming
+          merge-multiple: false
+      - name: Verify exact inventory and assemble SHA256SUMS
+        run: |
+          python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import shutil
+
+          targets = {
+              'x86_64-pc-windows-msvc': 'zip',
+              'x86_64-unknown-linux-gnu': 'tar.gz',
+              'aarch64-apple-darwin': 'tar.gz',
+          }
+          incoming, bundle = Path('incoming'), Path('bundle')
+          if {p.name for p in incoming.iterdir()} != {f'release-{t}' for t in targets}:
+              raise SystemExit('Expected exactly three target artifacts; missing, duplicate, or unexpected artifact')
+          bundle.mkdir()
+          sums = {}
+          for target, extension in targets.items():
+              directory = incoming / f'release-{target}'
+              name = f'zevria-v{os.environ["VERSION"]}-{target}.{extension}'
+              if directory.is_symlink() or not directory.is_dir() or {p.name for p in directory.iterdir()} != {name, name + '.sha256'}:
+                  raise SystemExit(f'Unexpected artifact inventory for {target}')
+              archive, checksum = directory / name, directory / (name + '.sha256')
+              if any(p.is_symlink() or not p.is_file() for p in (archive, checksum)):
+                  raise SystemExit('Expected regular release files')
+              with archive.open('rb') as f:
+                  digest = hashlib.file_digest(f, 'sha256').hexdigest()
+              line = f'{digest}  {name}\n'
+              if checksum.read_bytes() != line.encode('ascii'):
+                  raise SystemExit(f'Checksum mismatch: {name}')
+              sums[name] = line
+              shutil.copyfile(archive, bundle / name)
+          manifest = ''.join(sums[name] for name in sorted(sums))
+          (bundle / 'SHA256SUMS').write_bytes(manifest.encode('ascii'))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write(f'## Verified release bundle\n\nSource: `{os.environ["SOURCE_SHA"]}`\n\nRust: `{os.environ["TOOLCHAIN"]}`\n\n')
+              f.write('Targets: ' + ', '.join(f'`{t}`' for t in targets) + '\n\n')
+              f.write(f'```text\n{manifest}```\n\nAll three native build/test and extracted-binary smoke jobs succeeded.\n')
+          PY
+      - name: Upload the complete four-file bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zevria-v${{ needs.prepare.outputs.version }}-bundle
+          path: |
+            bundle/zevria-v${{ needs.prepare.outputs.version }}-x86_64-pc-windows-msvc.zip
+            bundle/zevria-v${{ needs.prepare.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+            bundle/zevria-v${{ needs.prepare.outputs.version }}-aarch64-apple-darwin.tar.gz
+            bundle/SHA256SUMS
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 14
+
+  draft:
+    name: Create or retry the draft (never publish)
+    needs: [prepare, assemble]
+    if: ${{ github.event_name == 'push' && github.ref == format('refs/tags/v{0}', needs.prepare.outputs.version) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: zevria-v${{ needs.prepare.outputs.version }}-bundle
+          path: bundle
+      - name: Verify source and safely create or update only draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_PROMPT_DISABLED: '1'
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TOOLCHAIN: ${{ needs.prepare.outputs.toolchain }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          from urllib.parse import quote
+
+          version, source = os.environ['VERSION'], os.environ['SOURCE_SHA']
+          tag = f'v{version}'
+          if os.environ['EVENT_NAME'] != 'push' or os.environ['SOURCE_REF'] != f'refs/tags/{tag}':
+              raise SystemExit('Release writes require an exact version-tag push, never dispatch')
+          repo = os.environ['GH_REPO']
+          base = f'repos/{repo}'
+          prerelease = '-' in version.split('+', 1)[0]
+          marker = f'<!-- zevria-release-source: {source} -->'
+          bundle = Path('bundle')
+          names = sorted(f'zevria-v{version}-{suffix}' for suffix in (
+              'x86_64-pc-windows-msvc.zip', 'x86_64-unknown-linux-gnu.tar.gz', 'aarch64-apple-darwin.tar.gz'))
+          if {p.name for p in bundle.iterdir()} != {*names, 'SHA256SUMS'}:
+              raise SystemExit('Unexpected release bundle inventory')
+          if any(p.is_symlink() or not p.is_file() for p in bundle.iterdir()):
+              raise SystemExit('Expected regular bundle files')
+          sums = ''
+          for name in names:
+              with (bundle / name).open('rb') as f:
+                  sums += f'{hashlib.file_digest(f, "sha256").hexdigest()}  {name}\n'
+          if (bundle / 'SHA256SUMS').read_bytes() != sums.encode('ascii'):
+              raise SystemExit('Bundle checksum verification failed')
+          assets = [str(bundle / name) for name in [*names, 'SHA256SUMS']]
+
+          def gh(*args):
+              # Argument arrays, not shell interpolation. Any CLI/API failure is fatal.
+              return subprocess.check_output(['gh', *args], text=True).strip()
+
+          def api(path, *args):
+              return json.loads(gh('api', path, *args))
+
+          def verify_tag():
+              obj = api(f'{base}/git/ref/tags/{quote(tag, safe="")}')['object']
+              seen = set()
+              while obj['type'] == 'tag':
+                  if obj['sha'] in seen or len(seen) >= 16:
+                      raise SystemExit('Invalid annotated tag chain')
+                  seen.add(obj['sha'])
+                  obj = api(f'{base}/git/tags/{obj["sha"]}')['object']
+              if obj['type'] != 'commit' or obj['sha'] != source:
+                  raise SystemExit('Remote tag no longer resolves to the built commit')
+
+          def lookup():
+              # A successful, paginated list includes drafts with this write token.
+              # Never reinterpret a 404/auth/rate-limit/network failure as absence.
+              pages = api(f'{base}/releases?per_page=100', '--paginate', '--slurp')
+              matches = [r for page in pages for r in page if r['tag_name'] == tag]
+              if len(matches) > 1:
+                  raise SystemExit('Multiple releases have the same tag')
+              return matches[0] if matches else None
+
+          def validate_draft(release):
+              markers = re.findall(r'<!-- zevria-release-source: (.*?) -->', release.get('body') or '')
+              if release['tag_name'] != tag or release['draft'] is not True or markers != [source]:
+                  raise SystemExit('Refusing to modify a published release or a conflicting/unmarked draft')
+              if release['prerelease'] != prerelease:
+                  raise SystemExit('Draft prerelease flag conflicts with the package version')
+
+          verify_tag()
+          release = lookup()
+          if release is None:
+              verify_tag()
+              args = ['release', 'create', tag, *assets, '--repo', repo, '--draft', '--verify-tag',
+                      '--title', f'Zevria {tag}', '--generate-notes', '--notes', f'{marker}\nSource commit: `{source}`\n']
+              if prerelease:
+                  args.append('--prerelease')
+              gh(*args)
+              release = lookup()
+              if release is None:
+                  raise SystemExit('Created draft could not be found')
+          else:
+              # Refresh immediately before mutation; do not rewrite title/notes or
+              # delete unrelated assets. Maintainers must not publish during retries.
+              release = api(f'{base}/releases/{release["id"]}')
+              validate_draft(release)
+              verify_tag()
+              gh('release', 'upload', tag, *assets, '--repo', repo, '--clobber')
+
+          release = api(f'{base}/releases/{release["id"]}')
+          validate_draft(release)
+          verify_tag()
+          pages = api(f'{base}/releases/{release["id"]}/assets?per_page=100', '--paginate', '--slurp')
+          uploaded = [a for page in pages for a in page]
+          for path in map(Path, assets):
+              matches = [a for a in uploaded if a['name'] == path.name]
+              if len(matches) != 1 or matches[0]['state'] != 'uploaded' or matches[0]['size'] != path.stat().st_size:
+                  raise SystemExit(f'Incomplete draft upload: {path.name}')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write(f'## Draft ready for manual review\n\nSource: `{source}`\n\nRust: `{os.environ["TOOLCHAIN"]}`\n\n')
+              f.write(f'Native targets and checksums:\n\n```text\n{sums}```\n\nDraft: {release["html_url"]}\n\n')
+              f.write('Not published. Review all assets and platform acceptance before publishing manually.\n')
+          PY
+      - name: Report an unsuccessful draft attempt
+        if: failure()
+        run: |
+          echo 'Draft creation/retry failed. A draft may contain incomplete assets; do not publish it. Inspect the failure and rerun successfully first.' >> "$GITHUB_STEP_SUMMARY"

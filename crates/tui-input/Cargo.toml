@@ -1,0 +1,19 @@
+[package]
+name = "zevria-tui-input"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+zevria-content = { workspace = true }
+zevria-foundation = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-workflow = { workspace = true }
+zevria-theme = { workspace = true }
+zevria-tui-widgets = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }

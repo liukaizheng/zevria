@@ -1,0 +1,17 @@
+[package]
+name = "zevria-theme"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Keep Palette and its derive macros on the same verified release: the macros
+# use internal library APIs, including during unlocked `cargo install`.
+palette = { version = "=0.7.7", default-features = false, features = ["std"] }
+palette_derive = "=0.7.7"
+anyhow = { workspace = true }
+ratatui = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }
+syn = { version = "2", features = ["full", "visit"] }

@@ -1,0 +1,40 @@
+[package]
+name = "zevria-provider"
+version.workspace = true
+edition.workspace = true
+
+# Temporary, opt-in instrumentation. See docs/cache-diagnostics.md for removal.
+[features]
+cache-diagnostics = ["dep:libc", "dep:uuid"]
+
+[dependencies]
+zevria-responses = { workspace = true }
+zevria-content = { workspace = true }
+zevria-foundation = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-model = { workspace = true }
+zevria-session-api = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+eventsource-stream = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+rig-agent = { workspace = true }
+rig-core = { workspace = true }
+rig-reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+zevria-tools = { workspace = true }
+zevria-transcript = { workspace = true }
+zevria-workflow = { workspace = true }
+zevria-core = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
+tracing-subscriber = { workspace = true }

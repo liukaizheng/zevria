@@ -1,0 +1,18 @@
+[package]
+name = "zevria-workflow"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-foundation = { workspace = true }
+zevria-content = { workspace = true }
+anyhow = { workspace = true }
+pulldown-cmark = { workspace = true }
+rig-core = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]

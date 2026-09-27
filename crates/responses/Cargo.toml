@@ -1,0 +1,16 @@
+[package]
+name = "zevria-responses"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zevria-foundation = { workspace = true }
+zevria-content = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-model = { workspace = true }
+anyhow = { workspace = true }
+rig-core = { workspace = true }
+rig-reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

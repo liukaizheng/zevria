@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "description": "Mocked usage and generated native items exercise incident-shaped accounting and replay. Not a measurement of provider caching; no private transcript content.",
+  "turns": [
+    {"input_items": 1, "input_tokens": 9572, "cached_tokens": 3328, "search_actions": 0, "reasoning_items": 2, "reconnect": false},
+    {"input_items": 5, "input_tokens": 41056, "cached_tokens": 8448, "search_actions": 7, "reasoning_items": 10, "reconnect": false},
+    {"input_items": 24, "input_tokens": 71048, "cached_tokens": 10496, "search_actions": 8, "reasoning_items": 18, "reconnect": true},
+    {"input_items": 52, "input_tokens": 32515, "cached_tokens": 13568, "search_actions": 2, "reasoning_items": 12, "reconnect": true},
+    {"input_items": 68, "input_tokens": 43565, "cached_tokens": 20736, "search_actions": 1, "reasoning_items": 8, "reconnect": true},
+    {"input_items": 79, "input_tokens": 132325, "cached_tokens": 37120, "search_actions": 15, "reasoning_items": 37, "reconnect": true},
+    {"input_items": 133, "input_tokens": 127104, "cached_tokens": 42240, "search_actions": 0, "reasoning_items": 2, "reconnect": false}
+  ]
+}

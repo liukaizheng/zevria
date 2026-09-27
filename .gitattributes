@@ -1,0 +1,2 @@
+# Instruction/transcript fixtures must have identical bytes on every runtime.
+* text=auto eol=lf
