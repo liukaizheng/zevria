@@ -1396,6 +1396,20 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
 
 #[tokio::test]
 async fn ensemble_plan_asks_for_unresolved_disagreement_and_resumes_same_turn() {
+    assert_ensemble_plan_question_round_trip(std::time::Duration::ZERO).await;
+}
+
+#[tokio::test]
+async fn ensemble_plan_question_round_trip_tolerates_delayed_startup() {
+    // Exercise a healthy session that outlives the old two-second phase deadline.
+    assert_ensemble_plan_question_round_trip(std::time::Duration::from_secs(3)).await;
+}
+
+async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Duration) {
+    // Worker review and question handling perform real durable transcript writes.
+    // Bound hangs without imposing a two-second latency requirement on shared CI.
+    const PHASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     let title = "User-resolved ensemble plan";
     let markdown = valid_plan_markdown(title, "Follow the user's selected approach.");
     let inspection = "rtk rg -n ensemble_policy crates/core/src/session.rs";
@@ -1449,7 +1463,12 @@ async fn ensemble_plan_asks_for_unresolved_disagreement_and_resumes_same_turn() 
     .with_question_responder(questions.responder)
     .with_ensemble_launcher(launcher);
     let (commands, command_rx) = mpsc::unbounded_channel();
-    let engine_task = tokio::spawn(engine.run(command_rx, events_tx));
+    let mut engine_task = tokio::spawn(async move {
+        if !start_delay.is_zero() {
+            tokio::time::sleep(start_delay).await;
+        }
+        engine.run(command_rx, events_tx).await
+    });
 
     commands
         .send(SessionCommand::Turn(
@@ -1461,11 +1480,24 @@ async fn ensemble_plan_asks_for_unresolved_disagreement_and_resumes_same_turn() 
         .expect("ensemble command");
 
     let mut lifecycle = Vec::new();
-    let question = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let question = tokio::time::timeout(PHASE_TIMEOUT, async {
         loop {
-            let event = recv_event(&mut receiver)
-                .await
-                .expect("event channel remains open");
+            let event = tokio::select! {
+                result = &mut engine_task => {
+                    panic!("ensemble engine stopped before the question: {result:?}")
+                }
+                event = recv_event(&mut receiver) => event.expect("event channel remains open"),
+            };
+            assert!(
+                !matches!(
+                    &event,
+                    SessionEvent::TurnFailed { .. }
+                        | SessionEvent::TurnRejected { .. }
+                        | SessionEvent::TurnCancelled { .. }
+                        | SessionEvent::TurnCompleted { .. }
+                ),
+                "ensemble ended before the question: {event:?}"
+            );
             if let SessionEvent::WorkerReviewUpdated { target, state } = &event
                 && let Some(snapshot) = state.eligible_snapshot()
                 && state.confirmation.is_none()
@@ -1493,7 +1525,14 @@ async fn ensemble_plan_asks_for_unresolved_disagreement_and_resumes_same_turn() 
         }
     })
     .await
-    .expect("ensemble question should arrive promptly");
+    .unwrap_or_else(|error| {
+        panic!(
+            "ensemble question did not arrive within {PHASE_TIMEOUT:?}: {error}; \
+             observed {} lifecycle events; last event: {:?}",
+            lifecycle.len(),
+            lifecycle.last()
+        )
+    });
     let question_id = question.id.clone();
     let response = QuestionResponse::Answered {
         answers: vec![QuestionAnswer {
@@ -1510,11 +1549,23 @@ async fn ensemble_plan_asks_for_unresolved_disagreement_and_resumes_same_turn() 
         ))
         .expect("question answer");
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(PHASE_TIMEOUT, async {
         loop {
-            let event = recv_event(&mut receiver)
-                .await
-                .expect("event channel remains open");
+            let event = tokio::select! {
+                result = &mut engine_task => {
+                    panic!("ensemble engine stopped before turn completion: {result:?}")
+                }
+                event = recv_event(&mut receiver) => event.expect("event channel remains open"),
+            };
+            assert!(
+                !matches!(
+                    &event,
+                    SessionEvent::TurnFailed { .. }
+                        | SessionEvent::TurnRejected { .. }
+                        | SessionEvent::TurnCancelled { .. }
+                ),
+                "ensemble failed after the question answer: {event:?}"
+            );
             let completed = matches!(event, SessionEvent::TurnCompleted { .. });
             lifecycle.push(event);
             if completed {
@@ -1523,15 +1574,23 @@ async fn ensemble_plan_asks_for_unresolved_disagreement_and_resumes_same_turn() 
         }
     })
     .await
-    .expect("ensemble turn should continue after the answer");
+    .unwrap_or_else(|error| {
+        panic!(
+            "ensemble turn did not complete within {PHASE_TIMEOUT:?} after the answer: {error}; \
+             observed {} lifecycle events; last event: {:?}",
+            lifecycle.len(),
+            lifecycle.last()
+        )
+    });
     commands
         .send(SessionCommand::Control(
             crate::session::ControlCommand::Shutdown,
         ))
         .expect("shutdown command");
     drop(commands);
-    engine_task
+    tokio::time::timeout(PHASE_TIMEOUT, engine_task)
         .await
+        .expect("ensemble engine should shut down after completing the turn")
         .expect("engine join")
         .expect("valid replay");
     lifecycle.extend(collect_events(&mut receiver).await);
