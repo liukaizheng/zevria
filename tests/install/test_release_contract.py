@@ -41,7 +41,9 @@ class ReleaseContract(unittest.TestCase):
                 # real packages, and never substitute these bytes for executables.
                 payload = target.encode()
                 (artifact / name).write_bytes(payload)
-                (artifact / (name + '.sha256')).write_text(f'{hashlib.sha256(payload).hexdigest()}  {name}\n')
+                (artifact / (name + '.sha256')).write_bytes(
+                    f'{hashlib.sha256(payload).hexdigest()}  {name}\n'.encode('ascii')
+                )
             env = dict(os.environ, VERSION='1.2.3', SOURCE_SHA='0' * 40, TOOLCHAIN='fixture',
                        GITHUB_STEP_SUMMARY=str(root / 'summary'))
             result = subprocess.run([sys.executable, '-c', source], cwd=root, env=env, capture_output=True, text=True)
