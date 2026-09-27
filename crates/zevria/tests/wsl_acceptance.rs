@@ -1,5 +1,7 @@
 //! Opt-in real-machine handoff coverage, not part of mocked launcher tests.
 //! Requires an already configured WSL 2 distribution and matching Linux Zevria.
+//! Installer acceptance additionally requires preinstalled Windows/Linux binaries
+//! and an explicit custom Linux root; this test never installs/reconfigures WSL.
 #![cfg(windows)]
 
 #[test]
@@ -57,4 +59,61 @@ fn whole_application_wsl_handoff_preserves_json_paths_and_failure_status() {
         "offline validation must not create configuration"
     );
     assert!(!workspace.join(".zevria/windows").exists());
+}
+
+#[test]
+#[ignore = "requires installer-produced matching companions and a provisioned custom-root WSL installation"]
+fn installer_produced_companions_discover_the_provisioned_custom_root() {
+    use std::process::Command;
+    let distro = std::env::var("ZEVRIA_WSL_ACCEPTANCE_DISTRO").unwrap();
+    let windows = std::path::PathBuf::from(
+        std::env::var_os("ZEVRIA_WSL_ACCEPTANCE_WINDOWS_EXE")
+            .expect("set the absolute installer-produced Windows executable path"),
+    );
+    let linux_root = std::env::var("ZEVRIA_WSL_ACCEPTANCE_LINUX_ROOT")
+        .expect("set the preinstalled custom Linux root recorded by install.sh");
+    assert!(windows.is_absolute() && windows.is_file());
+    assert!(linux_root.starts_with('/') && !linux_root.contains(['\0', '\n', '\r']));
+    let version = Command::new(&windows).arg("--version").output().unwrap();
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap().trim_end(),
+        format!("zevria {}", env!("CARGO_PKG_VERSION"))
+    );
+    let wsl = zevria_foundation::windows_process::system_executable("wsl.exe").unwrap();
+    let check = Command::new(wsl)
+        .args([
+            "--distribution", &distro, "--cd", "/", "--exec", "/usr/bin/timeout",
+            "--kill-after=1s", "10s", "/bin/sh", "-c",
+            "set -eu; IFS= read -r root < \"$HOME/.zevria/install-root\"; [ \"$root\" = \"$1\" ]; [ \"$root\" != \"$HOME/.zevria\" ]; exec \"$root/bin/zevria\" --__launcher-probe",
+            "zevria-installer-acceptance", &linux_root,
+        ])
+        .env_remove("HOME").env_remove("WSLENV").env_remove("ZEVRIA_INSTALL")
+        .output().unwrap();
+    assert!(check.status.success(), "{:?}", check);
+    let probe: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(probe["os"], "linux");
+    assert_eq!(probe["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(probe["launcher_revision"], 1);
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("no-config.toml");
+    let result = Command::new(windows)
+        .args([
+            "--runtime",
+            "wsl",
+            "--wsl-distro",
+            &distro,
+            "skills",
+            "list",
+            "--json",
+        ])
+        .env("ZEVRIA_CONFIG", &config)
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{:?}", result);
+    serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap();
+    assert!(String::from_utf8_lossy(&result.stderr).contains("runtime WSL"));
+    assert!(!config.exists());
+    assert!(!temp.path().join(".zevria/windows").exists());
 }

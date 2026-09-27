@@ -22,7 +22,8 @@ These runner labels define the acceptance baseline, not a promise of compatibili
 with every OS release. Linux is validated against Ubuntu 22.04's GNU environment;
 Alpine/musl and older distributions are not claimed. There is no Intel macOS,
 Linux ARM64, or Windows ARM64 package. These are **unsigned and unnotarized**
-standalone executables, not installers. There is no package-manager publication.
+standalone executables. The repository's installer scripts are **not additional
+release assets**. There is no package-manager publication.
 OS security policy may block an unsigned executable; use your organization's
 review process rather than assuming a checksum is a signature.
 
@@ -33,7 +34,136 @@ runners and one exact Rust version per run improve consistency but do not promis
 bit-for-bit reproducibility. Runner images and downloaded dependencies/tools can
 still change between runs.
 
-### Verify and install a download
+## Standalone installers
+
+The self-contained repository entry points are `install.sh` (Bash 3.2+) and
+`install.ps1` (Windows PowerShell 5.1 / PowerShell 7 on Windows x64). They require
+HTTPS access to GitHub; Bash also needs curl, tar, standard platform utilities,
+and either sha256sum or shasum. PowerShell uses built-in .NET facilities. They
+install **only Zevria**, without Rust, RTK, Git Bash, WSL, or provider setup.
+
+Moving installer-source URLs (usable after the files land on `main`):
+
+```text
+https://raw.githubusercontent.com/liukaizheng/zevria/main/install.sh
+https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1
+```
+
+Quick installation of the latest published stable binary:
+
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/liukaizheng/zevria/main/install.sh | bash
+```
+
+```powershell
+irm https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 | iex
+```
+
+These one-liners execute downloaded source. **Download and inspect** instead when
+appropriate; do not disable execution policy or bypass organization security controls:
+
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' -o install.sh https://raw.githubusercontent.com/liukaizheng/zevria/main/install.sh
+less install.sh
+bash install.sh --help
+bash install.sh v0.0.1
+```
+
+```powershell
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 -OutFile install.ps1
+Get-Content -LiteralPath ./install.ps1
+./install.ps1 -Help
+./install.ps1 -Version v0.0.1
+```
+
+Replace example version `0.0.1` with a published version. Both scripts accept
+SemVer with/without `v`, including published prereleases and build metadata.
+Omitting the version or specifying `latest` selects stable only. Latest resolves
+one canonical GitHub release tag; archive and `SHA256SUMS` then use that same
+explicit tag. An unavailable version/asset fails rather than substituting another.
+Checksums and archive inventory are validated before extraction; staged
+`--version` must match before anything replaces the installed executable.
+
+**Pinning installer source is different from pinning the binary.** Replace `main`
+in the raw URL with a reviewed full source commit SHA or tag *containing the
+installer files*, and still pass a binary version if reproducibility is needed:
+
+```sh
+ref=REVIEWED_COMMIT_SHA_OR_TAG
+curl -fsSL --proto '=https' --proto-redir '=https' -o install.sh "https://raw.githubusercontent.com/liukaizheng/zevria/$ref/install.sh"
+# Inspect it before execution.
+bash install.sh 0.0.1
+```
+
+```powershell
+$ref = 'REVIEWED_COMMIT_SHA_OR_TAG'
+Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/liukaizheng/zevria/$ref/install.ps1" -OutFile install.ps1
+# Inspect it before execution.
+./install.ps1 -Version 0.0.1
+```
+
+### Roots, PATH, reruns, and recovery
+
+The default root is `<resolved-home>/.zevria`, and the executable is under `bin`.
+Unix requires an absolute `HOME`. Windows uses valid absolute `HOME`, then
+`USERPROFILE`, then combined `HOMEDRIVE`/`HOMEPATH`. An absolute `ZEVRIA_INSTALL`
+overrides only the executable root; it does **not** relocate config, credentials,
+histories, or skills. Controls and PATH delimiters (`:` on Unix, `;` on Windows)
+are rejected. Installation destinations must not be links/reparse points.
+
+```sh
+ZEVRIA_INSTALL="$HOME/Applications/Zevria" bash install.sh 0.0.1 --no-path-update
+```
+
+```powershell
+$env:ZEVRIA_INSTALL = 'C:\Users\you\Applications\Zevria'
+./install.ps1 -Version 0.0.1 -NoPathUpdate
+```
+
+Automatic PATH setup prefers this bin over competing user/Cargo entries, removing
+duplicates of this bin while retaining unrelated entries and their order:
+
+- Bash: an owned block in `.bashrc` and the first existing `.bash_profile`,
+  `.bash_login`, or `.profile`; create `.bash_profile` when none exists.
+- zsh: an owned `.zshrc` block under `ZDOTDIR`, or home when unset.
+- fish: an owned `fish/config.fish` block under `XDG_CONFIG_HOME`, or `~/.config`.
+- Missing supported profiles are created. Existing symlinks remain symlinks;
+  broken/unwritable/ambiguous targets are left untouched with manual instructions.
+- Unknown shells or failed profile updates do not undo an installed binary.
+  Arbitrary later startup code can still reorder PATH.
+- Windows: prepend to unexpanded **user** PATH while preserving its registry type,
+  and to the installer process PATH; no machine PATH or elevation. Existing
+  `%ENVIRONMENT_REFERENCES%` survive. A root containing a literal `%` cannot safely
+  be added to an existing expandable PATH; choose another root or invoke directly.
+  Machine-level entries or shell aliases can still shadow it—use the printed
+  absolute executable path and repair competing entries yourself.
+
+A piped Bash process cannot change its parent shell; source the printed profile
+path or open a new shell. PowerShell executed in the current process can refresh
+that process; `powershell -File` / `pwsh -File` cannot refresh their parent. Restart
+terminals from a refreshed environment (sign out/in if necessary). Opt-out skips
+all profiles and persistent/process PATH changes, not binary installation.
+
+On Linux, even with opt-out, the installer atomically records its absolute root
+as one data line in `~/.zevria/install-root`. See [WSL discovery and repair](windows.md#linux-install-root-discovery-and-repair).
+
+Reruns deliberately replace the **selected root**, including downgrades and
+same-version repairs; installations in other roots remain unchanged. Verification
+failures leave the old executable untouched. Replacement stages on the destination
+filesystem rather than overwriting a live file. Linux executable/locator updates
+keep backups and roll back handled failures; failed recovery reports retained
+backup paths for manual restoration. A Windows lock requires closing Zevria and
+rerunning—no user process is killed. To return to an older release, rerun the
+installer with that version and the same root.
+
+This is not a crash-atomic transaction across filesystems. Power loss or forced
+termination can leave installer-owned `.zevria-install.*` / `.install-root.*`
+(Windows `.zevria-install-*`) recovery directories. Inspect and preserve any
+`previous` / `previous.exe` backups; restore the intended executable and matching
+locator, or rerun for that root. Never recursively delete the shared `.zevria`
+root as a repair step. The installers never change provider material.
+
+### Verify and install a manual download
 
 Download the archive for your native environment and `SHA256SUMS` from the same
 published release. GitHub's automatically generated source archives are not the
@@ -93,6 +223,18 @@ your user `PATH`. Unix tar archives preserve executable permission.
   provider/model roles. See [Getting started](../README.md#getting-started).
   Help, version, and the native offline skills listing need no live provider.
 
+### Offline installer validation
+
+`tests/install/test_unix.py` uses disposable homes/profiles and fixture tarballs;
+`test_windows.ps1` uses real fixture executables/ZIPs but intercepts persistent
+PATH reads/writes. Production installers have no alternate mirror/checksum-bypass
+flags. `test.yml` runs system Bash fixtures on Linux/macOS (including Bash 3.2),
+ShellCheck and fish profile checks, plus Windows PowerShell 5.1 and PowerShell 7.
+The Linux workspace tests execute the actual fixed launcher discovery source.
+These are not proof of real WSL handoff: retain the opt-in, provisioned-host lane
+and validate matching installer-produced Windows/Linux versions and custom roots
+before claiming real WSL acceptance.
+
 ## Maintainer prerequisites and release preparation
 
 1. Ensure GitHub Actions is enabled and repository policy allows the release job's
@@ -148,7 +290,11 @@ The dependency chain is `prepare → native build/test matrix → assemble → d
   executable must pass `--help`, the exact expected `--version`, and
   `--runtime native skills list --json`. Each smoke invocation set uses disposable
   HOME/USERPROFILE and workspace directories with inherited Zevria overrides
-  removed. No interactive session, live model, or destructive cleanup is used.
+  removed. Each native job additionally feeds its **freshly built archive** and
+  sidecar (served as `SHA256SUMS`) through the actual installer with offline fixture
+  transport, then runs all three smoke commands on the installed executable.
+  Windows exercises both PowerShell editions. No published-release substitute,
+  real registry/profile changes, interactive session, or live model is used.
 - **Assembly:** downloads only this run's target artifacts, retains their separate
   directories to detect duplicate/unexpected files, requires all three exact
   archives and sidecar checksums, verifies every digest, and assembles a sorted
@@ -212,7 +358,7 @@ gh workflow run release.yml --ref YOUR_BRANCH_OR_TAG
 ```
 
 Dispatch is **always build-only**, including `--ref v0.0.1`. It runs the same native
-checks, builds, extraction smoke tests, and bundle assembly, but cannot create or
+checks, builds, extraction and installer smoke tests, and bundle assembly, but cannot create or
 update any GitHub Release. Download `zevria-v<version>-bundle` from that run's
 Actions artifacts and inspect its four files/checksums. A dry run does not promote
 its artifacts into a later tag run; the tag run independently builds its source.
@@ -220,7 +366,7 @@ its artifacts into a later tag run; the tag run independently builds its source.
 Do not treat a workflow merely being added or statically linted as hosted
 acceptance. Require all three native jobs and assembly to succeed, including the
 Windows linker preflight, RTK installation, workspace tests, production build,
-extracted-binary smoke tests, and checksum verification. Confirm the draft job was
+extracted-binary and fresh-package installer smoke tests, and checksum verification. Confirm the draft job was
 skipped and dispatch created no release. Record the tested source commit and run
 ID; local linting or mocked probes do not establish Windows acceptance. Real draft
 creation needs a separately authorized version-tag push.

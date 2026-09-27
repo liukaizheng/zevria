@@ -214,27 +214,24 @@ pub fn diagnostics(workspace: &Path) -> anyhow::Result<()> {
 // Fixed source only. Values are positional arguments, never shell fragments.
 // Linux timeout bounds the bootstrap itself even if killing wsl.exe cannot stop
 // Linux descendants. No login profiles, installation, configuration, or providers.
-const PROBE_SCRIPT: &str = r#"set -eu
-export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-unset BASH_ENV ENV
+const LINUX_SETUP: &str = include_str!("launcher_linux.sh");
+fn linux_script(body: &str) -> String {
+    format!("{LINUX_SETUP}\n{body}")
+}
+const PROBE_SCRIPT: &str = r#"zevria_path "$HOME/.zevria/bin"
 map_path() { case "$1" in linux) printf '%s' "$2";; drive) wslpath -u "$2";; *) exit 31;; esac; }
 cwd=$(map_path "$1" "$2")
 config=''; if [ -n "$4" ]; then config=$(map_path "$3" "$4"); fi
 skill=''; if [ -n "$6" ]; then skill=$(map_path "$5" "$6"); fi
 cd -- "$cwd" || { echo 'workspace inaccessible in selected distribution' >&2; exit 32; }
-exe=$(command -v zevria) || { echo 'Linux Zevria is missing; install a compatible companion inside WSL' >&2; exit 33; }
-exe=$(readlink -f -- "$exe")
-magic=$(od -An -tx1 -N4 -- "$exe" | tr -d ' \n')
-[ "$magic" = 7f454c46 ] || { echo 'resolved Zevria is not a Linux ELF executable (possible Windows recursion)' >&2; exit 34; }
+zevria_select
 probe=--__launcher-probe
 if [ "$7" = tools ]; then probe=--__launcher-probe-tools; fi
 printf '%s\000' "$exe" "${WSL_DISTRO_NAME:-}" "$cwd" "$config" "$skill"
 "$exe" "$probe"
 "#;
-const HANDOFF_SCRIPT: &str = r#"set -eu
-export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-unset BASH_ENV ENV
-exe=$1; cwd=$2; config=$3; shift 3
+const HANDOFF_SCRIPT: &str = r#"exe=$1; cwd=$2; config=$3; shift 3
+zevria_path "${exe%/*}"
 cd -- "$cwd"
 if [ -n "$config" ]; then export ZEVRIA_CONFIG="$config"; else unset ZEVRIA_CONFIG; fi
 export _ZEVRIA_WSL_HANDOFF=1
@@ -315,6 +312,28 @@ struct Handoff {
     config: String,
     args: Vec<String>,
 }
+fn linux_wslenv(env: &str) -> String {
+    env.split(':')
+        .filter(|entry| {
+            !matches!(
+                entry
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_uppercase()
+                    .as_str(),
+                "HOME"
+                    | "SHELL"
+                    | "ZEVRIA_CONFIG"
+                    | "ZEVRIA_INSTALL"
+                    | "BASH_ENV"
+                    | "ENV"
+                    | "_ZEVRIA_WSL_HANDOFF"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
 fn wsl_command(wsl: &Path, distro: Option<&str>) -> Command {
     let mut command = Command::new(wsl);
     if let Some(distro) = distro {
@@ -324,24 +343,16 @@ fn wsl_command(wsl: &Path, distro: Option<&str>) -> Command {
     // WSLENV is an explicit bridge. Remove runtime-home/config entries instead
     // of letting Windows HOME/SHELL become Linux defaults. Other entries survive.
     if let Ok(env) = std::env::var("WSLENV") {
-        let env = env
-            .split(':')
-            .filter(|entry| {
-                !matches!(
-                    entry
-                        .split('/')
-                        .next()
-                        .unwrap_or("")
-                        .to_ascii_uppercase()
-                        .as_str(),
-                    "HOME" | "SHELL" | "ZEVRIA_CONFIG" | "BASH_ENV" | "ENV" | "_ZEVRIA_WSL_HANDOFF"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(":");
-        command.env("WSLENV", env);
+        command.env("WSLENV", linux_wslenv(&env));
     }
-    for name in ["HOME", "SHELL", "ZEVRIA_CONFIG", "BASH_ENV", "ENV"] {
+    for name in [
+        "HOME",
+        "SHELL",
+        "ZEVRIA_CONFIG",
+        "ZEVRIA_INSTALL",
+        "BASH_ENV",
+        "ENV",
+    ] {
         command.env_remove(name);
     }
     command
@@ -352,7 +363,7 @@ impl Handoff {
         command.args([
             "/bin/sh",
             "-c",
-            HANDOFF_SCRIPT,
+            &linux_script(HANDOFF_SCRIPT),
             "zevria-handoff",
             &self.executable,
             &self.workspace,
@@ -423,7 +434,7 @@ async fn prepare(
         "10s",
         "/bin/sh",
         "-c",
-        PROBE_SCRIPT,
+        &linux_script(PROBE_SCRIPT),
         "zevria-probe",
         workspace.kind,
         &workspace.value,
@@ -559,6 +570,10 @@ async fn acp_helper(args: &[String]) -> anyhow::Result<Launch> {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "launcher_linux_tests.rs"]
+mod linux_tests;
+
 #[cfg(test)]
 #[path = "launcher_mock_tests.rs"]
 mod mocked_tests;
@@ -658,6 +673,22 @@ mod tests {
             assert!(map_input(path, r"C:\work").is_err(), "{path}");
         }
     }
+    #[test]
+    fn installation_environment_never_crosses_the_wsl_bridge() {
+        assert_eq!(
+            linux_wslenv(
+                "KEEP/p:ZEVRIA_INSTALL/p:zevria_install/u:ZeVrIa_InStAlL/lw:HOME/p:SHELL:ZEVRIA_CONFIG/p:BASH_ENV:env:_ZEVRIA_WSL_HANDOFF:OTHER/l"
+            ),
+            "KEEP/p:OTHER/l"
+        );
+        let command = wsl_command(Path::new("wsl.exe"), None);
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .any(|(key, value)| key == "ZEVRIA_INSTALL" && value.is_none())
+        );
+    }
     fn probe(os: &str, version: &str) -> Vec<u8> {
         format!("/home/me/.cargo/bin/zevria\0Ubuntu\0/mnt/c/work space\0/mnt/c/config.toml\0/mnt/c/x';&.md\0{}", serde_json::json!({"os":os,"version":version,"launcher_revision":REVISION})).into_bytes()
     }
@@ -680,7 +711,7 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(argv.last().unwrap(), "--json");
-        assert!(argv.contains(&HANDOFF_SCRIPT.to_string()));
+        assert!(argv.contains(&linux_script(HANDOFF_SCRIPT)));
         assert!(
             decode_probe(
                 &probe("windows", env!("CARGO_PKG_VERSION")),

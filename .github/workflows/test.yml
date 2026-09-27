@@ -5,6 +5,52 @@ on:
   workflow_dispatch:
 
 jobs:
+  installers:
+    name: Offline installers (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify the release assembly inventory contract
+        run: python tests/install/test_release_contract.py
+      - name: System Bash syntax and offline fixtures (including macOS Bash 3.2)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          /bin/bash -n install.sh tests/install/transport.sh
+          INSTALL_TEST_BASH=/bin/bash python tests/install/test_unix.py
+      - name: Install ShellCheck and fish on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck fish
+      - name: Install ShellCheck and fish on macOS
+        if: runner.os == 'macOS'
+        run: brew install shellcheck fish
+      - name: ShellCheck and fish profile execution
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          shellcheck install.sh tests/install/transport.sh
+          INSTALL_TEST_BASH=/bin/bash python tests/install/test_unix.py
+      - name: Windows PowerShell 5.1 fixtures (mocked registry)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          ./tests/install/test_helpers.ps1
+          ./tests/install/test_windows.ps1
+      - name: PowerShell 7 fixtures (mocked registry)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./tests/install/test_helpers.ps1
+          ./tests/install/test_windows.ps1
+
   workspace:
     strategy:
       fail-fast: false

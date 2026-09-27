@@ -6,6 +6,14 @@ on:
         description: Existing WSL 2 distribution with matching Linux Zevria installed
         type: string
         required: true
+      windows_executable:
+        description: Absolute Windows executable installed by install.ps1 at the tested version
+        type: string
+        required: true
+      linux_install_root:
+        description: Preinstalled custom Linux root recorded by install.sh in the selected distro
+        type: string
+        required: true
 
 # Separate from mocked tests. This host is provisioned by its owner; the job
 # must never install/upgrade/shut down WSL or change the default distribution.
@@ -15,6 +23,8 @@ jobs:
     timeout-minutes: 15
     env:
       ZEVRIA_WSL_ACCEPTANCE_DISTRO: ${{ inputs.distro }}
+      ZEVRIA_WSL_ACCEPTANCE_WINDOWS_EXE: ${{ inputs.windows_executable }}
+      ZEVRIA_WSL_ACCEPTANCE_LINUX_ROOT: ${{ inputs.linux_install_root }}
     steps:
       - uses: actions/checkout@v4
       - name: Real whole-application handoff in disposable paths

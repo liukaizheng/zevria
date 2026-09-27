@@ -418,6 +418,15 @@ jobs:
               digest = hashlib.file_digest(f, 'sha256').hexdigest()
           Path(str(archive) + '.sha256').write_bytes(f'{digest}  {archive.name}\n'.encode('ascii'))
           PY
+      - name: Install and smoke-test this run's fresh native package offline
+        # Never use a previously published release or bypass checksum validation.
+        # The sidecar is served as SHA256SUMS by the fixture transport. Windows
+        # exercises both PowerShell editions without real registry/profile writes.
+        run: |
+          python tests/install/smoke.py \
+            "dist/zevria-v${VERSION}-${TARGET}.${{ matrix.extension }}" \
+            "dist/zevria-v${VERSION}-${TARGET}.${{ matrix.extension }}.sha256" \
+            "$VERSION"
       - name: Upload this target's archive and checksum only
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -486,7 +495,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
               f.write(f'## Verified release bundle\n\nSource: `{os.environ["SOURCE_SHA"]}`\n\nRust: `{os.environ["TOOLCHAIN"]}`\n\n')
               f.write('Targets: ' + ', '.join(f'`{t}`' for t in targets) + '\n\n')
-              f.write(f'```text\n{manifest}```\n\nAll three native build/test and extracted-binary smoke jobs succeeded.\n')
+              f.write(f'```text\n{manifest}```\n\nAll three native build/test, extracted-binary, and offline installer smoke jobs succeeded.\n')
           PY
       - name: Upload the complete four-file bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

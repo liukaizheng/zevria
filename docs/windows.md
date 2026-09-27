@@ -33,7 +33,8 @@ accessible workspace, a compatible Linux executable, and the dependencies for
 the requested operation. Probes use a trusted system `wsl.exe`, fixed bootstrap
 source, bounded output and deadlines, and positional arguments. They perform no
 installation or application configuration. The Linux bootstrap needs `/bin/sh`,
-`timeout`, `readlink`, `od`, `tr`, and (for Windows drive paths) `wslpath`.
+`timeout`, `readlink`, `od`, `tr`, `head`, `wc`, `grep`, and (for Windows drive
+paths) `wslpath`. It never sources shell profiles.
 
 **After handoff there is no native retry.** The Linux child's stdout, stderr,
 terminal handles and exit status belong to that invocation. First-run config,
@@ -42,35 +43,82 @@ signals. The launcher never shuts down a distribution or copies credentials.
 
 ## WSL-first setup: two installations
 
-1. Install/build the Windows application with a Rust MSVC toolchain and its
-   normal native build prerequisites. From this checkout:
+1. Install the Windows binary in PowerShell, using a **published pinned version**
+   (replace the example `0.0.1`). Inspect the downloaded script before running it:
 
-   ```text
-   cargo install --path crates/zevria --locked
+   ```powershell
+   Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 -OutFile install.ps1
+   Get-Content -LiteralPath ./install.ps1
+   ./install.ps1 -Version 0.0.1
    ```
+
+   Quick latest-stable installation is `irm https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 | iex`.
+   The raw URL becomes available after the script reaches `main`. Review the
+   [installer trust, source-pinning and PATH details](releases.md#standalone-installers).
+   Set absolute `$env:ZEVRIA_INSTALL` for a custom Windows executable root, and
+   use `-NoPathUpdate` to opt out of user/process PATH changes. No elevation is
+   required. New terminals may still see a machine-PATH copy first; use the
+   printed absolute path and repair shadowing explicitly.
 
 2. Inspect WSL yourself (`wsl --list --verbose`). If it is not installed or has
    no distribution, follow Microsoft's WSL installation instructions. Zevria
    will not install a distribution, upgrade WSL, or change its default for you.
-3. Enter the desired distribution (`wsl`, or `wsl --distribution NAME`). Install
-   Rust and build **the same Zevria version** from a compatible checkout inside
-   that Linux environment:
+3. Enter the desired **x64 GNU/glibc** distribution (`wsl`, or
+   `wsl --distribution NAME`). Install **the same binary version** there:
 
    ```sh
-   cargo install --path crates/zevria --locked
-   cargo install --git https://github.com/rtk-ai/rtk --locked
+   curl -fsSL --proto '=https' --proto-redir '=https' -o install.sh https://raw.githubusercontent.com/liukaizheng/zevria/main/install.sh
+   less install.sh
+   bash install.sh 0.0.1
+   # Custom root alternative (recorded even when PATH changes are disabled):
+   # ZEVRIA_INSTALL="$HOME/Applications/Zevria" bash install.sh 0.0.1 --no-path-update
    ```
 
-   The launcher searches the Linux PATH, including `~/.cargo/bin`, `~/.local/bin`,
-   `/usr/local/bin`, `/usr/bin`, and `/bin`. It rejects a Windows executable or
-   shell wrapper accidentally resolved as the Linux Zevria companion. Application
-   version and launcher compatibility revision must match. Release changes to
-   the launcher protocol must update that revision on both installations.
+   Install Linux RTK separately using its upstream instructions. If you already
+   have Rust, `cargo install --git https://github.com/rtk-ai/rtk --locked` is one
+   option; the unrelated crates.io package named `rtk` is not the required tool.
+   The installer does not install dependencies or configure providers.
+
+   The launcher rejects Windows executables and shell wrappers as Linux Zevria
+   companions. Application version and launcher compatibility revision must
+   match. A discovery-only change does not bump that revision. **The install-root
+   discovery below requires a newly built Windows launcher containing this
+   change. Installing an older published binary does not retrofit its launcher.**
 4. Configure providers/models in the Linux runtime's home. You may run Linux
    Zevria directly first to generate its setup templates. Windows credentials are
    not imported. Re-run explicitly if first-run setup exits after a handoff.
 5. From a Windows terminal in your project, run `zevria --runtime wsl`. Once this
    works, ordinary `zevria` may use automatic selection.
+
+Source-build alternative: use matching compatible checkouts and native Rust/build
+prerequisites in both environments, then `cargo install --path crates/zevria --locked`
+in each. No installer or launcher copies/upgrades the other runtime. If a locator
+from an earlier binary installation remains, repair/remove it before expecting
+Cargo discovery to win.
+
+### Linux install-root discovery and repair
+
+Every Linux installer run records its absolute root in the Linux home's
+`.zevria/install-root`, including default roots and `--no-path-update` installs.
+This file is bounded **data**, not shell source. A valid record selects precisely
+`<recorded-root>/bin/zevria`; that bin precedes Cargo and other fallbacks. The
+handoff stays bound to the exact executable selected by the successful probe.
+Windows `ZEVRIA_INSTALL` is never a Linux discovery input.
+
+Without a locator, search order is `~/.zevria/bin`, `~/.cargo/bin`, `~/.local/bin`,
+`/usr/local/bin`, `/usr/bin`, `/bin`, then inherited PATH. Custom roots do not
+require profile edits: WSL readiness and handoff never source Bash, zsh, or fish
+profiles or evaluate locator text.
+
+A malformed, unreadable, nonregular, linked/dangling or stale locator **fails WSL
+readiness**, rather than silently running another Linux Zevria. Automatic mode
+may still use its existing native fallback; explicit `--runtime wsl` fails. Repair
+inside the selected distribution by rerunning the matching Linux installer with
+the intended `ZEVRIA_INSTALL`. Or, after inspecting the record, remove only
+`~/.zevria/install-root` to deliberately restore fallback discovery. Do not delete
+the shared `.zevria` directory or credentials. An unavailable/non-ELF recorded
+executable also requires repair; a version mismatch requires matching Windows and
+Linux installations. These failures never trigger a native retry after handoff.
 
 Normal drive paths, canonical verbatim drive paths, and `\\wsl.localhost\NAME\...`
 (or `\\wsl$\NAME\...`) are recognized by the launcher. It deliberately translates
@@ -79,8 +127,9 @@ A WSL share for another distribution is rejected. General UNC/device paths and
 alternate data streams are not mapped. Arguments are not interpolated into shell
 source; spaces, Unicode, quotes, and metacharacters remain data.
 
-Windows HOME/SHELL are not forwarded as Linux defaults, including through their
-WSLENV entries. Other intentional WSLENV bridges remain the user's responsibility.
+Windows HOME/SHELL/ZEVRIA_INSTALL are not forwarded as Linux defaults, including
+case-insensitive WSLENV entries with flags. Config and shell-injection overrides
+are filtered too. Other intentional WSLENV bridges remain the user's responsibility.
 
 ## Native fallback: Git for Windows Bash and native RTK
 
@@ -198,6 +247,13 @@ does not rewrite ACP messages. See [ACP agent setup](acp-agent.md).
 - No distribution / companion / RTK / timeout: read the readiness stderr notice;
   use `--runtime wsl` to see a required-runtime error instead of automatic fallback.
 - Wrong companion: install the matching Linux version; do not point at zevria.exe.
+- Stale/custom root: repair the selected distro's `~/.zevria/install-root` as above;
+  do not assume a Cargo copy or profile PATH will override it.
+- Installer lock: close the running Windows Zevria and rerun; the installer does
+  not terminate user processes. Rerun with an older explicit version to roll back.
+- PATH refresh: source the printed Unix profile or open a new shell. PowerShell
+  child processes cannot update the parent's PATH; restart terminals from a
+  refreshed environment. Check the installed absolute path for shadowing.
 - Native Git Bash missing: install Git for Windows or correct ZEVRIA_GIT_BASH.
 - Native RTK missing: verify `rtk --version` in the command environment; restart
   after changing user PATH. Offline commands remain usable.
@@ -214,6 +270,8 @@ Windows machine, also record:
   stdout/stderr/nonzero status, timeouts, cancellation and aborted workers;
 - [ ] default/explicit/stopped/absent WSL distribution; missing/incompatible Linux
   companion; bounded readiness; no native retry after first-run/provider failure;
+- [ ] matching installer-produced Windows/Linux versions, both default and custom
+  Linux roots, a competing Cargo copy, stale-locator repair, and no profile sourcing;
 - [ ] local workspace with spaces/Unicode and a WSL-hosted checkout;
 - [ ] terminal input/submission, paste and image clipboard, Ctrl-C and terminal
   restoration, with unrelated WSL workloads left running;
@@ -222,4 +280,10 @@ Windows machine, also record:
 - [ ] independent continue/resume/list/clean, protected reads, reparse rejection,
   hard-link aliases, resource pagination, atomic settings and cross-process leases.
 
-These real-machine items are not established by mocked tests or cross-compilation.
+The opt-in WSL workflow requires an already-provisioned distro, the absolute
+installer-produced Windows executable path, and a matching **custom** Linux
+installation root already recorded by `install.sh`. Its ignored integration tests
+check the recorded root, matching versions, and real application handoff without
+installing or reconfiguring WSL. Also record default-root and interactive results
+using the checklist above. These real-machine items are not established by mocked
+tests or cross-compilation.

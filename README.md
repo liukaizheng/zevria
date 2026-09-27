@@ -22,29 +22,58 @@ Agent Client Protocol (ACP) agent for editors and other clients.
 
 ## Getting started
 
-### 1. Build and install
+### 1. Install Zevria
 
-For Windows x64, Linux x64, and Apple Silicon macOS packages, see
-[release downloads, prerequisites, and the maintainer release procedure](docs/releases.md).
+**Linux x64 GNU / Apple Silicon macOS** (including Bash under Rosetta):
 
-You will need:
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/liukaizheng/zevria/main/install.sh | bash
+```
 
-- A Rust toolchain with Cargo and support for the Rust 2024 edition.
-- Git and network access to fetch the workspace's registry and Git dependencies.
-- `rtk` on your `PATH`: Zevria's built-in command instructions expect shell tools
-  to run through RTK. See [command conventions](docs/instructions/command-conventions.md).
-- A terminal that reports `Ctrl+Enter` distinctly from `Enter` for prompt
-  submission.
-- Access to a model endpoint that implements the **OpenAI Responses wire
-  protocol**. A Chat Completions-only endpoint is not supported.
+**Windows x64**, in Windows PowerShell 5.1 or PowerShell 7 (not Git Bash):
 
-From a checkout of this repository:
+```powershell
+irm https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 | iex
+```
+
+These commands execute downloaded installer source. Prefer to download and inspect
+it first if required by your security policy; see [installation details](docs/releases.md#standalone-installers)
+for that alternative, source pinning, manual downloads, and unsigned-release limits.
+The moving URLs work after these files reach `main`; a missing stable release is
+an error, not permission to install an unverified substitute.
+
+The installers verify the release checksum and executable version, then install
+only Zevria into the resolved home's `.zevria/bin`, with automatic **user-level**
+PATH setup. Rust is not needed. Linux needs Bash 3.2+, curl, tar and sha256sum or
+shasum; macOS has the supported system Bash and utilities. Intel macOS, Linux
+ARM64/musl and Windows ARM64 are not packaged.
+
+- Set an absolute `ZEVRIA_INSTALL` to change the executable root (not configuration
+  or history locations). Spaces and Unicode are supported.
+- Pin a binary version with `bash -s -- v0.0.1` at the end of the Bash pipeline,
+  or download `install.ps1` and run `./install.ps1 -Version v0.0.1`. Examples use
+  placeholder versions, not a claim about the newest release.
+- Use `--no-path-update` / `-NoPathUpdate` to leave PATH and profiles untouched.
+- Open a new shell or use the printed refresh instructions. A piped/child installer
+  cannot change its parent shell; Windows machine PATH may still shadow user PATH.
+- Reruns replace the selected root, including same-version repairs and downgrades.
+  To roll back, rerun with the desired version. Other roots and provider files are
+  left alone. Linux installs also record the root for Windows-to-WSL discovery.
+
+Install runtime prerequisites separately: **RTK** for command tools, **Git for
+Windows Bash** for native Windows commands, a terminal that distinguishes
+`Ctrl+Enter`, and a model endpoint implementing the **OpenAI Responses wire
+protocol** (not Chat Completions alone). The installer does not install RTK, Git
+Bash, WSL, Rust, or provider credentials. See [command conventions](docs/instructions/command-conventions.md).
+
+**Source-build alternative:** with Rust/Cargo (Rust 2024 support), Git, network
+access, and native build tools, run this from a checkout:
 
 ```sh
 cargo install --path crates/zevria --locked
 ```
 
-Ensure Cargo's installation bin directory is on your `PATH`. Then launch Zevria
+For source builds, ensure Cargo's bin directory is on PATH. Then launch Zevria
 from the project you want to work on, not necessarily from this checkout:
 
 ```sh
@@ -70,6 +99,12 @@ Windows `--acp` defaults to native. Native history lives under `.zevria/windows/
 WSL history and global configuration remain separate. Nothing is installed,
 upgraded, copied, or migrated by the launcher, and an invocation is **never
 retried natively after handoff**, even if Linux first-run configuration fails.
+
+Use matching pinned binary versions for the Windows and Linux installers. A new
+Windows launcher discovers the Linux installer's `.zevria/install-root` record,
+including custom roots, without sourcing profiles; a stale record must be repaired.
+This discovery requires a Windows binary built with the change—installing an older
+published version does not retrofit its launcher.
 
 See [Windows setup and acceptance checklist](docs/windows.md) for the two-install
 setup, native RTK/Git Bash, supported filesystem boundaries, ACP, and validation
