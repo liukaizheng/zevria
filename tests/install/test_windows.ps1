@@ -89,6 +89,9 @@ class Fixture {
         Assert ($status -ne 0) "invalid arguments rejected: $arguments / $output"
     }
     Assert (-not [IO.File]::Exists($env:FIXTURE_CALLS)) 'invalid arguments did not download'
+    # These expected failures leave a nonzero native exit code that GitHub's
+    # PowerShell 5.1 wrapper otherwise mistakes for a failed fixture suite.
+    $global:LASTEXITCODE = 0
     $realHome = $env:HOME
     $env:USERPROFILE = Join-Path $temp 'profile'
     Assert ((Get-ZevriaHome) -eq $realHome) 'HOME wins'
