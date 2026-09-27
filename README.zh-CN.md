@@ -375,6 +375,6 @@ cargo test --workspace --locked
 - [检查策略及其限制](docs/instructions/inspection-policy.md)
 - [架构说明](docs/architecture.md)
 
-## 致谢
+## 友情链接
 
-感谢 [linux.do 社区](https://linux.do/) 分享了许多 AI 领域的知识，也感谢为 Zevria 提供支持的 [Rig](https://github.com/liukaizheng/rig) 框架。
+[Linux.Do](https://linux.do/) — 一个全新的理想社区。

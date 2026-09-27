@@ -597,8 +597,6 @@ provider's cacheable prompt prefix.
 - [Inspection policy and its limits](docs/instructions/inspection-policy.md)
 - [Architecture](docs/architecture.md)
 
-## Acknowledgments
+## Friends
 
-Thanks to the [linux.do community](https://linux.do/) for sharing so much AI
-knowledge, and to [Rig](https://github.com/liukaizheng/rig), the framework that
-powers Zevria.
+[Linux.Do](https://linux.do/) — A new ideal community.
