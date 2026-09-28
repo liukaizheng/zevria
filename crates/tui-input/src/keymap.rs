@@ -282,6 +282,14 @@ const COMPLETION: &[Binding] = &[
     ),
 ];
 const NORMAL: &[Binding] = &[
+    b!(
+        PreviousTurn,
+        "previous turn start",
+        0,
+        "Navigation",
+        key(Char('['))
+    ),
+    b!(NextTurn, "next turn start", 0, "Navigation", key(Char(']'))),
     b!(Insert, "input", 1, "Actions", key(Char('i'))),
     b!(Select, "select", 2, "Actions", key(Char('v'))),
     b!(PlanReview, "plan choices", 3, "Actions", key(Char('p'))),
@@ -618,6 +626,60 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn turn_navigation_is_normal_only_and_brackets_remain_text() {
+        for (ch, action) in [('[', Action::PreviousTurn), (']', Action::NextTurn)] {
+            let event = KeyEvent::new(Char(ch), KeyModifiers::NONE);
+            assert_eq!(
+                ChordState::default().resolve(KeyContext::Transcript, event),
+                Some(action)
+            );
+            for context in [
+                KeyContext::Composer,
+                KeyContext::Completion,
+                KeyContext::TextEntry,
+            ] {
+                assert_eq!(
+                    ChordState::default().resolve(context, event),
+                    Some(Action::Type(ch))
+                );
+            }
+            for context in [
+                KeyContext::BlockNav,
+                KeyContext::OverlayList,
+                KeyContext::OverlayInspect,
+                KeyContext::SkillsList,
+                KeyContext::SkillsInspect,
+                KeyContext::ModelList,
+                KeyContext::ModelReasoning,
+                KeyContext::ModelConfirm,
+                KeyContext::PlanDecision,
+                KeyContext::Question,
+                KeyContext::Help,
+            ] {
+                assert_eq!(
+                    ChordState::default().resolve(context, event),
+                    None,
+                    "{context:?}"
+                );
+            }
+            let binding = bindings(KeyContext::Transcript)
+                .find(|binding| binding.action == action)
+                .unwrap();
+            assert_eq!(binding.group, "Navigation");
+            assert_eq!(binding.primary, 0, "help only, not the compact footer");
+        }
+        for (ch, action) in [('u', Action::HalfPageUp), ('d', Action::HalfPageDown)] {
+            assert_eq!(
+                ChordState::default().resolve(
+                    KeyContext::BlockNav,
+                    KeyEvent::new(Char(ch), KeyModifiers::CONTROL)
+                ),
+                Some(action)
+            );
         }
     }
 

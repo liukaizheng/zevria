@@ -170,6 +170,9 @@ impl App {
             status_height,
         );
         let total = status_range.end();
+        parts
+            .view
+            .refresh_turn_positions(&parts.turn_starts, layout.conversation_content);
         parts.view.reconcile_conversation_viewport(
             total,
             viewport_height,

@@ -238,6 +238,18 @@ impl HistoryEntry {
         }))
     }
 
+    /// Numbered, user-originated prompt boundaries shared by folding and
+    /// Normal-mode turn navigation. Metadata and worker rows are not prompts.
+    pub(crate) fn has_prompt_header(&self) -> bool {
+        let header = match self {
+            Self::Conversation(entry) => entry.header,
+            Self::Ensemble(entry) => entry.header,
+            Self::PlanHandoff(_, header) => *header,
+            _ => None,
+        };
+        matches!(header, Some(NativeHeader::Prompt(_)))
+    }
+
     pub(crate) fn selectable_upper_bound(&self) -> usize {
         match self {
             Self::Conversation(entry) => entry.blocks.len(),
@@ -414,6 +426,16 @@ pub(crate) struct Selection {
     pub(crate) content_index: usize,
 }
 
+/// A turn's displayed beginning, not its selectable body. Native prompts
+/// (including special entries) use projection-scoped entry identity; grouped
+/// ACP prompts retain their presentation block identity across reducer updates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TurnStartTarget {
+    pub(crate) epoch: crate::presentation::ProjectionEpoch,
+    pub(crate) history_index: usize,
+    pub(crate) block: Option<PresentationBlockId>,
+}
+
 /// Cross-domain consequences of a committed conversation mutation.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct ConversationChange {
@@ -569,6 +591,60 @@ impl ConversationState {
 
     pub(crate) fn entry(&self, index: usize) -> Option<&HistoryEntry> {
         self.history.get(index)
+    }
+
+    pub(crate) fn turn_starts(&self, diagnostics_visible: bool) -> Vec<TurnStartTarget> {
+        let mut targets = Vec::new();
+        for (history_index, entry) in self.history.iter().enumerate() {
+            let target = TurnStartTarget {
+                epoch: self.epoch,
+                history_index,
+                block: None,
+            };
+            if entry.has_prompt_header() {
+                targets.push(target);
+            } else if let HistoryEntry::Conversation(conversation) = entry
+                && conversation.header.is_none()
+            {
+                targets.extend(
+                    entry
+                        .user_message_blocks(diagnostics_visible)
+                        .filter(|(index, start)| index == start)
+                        .map(|(index, _)| TurnStartTarget {
+                            block: Some(conversation.blocks[index].id),
+                            ..target
+                        }),
+                );
+            }
+        }
+        targets
+    }
+
+    pub(crate) fn reconcile_turn_start(
+        &self,
+        mut target: TurnStartTarget,
+    ) -> Option<TurnStartTarget> {
+        if target.epoch != self.epoch {
+            return None;
+        }
+        if let Some(id) = target.block {
+            let (history_index, id) = self.resolved_identity((target.history_index, id));
+            target.history_index = history_index;
+            target.block = Some(id);
+            let entry = self.entry(history_index)?;
+            let HistoryEntry::Conversation(conversation) = entry else {
+                return None;
+            };
+            (conversation.header.is_none()
+                && entry
+                    .user_message_blocks(true)
+                    .any(|(index, start)| index == start && conversation.blocks[index].id == id))
+            .then_some(target)
+        } else {
+            self.entry(target.history_index)?
+                .has_prompt_header()
+                .then_some(target)
+        }
     }
 
     pub(crate) fn entry_mut(&mut self, index: usize) -> Option<&mut HistoryEntry> {
@@ -2147,6 +2223,80 @@ mod tests {
     use super::*;
     use zevria_workflow::AgentRunDescriptor;
     use zevria_workflow::EnsembleRunId;
+
+    #[test]
+    fn turn_targets_preserve_block_identity_and_reject_replacement_epochs() {
+        let mut conversation = ConversationState::default();
+        conversation.push_message(
+            Message::user("headerless ACP prompt"),
+            ToolCallStatus::Finished,
+        );
+        let block_target = conversation.turn_starts(false)[0];
+        assert!(block_target.block.is_some());
+        let turn = conversation.allocate_turn();
+        conversation.push_user_turn(Message::user("numbered prompt"), turn);
+        let entry_target = conversation.turn_starts(false)[1];
+        assert_eq!(entry_target.block, None);
+        assert_eq!(
+            conversation.reconcile_turn_start(entry_target),
+            Some(entry_target)
+        );
+
+        // Aliased blocks can move within the same projection; targets follow
+        // presentation identity, not an old content index or entry offset.
+        let HistoryEntry::Conversation(entry) = conversation.entry_mut(0).unwrap() else {
+            panic!()
+        };
+        let old = entry.blocks[0].id;
+        entry.blocks[0].id = PresentationBlockId(100);
+        conversation
+            .identity_aliases
+            .insert((0, old), (0, PresentationBlockId(100)));
+        let reconciled = conversation.reconcile_turn_start(block_target).unwrap();
+        assert_eq!(reconciled.block, Some(PresentationBlockId(100)));
+        assert_eq!(reconciled.epoch, block_target.epoch);
+        conversation.restore(vec![TranscriptItem::Message(Message::user("replacement"))]);
+        assert_eq!(conversation.reconcile_turn_start(block_target), None);
+        assert_eq!(conversation.reconcile_turn_start(entry_target), None);
+    }
+
+    #[test]
+    fn turn_targets_ignore_zero_content_and_nonprompt_roles_without_changing_user_selection() {
+        let mut conversation = ConversationState::default();
+        conversation.push_message(Message::user("user"), ToolCallStatus::Finished);
+        conversation.push_message(
+            Message::assistant("You · #2 is only body text"),
+            ToolCallStatus::Finished,
+        );
+        conversation.push_message(Message::system("system"), ToolCallStatus::Finished);
+        conversation.push_message(
+            Message::tool_result("call", "command", "tool output"),
+            ToolCallStatus::Finished,
+        );
+        conversation.push_entry(HistoryEntry::Error("error".into()));
+        conversation.push_entry(HistoryEntry::CompactionDivider);
+        let first = conversation.turn_starts(false);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].history_index, 0);
+        let turn = conversation.allocate_turn();
+        conversation.push_user_turn(Message::user("second"), turn);
+        let second = conversation.turn_starts(false)[1];
+        assert_eq!(
+            conversation.next_user_message(
+                Selection {
+                    history_index: 0,
+                    content_index: 0
+                },
+                false
+            ),
+            Some(Selection {
+                history_index: second.history_index,
+                content_index: 0
+            })
+        );
+        conversation.commit_edit(second.history_index, false);
+        assert_eq!(conversation.reconcile_turn_start(second), None);
+    }
 
     #[test]
     fn native_acp_and_hosted_blocks_share_one_projection_allocator() {

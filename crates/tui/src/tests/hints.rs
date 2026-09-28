@@ -11,6 +11,8 @@ fn navigation_hints_keep_shortcuts_and_essential_narrow_fallbacks_readable() {
         "Ctrl+U half page up",
         "gg start",
         "G bottom",
+        "[ previous turn start",
+        "] next turn start",
         "zm fold turns",
         "zR unfold all",
         "v select",
@@ -41,6 +43,7 @@ fn navigation_hints_keep_shortcuts_and_essential_narrow_fallbacks_readable() {
         assert!(wide.contains(hint), "missing {hint}: {wide}");
     }
     assert!(!wide.contains("yy output"));
+    assert!(!wide.contains("turn start"));
     assert!(
         !wide.contains("Ctrl+B"),
         "Select has no control page shortcuts"

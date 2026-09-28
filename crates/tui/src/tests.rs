@@ -38,6 +38,8 @@ mod subtask_batch_tests;
 mod timed_tail_tests;
 #[path = "tool_adapter_tests.rs"]
 mod tool_adapter_tests;
+#[path = "turn_navigation_tests.rs"]
+mod turn_navigation_tests;
 #[path = "turn_progress_tests.rs"]
 mod turn_progress_tests;
 

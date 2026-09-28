@@ -106,6 +106,14 @@ impl App {
                 }
             }
             SurfaceKind::Transcript => {
+                if matches!(action, Action::PreviousTurn | Action::NextTurn) {
+                    self.view.jump_turn(if action == Action::PreviousTurn {
+                        view::TurnDirection::Previous
+                    } else {
+                        view::TurnDirection::Next
+                    });
+                    return None;
+                }
                 if (action == Action::Confirm
                     || (action == Action::RecoverDraft && !self.drafts.has_recovery()))
                     && !self.session.is_busy()

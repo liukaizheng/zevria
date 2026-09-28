@@ -77,6 +77,7 @@ pub(crate) struct PlanDialogView<'a> {
 /// not need direct access to private substate fields.
 pub(crate) struct RenderParts<'a> {
     pub(crate) history: &'a [HistoryEntry],
+    pub(crate) turn_starts: Vec<super::conversation::TurnStartTarget>,
     pub(crate) folds: &'a FoldState,
     pub(crate) selected: Option<ActiveSelection>,
     pub(crate) selection_reveal: bool,
@@ -371,6 +372,7 @@ impl App {
         };
         RenderParts {
             history: conversation.history(),
+            turn_starts: conversation.turn_starts(diagnostics_visible),
             folds,
             selected,
             selection_reveal: interaction.selection_reveal(),

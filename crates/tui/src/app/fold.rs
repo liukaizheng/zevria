@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use super::conversation::{ConversationState, HistoryEntry, Selection};
 use super::interaction::SelectionScope;
-use crate::presentation::{NativeHeader, PresentationBlockId};
+use crate::presentation::PresentationBlockId;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum FoldKey {
@@ -111,7 +111,7 @@ impl FoldState {
         let mut groups = Vec::new();
         let mut start = 0;
         for (index, entry) in history.iter().enumerate() {
-            if has_prompt_header(entry) {
+            if entry.has_prompt_header() {
                 if start < index {
                     groups.push(start..index);
                 }
@@ -146,7 +146,9 @@ impl FoldState {
         else {
             return;
         };
-        let prompt = has_prompt_header(&history[group.start]).then_some(group.start);
+        let prompt = history[group.start]
+            .has_prompt_header()
+            .then_some(group.start);
         if let Some(index) = prompt
             && index != last
             && history[index].message_fold_eligible(diagnostics_visible)
@@ -235,16 +237,6 @@ impl FoldState {
     }
 }
 
-fn has_prompt_header(entry: &HistoryEntry) -> bool {
-    let header = match entry {
-        HistoryEntry::Conversation(entry) => entry.header,
-        HistoryEntry::Ensemble(entry) => entry.header,
-        HistoryEntry::PlanHandoff(_, header) => *header,
-        _ => None,
-    };
-    matches!(header, Some(NativeHeader::Prompt(_)))
-}
-
 /// An entry-scoped read-only view; the streamed tail always uses `none()`.
 #[derive(Clone, Copy)]
 pub(crate) struct EntryFolds<'a> {
@@ -300,7 +292,7 @@ impl EntryFolds<'_> {
 mod tests {
     use super::*;
     use crate::app::{App, ToolCallStatus};
-    use crate::presentation::BlockVisibility;
+    use crate::presentation::{BlockVisibility, NativeHeader};
     use rig_core::message::Message;
 
     fn message(text: &str) -> HistoryEntry {

@@ -201,6 +201,40 @@ choices and skill selections are revealed in their measured viewports. Skill det
 paging pans details without moving a hidden selection; filter text is revealed
 within its dialog. FrameLayout alone allocates the application frame.
 
+Normal-mode `[` / `]` navigate to the nearest turn start strictly above / below
+its logical viewport top. From mid-turn, `[` returns to that turn's beginning
+before reaching the preceding turn. Exact-boundary presses skip the current start;
+there is no wraparound, and a missing destination preserves both position and
+follow intent. These are Normal-only catalog bindings, advertised in Navigation
+help but not the compact footer. Brackets remain literal editor text; Select-mode
+Ctrl+U/Ctrl+D retain their existing user-message traversal and scope semantics.
+
+Destinations are displayed prompt boundaries: native `NativeHeader::Prompt`
+entries (ordinary, request and skill prompts, approved Plan handoffs, and numbered
+ensemble commands), or grouped user blocks in headerless/ACP entries, including
+images and non-editable prompts. Assistant content, tools/results, Plan artifacts,
+workflow metadata, diagnostics, errors, compaction dividers and worker-status rows
+are not turn starts. Selection body ranges and rendered label text are not boundary
+sources. Layout resolves entry extents and block decoration geometry, excludes
+leading separators and hidden zero-height targets, and merges stops sharing one
+folded start. Navigation preserves folds rather than expanding them.
+
+Successful turn jumps remain Normal, leave draft/cursor/selection untouched, detach
+bottom-follow, and align the destination header with the **first conversation
+content row**, not the status/header area. A conversation-local trailing blank
+extent permits this even for a short final turn or a transcript shorter than the
+pane. Real content rows remain separate for painting, bottom-follow and downward
+re-pin; shared Viewport clamping is unchanged for all other surfaces. Ordinary
+scrolling/Home/End retire explicit alignment; `G`/End restores ordinary follow.
+
+Explicit alignment retains semantic identity across resize, folding, diagnostics
+and streaming changes, and takes precedence over older body scroll anchors.
+Invalid geometry defers resolution until a usable render; multiple jumps remain
+ordered, while later explicit navigation cancels stale pending jumps. Block targets
+follow presentation identity; special entry targets are scoped to the projection
+epoch. Tail edits, restore/replacement and pane retirement retire invalid targets
+and pending intent rather than reusing positional targets in a new projection.
+
 Metadata requires an exact active turn, stream/progress requires Running phase,
 management requires an exact pending request, and late child/review updates need
 explicit stable-identity fences. Acceptance is pure and precedes tail/retry/content

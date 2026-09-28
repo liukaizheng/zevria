@@ -2,17 +2,34 @@
 
 use ratatui::layout::Rect;
 
+use super::conversation::TurnStartTarget;
 use crate::layout::ConversationCache;
 use crate::viewport::{RowRange, Viewport};
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TurnDirection {
+    Previous,
+    Next,
+}
 
 pub(crate) struct ViewState {
     conversation: ConversationCache,
     conversation_viewport: Viewport,
+    /// Real rows exclude the alignment-only trailing blank extent.
+    conversation_rows: usize,
     rendered_selection_window: Option<RowRange>,
     allocation_measured: bool,
     follow: bool,
     repin_on_bottom: bool,
     pending_anchor: Option<(usize, crate::presentation::PresentationBlockId, usize)>,
+    turn_alignment: Option<TurnStartTarget>,
+    /// Reusable only until the next content/allocation invalidation. A jump
+    /// changes the logical top but not these destination rows.
+    turn_positions: Vec<(TurnStartTarget, usize)>,
+    turn_geometry_valid: bool,
+    /// Preserve input order until a usable layout can resolve strict row
+    /// comparisons; ordinary navigation and replacement retire these intents.
+    pending_turn_jumps: Vec<TurnDirection>,
     composer_width: u16,
     composer_viewport: Viewport,
     completion_viewport: Viewport,
@@ -24,11 +41,16 @@ impl Default for ViewState {
         Self {
             conversation: ConversationCache::default(),
             conversation_viewport: Viewport::default(),
+            conversation_rows: 0,
             rendered_selection_window: None,
             allocation_measured: false,
             follow: true,
             repin_on_bottom: false,
             pending_anchor: None,
+            turn_alignment: None,
+            turn_positions: Vec::new(),
+            turn_geometry_valid: false,
+            pending_turn_jumps: Vec::new(),
             composer_width: 0,
             composer_viewport: Viewport::default(),
             completion_viewport: Viewport::default(),
@@ -39,7 +61,7 @@ impl Default for ViewState {
 
 impl ViewState {
     pub(crate) fn capture_conversation_anchor(&mut self) {
-        if !self.follow && self.pending_anchor.is_none() {
+        if !self.follow && self.pending_anchor.is_none() && self.turn_alignment.is_none() {
             self.pending_anchor = self
                 .conversation
                 .semantic_anchor(self.conversation_viewport.top());
@@ -54,6 +76,56 @@ impl ViewState {
             let (history, id) = conversation.resolved_identity((history, id));
             self.pending_anchor = Some((history, id, within));
         }
+        self.turn_alignment = self
+            .turn_alignment
+            .and_then(|target| conversation.reconcile_turn_start(target));
+    }
+
+    /// Called only after refreshing the cache for this frame. Zero-sized panes
+    /// retain semantic intent but must never resolve it with fabricated widths.
+    pub(crate) fn refresh_turn_positions(&mut self, targets: &[TurnStartTarget], content: Rect) {
+        if self
+            .turn_alignment
+            .is_some_and(|target| !targets.contains(&target))
+        {
+            self.turn_alignment = None;
+        }
+        self.turn_geometry_valid = content.width > 0 && content.height > 0;
+        self.turn_positions = if self.turn_geometry_valid {
+            self.conversation.turn_start_positions(targets)
+        } else {
+            Vec::new()
+        };
+    }
+
+    pub(crate) fn jump_turn(&mut self, direction: TurnDirection) {
+        if !self.turn_geometry_valid {
+            self.pending_turn_jumps.push(direction);
+            return;
+        }
+        let top = if self.follow {
+            self.conversation_rows
+                .saturating_sub(self.conversation_viewport.visible_rows())
+        } else {
+            self.conversation_viewport.top()
+        };
+        let destination = match direction {
+            TurnDirection::Previous => self.turn_positions.iter().rev().find(|(_, row)| *row < top),
+            TurnDirection::Next => self.turn_positions.iter().find(|(_, row)| *row > top),
+        };
+        if let Some(&(target, row)) = destination {
+            self.turn_alignment = Some(target);
+            self.pending_anchor = None;
+            self.follow = false;
+            self.repin_on_bottom = false;
+            self.conversation_viewport.set_top(row);
+            self.invalidate_selection_window();
+        }
+    }
+
+    pub(super) fn retire_turn_alignment(&mut self) {
+        self.turn_alignment = None;
+        self.pending_turn_jumps.clear();
     }
 
     pub(crate) fn conversation_cache(&self) -> &ConversationCache {
@@ -65,6 +137,13 @@ impl ViewState {
     }
 
     pub(crate) fn invalidate_from(&mut self, index: usize) {
+        if self
+            .turn_alignment
+            .is_some_and(|target| target.history_index >= index)
+        {
+            self.turn_alignment = None;
+        }
+        self.pending_turn_jumps.clear();
         self.invalidate_rendered_geometry();
         self.conversation.invalidate_from(index);
     }
@@ -73,6 +152,7 @@ impl ViewState {
     /// pane. Invalidating the measurement need not discard reusable layouts.
     pub(crate) fn invalidate_rendered_geometry(&mut self) {
         self.allocation_measured = false;
+        self.turn_geometry_valid = false;
         self.invalidate_selection_window();
     }
 
@@ -115,9 +195,14 @@ impl ViewState {
 
     pub(crate) fn set_follow(&mut self, follow: bool) {
         self.follow = follow;
+        self.pending_turn_jumps.clear();
+        if follow {
+            self.turn_alignment = None;
+        }
     }
 
     pub(crate) fn jump_top(&mut self) {
+        self.retire_turn_alignment();
         self.invalidate_selection_window();
         self.follow = false;
         self.repin_on_bottom = false;
@@ -126,6 +211,7 @@ impl ViewState {
     }
 
     pub(crate) fn jump_bottom(&mut self) {
+        self.retire_turn_alignment();
         self.invalidate_selection_window();
         self.follow = true;
         self.repin_on_bottom = false;
@@ -133,6 +219,7 @@ impl ViewState {
     }
 
     pub(crate) fn scroll_up(&mut self, amount: usize) {
+        self.retire_turn_alignment();
         self.invalidate_selection_window();
         self.follow = false;
         self.repin_on_bottom = false;
@@ -141,6 +228,7 @@ impl ViewState {
     }
 
     pub(crate) fn scroll_down(&mut self, amount: usize) {
+        self.retire_turn_alignment();
         self.invalidate_selection_window();
         self.follow = false;
         self.repin_on_bottom = true;
@@ -174,8 +262,11 @@ impl ViewState {
     }
 
     pub(crate) fn reset_conversation(&mut self) {
+        self.retire_turn_alignment();
+        self.turn_positions.clear();
         self.invalidate_rendered_geometry();
         self.conversation_viewport = Viewport::default();
+        self.conversation_rows = 0;
         self.follow = true;
         self.repin_on_bottom = false;
         self.pending_anchor = None;
@@ -192,11 +283,24 @@ impl ViewState {
         selecting: bool,
     ) {
         self.allocation_measured = visible_rows > 0;
+        self.conversation_rows = total_rows;
+        if selection.is_some() {
+            self.retire_turn_alignment();
+        }
+        let aligned_row = self.turn_alignment.and_then(|target| {
+            self.turn_geometry_valid
+                .then(|| self.conversation.turn_start_row(target))
+                .flatten()
+        });
+        if self.turn_geometry_valid && aligned_row.is_none() {
+            self.turn_alignment = None;
+        }
         let attempted_top = self.conversation_viewport.top();
         let repin_on_bottom = std::mem::take(&mut self.repin_on_bottom);
         self.conversation_viewport
             .reconcile(total_rows, visible_rows);
         if !self.follow
+            && self.turn_alignment.is_none()
             && let Some(anchor) = self.pending_anchor.take()
             && let Some(row) = self.conversation.anchor_row(anchor)
         {
@@ -210,6 +314,29 @@ impl ViewState {
         }
         if self.follow {
             self.conversation_viewport.jump_end();
+        }
+        if !self.follow
+            && let Some(row) = aligned_row
+        {
+            self.pending_anchor = None;
+            self.conversation_viewport.set_top(row);
+        }
+        if self.turn_geometry_valid {
+            for direction in std::mem::take(&mut self.pending_turn_jumps) {
+                self.jump_turn(direction);
+            }
+        }
+        // Padding is local to explicit conversation alignment. Painting and
+        // bottom-follow/re-pin above continue to use the real content extent.
+        // No other viewport (composer, help, pickers, Plan review) is relaxed.
+        if self.turn_alignment.is_some() && self.turn_geometry_valid {
+            let padded_rows = total_rows.max(
+                self.conversation_viewport
+                    .top()
+                    .saturating_add(visible_rows),
+            );
+            self.conversation_viewport
+                .reconcile(padded_rows, visible_rows);
         }
         if let Some(selection) = selection {
             if selection.len() <= visible_rows {
@@ -280,6 +407,7 @@ impl ViewState {
 
     #[cfg(test)]
     pub(crate) fn set_scroll_for_test(&mut self, scroll: usize, follow: bool) {
+        self.retire_turn_alignment();
         self.invalidate_selection_window();
         self.conversation_viewport.set_top(scroll);
         self.follow = follow;
@@ -323,6 +451,121 @@ mod tests {
         }
         view.conversation.refresh(history, None, 80, false, &folds);
         cached_rows(view)
+    }
+
+    fn short_turn_view() -> (ViewState, super::super::conversation::ConversationState) {
+        let mut conversation = super::super::conversation::ConversationState::default();
+        for _ in 0..3 {
+            let turn = conversation.allocate_turn();
+            conversation.push_user_turn(Message::user("short prompt"), turn);
+        }
+        let mut view = ViewState::default();
+        view.conversation.refresh(
+            conversation.history(),
+            None,
+            80,
+            false,
+            &FoldState::default(),
+        );
+        view.refresh_turn_positions(&conversation.turn_starts(false), Rect::new(0, 1, 80, 20));
+        view.reconcile_conversation_viewport(cached_rows(&view), 20, None, false);
+        (view, conversation)
+    }
+
+    #[test]
+    fn turn_padding_is_not_the_real_bottom_for_follow_or_downward_repin() {
+        let (mut view, _) = short_turn_view();
+        let real = cached_rows(&view);
+        assert_eq!(view.scroll(), 0);
+        view.jump_turn(TurnDirection::Previous);
+        assert!(view.follow(), "a no-op must preserve follow");
+        view.jump_turn(TurnDirection::Next);
+        view.jump_turn(TurnDirection::Next);
+        let target_row = view.scroll();
+        assert!(target_row > 0);
+        view.reconcile_conversation_viewport(real, 20, None, false);
+        assert_eq!(view.scroll(), target_row);
+        assert_eq!(view.conversation_viewport.max_top(), target_row);
+        assert!(view.conversation_viewport.max_top() + 20 > real);
+        assert_eq!(view.conversation_rows, real);
+        assert!(!view.follow());
+        view.scroll_down(1);
+        view.reconcile_conversation_viewport(real, 20, None, false);
+        assert_eq!(view.scroll(), 0);
+        assert_eq!(view.conversation_viewport.max_top(), 0);
+        assert_eq!(view.conversation_rows, real);
+        assert!(
+            view.follow(),
+            "downward intent re-pins against real content, not padded extent"
+        );
+
+        view.jump_turn(TurnDirection::Next);
+        view.reconcile_conversation_viewport(real, 20, None, false);
+        view.scroll_up(1);
+        view.reconcile_conversation_viewport(real, 20, None, false);
+        assert_eq!(view.scroll(), 0);
+        assert!(!view.follow(), "upward clamping is not re-pin intent");
+        assert!(view.turn_alignment.is_none());
+        view.jump_turn(TurnDirection::Next);
+        view.jump_bottom();
+        view.jump_turn(TurnDirection::Previous);
+        assert!(
+            view.follow(),
+            "G then previous before redraw uses the real logical top (zero)"
+        );
+        assert!(view.turn_alignment.is_none());
+    }
+
+    #[test]
+    fn turn_alignment_outlives_layout_invalidation_but_not_replacement_or_later_navigation() {
+        let (mut view, mut conversation) = short_turn_view();
+        view.jump_turn(TurnDirection::Next);
+        let target = view.turn_alignment.unwrap();
+        view.pending_anchor = view.conversation.semantic_anchor(0);
+        view.reconcile_conversation_viewport(cached_rows(&view), 20, None, false);
+        assert_eq!(
+            view.scroll(),
+            view.conversation.turn_start_row(target).unwrap()
+        );
+        assert_eq!(
+            view.pending_anchor, None,
+            "explicit alignment beats an older body anchor"
+        );
+        view.invalidate_rendered_geometry();
+        view.jump_turn(TurnDirection::Next);
+        view.refresh_turn_positions(&conversation.turn_starts(false), Rect::new(0, 0, 0, 20));
+        view.reconcile_conversation_viewport(cached_rows(&view), 20, None, false);
+        assert_eq!(view.turn_alignment, Some(target));
+        assert_eq!(view.pending_turn_jumps.len(), 1);
+        view.refresh_turn_positions(&conversation.turn_starts(false), Rect::new(0, 1, 80, 20));
+        view.reconcile_conversation_viewport(cached_rows(&view), 20, None, false);
+        assert_eq!(
+            view.turn_alignment,
+            Some(conversation.turn_starts(false)[2])
+        );
+        assert!(view.pending_turn_jumps.is_empty());
+        view.invalidate_rendered_geometry();
+        view.jump_turn(TurnDirection::Previous);
+        view.jump_top();
+        assert!(view.pending_turn_jumps.is_empty());
+        assert!(view.turn_alignment.is_none());
+
+        view.refresh_turn_positions(&conversation.turn_starts(false), Rect::new(0, 1, 80, 20));
+        view.jump_turn(TurnDirection::Next);
+        view.invalidate_from(1);
+        assert!(
+            view.turn_alignment.is_none(),
+            "tail replacement retires positional entry targets"
+        );
+        conversation.restore(vec![
+            zevria_transcript::transcript::TranscriptItem::Message(Message::user("replacement")),
+        ]);
+        view.turn_alignment = Some(target);
+        view.reconcile_anchor_identity(&conversation);
+        assert!(
+            view.turn_alignment.is_none(),
+            "reused indices cannot cross projection epochs"
+        );
     }
 
     #[test]

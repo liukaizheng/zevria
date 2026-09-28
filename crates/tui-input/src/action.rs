@@ -19,6 +19,8 @@ pub enum Action {
     PageDown,
     HalfPageUp,
     HalfPageDown,
+    PreviousTurn,
+    NextTurn,
     Home,
     End,
     Confirm,

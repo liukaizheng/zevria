@@ -183,7 +183,7 @@ fn live_and_restored_user_jumps_include_both_ensemble_prompts_but_not_workers() 
     }
 }
 
-fn mixed_role_jump_events() -> Vec<AgentRunEvent> {
+pub(super) fn mixed_role_jump_events() -> Vec<AgentRunEvent> {
     let image = zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
     vec![
         AgentRunEvent::Prompt {

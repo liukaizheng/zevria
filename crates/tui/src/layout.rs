@@ -20,7 +20,7 @@ use rig_core::message::Message;
 
 use crate::app::{
     ActiveSelection, EntryFolds, FoldState, HistoryEntry, Selection, SelectionScope, SpanRole,
-    ToolCallStatus,
+    ToolCallStatus, TurnStartTarget,
 };
 use crate::chrome::style_selected_line;
 use crate::layout::prepare::{
@@ -797,6 +797,79 @@ impl ConversationCache {
         self.tail_reasoning = previous_reasoning;
     }
 
+    /// Ordered destinations validated against the same extents and decoration
+    /// rows used for painting. Multiple prompts under one fold are one stop.
+    pub(crate) fn turn_start_positions(
+        &self,
+        targets: &[TurnStartTarget],
+    ) -> Vec<(TurnStartTarget, usize)> {
+        let mut offset = 0usize;
+        let offsets = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let start = offset;
+                offset = offset.saturating_add(entry.extent());
+                start
+            })
+            .collect::<Vec<_>>();
+        let mut positions = targets
+            .iter()
+            .filter_map(|&target| {
+                let (history, within) = self.turn_start_location(target)?;
+                Some((target, offsets[history].saturating_add(within)))
+            })
+            .collect::<Vec<_>>();
+        positions.dedup_by_key(|(_, row)| *row);
+        positions
+    }
+
+    pub(crate) fn turn_start_row(&self, target: TurnStartTarget) -> Option<usize> {
+        let (history, within) = self.turn_start_location(target)?;
+        let offset = self.entries[..history]
+            .iter()
+            .map(EntryLayout::extent)
+            .sum::<usize>();
+        Some(offset.saturating_add(within))
+    }
+
+    fn turn_start_location(&self, target: TurnStartTarget) -> Option<(usize, usize)> {
+        let history = target.history_index;
+        let entry = self.entries.get(history)?;
+        let representative = match entry.span {
+            Some(SpanRole::Summary { .. }) => history,
+            Some(SpanRole::Hidden { start }) => start,
+            None => history,
+        };
+        let real = self.covered.get(&history).unwrap_or(entry);
+        if real.height == 0 {
+            return None;
+        }
+        let mut within = 0usize;
+        if let Some(id) = target.block {
+            let blocks = real.conversation_blocks.as_ref()?;
+            let block = blocks.iter().find(|block| block.fingerprint.id == id)?;
+            if real.message_folded {
+                within = blocks.first()?.decoration.start();
+            } else {
+                within = blocks
+                    .iter()
+                    .take_while(|block| block.fingerprint.id != id)
+                    .map(|block| block.height)
+                    .sum::<usize>()
+                    .saturating_add(block.decoration.start());
+            }
+        }
+        let visible = self.entries.get(representative)?;
+        if visible.height == 0 {
+            return None;
+        }
+        Some((
+            representative,
+            if entry.span.is_some() { 0 } else { within },
+        ))
+    }
+
     /// Containment lookup, not a search for the next available block: special
     /// entries and gaps must not acquire an anchor to later conversation content.
     pub(crate) fn semantic_anchor(
@@ -1072,6 +1145,125 @@ mod tests {
             HistoryEntry::Error("A visible error.".into()),
             HistoryEntry::CompactionDivider,
         ]
+    }
+
+    #[test]
+    fn turn_positions_use_wrapped_header_geometry_and_deduplicate_folded_starts() {
+        use crate::app::{ConversationState, FoldKey};
+        use crate::presentation::{BlockVisibility, DisplayTurn};
+
+        let mut conversation = ConversationState::default();
+        let HistoryEntry::Conversation(mut mixed) = HistoryEntry::from_message(
+            Message::Assistant {
+                id: None,
+                content: [
+                    "prefix",
+                    "diagnostic",
+                    "prompt",
+                    "more prompt",
+                    "answer",
+                    "diagnostic",
+                    "image",
+                ]
+                .into_iter()
+                .map(AssistantContent::text)
+                .collect(),
+            },
+            ToolCallStatus::Finished,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        for index in [1, 5] {
+            mixed.blocks[index].role = None;
+            mixed.blocks[index].visibility = BlockVisibility::Diagnostics;
+            mixed.blocks[index].kind =
+                PresentationBlockKind::Diagnostic(crate::presentation::PresentedDiagnostic {
+                    label: "diagnostic".into(),
+                    text: "diagnostic\nwrapped rows".into(),
+                    tone: crate::presentation::DiagnosticTone::Muted,
+                });
+        }
+        for index in [2, 3, 6] {
+            mixed.blocks[index].role = Some(PresentationRole::User);
+        }
+        mixed.blocks[6].kind = PresentationBlockKind::Image {
+            image: zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap(),
+            ordinal: 1,
+            editable: false,
+        };
+        conversation.push_entry(HistoryEntry::Conversation(mixed));
+        let mut special = non_conversation_entries();
+        let HistoryEntry::PlanHandoff(_, header) = &mut special[1] else {
+            panic!()
+        };
+        *header = Some(NativeHeader::Prompt(DisplayTurn(2)));
+        for entry in special {
+            conversation.push_entry(entry);
+        }
+        conversation.push_entry(HistoryEntry::Conversation(ConversationEntry {
+            header: Some(NativeHeader::Prompt(DisplayTurn(3))),
+            blocks: Vec::new(),
+        }));
+        for width in [1, 6, 17, 80] {
+            for diagnostics in [false, true] {
+                let mut cache = ConversationCache::default();
+                cache.set_appearance(TranscriptAppearance::Acp);
+                let targets = conversation.turn_starts(diagnostics);
+                assert_eq!(
+                    targets.len(),
+                    4,
+                    "two grouped blocks, handoff, and zero-height prompt"
+                );
+                cache.refresh(
+                    conversation.history(),
+                    None,
+                    width,
+                    diagnostics,
+                    &FoldState::default(),
+                );
+                let positions = cache.turn_start_positions(&targets);
+                assert_eq!(
+                    positions.len(),
+                    3,
+                    "hidden zero-height destination is omitted"
+                );
+                assert!(positions.windows(2).all(|pair| pair[0].1 < pair[1].1));
+                let entry = &cache.entries()[0];
+                for (target, row) in &positions[..2] {
+                    let id = target.block.unwrap();
+                    let mut prefix = 0;
+                    for block in entry.conversation_blocks.as_ref().unwrap() {
+                        if block.fingerprint.id == id {
+                            assert_eq!(*row, prefix + block.decoration.start());
+                            assert!(
+                                *row < prefix + block.rows.start(),
+                                "the header is before the selectable body"
+                            );
+                            assert!(block.decoration.start() > 0, "do not land on the separator");
+                            break;
+                        }
+                        prefix += block.height;
+                    }
+                }
+                assert_eq!(
+                    positions[2].1,
+                    cache.entries()[..2]
+                        .iter()
+                        .map(EntryLayout::extent)
+                        .sum::<usize>()
+                );
+                let mut folds = FoldState::default();
+                folds.fold(FoldKey::Message { history_index: 0 });
+                cache.refresh(conversation.history(), None, width, diagnostics, &folds);
+                assert_eq!(cache.turn_start_row(targets[0]), Some(0));
+                assert_eq!(cache.turn_start_row(targets[1]), Some(0));
+                assert_eq!(cache.turn_start_positions(&targets).len(), 2);
+                folds.fold(FoldKey::Span { start: 0, end: 2 });
+                cache.refresh(conversation.history(), None, width, diagnostics, &folds);
+                assert_eq!(cache.turn_start_positions(&targets), vec![(targets[0], 0)]);
+            }
+        }
     }
 
     #[test]

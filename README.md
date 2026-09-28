@@ -255,6 +255,15 @@ In **Normal** mode:
 - `gg` / `G`: jump to the top / bottom. Type `g` twice for `gg`.
 - `PageDown` / `PageUp` (or `Ctrl+F` / `Ctrl+B`): move down / up one page.
 - `Ctrl+D` / `Ctrl+U`: move down / up half a page.
+- `[` / `]`: jump to the previous / next turn start, including user prompts and
+  approved Plan handoffs. From partway through a turn, `[` first returns to that
+  turn's beginning; press it again for the preceding turn. There is no wraparound.
+
+Turn jumps place the destination's message header on the first row of the
+conversation content area, even if that leaves blank space below a short final
+turn. They preserve folds and your draft, stay in Normal mode, and pause automatic
+bottom-follow; `G` or `End` resumes it. Brackets are ordinary text in Insert mode
+and do not navigate in Select mode.
 
 In **Select** mode, `j` / `k` move the selection instead of scrolling. In Message
 scope they choose the next / previous message; press `Enter` to enter Block scope,

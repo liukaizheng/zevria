@@ -65,7 +65,7 @@ use zevria_workflow::ensemble_review::*;
 
 pub(crate) use conversation::{
     ConversationChange, ConversationState, EnsembleHistory, HistoryEntry, Selection, ToolCallState,
-    ToolCallStatus,
+    ToolCallStatus, TurnStartTarget,
 };
 use edit::{EditState, RecallEdit};
 pub(crate) use fold::{EntryFolds, FoldKey, FoldState, SpanRole, TurnFold};
@@ -215,6 +215,7 @@ impl App {
     ) {
         self.view.invalidate_rendered_geometry();
         if self.worker.bind(target, state, &mut self.composer) {
+            self.view.retire_turn_alignment();
             self.pane.freeze_worker();
         } else {
             self.pane.enable_worker();
@@ -224,6 +225,7 @@ impl App {
     }
 
     pub(crate) fn freeze_worker(&mut self) {
+        self.view.retire_turn_alignment();
         self.view.invalidate_rendered_geometry();
         self.composer.cancel_paste();
         self.pane.freeze_worker();
