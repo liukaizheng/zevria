@@ -232,6 +232,11 @@ impl TransientFixture {
         // Deliberately not named "claude": only explicit transport enables it.
         agent.plan_handoff_transport = Some(PlanHandoffTransport::ClaudeCodeExitPlanMode);
         let mut config = single_agent_config(agent);
+        if scenario == "fresh-deadline" {
+            // Native capture needs the production grace window on the slower
+            // Windows runner; the shared test helper's 1-second budget flakes.
+            config.cancel_grace_seconds = 5;
+        }
         config.review_turn_timeout_seconds = 3;
         let logs = directory.path().join("agent-runs");
         let supervisor =
