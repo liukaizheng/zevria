@@ -289,6 +289,7 @@ pub(crate) struct ConversationBlockContext {
     pub(crate) header_role: Option<PresentationRole>,
     pub(crate) header: Option<NativeHeader>,
     pub(crate) separator_before: bool,
+    pub(crate) item_gap_before: bool,
     pub(crate) selected: bool,
     pub(crate) folded: bool,
     pub(crate) reasoning_heading: bool,
@@ -532,6 +533,7 @@ pub(crate) fn render_conversation_block(
         header_role,
         header: identity,
         separator_before,
+        item_gap_before,
         selected,
         folded,
         reasoning_heading,
@@ -550,6 +552,12 @@ pub(crate) fn render_conversation_block(
         });
     }
     let decoration_start = wrapped_height(&lines[block_start..], wrap_width);
+    if item_gap_before && !separator_before {
+        // Layout-owned spacing belongs to the message/card surface, but not
+        // the selectable or foldable body. Role/prompt separators already
+        // provide the boundary row when present.
+        lines.push(Line::default());
+    }
     if let Some(role) = header_role {
         let (label, color) = presentation_role(role);
         let mut header = role_header(label, color);

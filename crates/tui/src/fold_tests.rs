@@ -1597,7 +1597,7 @@ fn message_fold_summary_counts_blocks_and_honours_inner_block_folds() {
     app.select_for_test(cursor(0, 1));
     chord(&mut app, 'c');
     rendered_text(&mut app, 100, 24);
-    assert_eq!(app.view_cache().entries()[0].height, 10);
+    assert_eq!(app.view_cache().entries()[0].height, 12);
     assert!(folded(&app, 0, 1));
     app.handle_event(key(KeyCode::Esc));
     chord(&mut app, 'c');
@@ -1606,7 +1606,7 @@ fn message_fold_summary_counts_blocks_and_honours_inner_block_folds() {
     assert_eq!(entry.height, 2);
     assert_eq!(
         line_text(&entry.lines[1]),
-        "▸ row 0 · 3 blocks · 8 more rows"
+        "▸ row 0 · 3 blocks · 10 more rows"
     );
     assert!(
         entry
@@ -1621,11 +1621,11 @@ fn message_fold_summary_counts_blocks_and_honours_inner_block_folds() {
     rendered_text(&mut app, 100, 24);
     assert!(!message_folded(&app, 0));
     assert!(folded(&app, 0, 1), "za removes only the outer fold");
-    assert_eq!(app.view_cache().entries()[0].height, 10);
+    assert_eq!(app.view_cache().entries()[0].height, 12);
     chord(&mut app, 'R');
     rendered_text(&mut app, 100, 24);
     assert!(!folded(&app, 0, 1));
-    assert_eq!(app.view_cache().entries()[0].height, 13);
+    assert_eq!(app.view_cache().entries()[0].height, 15);
 }
 
 #[test]
@@ -1875,11 +1875,18 @@ fn message_selection_rebuilds_only_the_affected_entries() {
             entry.items[2].1.end()
         ))
     );
-    assert!(
-        entry.lines[1..]
-            .iter()
-            .all(|line| line.style.bg == crate::chrome::selection_style().bg)
-    );
+    for (_, body) in &entry.items {
+        assert!(
+            entry.lines[body.start()..body.end()]
+                .iter()
+                .all(|line| line.style.bg == crate::chrome::selection_style().bg)
+        );
+    }
+    for pair in entry.items.windows(2) {
+        let gap = &entry.lines[pair[0].1.end()];
+        assert!(gap.spans.is_empty());
+        assert_eq!(gap.style, ratatui::style::Style::default());
+    }
     rendered_text(&mut app, 80, 24);
     assert_eq!(app.view_cache().rebuilds, entries + 2);
     app.handle_event(key(KeyCode::Enter));

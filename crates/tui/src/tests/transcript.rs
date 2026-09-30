@@ -1194,7 +1194,7 @@ fn restored_compound_file_results_keep_summaries_metadata_and_legacy_fallback() 
     let _ = rendered_text(&mut app, 120, 28);
     let rendered = laid_out_transcript_text(&app);
     assert_eq!(app.history().len(), 1);
-    assert_eq!(app.view_cache().entries()[0].height, 5);
+    assert_eq!(app.view_cache().entries()[0].height, 7);
     for expected in [
         "write new.rs ✓ (+1 -0)",
         "delete obsolete.rs ✓ (+0 -1)",

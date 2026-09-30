@@ -667,26 +667,28 @@ fn bottom_clipped_block_wins_over_a_later_block_in_the_same_message() {
                 .collect(),
         }));
         app.set_view_for_test(0, false);
-        rendered_text(&mut app, 80, 10);
+        // Keep one body row (not only its preceding item gap) clipped at
+        // the bottom of the viewport.
+        rendered_text(&mut app, 80, 11);
         assert_eq!(
             app.view_cache().entries()[0].items,
             vec![
                 (0, RowRange::new(1, 5)),
-                (1, RowRange::new(5, 9)),
-                (2, RowRange::new(9, 13)),
+                (1, RowRange::new(6, 10)),
+                (2, RowRange::new(11, 15)),
             ]
         );
         enter_selection(&mut app);
         assert_eq!(app.selection(), cursor(0, 1));
         assert_eq!(app.selection_scope(), Some(SelectionScope::Message));
-        let message_buffer = rendered_buffer(&mut app, 80, 10);
+        let message_buffer = rendered_buffer(&mut app, 80, 11);
         let content = conversation_content_area(&message_buffer, false);
         assert_eq!(
             message_buffer[(content.x, content.bottom() - 2)].bg,
             SELECTION_BG
         );
         app.handle_event(key(KeyCode::Enter));
-        let buffer = rendered_buffer(&mut app, 80, 10);
+        let buffer = rendered_buffer(&mut app, 80, 11);
         assert_eq!(app.view_scroll(), 0);
         let content = conversation_content_area(&buffer, false);
         assert_eq!(buffer[(content.x, content.bottom() - 1)].bg, SELECTION_BG);
@@ -695,10 +697,10 @@ fn bottom_clipped_block_wins_over_a_later_block_in_the_same_message() {
         app.handle_event(key(KeyCode::Down));
         assert_eq!(app.selection(), cursor(0, 2));
         assert!(app.interaction().selection_reveal());
-        rendered_text(&mut app, 80, 10);
+        rendered_text(&mut app, 80, 11);
         assert_eq!(
             app.view_scroll(),
-            7,
+            8,
             "explicit navigation reveals the fitting item"
         );
     }
@@ -836,12 +838,12 @@ fn clamped_navigation_requests_revelation_in_both_directions() {
         ],
     }));
     app.set_view_for_test(0, false);
-    rendered_text(&mut app, 80, 10);
+    rendered_text(&mut app, 80, 11);
     double_escape(&mut app);
     assert_eq!(app.selection(), cursor(0, 1));
     app.handle_event(key(KeyCode::Enter));
     app.handle_event(key(KeyCode::Char('j')));
-    rendered_text(&mut app, 80, 10);
+    rendered_text(&mut app, 80, 11);
     assert_eq!(app.view_scroll(), 3);
 }
 
@@ -875,7 +877,7 @@ fn cached_ranges_exclude_headers_separators_gaps_dividers_and_hidden_blocks() {
         vec![
             (0, RowRange::new(1, 2)),
             (2, RowRange::new(4, 5)),
-            (3, RowRange::new(5, 6)),
+            (3, RowRange::new(6, 7)),
         ]
     );
     assert!(
@@ -890,6 +892,7 @@ fn cached_ranges_exclude_headers_separators_gaps_dividers_and_hidden_blocks() {
         None,
         None,
         cursor(1, 2),
+        None,
         cursor(1, 3),
         None,
         None,

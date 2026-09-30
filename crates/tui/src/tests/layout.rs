@@ -1017,16 +1017,16 @@ fn user_message_surfaces_exclude_roleless_diagnostics_and_mixed_role_separators(
     }));
     let buffer = rendered_buffer(&mut app, 80, 30);
     let content = conversation_content_area(&buffer, false);
-    assert_eq!(app.view_cache().entries()[0].height, 13);
-    assert!(buffer_row_text(&buffer, content.y + 2).contains("roleless diagnostic"));
-    assert!(buffer_row_text(&buffer, content.y + 3).contains("second user"));
-    assert!(buffer_row_text(&buffer, content.y + 11).contains("● You"));
+    assert_eq!(app.view_cache().entries()[0].height, 15);
+    assert!(buffer_row_text(&buffer, content.y + 3).contains("roleless diagnostic"));
+    assert!(buffer_row_text(&buffer, content.y + 5).contains("second user"));
+    assert!(buffer_row_text(&buffer, content.y + 13).contains("● You"));
     for y in content.y..content.bottom() {
         assert_conversation_row_background(
             &buffer,
             content,
             y,
-            if [0, 1, 3, 11, 12].contains(&(y - content.y)) {
+            if [0, 1, 4, 5, 13, 14].contains(&(y - content.y)) {
                 ZEVRIA_DARK.surfaces.panel
             } else {
                 ZEVRIA_DARK.surfaces.canvas
@@ -1035,7 +1035,7 @@ fn user_message_surfaces_exclude_roleless_diagnostics_and_mixed_role_separators(
     }
     assert_eq!(
         full_width_message_separator_rows(&buffer, false),
-        [4, 7, 10].map(|row| content.y + row)
+        [6, 9, 12].map(|row| content.y + row)
     );
 }
 

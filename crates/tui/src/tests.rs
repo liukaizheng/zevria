@@ -24,6 +24,8 @@ mod fold_tests;
 mod inline_web_tests;
 #[path = "input_contract_tests.rs"]
 mod input_contract_tests;
+#[path = "item_spacing_tests.rs"]
+mod item_spacing_tests;
 #[path = "mode_tests.rs"]
 mod mode_tests;
 #[path = "selection_tests.rs"]

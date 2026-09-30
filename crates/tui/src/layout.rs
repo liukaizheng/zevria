@@ -67,6 +67,7 @@ struct BlockFingerprint {
     header_role: Option<PresentationRole>,
     header: Option<NativeHeader>,
     separator_before: bool,
+    item_gap_before: bool,
     selected: bool,
     folded: bool,
     reasoning_heading: bool,
@@ -105,6 +106,7 @@ impl PresentationBlockLayout {
                 header_role: fingerprint.header_role,
                 header: fingerprint.header,
                 separator_before: fingerprint.separator_before,
+                item_gap_before: fingerprint.item_gap_before,
                 selected: fingerprint.selected,
                 folded: fingerprint.folded,
                 reasoning_heading: fingerprint.reasoning_heading,
@@ -577,12 +579,21 @@ fn conversation_fingerprints<'a>(
     entry_folds: EntryFolds<'a>,
 ) -> impl Iterator<Item = (usize, &'a PresentationBlock, BlockFingerprint)> + 'a {
     let mut current_role = None;
+    let mut previous_item = None;
     entry
         .blocks
         .iter()
         .enumerate()
         .filter(move |(_, block)| block.visible(diagnostics_visible))
         .map(move |(index, block)| {
+            // Derived child rows share their top-level tool's item identity,
+            // including when the tool header itself is hidden.
+            let item = match block.kind {
+                PresentationBlockKind::Subtask { parent, .. } => parent,
+                _ => block.id,
+            };
+            let item_gap_before = previous_item.is_some_and(|previous| previous != item);
+            previous_item = Some(item);
             let (header_role, separator_before) = block_header(block, current_role, appearance);
             if let Some(role) = block.role {
                 current_role = Some(role);
@@ -594,6 +605,7 @@ fn conversation_fingerprints<'a>(
                 header_role,
                 header: native_header(entry, header_role, appearance),
                 separator_before,
+                item_gap_before,
                 selected: !entry_folds.is_message_folded() && selection.includes(index),
                 folded: entry_folds.is_block_folded(block.id),
                 reasoning_heading: reasoning && !previous_reasoning,

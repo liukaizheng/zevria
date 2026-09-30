@@ -77,6 +77,7 @@ fn assert_status_tokens_and_selection() {
                             header_role: None,
                             header: None,
                             separator_before: false,
+                            item_gap_before: false,
                             selected,
                             folded,
                             reasoning_heading: false,

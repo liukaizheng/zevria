@@ -211,6 +211,7 @@ fn prompt_phase_badges_use_icons_and_keep_attempts_colors_and_copy() {
                 header_role: Some(PresentationRole::User),
                 header: None,
                 separator_before: false,
+                item_gap_before: false,
                 selected: false,
                 folded: false,
                 reasoning_heading: false,
@@ -1162,8 +1163,10 @@ fn user_message_surfaces_in_acp_do_not_require_card_metadata() {
                     .all(|d| !d.card)
             );
             for y in area.y..area.bottom() {
+                // Each generated gap belongs to the following block's
+                // surface, not to the preceding diagnostic or user item.
                 let roleless =
-                    diagnostic_start.is_some_and(|start| (start..next_user).contains(&y));
+                    diagnostic_start.is_some_and(|start| (start - 1..next_user - 1).contains(&y));
                 assert_conversation_row_background(
                     &buffer,
                     area,
