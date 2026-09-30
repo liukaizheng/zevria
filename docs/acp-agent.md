@@ -120,14 +120,15 @@ while the rendered instruction set stays outside conversation replay.
 Resume clears a prior contribution when its file is missing, empty, or rejected.
 External ACP agents retain their own guidance behavior.
 
-New sessions (including fresh implementation handoffs) use current global model
+Independent new ACP/CLI sessions and native worker roots use current global model
 assignments from `config.toml`, validated against the sibling `models.jsonc`, at the
 configuration path captured at server startup (including `ZEVRIA_CONFIG`). `session/load` and `session/resume` restore the root's last
 successfully selected **Build and Plan** exact provider/model identities and
 reasoning levels together from its version-1 metadata header. Request-local orchestration
 uses that same saved Build identity; there is no sixth role or `modes.orchestrate` assignment. Current catalog
 limits/settings still apply; an unavailable saved model or unsupported saved level
-rejects resume with guidance to restore the catalog entry/level or start a new session.
+rejects resume with guidance to restore the catalog entry/level or independently
+launch a new session with valid defaults.
 No fallback, provider traffic, or header rewrite is performed. Review, Explore, and Builder use current
 globals; external ensemble agents are unchanged.
 Resume never rewrites global assignments or infers selections from native replay.
@@ -137,15 +138,28 @@ in the complete top-level instruction set, not as ordered developer input. Withi
 one workflow it remains byte-identical across ordinary turns and skill activation. This applies to Zevria-owned
 native workers too, not external ACP agents' independent provider clients.
 Active sessions and retries are not hot-reloaded. The TUI's `/model-session` changes only the
-composer's captured model role, saved for resume with config unchanged. Build targets
+composer's captured model role, saved for resume and TUI replacement with config unchanged. Build targets
 Build; Plan targets Plan. `/model` also saves that role's complete assignment in
 `config.toml`. Orchestration does not change model selection or reasoning.
 Both pickers require a profile choice followed by explicit reasoning confirmation;
 the first stage does not save or apply anything. ACP
 loading/resuming that same root restores either command's saved local choices, including a switch acknowledged
-just before closing without another assistant response. Fresh sessions and
-`/implement-fresh` handoffs still use globals. Missing saved catalog identities
-still block resume; the header is not a historical configuration snapshot.
+just before closing without another assistant response. TUI `/new` and
+`/implement-fresh` (or the equivalent fresh-approval dialog action) inherit **both
+current Build and Plan provider/model/reasoning selections**, including choices
+originally derived from configuration. A subsequent `/new` after resume inherits
+that restored pair. `/new` resets conversation, Plan state, and active skills without
+a model request, not model preferences. Fresh implementation uses the inherited
+Build choice, not the Plan model, and later global-default changes do not retarget
+either inherited mode. This explicit TUI transition does not change independent
+ACP new-session or worker behavior. Missing catalog identities or reasoning levels
+block inherited startup just as they block resume; another inheriting `/new` cannot
+fix them. Restore the catalog entry/level or independently launch with valid defaults.
+The version-1 header is not a historical configuration snapshot: capabilities and
+limits are reloaded, the inherited pair is persisted before any opening handoff,
+and model preferences never enter Plan content, instructions, or provider messages.
+Cacheable prompt-prefix construction is unchanged; replacements still receive a
+new session/cache identity.
 
 Both TUI commands require an idle writable interactive root and preserve explicit
 confirmation for conversion, which costs tokens and can change shared context for

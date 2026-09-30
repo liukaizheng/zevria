@@ -357,8 +357,8 @@ role, compatibility checks, and explicitly confirmed conversion. Build targets
 Build; Plan targets Plan. In Build, `/model` updates the Build assignment and
 `/model-session` updates only its saved session selection. Orchestration is one
 request behavior and does not change those targets. Switching mode alone is not a model change. `/model-session` saves
-only that role's complete version-1 session selection ("session only — saved on resume; config
-unchanged"); `/model` also saves its global assignment in `config.toml`. Conversion can cost tokens,
+only that role's complete version-1 session selection ("session only — kept on /new,
+fresh handoff and resume; config unchanged"); `/model` also saves its global assignment in `config.toml`. Conversion can cost tokens,
 lose detail, and replace the shared context for both root modes, regardless of selection
 scope. Config revision is revalidated after asynchronous preparation and before
 persistence, without a config-writing transaction for session-only requests.
@@ -372,11 +372,23 @@ restores the saved identity and reasoning level together; unavailable models or
 levels reject resume without fallback, provider calls, or metadata migration.
 
 Resume restores either command's saved Build/Plan identities, even if the root
-closed immediately after acknowledgement with no further response. Fresh sessions,
-including `/implement-fresh` handoffs, use global defaults. The other mutable role's
+closed immediately after acknowledgement with no further response. Independent fresh
+sessions, including separate CLI/ACP launches and native workers, use global defaults.
+TUI `/new` and fresh Plan implementation (command or approval-dialog action) inherit
+both current Build/Plan provider, model, and reasoning selections, including choices
+originally derived from configuration. `/new` clears conversation, Plan state, and
+active skills without generation, not model preferences; a subsequent `/new` after
+resume inherits the restored pair. Default changes do not retarget inherited modes.
+Fresh implementation uses the inherited Build choice, not the Plan model. The other mutable role's
 selection, Review, Explore, Builder, workers, permissions, and other active sessions remain
 unchanged. There is no catalog hot reload or ACP model-selection API; ACP loading
-a session still restores its saved choices.
+a session still restores its saved choices. Replacement reloads catalog capabilities,
+limits, and other-role defaults, validates the inherited pair without fallback, and
+writes its version-1 header before an opening handoff. Missing catalog entries or
+reasoning levels require restoring them or an independent launch with valid defaults,
+not another inheriting `/new`. The header remains outside provider input and the
+unchanged cacheable prompt-prefix construction; each replacement still has its
+normal new root/cache identity and connections.
 
 `reset` means local transcript history changed outside every provider-side
 chain—for example an edit, installed checkpoint, explicit model change, or failed turn. The router

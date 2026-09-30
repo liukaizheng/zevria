@@ -41,7 +41,9 @@ impl SessionRuntimeFactory for AcpHostFactory {
         Box::pin(async move {
             let workspace = canonical_workspace(request.workspace)?;
             let start = match request.start {
-                SessionStart::New => runtime::SessionStart::New,
+                SessionStart::New => runtime::SessionStart::New {
+                    inherited_models: None,
+                },
                 SessionStart::Existing { session_id } => {
                     let sessions_dir = runtime::sessions_dir(&workspace, self.profile);
                     let summary = transcript::list_sessions(&sessions_dir)?

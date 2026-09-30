@@ -1495,22 +1495,29 @@ captured at maintenance start; skill mutations remain idle-only.
 | `/model-session` | Save the captured role's complete model/reasoning selection | Neither file is written |
 | `/model` | Save the captured role's complete model/reasoning selection | Save that mode's provider, model, and reasoning level in `config.toml` |
 
-The local picker is labeled **session only — saved on resume; config unchanged**;
+The local picker is labeled **session only — kept on /new, fresh handoff and resume; config unchanged**;
 `/model` is explicitly labeled as changing the global default too. In Build,
 `/model-session` updates the session's saved Build selection and `/model` also
 updates `modes.build.provider/model/reasoning_level`. Orchestrated requests use
 that same selection; there is no `modes.orchestrate` assignment or extra picker.
 The other mutable role's selection, Review, Explore, Builder, external workers,
-tool permissions, and other running sessions are unchanged. Fresh roots (including empty `/new` sessions and
-`/implement-fresh` handoffs) use current globals from the startup-captured
-configuration path.
+tool permissions, and other running sessions are unchanged. Independent fresh roots,
+including separate CLI/ACP launches and native workers, use current globals from the
+startup-captured configuration path. TUI replacement roots (`/new`, `/implement-fresh`,
+and the fresh-approval dialog action) instead inherit **both current selections**:
+provider, model, and reasoning level for Build and Plan independently. This includes
+choices originally resolved from configuration, not just `/model-session` overrides.
+Configuration-default changes do not retarget either inherited mode; fresh Plan
+implementation uses the saved Build selection, never the Plan model.
 CLI `--continue`, TUI `/resume`, and ACP load/resume restore the **last successfully
 selected Build and Plan identities and reasoning levels** from the version-1 header, including
 changes acknowledged immediately before closing, with no later assistant response.
 Review, Explore, and Builder still use session-opening globals. Ordinary resume never rewrites
 globals. The header stores complete selections, not credentials or a historical config
-snapshot; removing a selected catalog entry still blocks resume under the existing
-strict restoration rules. Roots with a saved workflow selection remain resumable
+snapshot; removing a selected catalog entry or supported reasoning level blocks
+resume or inherited replacement explicitly, with no default fallback. Restore the
+entry/level or independently launch a new session with available defaults; an
+inheriting `/new` cannot repair an unavailable selection. Roots with a saved workflow selection remain resumable
 even without conversation messages; only empty files and legacy metadata-only
 roots without a mode record qualify as abandoned.
 
@@ -1522,6 +1529,22 @@ already-active session-local choice to the global default. The frontend waits fo
 a request-, mode-, and scope-correlated authoritative success before changing its
 profile/limits or clearing old response/context telemetry. Management is not a
 prompt, assistant response, or synthetic turn.
+
+The TUI snapshots complete selections from committed root profiles and reasoning
+state installed by restoration and correlated successful management results, not
+usage telemetry, picker drafts, the active mode, or a stale startup snapshot.
+`UiOutcome::New` and `UiOutcome::Fresh` carry that pair separately from the unchanged
+`PlanHandoff`, including handoffs received while draining an event burst. After
+normal outgoing shutdown, `SessionStart::New` or `SessionStart::FromPlan` receives
+explicit inherited selections. Resume has no inherited override. Fresh startup
+reloads catalogs, capabilities, limits, and other-role defaults, validates the
+complete pair, builds routing and compaction policies from it, and durably writes
+the existing version-1 `SessionModels` header before any opening handoff executes.
+Missing or inconsistent frontend state and unavailable selections are errors, not
+reasons to infer defaults. No process-global preference or new schema is involved.
+These selections remain typed startup state and transcript metadata, excluded from
+Plan Markdown, instructions, messages, and provider input. Replacement still has a
+new session/cache identity; cacheable prompt-prefix construction is unchanged.
 
 `provider::replay` is the shared side-effect-free destination projection for
 preflight, HTTP, full WebSocket input, exact counting, and compaction. Original
@@ -2625,9 +2648,12 @@ is accepted); submitting `/new anything` reports `Unknown command: /new anything
 and preserves the draft. The frontend returns `UiOutcome::New`, waits for normal
 session shutdown, then starts `SessionStart::New` with the existing `Connecting…`
 frame. The new session starts in Build mode with no conversation, Plan artifact or
-handoff, session-only model selections, or active-skill history. It resolves
-current global model defaults and rediscovers skills, without an opening prompt
-or automatic model turn. Substantive old conversations and their related
+handoff, or active-skill history. It inherits only the two current model/reasoning
+selections, including configuration-origin choices, and rediscovers skills without
+an opening prompt or automatic model turn. `/new` resets conversation, not model
+preferences; configuration changes refresh catalogs and other roles but do not
+replace the inherited Build/Plan pair. `/resume` and `--continue` restore the target
+transcript's pair, which a subsequent `/new` then inherits. Substantive old conversations and their related
 artifacts remain available through `/resume`; roots with canonical mode metadata
 are also retained without messages. Empty files and valid legacy metadata-only
 roots without a saved mode are excluded and removed best-effort, while damaged
@@ -2844,7 +2870,9 @@ and mode commands cannot substitute for the version-checked decision.
 Current-session approval atomically appends `Resolved` and a typed `Handoff`
 record, emits a semantic handoff row, and starts an ordinary Build turn. Fresh
 approval emits `FreshPlanHandoffRequested`; the manager creates an ordinary Build
-session and sends `StartFromPlan` with that same typed value. Both current and
+session with both current model/reasoning selections and sends `StartFromPlan` with
+that same typed handoff value. Model choices are transition data, not approved Plan
+content, and the first Build request uses the inherited Build selection. Both current and
 fresh handoffs always select Build with a new Standard request boundary,
 regardless of an earlier orchestration request or whether the artifact was Ready
 or Published. No frontend

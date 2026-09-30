@@ -191,7 +191,11 @@ fn draining_engine_shutdown_settles_unacknowledged_selection_but_keeps_an_accept
         }
         drop(events);
         let mut engine_done = false;
-        assert!(drain_update_burst(&mut views, &mut updates, &mut engine_done).is_none());
+        assert!(
+            drain_update_burst(&mut views, &mut updates, &mut engine_done)
+                .unwrap()
+                .is_none()
+        );
         assert!(engine_done);
         assert!(!views.root.is_busy());
         assert!(!views.root.mode_selection_pending());

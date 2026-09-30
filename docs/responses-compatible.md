@@ -795,9 +795,9 @@ metadata.
 
 In the TUI, bare `/model-session` selects an existing configured profile for the
 root composer's captured model role and then requires explicit confirmation of a
-supported reasoning level. It durably saves the complete selection for resume,
-**without changing config**. The picker says **session only — saved on resume;
-config unchanged**. Bare `/model` uses the same searchable picker, visibly labeled
+supported reasoning level. It durably saves the complete per-mode selection for
+resume and TUI replacements, **without changing config**. The picker says
+**session only — kept on /new, fresh handoff and resume; config unchanged**. Bare `/model` uses the same searchable picker, visibly labeled
 as saving the role's global default too.
 
 Build targets Build; Plan targets Plan. In Build, `/model-session` saves the
@@ -815,22 +815,35 @@ Both commands are argument-free; a leading space sends either as literal text.
 There is no ACP model-selection API, new model-role config key, CLI flag, or
 automatic catalog reload.
 
-Fresh sessions and `/implement-fresh` handoffs read global defaults from the
-`[modes]` assignments in the startup-captured `config.toml`, validated against
-its sibling catalog, including a custom `ZEVRIA_CONFIG`. Resumed roots
-restore their last successfully selected Build and Plan identities **and reasoning
-levels** from a version-1
-`zevria_session_models` header, including a session-only switch acknowledged just
-before closing with no later assistant response. Metadata-only abandoned roots
+Independent fresh sessions (including separate CLI/ACP launches and native workers)
+read global defaults from the `[modes]` assignments in the startup-captured
+`config.toml`, validated against its sibling catalog, including a custom
+`ZEVRIA_CONFIG`. TUI `/new` and `/implement-fresh` replacements, including the
+fresh-approval dialog action, inherit **both current Build and Plan selections**
+(provider, model, and reasoning level), even when originally derived from configuration.
+The modes remain independent: fresh implementation uses the saved Build selection,
+not the Plan model. `/new` resets conversation, Plan state, and active skills without
+an automatic provider request; it does not reset model preferences. Later default
+changes do not replace the inherited pair. Resumed roots restore their last
+successfully selected Build and Plan identities **and reasoning levels** from a
+version-1 `zevria_session_models` header, including a session-only switch acknowledged
+just before closing with no later assistant response. A subsequent `/new` inherits
+that restored pair. Metadata-only abandoned roots
 still are not kept as resumable conversations. Review, Explore, and
 Builder adopt current globals; external workers are unchanged. Exact, case-sensitive
 provider/model keys resolve against current endpoints, credentials, capabilities
 and limits, not a frozen historical config. Removing a saved catalog identity or
-supported reasoning level blocks resume with actionable guidance; no fallback is inferred. Resume does not save globals or make model,
+supported reasoning level blocks resume or inherited startup with actionable guidance;
+no fallback is inferred. Restore the entry/level or independently launch with valid
+defaults; another inheriting `/new` cannot fix an unavailable choice. Resume does not save globals or make model,
 counting, or conversion calls to recover selections. Other active sessions keep
 their routes. Original native replay and source identities are preserved;
 destination projection—not transcript relabeling—makes visible history portable,
-even for two models under the same provider.
+even for two models under the same provider. Inherited routing and compaction policies
+use current catalog capabilities and limits, and the complete pair is written to the
+new transcript header before any opening Plan handoff. Selection metadata is not
+provider input, instructions, or Plan content; it does not change cacheable prefix
+construction, and a replacement still has a new session/cache identity.
 
 An opaque checkpoint from another profile or a smaller input ceiling may require
 confirmed conversion. The dialog names source/destination and warns that a model

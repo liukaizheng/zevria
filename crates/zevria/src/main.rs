@@ -312,7 +312,9 @@ async fn main() -> anyhow::Result<()> {
             })?,
         )
     } else {
-        runtime::SessionStart::New
+        runtime::SessionStart::New {
+            inherited_models: None,
+        }
     };
 
     let mut terminal = ratatui::try_init()?;
@@ -322,15 +324,14 @@ async fn main() -> anyhow::Result<()> {
     // Session switches tear the whole stack down and rebuild it here:
     // `/resume` loads the chosen transcript like `--continue`, `/new` starts
     // an empty root with no opening prompt, and `/implement-fresh` seeds a
-    // fresh root with the approved Plan handoff.
+    // fresh root with the approved Plan handoff. Both replacements retain the
+    // source root's committed Build/Plan selections, not its conversation.
     let session_outcome = loop {
         match run_session(&mut terminal, &app_config, &workspace, next_start).await {
-            Ok(UiOutcome::Quit) => break Ok(()),
-            Ok(UiOutcome::Resume(path)) => next_start = runtime::SessionStart::Resume(path),
-            Ok(UiOutcome::New) => next_start = runtime::SessionStart::New,
-            Ok(UiOutcome::Fresh { handoff }) => {
-                next_start = runtime::SessionStart::FromPlan(handoff)
-            }
+            Ok(outcome) => match replacement_start(outcome) {
+                Some(start) => next_start = start,
+                None => break Ok(()),
+            },
             Err(error) => break Err(error),
         }
     };
@@ -341,6 +342,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("shutting down");
 
     session_outcome
+}
+
+/// Translate transition data only after the outgoing stack has shut down.
+fn replacement_start(outcome: UiOutcome) -> Option<runtime::SessionStart> {
+    match outcome {
+        UiOutcome::Quit => None,
+        UiOutcome::Resume(path) => Some(runtime::SessionStart::Resume(path)),
+        UiOutcome::New { models } => Some(runtime::SessionStart::New {
+            inherited_models: Some(models),
+        }),
+        UiOutcome::Fresh { handoff, models } => Some(runtime::SessionStart::FromPlan {
+            handoff,
+            inherited_models: Some(models),
+        }),
+    }
 }
 
 /// One complete engine run over a single session. Provider, transcript,
@@ -356,7 +372,9 @@ async fn run_session(
         terminal,
         match &start {
             runtime::SessionStart::Resume(_) => "Resuming session…",
-            runtime::SessionStart::New | runtime::SessionStart::FromPlan(_) => "Connecting…",
+            runtime::SessionStart::New { .. } | runtime::SessionStart::FromPlan { .. } => {
+                "Connecting…"
+            }
         },
     )?;
 

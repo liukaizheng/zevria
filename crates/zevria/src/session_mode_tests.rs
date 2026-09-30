@@ -63,7 +63,11 @@ fn assert_tui_restoration_uses_selected_mode(restoration: &runtime::SessionResto
 async fn fresh_root_headers_and_selected_only_restoration_are_frontend_authoritative() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
-    let fresh = fixture.start(runtime::SessionStart::New).await;
+    let fresh = fixture
+        .start(runtime::SessionStart::New {
+            inherited_models: None,
+        })
+        .await;
     assert_eq!(fresh.restoration().selected_mode, SessionMode::Build);
     assert!(matches!(
         fresh.restoration().transcript_items.as_slice(),
@@ -136,7 +140,11 @@ async fn production_mode_selection_survives_immediate_close_across_tui_and_acp()
     let config_before = std::fs::read(&fixture.path).unwrap();
     let factory = crate::acp_host::AcpHostFactory::new(Arc::new(load(&fixture.path).unwrap()));
     for selected_mode in [SessionMode::Build, SessionMode::Plan] {
-        let mut tui = fixture.start(runtime::SessionStart::New).await;
+        let mut tui = fixture
+            .start(runtime::SessionStart::New {
+                inherited_models: None,
+            })
+            .await;
         let id = tui.restoration().session_id.clone();
         let path = tui.restoration().transcript_path.clone();
         let mut expected = tui.restoration().transcript_items.clone();
@@ -241,7 +249,11 @@ async fn production_mode_selection_survives_immediate_close_across_tui_and_acp()
 async fn production_mode_selection_does_not_allocate_turns_or_call_the_provider() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
-    let mut root = fixture.start(runtime::SessionStart::New).await;
+    let mut root = fixture
+        .start(runtime::SessionStart::New {
+            inherited_models: None,
+        })
+        .await;
     let path = root.restoration().transcript_path.clone();
     let before = std::fs::read(&path).unwrap();
     let mut events = root.take_event_receiver().unwrap();
@@ -290,7 +302,11 @@ async fn production_mode_selection_does_not_allocate_turns_or_call_the_provider(
 async fn roots_without_selected_mode_metadata_use_the_engine_plan_fallback() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
-    let fresh = fixture.start(runtime::SessionStart::New).await;
+    let fresh = fixture
+        .start(runtime::SessionStart::New {
+            inherited_models: None,
+        })
+        .await;
     let headers = fresh
         .restoration()
         .transcript_items
@@ -364,7 +380,11 @@ async fn roots_without_selected_mode_metadata_use_the_engine_plan_fallback() {
 async fn worker_profile_rejects_persisted_orchestrate_without_provider_or_transcript_mutation() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
-    let fresh = fixture.start(runtime::SessionStart::New).await;
+    let fresh = fixture
+        .start(runtime::SessionStart::New {
+            inherited_models: None,
+        })
+        .await;
     let mut items = fresh.restoration().transcript_items.clone();
     items[1] = TranscriptItem::SessionMode(SessionMode::Build);
     fresh.shutdown().await.unwrap();

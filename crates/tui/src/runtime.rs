@@ -12,10 +12,14 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc::{UnboundedSender, error::TryRecvError};
-use zevria_model::models::ModelSelectionScope;
+use zevria_model::models::{ModelSelectionScope, SessionModels};
 use zevria_session_api::{SessionCommand, SessionEvent, SessionEventReceiver, SessionUpdate};
 use zevria_transcript::transcript::{SessionSummary, list_sessions};
 use zevria_workflow::PlanHandoff;
+
+#[cfg(test)]
+#[path = "session_replacement_tests.rs"]
+mod session_replacement_tests;
 
 const MAX_EVENT_BURST: usize = 64;
 
@@ -33,12 +37,15 @@ pub enum UiOutcome {
     Quit,
     /// Rebuild the whole session stack on the transcript at this path.
     Resume(PathBuf),
-    /// Rebuild an empty root session in the same workspace.
-    New,
+    /// Rebuild an empty root session, retaining both committed mode selections.
+    New {
+        models: SessionModels,
+    },
     /// Rebuild the session stack and deliver this typed handoff through
-    /// `SessionCommand::StartFromPlan`.
+    /// `SessionCommand::StartFromPlan`, retaining both mode selections.
     Fresh {
         handoff: PlanHandoff,
+        models: SessionModels,
     },
 }
 
@@ -107,13 +114,13 @@ pub async fn run_ui(
             }
             maybe_update = updates_rx.recv(), if !engine_done => match maybe_update {
                 Some(update) => {
-                    if let Some(handoff) = apply_session_update(&mut views, update) {
-                        return Ok(UiOutcome::Fresh { handoff });
+                    if let Some(outcome) = apply_session_update(&mut views, update)? {
+                        return Ok(outcome);
                     }
-                    if let Some(handoff) =
-                        drain_update_burst(&mut views, updates_rx, &mut engine_done)
+                    if let Some(outcome) =
+                        drain_update_burst(&mut views, updates_rx, &mut engine_done)?
                     {
-                        return Ok(UiOutcome::Fresh { handoff });
+                        return Ok(outcome);
                     }
                 }
                 None => {
@@ -219,7 +226,7 @@ pub async fn run_ui(
                         Some(UiAction::RunCommand(command)) => match command {
                             SlashCommand::Confirm | SlashCommand::Unconfirm | SlashCommand::Baseline | SlashCommand::Unbaseline | SlashCommand::Retry | SlashCommand::CancelPrompt | SlashCommand::Abandon => { views.root.push_error("Worker commands are available only in a live Plan worker pane.".into()); }
                             SlashCommand::Resume => open_resume_picker(&mut views, context),
-                            SlashCommand::New => return Ok(UiOutcome::New),
+                            SlashCommand::New => return new_session_outcome(&views.root),
                             SlashCommand::Skills => views.overlays.show_skills(),
                             SlashCommand::Model | SlashCommand::ModelSession => {
                                 let scope = if command == SlashCommand::ModelSession {
@@ -257,18 +264,30 @@ pub async fn run_ui(
     }
 }
 
-fn apply_session_update(views: &mut SessionViews, update: SessionUpdate) -> Option<PlanHandoff> {
+fn new_session_outcome(root: &crate::App) -> anyhow::Result<UiOutcome> {
+    Ok(UiOutcome::New {
+        models: root.session_models()?,
+    })
+}
+
+fn apply_session_update(
+    views: &mut SessionViews,
+    update: SessionUpdate,
+) -> anyhow::Result<Option<UiOutcome>> {
     match update {
         SessionUpdate::Lifecycle(SessionEvent::FreshPlanHandoffRequested { handoff }) => {
-            Some(handoff)
+            Ok(Some(UiOutcome::Fresh {
+                handoff,
+                models: views.root.session_models()?,
+            }))
         }
         SessionUpdate::Lifecycle(event) => {
             views.apply(event);
-            None
+            Ok(None)
         }
         SessionUpdate::Streams(batch) => {
             views.apply_streams(&batch);
-            None
+            Ok(None)
         }
     }
 }
@@ -277,12 +296,12 @@ pub(crate) fn drain_update_burst(
     views: &mut SessionViews,
     updates_rx: &mut SessionEventReceiver,
     engine_done: &mut bool,
-) -> Option<PlanHandoff> {
+) -> anyhow::Result<Option<UiOutcome>> {
     for _ in 0..MAX_EVENT_BURST {
         match updates_rx.try_recv() {
             Ok(update) => {
-                if let Some(handoff) = apply_session_update(views, update) {
-                    return Some(handoff);
+                if let Some(outcome) = apply_session_update(views, update)? {
+                    return Ok(Some(outcome));
                 }
             }
             Err(TryRecvError::Empty) => break,
@@ -293,7 +312,7 @@ pub(crate) fn drain_update_burst(
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// List this workspace's resumable sessions — excluding the live one — and

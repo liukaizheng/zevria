@@ -76,11 +76,17 @@ fn append_guidance_notices(
     }
 }
 
-/// Owned startup intent. A Plan handoff always creates a fresh session.
+/// Owned startup intent. Only explicit root replacements inherit selections;
+/// independent starts use configuration defaults and resume uses its transcript.
 pub enum SessionStart {
-    New,
+    New {
+        inherited_models: Option<zevria_model::models::SessionModels>,
+    },
     Resume(PathBuf),
-    FromPlan(PlanHandoff),
+    FromPlan {
+        handoff: PlanHandoff,
+        inherited_models: Option<zevria_model::models::SessionModels>,
+    },
 }
 
 /// Build the root production registry in its stable advertised order.
@@ -301,9 +307,16 @@ pub async fn start_session_with_profile(
         return start_session(config, workspace, start).await;
     }
     let resume_path = match start {
-        SessionStart::New => None,
+        SessionStart::New {
+            inherited_models: None,
+        } => None,
+        SessionStart::New {
+            inherited_models: Some(_),
+        } => {
+            anyhow::bail!("model inheritance is only supported for interactive root replacements")
+        }
         SessionStart::Resume(path) => Some(path),
-        SessionStart::FromPlan(_) => {
+        SessionStart::FromPlan { .. } => {
             anyhow::bail!("ensemble workers cannot implement a Plan handoff")
         }
     };
@@ -356,7 +369,7 @@ async fn start_worker_session(
     if let Some(loaded) = &loaded {
         loaded.ensure_resumable()?;
     }
-    let models = crate::session_models::resolve(model_config, &id, loaded.as_ref())?;
+    let models = crate::session_models::resolve(model_config, &id, loaded.as_ref(), None)?;
     let items = loaded.as_ref().map_or_else(
         || vec![TranscriptItem::SessionModels(models.selections.clone())],
         |loaded| loaded.items.clone(),
@@ -630,8 +643,8 @@ pub async fn start_session(
     start: SessionStart,
 ) -> anyhow::Result<RunningSession> {
     zevria_foundation::shell::prepare_native().await?;
-    // Only session construction reloads defaults. Other running sessions keep
-    // their immutable catalogs and installed routes.
+    // Session construction reloads catalogs, limits and other-role defaults.
+    // Inherited/restored root selections and other running sessions stay pinned.
     let fresh_models = app_config
         .source_path
         .as_deref()
@@ -650,7 +663,7 @@ pub async fn start_session(
                 .to_string();
             (id, path.clone())
         }
-        SessionStart::New | SessionStart::FromPlan(_) => {
+        SessionStart::New { .. } | SessionStart::FromPlan { .. } => {
             let id = transcript::pick_session_id();
             let path = sessions_dir.join(format!("{id}.jsonl"));
             (id, path)
@@ -659,11 +672,22 @@ pub async fn start_session(
     let lease = prepare_session_lease(&root_path).await?;
     let loaded = match &start {
         SessionStart::Resume(_) => Some(transcript::load_report(&root_path)?),
-        SessionStart::New | SessionStart::FromPlan(_) => None,
+        SessionStart::New { .. } | SessionStart::FromPlan { .. } => None,
     };
-    // Restoration errors precede writable handles, repair and provider calls.
-    let session_models =
-        crate::session_models::resolve(model_config, &root_session_id, loaded.as_ref())?;
+    let inherited_models = match &start {
+        SessionStart::New { inherited_models }
+        | SessionStart::FromPlan {
+            inherited_models, ..
+        } => inherited_models.as_ref(),
+        SessionStart::Resume(_) => None,
+    };
+    // Selection errors precede writable handles, repair and provider calls.
+    let session_models = crate::session_models::resolve(
+        model_config,
+        &root_session_id,
+        loaded.as_ref(),
+        inherited_models,
+    )?;
     let subsessions_dir = transcript::subsessions_dir(workspace, &root_session_id);
     let agent_runs_root = agent_runs_dir(workspace, &root_session_id);
     if let Some(outcome) = &loaded {
@@ -745,7 +769,7 @@ pub async fn start_session(
     let transcript_items = original_items;
     let transcript = match &start {
         SessionStart::Resume(_) => transcript::TranscriptWriter::append_to(root_path)?,
-        SessionStart::New | SessionStart::FromPlan(_) => {
+        SessionStart::New { .. } | SessionStart::FromPlan { .. } => {
             let mut writer =
                 transcript::TranscriptWriter::create_with_id(&sessions_dir, &root_session_id)?;
             writer.rewrite(&transcript_items)?;
@@ -767,6 +791,16 @@ pub async fn start_session(
                 (SessionStart::Resume(_), ModelRole::Build | ModelRole::Plan) => {
                     "restored selection"
                 }
+                (
+                    SessionStart::New {
+                        inherited_models: Some(_),
+                    }
+                    | SessionStart::FromPlan {
+                        inherited_models: Some(_),
+                        ..
+                    },
+                    ModelRole::Build | ModelRole::Plan,
+                ) => "inherited selection",
                 _ => "global default",
             };
             match zevria_session_api::ModelProvider::preflight_input(&provider, profile, &transcript::model_input(&transcript_items)) {
@@ -879,7 +913,7 @@ pub async fn start_session(
     );
     let supervisor_task = observe_task("subtask supervisor", supervisor, exit_tx);
 
-    if let SessionStart::FromPlan(handoff) = start {
+    if let SessionStart::FromPlan { handoff, .. } = start {
         command_tx
             .send(SessionCommand::Turn(
                 zevria_session_api::TurnCommand::StartFromPlan { handoff },
@@ -1131,7 +1165,9 @@ mod tests {
         let worker = start_session_with_profile(
             &config,
             workspace.path(),
-            SessionStart::New,
+            SessionStart::New {
+                inherited_models: None,
+            },
             ExecutionProfile::EnsembleWorker,
         )
         .await

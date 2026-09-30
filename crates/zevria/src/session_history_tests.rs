@@ -311,7 +311,11 @@ async fn root_and_worker_startup_sweep_only_their_namespace_and_preserve_discove
 async fn fresh_root_shutdown_preserves_selected_build_metadata_and_removes_sidecar() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
-    let root = fixture.start(runtime::SessionStart::New).await;
+    let root = fixture
+        .start(runtime::SessionStart::New {
+            inherited_models: None,
+        })
+        .await;
     let path = root.restoration().transcript_path.clone();
     let before = std::fs::read(&path).unwrap();
     assert_eq!(root.restoration().selected_mode, SessionMode::Build);
@@ -377,7 +381,10 @@ async fn native_workers_reject_plan_handoffs_before_startup_work() {
     let error = match runtime::start_session_with_profile(
         &fixture.config,
         workspace,
-        runtime::SessionStart::FromPlan(plan_handoff("source-session")),
+        runtime::SessionStart::FromPlan {
+            handoff: plan_handoff("source-session"),
+            inherited_models: None,
+        },
         ExecutionProfile::EnsembleWorker,
     )
     .await

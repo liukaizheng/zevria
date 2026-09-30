@@ -496,13 +496,22 @@ Other useful commands:
 
 | Command | Purpose |
 | --- | --- |
-| `/new` | Start an empty session in this workspace. |
+| `/new` | Start an empty Build conversation in this workspace, keeping both modes' model and reasoning choices. |
 | `/resume` | Choose a previous workspace session. |
 | `/compact` | Summarize the active model context into a saved checkpoint. |
 | `/model` | Select this role's model and reasoning level; save to the session and global configuration. |
-| `/model-session` | Select a model and reasoning level for this session without changing global defaults. |
+| `/model-session` | Select this mode's model and reasoning level; retain on TUI reset/resume without changing global defaults. |
 | `/skills` | Inspect, enable, disable, and reload local skills. |
 | `/ensemble-review <prompt>` | Collect independent ACP reviews and synthesize a read-only review. |
+
+Build and Plan keep independent provider, model, and reasoning selections through
+mode switches, `/new`, and `/implement-fresh` (including the approval-dialog action).
+Fresh implementation uses the saved **Build** selection, not the Plan model. `/new`
+clears conversation, Plan state, and active-skill history without an automatic model
+request; it does not reset model preferences, even if configuration defaults have
+changed. Independently launched sessions use current defaults; `/resume` and
+`--continue` restore the chosen transcript's pair. `/model-session` never writes
+configuration; `/model` also saves the selected mode's global default.
 
 ### Resume from the command line
 

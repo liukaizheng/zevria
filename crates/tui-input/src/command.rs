@@ -30,13 +30,13 @@ pub enum SlashCommand {
     Abandon,
     /// Change this session's role selection and the role's global default.
     Model,
-    /// Change only this session's current role, saved for resume; config unchanged.
+    /// Change only this mode's selection, retained on TUI replacement/resume; config unchanged.
     ModelSession,
     /// Inspect and manage the two fixed skill locations.
     Skills,
     /// Pick a previous session of this workspace and resume it.
     Resume,
-    /// Start a fresh session in the current workspace.
+    /// Reset the conversation in Build, retaining both modes' model/reasoning choices.
     New,
     /// Select ordinary local implementation mode.
     Build,
@@ -75,7 +75,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         command: SlashCommand::New,
         name: "new",
-        description: "Start an empty session in this workspace",
+        description: "Start an empty Build conversation, retaining both modes' model/reasoning choices",
     },
     CommandSpec {
         command: SlashCommand::Build,
@@ -105,7 +105,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         command: SlashCommand::ImplementFresh,
         name: "implement-fresh",
-        description: "Clear context and implement the last submitted plan",
+        description: "Implement the last plan with fresh context and saved Build model/reasoning",
     },
     CommandSpec {
         command: SlashCommand::EnsemblePlan,
@@ -130,7 +130,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         command: SlashCommand::ModelSession,
         name: "model-session",
-        description: "Choose this mode's model and reasoning for resume; config unchanged",
+        description: "Choose this mode's model/reasoning; keep on reset/resume, not in config",
     },
 ];
 

@@ -5,6 +5,8 @@ mod history_tests;
 mod mode_tests;
 #[path = "session_reasoning_tests.rs"]
 mod reasoning_tests;
+#[path = "session_replacement_tests.rs"]
+mod replacement_tests;
 
 use std::path::{Path, PathBuf};
 use zevria_app::{
@@ -224,16 +226,20 @@ fn plan_handoff(source_session_id: &str) -> zevria_workflow::PlanHandoff {
     )
 }
 
-fn assert_persisted_handoff(path: &Path, expected: &zevria_workflow::PlanHandoff) {
+fn assert_persisted_handoff(
+    path: &Path,
+    expected: &zevria_workflow::PlanHandoff,
+    expected_models: &zevria_model::models::SessionModels,
+) {
     let items = transcript::load(path).unwrap();
     assert!(matches!(
         items.as_slice(),
         [
-            TranscriptItem::SessionModels(_),
+            TranscriptItem::SessionModels(models),
             TranscriptItem::SessionMode(SessionMode::Build),
             TranscriptItem::Plan(zevria_workflow::PlanRecord::Handoff { handoff }),
             ..
-        ] if handoff == expected
+        ] if handoff == expected && models == expected_models
     ));
     assert_eq!(
         items
@@ -361,7 +367,9 @@ async fn session_header_follows_persistent_identity_across_modes_resume_and_fres
             .start(if iteration == 1 {
                 runtime::SessionStart::Resume(original_path.clone().unwrap())
             } else {
-                runtime::SessionStart::New
+                runtime::SessionStart::New {
+                    inherited_models: None,
+                }
             })
             .await;
         let id = running.restoration().session_id.clone();
@@ -434,7 +442,11 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
     let fixture = Fixture::new(&server.url);
     let a = ModelProfileRef::new("p", "old");
     let b = ModelProfileRef::new("p", "new/with:separators");
-    let mut first = fixture.start(runtime::SessionStart::New).await;
+    let mut first = fixture
+        .start(runtime::SessionStart::New {
+            inherited_models: None,
+        })
+        .await;
     let path = first.restoration().transcript_path.clone();
     let mut events = first.take_event_receiver().unwrap();
     first
@@ -527,7 +539,11 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
             &original_replay
         );
     }
-    let fresh = fixture.start(runtime::SessionStart::New).await;
+    let fresh = fixture
+        .start(runtime::SessionStart::New {
+            inherited_models: None,
+        })
+        .await;
     assert_eq!(
         fresh.restoration().model_contexts[ModelRole::Build.index()].profile,
         b
@@ -542,11 +558,21 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
     assert!(!transcript::is_abandoned_root(&fresh_path));
     fresh.shutdown().await.unwrap();
     assert_eq!(std::fs::read(&fresh_path).unwrap(), fresh_bytes);
+    let expected_models = transcript::load_report(&fresh_path)
+        .unwrap()
+        .session_models()
+        .unwrap()
+        .unwrap()
+        .clone();
+    // An independent FromPlan start with no source selections still uses defaults.
     let source_session_id = path.file_stem().unwrap().to_str().unwrap();
     let source_before = std::fs::read(&path).unwrap();
     let opening_handoff = plan_handoff(source_session_id);
     let mut handoff = fixture
-        .start(runtime::SessionStart::FromPlan(opening_handoff.clone()))
+        .start(runtime::SessionStart::FromPlan {
+            handoff: opening_handoff.clone(),
+            inherited_models: None,
+        })
         .await;
     let handoff_path = handoff.restoration().transcript_path.clone();
     assert_ne!(handoff.restoration().session_id, source_session_id);
@@ -574,7 +600,7 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
     completed(&mut events, &b, SessionMode::Build, 40000).await;
     server.expect("p", "new/with:separators").await;
     handoff.shutdown().await.unwrap();
-    assert_persisted_handoff(&handoff_path, &opening_handoff);
+    assert_persisted_handoff(&handoff_path, &opening_handoff, &expected_models);
     assert_eq!(std::fs::read(&path).unwrap(), source_before);
     assert_eq!(std::fs::read(&fixture.models_path).unwrap(), config_bytes);
     assert!(server.requests.try_recv().is_err());
@@ -584,7 +610,11 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
 async fn immediate_model_change_resume_and_global_session_divergence_are_durable() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
-    let mut running = fixture.start(runtime::SessionStart::New).await;
+    let mut running = fixture
+        .start(runtime::SessionStart::New {
+            inherited_models: None,
+        })
+        .await;
     let path = running.restoration().transcript_path.clone();
     let commands = running.command_sender();
     let mut events = running.take_event_receiver().unwrap();
@@ -770,8 +800,8 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
 }
 
 #[tokio::test]
-async fn session_only_switches_preserve_config_and_resume_without_affecting_fresh_or_active_roots()
-{
+async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_or_independent_roots()
+ {
     for read_only in [false, true] {
         for mode in [SessionMode::Build, SessionMode::Plan] {
             let mut server = Server::new().await;
@@ -802,8 +832,16 @@ async fn session_only_switches_preserve_config_and_resume_without_affecting_fres
                 assert!(!lock_path.exists());
             };
             let defaults = fixture.config.routing().context_policies();
-            let mut running = fixture.start(runtime::SessionStart::New).await;
-            let mut other = fixture.start(runtime::SessionStart::New).await;
+            let mut running = fixture
+                .start(runtime::SessionStart::New {
+                    inherited_models: None,
+                })
+                .await;
+            let mut other = fixture
+                .start(runtime::SessionStart::New {
+                    inherited_models: None,
+                })
+                .await;
             let path = running.restoration().transcript_path.clone();
             let commands = running.command_sender();
             let mut events = running.take_event_receiver().unwrap();
@@ -860,6 +898,7 @@ async fn session_only_switches_preserve_config_and_resume_without_affecting_fres
             // Close immediately after acknowledgement: no new assistant turn.
             running.shutdown().await.unwrap();
             let durable = transcript::load_report(&path).unwrap();
+            let inherited_models = durable.session_models().unwrap().unwrap().clone();
             assert_eq!(&durable.items[1..], &original_history[1..]);
             assert_eq!(
                 durable
@@ -941,16 +980,26 @@ async fn session_only_switches_preserve_config_and_resume_without_affecting_fres
                     .await;
             }
             other.shutdown().await.unwrap();
-            let fresh = fixture.start(runtime::SessionStart::New).await;
+            let fresh = fixture
+                .start(runtime::SessionStart::New {
+                    inherited_models: None,
+                })
+                .await;
             assert_eq!(fresh.restoration().model_contexts, defaults);
             fresh.shutdown().await.unwrap();
-            // Production /implement-fresh construction carries only the Plan,
-            // not this root's local selections, and resolves globals anew.
+            // Production /implement-fresh transfers both committed selections,
+            // without changing either the approved Plan or global defaults.
             let source_session_id = path.file_stem().unwrap().to_str().unwrap();
             let source_before = std::fs::read(&path).unwrap();
             let opening_handoff = plan_handoff(source_session_id);
             let mut handoff = fixture
-                .start(runtime::SessionStart::FromPlan(opening_handoff.clone()))
+                .start(
+                    crate::replacement_start(zevria_tui::UiOutcome::Fresh {
+                        handoff: opening_handoff.clone(),
+                        models: inherited_models.clone(),
+                    })
+                    .unwrap(),
+                )
                 .await;
             let handoff_path = handoff.restoration().transcript_path.clone();
             assert_ne!(handoff.restoration().session_id, source_session_id);
@@ -966,18 +1015,23 @@ async fn session_only_switches_preserve_config_and_resume_without_affecting_fres
                     TranscriptItem::SessionMode(SessionMode::Build)
                 ]
             ));
-            assert_eq!(handoff.restoration().model_contexts, defaults);
+            for current_mode in SessionMode::ALL {
+                let role = zevria_model::models::mode_role(current_mode);
+                assert_eq!(
+                    handoff.restoration().model_contexts[role.index()].profile,
+                    inherited_models.for_mode(current_mode).profile
+                );
+                assert_eq!(
+                    handoff.restoration().reasoning_levels[role.index()],
+                    inherited_models.reasoning_for_mode(current_mode)
+                );
+            }
+            let build = &inherited_models.for_mode(SessionMode::Build).profile;
             let mut events = handoff.take_event_receiver().unwrap();
-            completed(
-                &mut events,
-                &defaults[ModelRole::Build.index()].profile,
-                SessionMode::Build,
-                defaults[ModelRole::Build.index()].input_token_limit,
-            )
-            .await;
-            server.expect("p", "old").await;
+            completed(&mut events, build, SessionMode::Build, 100000).await;
+            server.expect(&build.provider, &build.model).await;
             handoff.shutdown().await.unwrap();
-            assert_persisted_handoff(&handoff_path, &opening_handoff);
+            assert_persisted_handoff(&handoff_path, &opening_handoff, &inherited_models);
             assert_eq!(std::fs::read(&path).unwrap(), source_before);
             assert_config_unchanged();
             assert!(

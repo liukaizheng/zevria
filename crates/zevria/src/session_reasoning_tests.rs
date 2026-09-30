@@ -84,7 +84,11 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
             let ordinary = std::fs::read(&fixture.path).unwrap();
             let model_bytes = std::fs::read(&fixture.models_path).unwrap();
             let revision_before = revision(&load(&fixture.path).unwrap()).unwrap();
-            let mut running = fixture.start(runtime::SessionStart::New).await;
+            let mut running = fixture
+                .start(runtime::SessionStart::New {
+                    inherited_models: None,
+                })
+                .await;
             let role = zevria_model::models::mode_role(mode);
             let context = running.restoration().model_contexts[role.index()].clone();
             let initial = running.restoration().reasoning_levels;
@@ -165,7 +169,11 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
                 );
             }
             resumed.shutdown().await.unwrap();
-            let fresh = fixture.start(runtime::SessionStart::New).await;
+            let fresh = fixture
+                .start(runtime::SessionStart::New {
+                    inherited_models: None,
+                })
+                .await;
             assert_eq!(
                 fresh.restoration().reasoning_levels[role.index()],
                 if scope == Scope::SessionOnly {

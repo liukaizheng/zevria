@@ -461,10 +461,10 @@ impl ModelPicker {
     fn scope_label(&self) -> &'static str {
         match self.scope {
             Some(ModelSelectionScope::SessionOnly) => {
-                "session only — saved on resume; config unchanged"
+                "session only — kept on /new, fresh handoff and resume; config unchanged"
             }
             Some(ModelSelectionScope::SessionAndDefault) => {
-                "session and global default — saved on resume; updates config"
+                "session and global default — kept on /new, fresh handoff and resume; updates config"
             }
             None => "",
         }

@@ -426,6 +426,32 @@ impl App {
         Arc::clone(&self.model_profiles)
     }
 
+    /// Snapshot both committed root selections for a session replacement.
+    /// Restoration and correlated model-management acknowledgements own this
+    /// state; usage telemetry, picker drafts and the active mode do not.
+    pub fn session_models(&self) -> anyhow::Result<zevria_model::models::SessionModels> {
+        use zevria_model::models::{ModelSelection, SessionModels, mode_role};
+
+        anyhow::ensure!(
+            self.pane.is_root(),
+            "only the root owns session model selections"
+        );
+        let selection = |mode| -> anyhow::Result<ModelSelection> {
+            let role = mode_role(mode);
+            let profile = self.model_profiles.get(role).ok_or_else(|| {
+                anyhow::anyhow!("cannot replace session: missing committed {mode} model profile")
+            })?;
+            let reasoning = self.session.reasoning(role).ok_or_else(|| {
+                anyhow::anyhow!("cannot replace session: missing committed {mode} reasoning level")
+            })?;
+            Ok(ModelSelection::new(profile.clone(), reasoning))
+        };
+        SessionModels::new(
+            selection(SessionMode::Build)?,
+            selection(SessionMode::Plan)?,
+        )
+    }
+
     pub(crate) fn contains_presented_error(&self, error: &str) -> bool {
         self.conversation.contains_presented_error(error)
     }

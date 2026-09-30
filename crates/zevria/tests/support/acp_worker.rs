@@ -531,7 +531,7 @@ fn fresh_native_worker_and_parent_synthesis_inspection_smoke() {
         let config = zevria_app::test_support::load_config(Path::new(&path)).unwrap();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let mut session = zevria_app::runtime::start_session(
-                &config, &std::env::current_dir().unwrap(), zevria_app::runtime::SessionStart::New,
+                &config, &std::env::current_dir().unwrap(), zevria_app::runtime::SessionStart::New { inherited_models: None },
             ).await.unwrap();
             let mut events = session.take_event_receiver().unwrap();
             session.command_sender().send(zevria_session_api::SessionCommand::Turn(

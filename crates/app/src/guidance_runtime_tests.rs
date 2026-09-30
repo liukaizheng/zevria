@@ -77,9 +77,16 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
         },
         "source-session",
     );
-    let mut running = start_session(&config, workspace.path(), SessionStart::FromPlan(handoff))
-        .await
-        .unwrap();
+    let mut running = start_session(
+        &config,
+        workspace.path(),
+        SessionStart::FromPlan {
+            handoff,
+            inherited_models: None,
+        },
+    )
+    .await
+    .unwrap();
     assert!(running.restoration.startup_notices.is_empty());
     std::fs::write(
         workspace.path().join("AGENTS.md"),

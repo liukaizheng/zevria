@@ -151,9 +151,15 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     );
     let config_path = workspace.join("config.toml");
     let config = crate::test_support::write_fixture(&config_path, &source).unwrap();
-    let mut running = start_session(&config, &workspace, SessionStart::New)
-        .await
-        .unwrap();
+    let mut running = start_session(
+        &config,
+        &workspace,
+        SessionStart::New {
+            inherited_models: None,
+        },
+    )
+    .await
+    .unwrap();
     let path = running.restoration.transcript_path.clone();
     let mut events = running.take_event_receiver().unwrap();
     for (index, mode) in [
