@@ -1,6 +1,6 @@
 use super::*;
 use crate::{DirectivePolicy, InstructionSet, SkillPromptCatalog};
-use zevria_foundation::{ModelRole, TurnPolicy, WorkspaceContract};
+use zevria_foundation::{ModelRole, TurnPolicy, WorkspaceBinding, WorkspaceContract};
 
 #[path = "prompt_test_support.rs"]
 mod support;
@@ -18,6 +18,61 @@ fn set(policy: &TurnPolicy) -> InstructionSet {
             entries: vec![],
         }),
     }
+}
+
+const COMMAND_CALL_CONTRACT_HEADING: &str = "### Command calls and batching\n";
+
+fn command_enabled_policies() -> [TurnPolicy; 5] {
+    [
+        TurnPolicy::new(BUILD_MODE_INSTRUCTIONS, None, ModelRole::Build, true),
+        TurnPolicy::new(BUILD_MODE_INSTRUCTIONS, None, ModelRole::Build, true).with_orchestration(),
+        TurnPolicy::new(
+            PLAN_MODE_INSTRUCTIONS,
+            Some(vec!["command".into()]),
+            ModelRole::Plan,
+            false,
+        )
+        .with_contract(WorkspaceContract::SourceReadOnlyScratch),
+        TurnPolicy::new(
+            EXPLORE_AGENT_INSTRUCTIONS,
+            Some(vec!["command".into(), "web_search".into()]),
+            ModelRole::Explore,
+            false,
+        )
+        .with_contract(WorkspaceContract::SourceReadOnlyScratch),
+        TurnPolicy::new(
+            BUILD_SUBTASK_INSTRUCTIONS,
+            Some(vec!["command".into(), "write".into()]),
+            ModelRole::Builder,
+            false,
+        )
+        .with_workspace(WorkspaceBinding {
+            root: "/abs/child".into(),
+            startup: "/abs/startup".into(),
+        }),
+    ]
+}
+
+fn command_disabled_policies() -> Vec<TurnPolicy> {
+    command_enabled_policies()
+        .into_iter()
+        .map(|mut policy| {
+            policy
+                .allowed_tool_names
+                .get_or_insert_with(|| vec!["web_search".into(), "launch_subtasks".into()])
+                .retain(|name| name != "command");
+            policy
+        })
+        .chain(std::iter::once(
+            TurnPolicy::new(
+                MAINTENANCE_INSTRUCTIONS,
+                Some(vec![]),
+                ModelRole::Build,
+                false,
+            )
+            .with_scope("maintenance"),
+        ))
+        .collect()
 }
 
 fn workflow_docs() -> Vec<&'static str> {
@@ -142,47 +197,23 @@ fn render_is_a_pure_module_join() {
 
 #[test]
 fn capability_sections_are_selected_exactly_once() {
-    let cases = [
-        (
-            TurnPolicy::new(BUILD_MODE_INSTRUCTIONS, None, ModelRole::Build, true),
+    let cases = command_enabled_policies()
+        .into_iter()
+        .zip([
             [true, true, false],
-        ),
-        (
-            TurnPolicy::new(BUILD_MODE_INSTRUCTIONS, None, ModelRole::Build, true)
-                .with_orchestration(),
             [true, true, false],
-        ),
-        (
-            TurnPolicy::new(
-                PLAN_MODE_INSTRUCTIONS,
-                Some(vec!["command".into()]),
-                ModelRole::Plan,
-                false,
-            )
-            .with_contract(WorkspaceContract::SourceReadOnlyScratch),
             [true, false, true],
-        ),
-        (
-            TurnPolicy::new(
-                EXPLORE_AGENT_INSTRUCTIONS,
-                Some(vec!["command".into(), "web_search".into()]),
-                ModelRole::Explore,
-                false,
-            )
-            .with_contract(WorkspaceContract::SourceReadOnlyScratch),
             [true, true, true],
-        ),
-        (
-            TurnPolicy::new(
-                MAINTENANCE_INSTRUCTIONS,
-                Some(vec![]),
-                ModelRole::Build,
-                false,
-            )
-            .with_scope("maintenance"),
+            [true, false, false],
+        ])
+        .chain(command_disabled_policies().into_iter().zip([
+            [false, true, false],
+            [false, true, false],
+            [false, false, true],
+            [false, true, true],
             [false, false, false],
-        ),
-    ];
+            [false, false, false],
+        ]));
     for (policy, expected) in cases {
         let set = set(&policy);
         set.validate().unwrap();
@@ -208,29 +239,95 @@ fn capability_sections_are_selected_exactly_once() {
 }
 
 #[test]
+fn command_call_contract_uses_advertised_direct_calls_and_sequential_batching() {
+    let (_, contract) = COMMAND_CONVENTIONS_INSTRUCTIONS
+        .split_once(COMMAND_CALL_CONTRACT_HEADING)
+        .expect("command-call contract subsection");
+    for required in [
+        "Use the callable tool definitions advertised for the current request, including definitions supplied outside prose system guidance.",
+        "Follow their exact invocation names and arguments; the workflow's registered tool names determine what is allowed.",
+        "An advertised, workflow-allowed `command` tool needs no separate permission or tool-version probe merely because prose guidance omits it.",
+        "Honor Plan/Explore restrictions, actual errors, and task-relevant version checks.",
+        "For independent reads and searches, submit separate `command` calls together in one assistant response, with one focused RTK invocation per call.",
+        "Native Zevria needs no generic parallel wrapper: call `command` directly instead of inventing an unadvertised wrapper or inferring one from model-specific habits.",
+        "Do not combine unrelated reads into a shell script merely to avoid batching uncertainty.",
+        "Batching reduces model round trips; it does not promise wall-clock overlap.",
+        "Ordinary calls execute sequentially in assistant-call order.",
+        "Wait for earlier results when later commands depend on them.",
+        "Skill-only responses, subtask response-shape requirements, and Plan submission boundaries still apply.",
+    ] {
+        assert_eq!(contract.matches(required).count(), 1, "{required}");
+    }
+}
+
+#[test]
+fn command_call_contract_is_rendered_once_after_workflow() {
+    for policy in command_enabled_policies() {
+        for application in [DEFAULT_PREAMBLE, "Custom engineering guidance"] {
+            let mut set = set(&policy);
+            set.application = application.into();
+            set.validate().unwrap();
+            let text = set.render();
+            assert_eq!(text.matches(COMMAND_CALL_CONTRACT_HEADING).count(), 1);
+            assert_eq!(text.matches(COMMAND_CONVENTIONS_INSTRUCTIONS).count(), 1);
+            let workflow = format!(
+                "## Workflow policy: {}\n{}\n{}",
+                set.workflow.scope,
+                set.workflow.declaration(),
+                set.workflow.instructions
+            );
+            let workflow_end = text.find(&workflow).unwrap() + workflow.len();
+            let command_start = text.find("## Command conventions\n").unwrap();
+            let contract_start = text.find(COMMAND_CALL_CONTRACT_HEADING).unwrap();
+            assert!(workflow_end < command_start);
+            assert!(command_start < contract_start);
+        }
+    }
+}
+
+#[test]
+fn command_call_contract_is_absent_when_command_is_disallowed() {
+    for policy in command_disabled_policies() {
+        assert!(!policy.allows_tool("command"));
+        for application in [DEFAULT_PREAMBLE, "Custom engineering guidance"] {
+            let mut set = set(&policy);
+            set.application = application.into();
+            set.validate().unwrap();
+            let text = set.render();
+            assert!(!text.contains(COMMAND_CALL_CONTRACT_HEADING));
+            assert!(!text.contains(COMMAND_CONVENTIONS_INSTRUCTIONS));
+            assert!(!text.contains("## Command conventions\n"));
+        }
+    }
+}
+
+#[test]
 fn workflow_changes_preserve_the_byte_identical_stable_prefix() {
-    let build = TurnPolicy::new(BUILD_MODE_INSTRUCTIONS, None, ModelRole::Build, true);
-    let orchestrate = TurnPolicy::new(
-        PLAN_MODE_INSTRUCTIONS,
-        Some(vec!["command".into()]),
-        ModelRole::Plan,
-        true,
-    );
-    let build = set(&build).render();
-    let orchestrate = set(&orchestrate).render();
-    assert_ne!(build, orchestrate);
-    assert_eq!(
-        build
+    let policies = command_enabled_policies()
+        .into_iter()
+        .chain(command_disabled_policies())
+        .collect::<Vec<_>>();
+    for application in [DEFAULT_PREAMBLE, "Custom engineering guidance"] {
+        let mut baseline = set(&policies[0]);
+        baseline.application = application.into();
+        let baseline = baseline.render();
+        let stable_prefix = baseline
             .split_once("## Workflow policy:")
             .unwrap()
             .0
-            .as_bytes(),
-        orchestrate
-            .split_once("## Workflow policy:")
-            .unwrap()
-            .0
-            .as_bytes()
-    );
+            .as_bytes();
+        for policy in &policies[1..] {
+            let mut set = set(policy);
+            set.application = application.into();
+            set.validate().unwrap();
+            let text = set.render();
+            assert_ne!(baseline, text);
+            assert_eq!(
+                stable_prefix,
+                text.split_once("## Workflow policy:").unwrap().0.as_bytes()
+            );
+        }
+    }
 }
 
 #[test]

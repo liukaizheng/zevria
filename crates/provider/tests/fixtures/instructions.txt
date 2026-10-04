@@ -63,6 +63,14 @@ over equivalent commands that emit an unbounded recursive result set.
 
 The goal is not to search less thoroughly, but to keep each individual command focused and its output small enough to reason about effectively.
 
+### Command calls and batching
+
+Use the callable tool definitions advertised for the current request, including definitions supplied outside prose system guidance. Follow their exact invocation names and arguments; the workflow's registered tool names determine what is allowed. An advertised, workflow-allowed `command` tool needs no separate permission or tool-version probe merely because prose guidance omits it. Honor Plan/Explore restrictions, actual errors, and task-relevant version checks.
+
+For independent reads and searches, submit separate `command` calls together in one assistant response, with one focused RTK invocation per call. Native Zevria needs no generic parallel wrapper: call `command` directly instead of inventing an unadvertised wrapper or inferring one from model-specific habits. Do not combine unrelated reads into a shell script merely to avoid batching uncertainty.
+
+Batching reduces model round trips; it does not promise wall-clock overlap. Ordinary calls execute sequentially in assistant-call order. Wait for earlier results when later commands depend on them. Skill-only responses, subtask response-shape requirements, and Plan submission boundaries still apply.
+
 
 ## Hosted search
 `web_search` is provider-hosted external search when advertised, not a local function or shell service. It does not change command, workspace, or workflow permissions and does not replace required repository inspection.
