@@ -1,4 +1,6 @@
 use super::*;
+#[path = "recovery_tests.rs"]
+mod bounded_recovery;
 #[cfg(feature = "cache-diagnostics")]
 #[path = "cache_diagnostics/lifecycle_tests.rs"]
 mod cache_diagnostic_lifecycle;
@@ -388,6 +390,7 @@ fn resolved_profile(
             base_url,
             api_key: LiteralApiKey::new(api_key),
             supports_websockets,
+            network: NetworkConfig::default(),
             session_id_header: None,
             compatibility,
             additional_params,
@@ -631,6 +634,7 @@ fn test_session_with_pump(
         ws: OpenAiParkedWebSocket {
             session,
             config: OpenAiWebSocketConfig {
+                connect_timeout: std::time::Duration::from_secs(1),
                 url: url.to_string(),
                 headers: HeaderMap::new(),
             },
@@ -642,6 +646,7 @@ fn test_session_with_pump(
         },
         responses_url: endpoints.http,
         transport: OpenAiTransport::WebSocket,
+        recovery: RecoveryPolicy::default(),
         compaction_url: None,
         compaction_timeout: std::time::Duration::from_secs(300),
         input_token_count_url: None,
@@ -649,6 +654,7 @@ fn test_session_with_pump(
         input_token_count_unsupported: false,
         api_key: "test-key".to_string(),
         http: reqwest::Client::new(),
+        maintenance_http: reqwest::Client::new(),
     }
 }
 
@@ -1120,6 +1126,7 @@ async fn initial_and_replacement_handshakes_use_only_configured_headers() {
     let mut headers = HeaderMap::new();
     headers.insert("authorization", HeaderValue::from_static("Bearer test-key"));
     let config = OpenAiWebSocketConfig {
+        connect_timeout: std::time::Duration::from_secs(1),
         url: format!("ws://{address}"),
         headers,
     };
@@ -4083,7 +4090,7 @@ async fn run_turn_retries_missing_response_id_with_full_history_once() {
     run_turn("old question", &mut openai, &mut state, &discard_updates())
         .await
         .expect("the initial turn should establish a live continuation");
-    run_turn("new question", &mut openai, &mut state, &discard_updates())
+    recovery_followup("new question", &mut openai, &mut state, &discard_updates())
         .await
         .expect("fallback turn should complete");
 
@@ -4165,7 +4172,7 @@ async fn a_stale_chain_reported_without_the_dedicated_code_still_falls_back() {
     run_turn("old question", &mut openai, &mut state, &discard_updates())
         .await
         .expect("the initial turn should establish a live continuation");
-    run_turn("new question", &mut openai, &mut state, &discard_updates())
+    recovery_followup("new question", &mut openai, &mut state, &discard_updates())
         .await
         .expect("the message-detected fallback should complete");
 
@@ -4277,7 +4284,7 @@ async fn missing_native_output_fails_without_committing_or_continuing() {
         .await
         .expect("initial response should establish continuation");
 
-    let error = run_turn("new question", &mut openai, &mut state, &discard_updates())
+    let error = recovery_followup("new question", &mut openai, &mut state, &discard_updates())
         .await
         .expect_err("missing native output must fail the turn");
 
@@ -4346,7 +4353,7 @@ async fn unconvertible_native_output_fails_without_committing_or_continuing() {
         .await
         .expect("initial response should establish continuation");
 
-    let error = run_turn("new question", &mut openai, &mut state, &discard_updates())
+    let error = recovery_followup("new question", &mut openai, &mut state, &discard_updates())
         .await
         .expect_err("unconvertible native output must fail the turn");
 
@@ -4487,7 +4494,7 @@ impl Tool for CountTool {
 }
 
 #[tokio::test]
-async fn reconnecting_a_continuation_does_not_execute_its_tool_twice() {
+async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial_calls() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test listener should bind");
@@ -4528,7 +4535,15 @@ async fn reconnecting_a_continuation_does_not_execute_its_tool_twice() {
         );
         assert_eq!(continuation["previous_response_id"], "resp_tool");
         assert!(continuation.to_string().contains("counted"));
-        drop(socket);
+        send_json(
+            &mut socket,
+            json!({"type":"response.output_item.added", "output_index":0, "sequence_number":1,
+            "item":function_call("partial_fc", "partial_call", "count_once", json!({}))}),
+        )
+        .await;
+        // Keep the connection open without a terminal response. The partial
+        // call is preview-only and must never execute.
+        let _abandoned = socket;
 
         let (stream, _) = listener.accept().await.expect("server should re-accept");
         let mut socket = accept_async(stream)
@@ -4581,6 +4596,7 @@ async fn reconnecting_a_continuation_does_not_execute_its_tool_twice() {
         ws: OpenAiParkedWebSocket {
             session: OpenAiWebSocketSession::new(socket),
             config: OpenAiWebSocketConfig {
+                connect_timeout: std::time::Duration::from_secs(1),
                 url: url.clone(),
                 headers: HeaderMap::new(),
             },
@@ -4592,6 +4608,10 @@ async fn reconnecting_a_continuation_does_not_execute_its_tool_twice() {
         },
         responses_url,
         transport: OpenAiTransport::WebSocket,
+        recovery: RecoveryPolicy {
+            response_idle_timeout: std::time::Duration::from_millis(80),
+            ..fast_recovery_policy(4)
+        },
         compaction_url: None,
         compaction_timeout: std::time::Duration::from_secs(300),
         input_token_count_url: None,
@@ -4599,6 +4619,7 @@ async fn reconnecting_a_continuation_does_not_execute_its_tool_twice() {
         input_token_count_unsupported: false,
         api_key: "test-key".to_string(),
         http: reqwest::Client::new(),
+        maintenance_http: reqwest::Client::new(),
     };
     let transcript_directory = tempfile::tempdir().expect("temporary transcript directory");
     let transcript =
@@ -4978,13 +4999,34 @@ async fn every_request_carries_its_connections_prompt_cache_key() {
     server.await.expect("server task should finish");
 }
 
-fn fast_recovery_policy(max_reconnect_attempts: usize) -> RecoveryPolicy {
+async fn recovery_followup(
+    text: &str,
+    openai: &mut OpenAiProvider,
+    state: &mut AttemptState,
+    progress: &ProgressReporter,
+) -> anyhow::Result<()> {
+    let history = state.history.clone();
+    let replays = state.history_replays.clone();
+    let prompt = Message::user(text);
+    run_turn_request_with_recovery(
+        request_with_replays(&history, &replays, &prompt, "", None),
+        openai,
+        state,
+        progress,
+        &fast_recovery_policy(4),
+    )
+    .await
+}
+
+fn fast_recovery_policy(max_attempts: usize) -> RecoveryPolicy {
     RecoveryPolicy {
-        max_reconnect_attempts,
+        max_attempts,
+        connect_timeout: std::time::Duration::from_secs(1),
+        stall_warning: std::time::Duration::from_millis(5),
         backoff_base: std::time::Duration::from_millis(10),
         backoff_cap: std::time::Duration::from_millis(20),
         send_timeout: std::time::Duration::from_secs(1),
-        first_event_timeout: std::time::Duration::from_secs(1),
+        response_idle_timeout: std::time::Duration::from_secs(1),
     }
 }
 
@@ -5078,14 +5120,17 @@ async fn a_close_observed_while_parked_reconnects_before_the_next_request() {
             retries.push(retry_after);
         }
     }
-    assert_eq!(retries, vec![std::time::Duration::ZERO]);
+    assert!(
+        retries.is_empty(),
+        "a parked reconnect starts attempt one, not a separate recovery cycle"
+    );
     assert_eq!(openai.ws.socket_generation, 1);
     assert_eq!(continuation_response_id(&openai), Some("resp_replaced"));
     server.await.expect("server task should finish");
 }
 
 #[tokio::test]
-async fn first_event_timeout_reconnects_after_only_a_late_prior_done() {
+async fn response_idle_timeout_reconnects_after_only_a_late_prior_done() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test listener should bind");
@@ -5130,7 +5175,7 @@ async fn first_event_timeout_reconnects_after_only_a_late_prior_done() {
     let mut openai = test_session_with_url(&url, socket, None);
     let mut state = AttemptState::default();
     let mut policy = fast_recovery_policy(3);
-    policy.first_event_timeout = std::time::Duration::from_millis(30);
+    policy.response_idle_timeout = std::time::Duration::from_millis(30);
     let initial = RequestParts {
         prompt: Message::user("old question"),
         history: Vec::new(),
@@ -5176,7 +5221,7 @@ async fn first_event_timeout_reconnects_after_only_a_late_prior_done() {
 }
 
 #[tokio::test]
-async fn stale_id_full_retry_starts_a_new_first_event_deadline() {
+async fn stale_id_full_retry_consumes_budget_then_falls_back_to_http() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test listener should bind");
@@ -5214,19 +5259,23 @@ async fn stale_id_full_retry_starts_a_new_first_event_deadline() {
         // expire; without a reset here the turn would wait forever because
         // the stale-ID error already ended the original deadline.
 
-        let (stream, _) = listener.accept().await.expect("server should re-accept");
-        let mut replacement = accept_async(stream)
-            .await
-            .expect("server should upgrade replacement");
-        let replayed = receive_json(&mut replacement).await;
+        let (mut replacement, _) = listener.accept().await.expect("HTTP fallback");
+        let replayed = receive_http_json(&mut replacement).await.body;
         assert!(replayed.get("previous_response_id").is_none());
         let wire = replayed.to_string();
-        assert!(wire.contains("old question"));
-        assert!(wire.contains("old answer"));
-        assert!(wire.contains("stale timeout question"));
-        send_json(
+        assert!(
+            wire.contains("old question")
+                && wire.contains("old answer")
+                && wire.contains("stale timeout question")
+        );
+        send_http_response(
             &mut replacement,
-            completed_event("resp_stale_recovered", "msg_stale_recovered", "recovered"),
+            "200 OK",
+            "text/event-stream",
+            sse_data(
+                completed_event("resp_stale_recovered", "msg_stale_recovered", "recovered")
+                    .to_string(),
+            ),
         )
         .await;
     });
@@ -5235,7 +5284,7 @@ async fn stale_id_full_retry_starts_a_new_first_event_deadline() {
     let mut openai = test_session_with_url(&url, socket, None);
     let mut state = AttemptState::default();
     let mut policy = fast_recovery_policy(3);
-    policy.first_event_timeout = std::time::Duration::from_millis(30);
+    policy.response_idle_timeout = std::time::Duration::from_millis(30);
     let initial = RequestParts {
         prompt: Message::user("old question"),
         history: Vec::new(),
@@ -5275,11 +5324,8 @@ async fn stale_id_full_retry_starts_a_new_first_event_deadline() {
     .await
     .expect("the stale fallback timeout should reconnect and replay");
 
-    assert_eq!(openai.ws.socket_generation, 1);
-    assert_eq!(
-        continuation_response_id(&openai),
-        Some("resp_stale_recovered")
-    );
+    assert_eq!(openai.transport, OpenAiTransport::Http);
+    assert!(openai.ws.continuation.is_none());
     server.await.expect("server task should finish");
 }
 
@@ -5530,15 +5576,14 @@ async fn turn_survives_repeated_drops_within_the_recovery_budget() {
             assert!(request.to_string().contains("flaky question"));
             drop(socket);
         }
-        let (stream, _) = listener.accept().await.expect("server should re-accept");
-        let mut socket = accept_async(stream)
-            .await
-            .expect("server should upgrade the final reconnect");
-        let request = receive_json(&mut socket).await;
+        let (mut socket, _) = listener.accept().await.expect("HTTP fallback");
+        let request = receive_http_json(&mut socket).await.body;
         assert!(request.to_string().contains("flaky question"));
-        send_json(
+        send_http_response(
             &mut socket,
-            completed_event("resp_persist", "msg_persist", "made it through"),
+            "200 OK",
+            "text/event-stream",
+            sse_data(completed_event("resp_persist", "msg_persist", "made it through").to_string()),
         )
         .await;
     });
@@ -5587,11 +5632,19 @@ async fn turn_survives_repeated_drops_within_the_recovery_budget() {
         }
     }
     assert_eq!(
-        retry_attempts,
-        vec![
-            (1, std::time::Duration::from_millis(10)),
-            (2, std::time::Duration::from_millis(20)),
-        ]
+        retry_attempts
+            .iter()
+            .map(|(attempt, _)| *attempt)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert!(
+        (std::time::Duration::from_micros(7500)..=std::time::Duration::from_millis(10))
+            .contains(&retry_attempts[0].1)
+    );
+    assert!(
+        (std::time::Duration::from_millis(15)..=std::time::Duration::from_millis(20))
+            .contains(&retry_attempts[1].1)
     );
 
     server.await.expect("server task should finish");
@@ -5609,7 +5662,7 @@ async fn turn_fails_after_the_recovery_budget_is_exhausted() {
     let server = tokio::spawn(async move {
         // Initial connection plus one per recovery cycle, all dying
         // mid-request.
-        for _ in 0..3 {
+        for _ in 0..2 {
             let (stream, _) = listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
@@ -5617,6 +5670,20 @@ async fn turn_fails_after_the_recovery_budget_is_exhausted() {
             let _request = receive_json(&mut socket).await;
             drop(socket);
         }
+        let (mut http, _) = listener.accept().await.unwrap();
+        let _ = receive_http_json(&mut http).await;
+        send_http_response(
+            &mut http,
+            "503 Service Unavailable",
+            "application/json",
+            "{}",
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(80), listener.accept())
+                .await
+                .is_err()
+        );
     });
 
     let (socket, _) = connect_async(&url).await.expect("client should connect");
@@ -5634,13 +5701,13 @@ async fn turn_fails_after_the_recovery_budget_is_exhausted() {
         &mut openai,
         &mut state,
         &discard_updates(),
-        &fast_recovery_policy(2),
+        &fast_recovery_policy(3),
     )
     .await
     .expect_err("a persistently dead server should fail the turn");
 
     assert!(
-        format!("{error:#}").contains("after 2 reconnect attempts"),
+        format!("{error:#}").contains("after 3 attempts"),
         "the surfaced error should say the recovery budget was exhausted: {error:#}"
     );
 
@@ -6219,12 +6286,18 @@ async fn http_retries_server_errors_and_partial_stream_loss_with_identical_reque
         }
     }
     assert_eq!(retries.len(), 2);
-    assert_eq!(retries[0].0, 1);
+    assert_eq!(retries[0].0, 2);
     assert!(retries[0].1.contains("req_retry_503"));
-    assert_eq!(retries[1].0, 2);
+    assert_eq!(retries[1].0, 3);
     assert!(retries[1].1.contains("req_retry_stream"));
-    assert_eq!(retries[0].2, std::time::Duration::from_millis(10));
-    assert_eq!(retries[1].2, std::time::Duration::from_millis(20));
+    assert!(
+        (std::time::Duration::from_micros(7500)..=std::time::Duration::from_millis(10))
+            .contains(&retries[0].2)
+    );
+    assert!(
+        (std::time::Duration::from_millis(15)..=std::time::Duration::from_millis(20))
+            .contains(&retries[1].2)
+    );
 }
 
 #[tokio::test]
@@ -6269,7 +6342,7 @@ async fn http_stream_retry_and_terminal_error_keep_their_per_attempt_request_ids
         &mut openai,
         &mut state,
         &ProgressReporter::new(sender),
-        &fast_recovery_policy(1),
+        &fast_recovery_policy(2),
     )
     .await
     .expect_err("both streams end before a terminal response");
@@ -6293,7 +6366,7 @@ async fn http_stream_retry_and_terminal_error_keep_their_per_attempt_request_ids
 }
 
 #[tokio::test]
-async fn http_first_event_timeout_retries_but_unknown_event_starts_stream() {
+async fn http_idle_timeout_retries_even_after_unknown_event() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("HTTP listener");
@@ -6301,38 +6374,23 @@ async fn http_first_event_timeout_retries_but_unknown_event_starts_stream() {
     let server = tokio::spawn(async move {
         let (mut stalled, _) = listener.accept().await.expect("stalled HTTP connection");
         let first = receive_http_json(&mut stalled).await.body;
-        stalled
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
-            )
-            .await
-            .expect("stalled SSE headers");
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        drop(stalled);
-
+        let metadata = sse_data(json!({"type":"relay.metadata", "state":"started"}).to_string());
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            metadata.len() + 1000
+        );
+        stalled.write_all(headers.as_bytes()).await.unwrap();
+        stalled.write_all(metadata.as_bytes()).await.unwrap();
         let (mut stream, _) = listener.accept().await.expect("retry HTTP connection");
         let second = receive_http_json(&mut stream).await.body;
-        let first_event =
-            sse_data(json!({"type": "relay.metadata", "state": "started"}).to_string());
-        let completed =
-            sse_data(completed_event("resp_slow_http", "msg_slow_http", "finished").to_string());
-        let body_len = first_event.len() + completed.len();
-        let headers = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
-        );
-        stream
-            .write_all(headers.as_bytes())
-            .await
-            .expect("slow SSE headers");
-        stream
-            .write_all(first_event.as_bytes())
-            .await
-            .expect("first SSE event");
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        stream
-            .write_all(completed.as_bytes())
-            .await
-            .expect("terminal SSE event");
+        send_http_response(
+            &mut stream,
+            "200 OK",
+            "text/event-stream",
+            sse_data(completed_event("resp_slow_http", "msg_slow_http", "finished").to_string()),
+        )
+        .await;
+        drop(stalled);
         (first, second)
     });
 
@@ -6343,7 +6401,7 @@ async fn http_first_event_timeout_retries_but_unknown_event_starts_stream() {
     .await;
     let mut state = AttemptState::default();
     let mut policy = fast_recovery_policy(2);
-    policy.first_event_timeout = std::time::Duration::from_millis(20);
+    policy.response_idle_timeout = std::time::Duration::from_millis(20);
     let parts = RequestParts {
         prompt: Message::user("wait for it"),
         history: Vec::new(),
@@ -6358,7 +6416,7 @@ async fn http_first_event_timeout_retries_but_unknown_event_starts_stream() {
         &policy,
     )
     .await
-    .expect("HTTP retry should tolerate midstream inactivity");
+    .expect("unknown metadata must not suppress the inactivity retry");
 
     assert_eq!(
         attempt_message(&state),
@@ -6712,7 +6770,7 @@ async fn exhausted_websocket_retries_fall_back_with_full_input_and_remain_http()
         &mut openai,
         &mut state,
         &discard_updates(),
-        &fast_recovery_policy(1),
+        &fast_recovery_policy(3),
     )
     .await
     .expect("HTTP fallback should recover the logical request");

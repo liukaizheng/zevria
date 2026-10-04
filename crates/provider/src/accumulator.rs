@@ -5,6 +5,8 @@ pub(crate) struct AttemptState {
     pub(crate) result: AssistantMessageAccumulator,
     pub(crate) native_output: NativeOutputLedger,
     pub(crate) search: Option<crate::search::SearchStream>,
+    pub(crate) stale_replay: bool,
+    pub(crate) response_ids: std::collections::HashSet<String>,
     #[cfg(test)]
     pub(crate) history: Vec<Message>,
     #[cfg(test)]

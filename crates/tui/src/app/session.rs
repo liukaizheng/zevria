@@ -106,12 +106,23 @@ pub(crate) struct ActiveOperation {
     pub(crate) id: TurnId,
     /// Raw dispatch marker, used only to reject duplicate/stale events.
     pub(crate) model_call: Option<usize>,
+    network_attempt: usize,
+    network: Option<NetworkNotice>,
     pub(crate) display_turn: Option<DisplayTurn>,
     pub(crate) call_header: Option<NativeHeader>,
     pub(crate) kind: OperationKind,
     pub(crate) mode: SessionMode,
     pub(crate) role: ModelRole,
     pub(crate) phase: ActivePhase,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NetworkNotice {
+    status: zevria_session_api::event::NetworkStatus,
+    transport: zevria_session_api::event::NetworkTransport,
+    attempt: usize,
+    max_attempts: usize,
+    received_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -468,6 +479,8 @@ impl SessionState {
             return false;
         }
         active.model_call = Some(call);
+        active.network_attempt = 0;
+        active.network = None;
         active.phase = ActivePhase::Running(TurnTail::Waiting);
         true
     }
@@ -626,6 +639,8 @@ impl SessionState {
             started_at,
             id,
             model_call: None,
+            network_attempt: 0,
+            network: None,
             display_turn: None,
             call_header: None,
             kind,
@@ -672,6 +687,8 @@ impl SessionState {
             started_at,
             id,
             model_call,
+            network_attempt: 0,
+            network: None,
             display_turn,
             call_header,
             kind,
@@ -730,6 +747,117 @@ impl SessionState {
         Some(transition)
     }
 
+    pub(crate) fn accepts_network(&mut self, id: TurnId, call: usize, attempt: usize) -> bool {
+        let SessionActivity::Active(active) = &mut self.activity else {
+            return false;
+        };
+        if active.id != id
+            || !matches!(active.phase, ActivePhase::Running(_))
+            || call != active.model_call.unwrap_or(1)
+            || attempt == 0
+            || attempt < active.network_attempt
+        {
+            return false;
+        }
+        active.network_attempt = attempt;
+        true
+    }
+
+    pub(crate) fn network_status(
+        &mut self,
+        id: TurnId,
+        call: usize,
+        attempt: usize,
+        max_attempts: usize,
+        transport: zevria_session_api::event::NetworkTransport,
+        status: zevria_session_api::event::NetworkStatus,
+    ) -> bool {
+        use zevria_session_api::event::NetworkStatus;
+        if !self.accepts_network(id, call, attempt) {
+            return false;
+        }
+        let SessionActivity::Active(active) = &mut self.activity else {
+            unreachable!()
+        };
+        if status == NetworkStatus::AttemptStarted
+            && matches!(active.phase, ActivePhase::Running(TurnTail::Retrying(_)))
+        {
+            active.phase = ActivePhase::Running(TurnTail::Waiting);
+        }
+        active.network = if status == NetworkStatus::ProgressResumed {
+            None
+        } else {
+            Some(NetworkNotice {
+                status,
+                transport,
+                attempt,
+                max_attempts,
+                received_at: self.observed_at,
+            })
+        };
+        true
+    }
+
+    pub(crate) fn network_message(&self) -> Option<(String, bool)> {
+        use zevria_session_api::event::{NetworkStatus, NetworkTransport};
+        let SessionActivity::Active(active) = &self.activity else {
+            return None;
+        };
+        let notice = active.network.as_ref()?;
+        let transport = match notice.transport {
+            NetworkTransport::Http => "HTTP",
+            NetworkTransport::WebSocket => "WebSocket",
+        };
+        let (message, warning) = match notice.status {
+            // Track routine phases for scope/lifecycle guards, but keep a
+            // healthy first attempt on the ordinary running/streaming display.
+            NetworkStatus::AttemptStarted
+            | NetworkStatus::Connecting
+            | NetworkStatus::AwaitingResponse
+                if notice.attempt == 1 =>
+            {
+                return None;
+            }
+            NetworkStatus::Quiet { idle_for, retry_in } => {
+                let elapsed = self
+                    .observed_at
+                    .saturating_duration_since(notice.received_at);
+                let seconds = retry_in.saturating_sub(elapsed).as_secs();
+                (
+                    format!(
+                        "No response progress for {}s · {} in {}m {}s",
+                        (idle_for + elapsed).as_secs(),
+                        if notice.attempt < notice.max_attempts {
+                            "automatic retry"
+                        } else {
+                            "request will stop"
+                        },
+                        seconds / 60,
+                        seconds % 60
+                    ),
+                    true,
+                )
+            }
+            NetworkStatus::AttemptStarted => (format!("Starting {transport} attempt"), false),
+            NetworkStatus::Connecting => (format!("Connecting via {transport}"), false),
+            NetworkStatus::AwaitingResponse => (format!("Awaiting {transport} response"), false),
+            NetworkStatus::ProgressResumed => return None,
+        };
+        Some((
+            format!(
+                "{message} · attempt {}/{}",
+                notice.attempt, notice.max_attempts
+            ),
+            warning,
+        ))
+    }
+
+    /// Snapshots may repeat or arrive after a non-fencing network warning.
+    /// Only classified progress clears that warning, not arbitrary previews.
+    pub(crate) fn preview_progress(&mut self, id: TurnId) -> bool {
+        self.set_tail(id, TurnTail::Waiting)
+    }
+
     pub(crate) fn stream(&mut self, id: TurnId, message: Message) -> bool {
         self.set_tail(id, TurnTail::Streaming(message))
     }
@@ -742,6 +870,11 @@ impl SessionState {
         retry_after: Duration,
         error: String,
     ) -> bool {
+        if let SessionActivity::Active(active) = &mut self.activity {
+            if active.id == id {
+                active.network = None;
+            }
+        }
         self.set_tail(
             id,
             TurnTail::Retrying(RetryNotice {
@@ -772,6 +905,11 @@ impl SessionState {
     }
 
     pub(crate) fn progress(&mut self, id: TurnId) -> bool {
+        if let SessionActivity::Active(active) = &mut self.activity {
+            if active.id == id {
+                active.network = None;
+            }
+        }
         self.set_tail(id, TurnTail::Waiting)
     }
 
@@ -795,6 +933,7 @@ impl SessionState {
         }
         match &active.phase {
             ActivePhase::Running(_) => {
+                active.network = None;
                 active.phase = ActivePhase::Running(TurnTail::Waiting);
                 true
             }

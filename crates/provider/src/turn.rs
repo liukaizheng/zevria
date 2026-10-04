@@ -1,5 +1,8 @@
 //! One OpenAI model request, response chaining, and bounded recovery.
 
+use crate::recovery::{
+    AttemptBudget, AttemptProgress, ProgressClock, RecoveryPolicy, ResponseIdleTimeout,
+};
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures_util::StreamExt;
 use rig_core::{
@@ -18,18 +21,20 @@ use zevria_model::ModelInputTooLarge;
 use zevria_model::ModelRequest;
 use zevria_model::ModelResponse;
 use zevria_model::ProviderReplay;
+use zevria_responses::protocol::{ProgressObservation, ResponseProgress};
 use zevria_session_api::CompactFuture;
 use zevria_session_api::InputTokenCountFuture;
 use zevria_session_api::ModelProvider;
 use zevria_session_api::ProgressReporter;
 use zevria_session_api::ProviderFuture;
+use zevria_session_api::event::{NetworkStatus, NetworkTransport};
 
 use crate::{
     accumulator::AttemptState,
     config::validate_additional_params,
     connection::{
         ContinuationState, OpenAiProvider, OpenAiTransport, is_http_upgrade_required,
-        log_identifier, response_request_id,
+        log_identifier, response_request_id, retryable_connect_error,
     },
     protocol::websocket_message_to_text,
     replay::ReplaySource,
@@ -612,7 +617,7 @@ async fn run_remote_compaction(
     );
 
     let response = openai
-        .http
+        .maintenance_http
         .post(url.clone())
         .bearer_auth(&openai.api_key)
         .timeout(openai.compaction_timeout)
@@ -948,11 +953,13 @@ async fn run_model_request(
     state: &mut AttemptState,
     progress: &ProgressReporter,
     policy: &RecoveryPolicy,
+    request_attempt: usize,
 ) -> anyhow::Result<ModelResponse> {
     state.search = prepared
         .search_advertised
         .then(|| crate::search::SearchStream::new(openai.profile.clone(), progress));
-    let result = run_model_request_inner(prepared, openai, state, progress, policy).await;
+    let result =
+        run_model_request_inner(prepared, openai, state, progress, policy, request_attempt).await;
     state.finish_search(result.is_ok(), progress).await?;
     #[cfg(feature = "cache-diagnostics")]
     crate::cache_diagnostics::finish(prepared, openai, result.as_ref().ok());
@@ -965,6 +972,7 @@ async fn run_model_request_inner(
     state: &mut AttemptState,
     progress: &ProgressReporter,
     policy: &RecoveryPolicy,
+    request_attempt: usize,
 ) -> anyhow::Result<ModelResponse> {
     state.reset_result();
     // Remember the prior terminal even if selecting this transmission must
@@ -978,37 +986,46 @@ async fn run_model_request_inner(
             .map(|continuation| continuation.response_id.clone())
     });
 
-    let transmission = select_transmission(prepared, openai);
-    let mut request_mode = transmission.mode;
-    let mut previous_response_id = transmission.previous_response_id.clone();
-    let mut retried_with_history = false;
+    let transmission = if std::mem::take(&mut state.stale_replay) {
+        full_transmission(prepared)
+    } else {
+        select_transmission(prepared, openai)
+    };
+    let request_mode = transmission.mode;
+    let previous_response_id = transmission.previous_response_id.clone();
     if let Err(error) =
         send_prepared_request(prepared, &transmission, openai, policy.send_timeout).await
     {
         abandon_attempt(openai, state);
         return Err(error);
     }
-    let mut first_event_deadline = Some(tokio::time::Instant::now() + policy.first_event_timeout);
+    let attempt_progress = AttemptProgress {
+        reporter: progress,
+        attempt: request_attempt,
+        max_attempts: policy.max_attempts,
+        transport: NetworkTransport::WebSocket,
+    };
+    attempt_progress
+        .status(NetworkStatus::AwaitingResponse)
+        .await;
+    let mut clock = ProgressClock::new(policy);
+    let mut response_progress = ResponseProgress::new(prior_terminal_id.clone());
+    for id in &state.response_ids {
+        response_progress.exclude_response(id.clone());
+    }
 
     loop {
-        let inbound = if let Some(deadline) = first_event_deadline {
-            match tokio::time::timeout_at(deadline, openai.ws.session.next()).await {
-                Ok(inbound) => inbound,
-                Err(_) => {
-                    openai
-                        .ws
-                        .session
-                        .terminate(OpenAiWebSocketTerminalCategory::FirstEventTimeout);
-                    abandon_attempt(openai, state);
-                    return Err(WebSocketDisconnected::without_source(
-                        "waiting for the first response event",
-                        OpenAiWebSocketTerminalCategory::FirstEventTimeout.as_str(),
-                    )
-                    .into());
-                }
+        let inbound = match clock.next(openai.ws.session.next(), attempt_progress).await {
+            Ok(inbound) => inbound,
+            Err(error) => {
+                openai
+                    .ws
+                    .session
+                    .terminate(OpenAiWebSocketTerminalCategory::ResponseIdleTimeout);
+                openai.ws.invalidate_continuation("response_idle_timeout");
+                abandon_attempt(openai, state);
+                return Err(error.into());
             }
-        } else {
-            openai.ws.session.next().await
         };
 
         let Some(inbound) = inbound else {
@@ -1086,58 +1103,12 @@ async fn run_model_request_inner(
             }
         };
 
+        if message.trim().is_empty() || message.trim() == "[DONE]" {
+            continue;
+        }
         #[cfg(feature = "cache-diagnostics")]
         crate::cache_diagnostics::observe_raw(openai, &message, prior_terminal_id.as_deref(), None);
 
-        if prepared.search_advertised
-            && prior_terminal_id.is_some()
-            && let Ok(event) = serde_json::from_str::<serde_json::Value>(&message)
-            && matches!(
-                event["type"].as_str(),
-                Some("response.completed" | "response.done")
-            )
-            && event["response"]["id"].as_str() == prior_terminal_id.as_deref()
-        {
-            if event["type"] == "response.done" {
-                openai.ws.pending_done_response_id = None;
-            }
-            continue;
-        }
-
-        // Capture lossless native output from the original JSON before Rig
-        // deserializes modeled output fields. `response.done` is captured in
-        // its typed branch after a late duplicate has been filtered.
-        match serde_json::from_str::<serde_json::Value>(&message)
-            .ok()
-            .and_then(|event| {
-                event
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
-            .as_deref()
-        {
-            Some("response.output_item.done") => {
-                state.record_native_output_item_done(&message);
-            }
-            Some("response.completed") => {
-                state.record_native_terminal_output(&message);
-            }
-            _ => {}
-        }
-
-        // Do not attach a preceding response's late done event to this attempt.
-        let pending_done = serde_json::from_str::<serde_json::Value>(&message)
-            .ok()
-            .is_some_and(|event| {
-                event["type"] == "response.done"
-                    && event["response"]["id"]
-                        .as_str()
-                        .is_some_and(|id| openai.ws.pending_done_response_id.as_deref() == Some(id))
-            });
-        if !pending_done {
-            state.observe_search(&message, progress).await;
-        }
         let event = match parse_server_event(&message) {
             Ok(event) => event,
             Err(error) => {
@@ -1145,28 +1116,26 @@ async fn run_model_request_inner(
                 return Err(error.into());
             }
         };
-
-        let is_pending_done = match event.as_ref() {
-            Some(ResponsesWebSocketEvent::Done(done)) => {
-                let response_id = done.response_id();
-                openai
-                    .ws
-                    .pending_done_response_id
-                    .as_deref()
-                    .is_some_and(|pending_id| response_id == Some(pending_id))
+        let raw: serde_json::Value = serde_json::from_str(&message)?;
+        match response_progress.observe(&raw) {
+            ProgressObservation::OtherResponse => continue,
+            ProgressObservation::Advanced => {
+                if let Some(id) = raw["response"]["id"]
+                    .as_str()
+                    .or_else(|| raw["response_id"].as_str())
+                {
+                    state.response_ids.insert(id.to_string());
+                }
+                clock.advanced(attempt_progress).await;
             }
-            _ => false,
-        };
-        if is_pending_done {
-            openai.ws.pending_done_response_id = None;
-            continue;
+            ProgressObservation::Unchanged => {}
         }
-
-        // Any syntactically valid current-generation server event, including
-        // an unknown event type, starts the response stream. A late
-        // `response.done` for the preceding response is the sole exception
-        // and leaves the original deadline running.
-        first_event_deadline = None;
+        match raw["type"].as_str() {
+            Some("response.output_item.done") => state.record_native_output_item_done(&message),
+            Some("response.completed") => state.record_native_terminal_output(&message),
+            _ => {}
+        }
+        state.observe_search(&message, progress).await;
 
         let Some(event) = event else {
             continue;
@@ -1269,38 +1238,17 @@ async fn run_model_request_inner(
                             .into());
                 }
 
-                let can_retry_with_history = previous_response_id.is_some()
-                    && !retried_with_history
+                if previous_response_id.is_some()
                     && error_reports_missing_previous_response(
                         error.error.code.as_deref(),
                         error.error.message.as_deref(),
-                    );
-
-                if can_retry_with_history {
-                    tracing::warn!(
-                        "previous response not found on the server; replaying the full local history"
-                    );
-                    state.finish_search(false, progress).await?;
-                    state.reset_result();
-                    progress.stream_cleared();
+                    )
+                {
                     openai.ws.invalidate_continuation("stale_response_id");
-                    previous_response_id = None;
-                    retried_with_history = true;
-
-                    state.search = prepared.search_advertised.then(|| {
-                        crate::search::SearchStream::new(openai.profile.clone(), progress)
-                    });
-                    let full = full_transmission(prepared);
-                    request_mode = full.mode;
-                    if let Err(error) =
-                        send_prepared_request(prepared, &full, openai, policy.send_timeout).await
-                    {
-                        abandon_attempt(openai, state);
-                        return Err(error);
-                    }
-                    first_event_deadline =
-                        Some(tokio::time::Instant::now() + policy.first_event_timeout);
-                    continue;
+                    abandon_attempt(openai, state);
+                    // Finalize this attempt before the shared budget decides
+                    // whether a full-input replay is permitted.
+                    return Err(StaleResponseId.into());
                 }
 
                 abandon_attempt(openai, state);
@@ -1727,26 +1675,29 @@ async fn run_http_model_request_inner(
     }
 
     let mut events = response.bytes_stream().eventsource();
-    let mut first_event_deadline = Some(tokio::time::Instant::now() + policy.first_event_timeout);
+    let attempt_progress = AttemptProgress {
+        reporter: progress,
+        attempt: request_attempt,
+        max_attempts: policy.max_attempts,
+        transport: NetworkTransport::Http,
+    };
+    attempt_progress
+        .status(NetworkStatus::AwaitingResponse)
+        .await;
+    let mut clock = ProgressClock::new(policy);
+    let mut response_progress = ResponseProgress::default();
 
     loop {
-        let event = if let Some(deadline) = first_event_deadline {
-            match tokio::time::timeout_at(deadline, events.next()).await {
-                Ok(event) => event,
-                Err(_) => {
-                    return Err(HttpAttemptError::retryable_response(
-                        "first_event_timeout",
-                        anyhow::anyhow!(
-                            "OpenAI HTTP response produced no event within {}s",
-                            policy.first_event_timeout.as_secs_f64()
-                        ),
-                        &upstream_request_id,
-                    ));
-                }
-            }
-        } else {
-            events.next().await
-        };
+        let event = clock
+            .next(events.next(), attempt_progress)
+            .await
+            .map_err(|error| {
+                HttpAttemptError::retryable_response(
+                    "response_idle_timeout",
+                    error,
+                    &upstream_request_id,
+                )
+            })?;
 
         let payload = match event {
             Some(Ok(event)) => event.data,
@@ -1786,33 +1737,22 @@ async fn run_http_model_request_inner(
             upstream_request_id.as_deref(),
         );
 
-        match serde_json::from_str::<serde_json::Value>(payload)
-            .ok()
-            .and_then(|event| {
-                event
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
-            .as_deref()
-        {
-            Some("response.output_item.done") => {
-                state.record_native_output_item_done(payload);
-            }
-            Some("response.completed") => {
-                state.record_native_terminal_output(payload);
-            }
-            _ => {}
-        }
-
-        state.observe_search(payload, progress).await;
         let event = parse_server_event(payload).map_err(|error| {
             HttpAttemptError::terminal_response(anyhow::Error::from(error), &upstream_request_id)
         })?;
-        // Any syntactically valid, nonempty server event, including an unknown
-        // event type, proves the SSE stream has started. Empty frames and the
-        // `[DONE]` sentinel above intentionally leave the deadline running.
-        first_event_deadline = None;
+        let raw: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|error| HttpAttemptError::terminal_response(error, &upstream_request_id))?;
+        match response_progress.observe(&raw) {
+            ProgressObservation::OtherResponse => continue,
+            ProgressObservation::Advanced => clock.advanced(attempt_progress).await,
+            ProgressObservation::Unchanged => {}
+        }
+        match raw["type"].as_str() {
+            Some("response.output_item.done") => state.record_native_output_item_done(payload),
+            Some("response.completed") => state.record_native_terminal_output(payload),
+            _ => {}
+        }
+        state.observe_search(payload, progress).await;
         let Some(event) = event else {
             continue;
         };
@@ -2011,141 +1951,26 @@ async fn run_http_model_request_inner(
     }
 }
 
-async fn run_http_model_request_with_recovery(
-    prepared: &PreparedRequest,
-    openai: &mut OpenAiProvider,
-    state: &mut AttemptState,
-    progress: &ProgressReporter,
-    policy: &RecoveryPolicy,
-) -> anyhow::Result<ModelResponse> {
-    let mut retries = 0usize;
-    loop {
-        match run_http_model_request(
-            prepared,
-            openai,
-            state,
-            progress,
-            policy,
-            retries.saturating_add(1),
-        )
-        .await
-        {
-            Ok(response) => return Ok(response),
-            Err(HttpAttemptError::Terminal {
-                error,
-                upstream_request_id,
-            }) => {
-                state.reset_result();
-                tracing::debug!(
-                    provider = %openai.profile.provider,
-                    model = %openai.profile.model,
-                    transport = OpenAiTransport::Http.as_str(),
-                    upstream_request_id = ?upstream_request_id.as_deref().map(log_identifier),
-                    "OpenAI HTTP request ended with a terminal error"
-                );
-                return Err(error);
-            }
-            Err(HttpAttemptError::Retryable {
-                category,
-                error,
-                upstream_request_id,
-            }) => {
-                state.reset_result();
-                progress.stream_cleared();
-                if retries >= policy.max_reconnect_attempts {
-                    return Err(error.context(format!(
-                        "the turn failed after {} HTTP retry attempts",
-                        policy.max_reconnect_attempts
-                    )));
-                }
-                retries += 1;
-                let retry_after = policy.backoff(retries);
-                tracing::warn!(
-                    transport = OpenAiTransport::Http.as_str(),
-                    retry = retries,
-                    max_retries = policy.max_reconnect_attempts,
-                    retry_category = category,
-                    upstream_request_id = ?upstream_request_id.as_deref().map(log_identifier),
-                    "OpenAI HTTP request failed; replaying complete local input"
-                );
-                progress
-                    .retrying(
-                        retries,
-                        policy.max_reconnect_attempts,
-                        retry_after,
-                        error.to_string(),
-                    )
-                    .await;
-                tokio::time::sleep(retry_after).await;
-            }
-        }
+#[derive(Debug)]
+struct StaleResponseId;
+impl std::fmt::Display for StaleResponseId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("previous response is unavailable; replaying authoritative local input")
     }
 }
+impl std::error::Error for StaleResponseId {}
 
-/// How a turn recovers from transport failures: bounded request and
-/// first-event waits plus reconnect/replay attempts with capped backoff.
-pub(crate) struct RecoveryPolicy {
-    /// Recovery cycles after the initial attempt. WebSocket and HTTP each get
-    /// a fresh budget when a logical request falls back between transports.
-    pub(crate) max_reconnect_attempts: usize,
-    /// Delay before the first recovery cycle; doubles per cycle.
-    pub(crate) backoff_base: std::time::Duration,
-    /// Upper bound on the per-cycle backoff delay.
-    pub(crate) backoff_cap: std::time::Duration,
-    /// How long a socket write acknowledgement or HTTP response headers may
-    /// take.
-    pub(crate) send_timeout: std::time::Duration,
-    /// How long a request may wait for its first syntactically valid server
-    /// event. Unknown event types still prove the stream has started; transport
-    /// control frames, empty SSE data, and `[DONE]` do not. Mid-stream
-    /// inactivity after that event is unbounded.
-    pub(crate) first_event_timeout: std::time::Duration,
-}
-
-impl Default for RecoveryPolicy {
-    fn default() -> Self {
-        Self {
-            max_reconnect_attempts: 5,
-            backoff_base: std::time::Duration::from_millis(500),
-            backoff_cap: std::time::Duration::from_secs(8),
-            send_timeout: std::time::Duration::from_secs(30),
-            first_event_timeout: std::time::Duration::from_secs(30),
-        }
-    }
-}
-
-impl RecoveryPolicy {
-    /// The delay before recovery cycle `attempt` (1-based): exponential from
-    /// the base, capped.
-    fn backoff(&self, attempt: usize) -> std::time::Duration {
-        let doublings = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
-        self.backoff_base
-            .saturating_mul(2u32.saturating_pow(doublings))
-            .min(self.backoff_cap)
-    }
-}
-
-/// Run one model request, transparently recovering its preferred transport and
-/// falling back to sticky HTTP when WebSocket recovery is exhausted. Tool
-/// execution lives outside this scope, so replaying one prepared request can
-/// never repeat a completed command. Recovery attempts remain bounded by the
-/// transport recovery policy for each logical request.
 async fn run_model_request_with_reconnect(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
     state: &mut AttemptState,
     progress: &ProgressReporter,
 ) -> anyhow::Result<ModelResponse> {
-    run_model_request_with_recovery(
-        model_request,
-        openai,
-        state,
-        progress,
-        &RecoveryPolicy::default(),
-    )
-    .await
+    let policy = openai.recovery.clone();
+    run_model_request_with_recovery(model_request, openai, state, progress, &policy).await
 }
 
+#[tracing::instrument(skip_all, fields(profile = %openai.profile))]
 async fn run_model_request_with_recovery(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
@@ -2156,117 +1981,157 @@ async fn run_model_request_with_recovery(
     let prepared = prepare_turn_request(model_request, openai).await?;
     #[cfg(feature = "cache-diagnostics")]
     let prepared = crate::cache_diagnostics::dispatch(prepared, openai);
+    run_prepared_with_recovery(&prepared, openai, state, progress, policy).await
+}
 
-    if openai.transport == OpenAiTransport::Http {
-        return run_http_model_request_with_recovery(&prepared, openai, state, progress, policy)
-            .await;
-    }
-
-    let mut attempt = 0usize;
-    let mut pending_disconnect = None;
-    loop {
-        // A parked connection is replaced only after its continuously polled
-        // pump has definitively stopped. Think-time alone is never a reason to
-        // rotate a healthy socket or discard its continuation.
-        let (error, reconnect_immediately) = if let Some(error) = pending_disconnect.take() {
-            (error, false)
-        } else if let Some(terminal) = openai.ws.session.terminal_status() {
-            (
-                anyhow::Error::from(WebSocketDisconnected::from_terminal(
-                    "starting the next request on a terminated socket",
-                    terminal,
-                )),
-                attempt == 0,
-            )
+/// Exactly one budget for connection establishment, dispatch, and streaming.
+/// A failed attempt cannot mutate prepared input or restart the tool loop.
+async fn run_prepared_with_recovery(
+    prepared: &PreparedRequest,
+    openai: &mut OpenAiProvider,
+    state: &mut AttemptState,
+    progress: &ProgressReporter,
+    policy: &RecoveryPolicy,
+) -> anyhow::Result<ModelResponse> {
+    let mut budget = AttemptBudget::new(policy.max_attempts);
+    let mut websocket_attempts = 0;
+    while let Some(attempt) = budget.start() {
+        let attempt_started = tokio::time::Instant::now();
+        let transport = openai.transport;
+        let attempt_progress = AttemptProgress {
+            reporter: progress,
+            attempt,
+            max_attempts: policy.max_attempts,
+            transport: match transport {
+                OpenAiTransport::Http => NetworkTransport::Http,
+                OpenAiTransport::WebSocket => NetworkTransport::WebSocket,
+            },
+        };
+        attempt_progress.status(NetworkStatus::AttemptStarted).await;
+        let result = if transport == OpenAiTransport::Http {
+            attempt_progress.status(NetworkStatus::Connecting).await;
+            run_http_model_request(prepared, openai, state, progress, policy, attempt).await
         } else {
-            match run_model_request(&prepared, openai, state, progress, policy).await {
-                Ok(message) => return Ok(message),
-                Err(error) if is_websocket_disconnect(&error) => (error, false),
-                Err(error) => return Err(error),
+            websocket_attempts += 1;
+            let connected = if openai.ws.session.terminal_status().is_some() {
+                #[cfg(feature = "cache-diagnostics")]
+                if openai.ws.session.terminal_status()
+                    != Some(OpenAiWebSocketTerminalCategory::NotConnected)
+                {
+                    crate::cache_diagnostics::recovery(prepared, openai);
+                }
+                attempt_progress.status(NetworkStatus::Connecting).await;
+                openai.ws.config.connect_timeout = policy.connect_timeout;
+                let result = openai.ws.reconnect().await;
+                #[cfg(feature = "cache-diagnostics")]
+                crate::cache_diagnostics::connection(
+                    openai,
+                    if result.is_ok() {
+                        "reconnected"
+                    } else {
+                        "reconnect_failed"
+                    },
+                );
+                result
+            } else {
+                Ok(())
+            };
+            match connected {
+                Err(error) if is_http_upgrade_required(&error) => Err(HttpAttemptError::retryable(
+                    "websocket_upgrade_required",
+                    error,
+                )),
+                Err(error) if retryable_connect_error(&error) => {
+                    Err(HttpAttemptError::retryable("connect_error", error))
+                }
+                Err(error) => Err(HttpAttemptError::terminal(error)),
+                Ok(()) => {
+                    match run_model_request(prepared, openai, state, progress, policy, attempt)
+                        .await
+                    {
+                        Ok(response) => Ok(response),
+                        Err(error) if error.is::<StaleResponseId>() => {
+                            Err(HttpAttemptError::retryable("stale_response_id", error))
+                        }
+                        Err(error) if error.is::<ResponseIdleTimeout>() => {
+                            Err(HttpAttemptError::retryable("response_idle_timeout", error))
+                        }
+                        Err(error) if is_websocket_disconnect(&error) => {
+                            let category = error
+                                .downcast_ref::<WebSocketDisconnected>()
+                                .map(WebSocketDisconnected::terminal_category)
+                                .unwrap_or("disconnect");
+                            Err(HttpAttemptError::retryable(category, error))
+                        }
+                        Err(error) => Err(HttpAttemptError::terminal(error)),
+                    }
+                }
             }
         };
-
+        let (category, error, upstream_request_id) = match result {
+            Ok(response) => return Ok(response),
+            Err(HttpAttemptError::Terminal {
+                error,
+                upstream_request_id,
+            }) => {
+                state.reset_result();
+                tracing::debug!(profile = %openai.profile, attempt, transport = transport.as_str(),
+                    upstream_request_id = ?upstream_request_id.as_deref().map(log_identifier), "completion ended with a terminal error");
+                return Err(error);
+            }
+            Err(HttpAttemptError::Retryable {
+                category,
+                error,
+                upstream_request_id,
+            }) => (category, error, upstream_request_id),
+        };
         #[cfg(feature = "cache-diagnostics")]
-        crate::cache_diagnostics::recovery(&prepared, openai);
-        if attempt >= policy.max_reconnect_attempts {
-            let websocket_error = error.context(format!(
-                "the turn failed after {} reconnect attempts",
-                policy.max_reconnect_attempts
-            ));
-            state.reset_result();
-            progress.stream_cleared();
-            openai.switch_to_http("websocket_retries_exhausted");
-            return run_http_model_request_with_recovery(
-                &prepared, openai, state, progress, policy,
-            )
-            .await
-            .map_err(|http_error| {
-                http_error.context(format!(
-                    "WebSocket transport was unavailable before HTTP fallback: {websocket_error:#}"
-                ))
+        crate::cache_diagnostics::recovery(prepared, openai);
+        state.reset_result();
+        // Continuation only represents completed work. Never treat an ID as
+        // token-level resumption of the abandoned response.
+        openai.ws.invalidate_continuation("attempt_failed");
+        state.stale_replay = category == "stale_response_id";
+        progress.stream_cleared();
+        tracing::warn!(profile = %openai.profile, attempt, max_attempts = policy.max_attempts,
+            transport = transport.as_str(), phase = "recovery", timeout_category = category,
+            elapsed_ms = attempt_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            since_last_completion_ms = openai.ws.idle_for().as_millis().min(u64::MAX as u128) as u64,
+            upstream_request_id = ?upstream_request_id.as_deref().map(log_identifier),
+            "completion attempt failed");
+        if budget.remaining() == 0 {
+            return Err(error.context(format!("Model request failed after {} attempts. Check the connection/provider, then try again; for quiet models increase providers.{}.network.response_idle_timeout_seconds. Completed local tool work has not been rerun.", policy.max_attempts, openai.profile.provider)));
+        }
+        // One same-transport recovery at most, reserving HTTP when possible.
+        if transport == OpenAiTransport::WebSocket
+            && (category == "websocket_upgrade_required"
+                || websocket_attempts >= 2
+                || budget.remaining() == 1)
+        {
+            openai.switch_to_http(if category == "websocket_upgrade_required" {
+                category
+            } else {
+                "websocket_retries_exhausted"
             });
         }
-        attempt += 1;
-
-        let terminal_category = error
-            .downcast_ref::<WebSocketDisconnected>()
-            .map(WebSocketDisconnected::terminal_category)
-            .unwrap_or("unknown_disconnect");
-        let socket_generation = openai.ws.socket_generation;
-        let idle_ms = u64::try_from(openai.ws.idle_for().as_millis()).unwrap_or(u64::MAX);
-        tracing::warn!(
-            socket_generation,
-            attempt,
-            max_reconnect_attempts = policy.max_reconnect_attempts,
-            idle_ms,
-            terminal_category,
-            "OpenAI websocket disconnected; reconnecting for full replay"
-        );
-        let retry_after = if reconnect_immediately {
+        let retry_after = if category == "websocket_upgrade_required" {
             std::time::Duration::ZERO
         } else {
             policy.backoff(attempt)
         };
-        progress.stream_cleared();
         progress
             .retrying(
-                attempt,
-                policy.max_reconnect_attempts,
+                attempt + 1,
+                policy.max_attempts,
                 retry_after,
                 error.to_string(),
             )
             .await;
-        if !reconnect_immediately {
-            tokio::time::sleep(retry_after).await;
-        }
-
-        if let Err(reconnect_error) = openai.ws.reconnect().await {
-            if is_http_upgrade_required(&reconnect_error) {
-                openai.switch_to_http("websocket_upgrade_required");
-                return run_http_model_request_with_recovery(
-                    &prepared, openai, state, progress, policy,
-                )
-                .await;
-            }
-            tracing::warn!(
-                socket_generation,
-                attempt,
-                idle_ms,
-                terminal_category,
-                reconnect_error = %reconnect_error,
-                "OpenAI websocket reconnect handshake failed; preserving the prior session"
-            );
-            // Do not send another model request on a connection already known
-            // to require replacement (notably the 60-minute limit). Retry only
-            // the handshake; the failed swap left every old field intact.
-            pending_disconnect = Some(error);
-            #[cfg(feature = "cache-diagnostics")]
-            crate::cache_diagnostics::connection(openai, "reconnect_failed");
-        } else {
-            #[cfg(feature = "cache-diagnostics")]
-            crate::cache_diagnostics::connection(openai, "reconnected");
-        }
+        // Core's cancellation select drops this sleep along with the entire
+        // provider future. No separate task or nested retry loop survives it.
+        tokio::time::sleep(retry_after).await;
     }
+    anyhow::bail!("completion recovery requires a positive attempt budget")
 }
 
 /// Single-response helper used by the protocol-focused tests.
@@ -2324,9 +2189,9 @@ pub(crate) async fn run_turn_request(
     let prepared = prepare_turn_request(&model_request, openai).await?;
     let policy = RecoveryPolicy::default();
     let response = if openai.transport == OpenAiTransport::Http {
-        run_http_model_request_with_recovery(&prepared, openai, state, progress, &policy).await?
+        run_prepared_with_recovery(&prepared, openai, state, progress, &policy).await?
     } else {
-        run_model_request(&prepared, openai, state, progress, &policy).await?
+        run_model_request(&prepared, openai, state, progress, &policy, 1).await?
     };
     state.history.push(prompt);
     state.history_replays.push(None);

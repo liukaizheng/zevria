@@ -11,6 +11,7 @@ mod connection;
 mod prompt_cache;
 mod protocol;
 use zevria_responses::replay;
+mod recovery;
 mod router;
 mod search;
 mod turn;
@@ -35,8 +36,8 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 pub use cache_diagnostics::CacheDiagnosticContext;
 pub use config::{
     InputTokenCountConfig, LiteralApiKey, ModeAssignments, ModelAssignment, ModelConfig,
-    ModelRouting, ProviderConfig, ProviderEndpoint, RemoteCompactionConfig, ResolvedModelProfile,
-    ResponsesCompatibilityConfig,
+    ModelRouting, NetworkConfig, ProviderConfig, ProviderEndpoint, RemoteCompactionConfig,
+    ResolvedModelProfile, ResponsesCompatibilityConfig,
 };
 pub use connection::OpenAiProvider;
 pub use router::{ResponsesRouter, ResponsesRouterFactory};
@@ -50,6 +51,8 @@ use connection::{
 };
 #[cfg(test)]
 use futures_util::{SinkExt, StreamExt};
+#[cfg(test)]
+use recovery::RecoveryPolicy;
 #[cfg(test)]
 use rig_core::client::CompletionClient;
 #[cfg(test)]
@@ -69,8 +72,8 @@ use tokio_tungstenite::{
 };
 #[cfg(test)]
 use turn::{
-    RecoveryPolicy, is_websocket_disconnect, message_reports_upstream_disconnect, run_turn,
-    run_turn_request, run_turn_request_with_reconnect, run_turn_request_with_recovery,
+    is_websocket_disconnect, message_reports_upstream_disconnect, run_turn, run_turn_request,
+    run_turn_request_with_reconnect, run_turn_request_with_recovery,
 };
 #[cfg(test)]
 use websocket_session::{

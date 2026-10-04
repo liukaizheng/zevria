@@ -5,7 +5,7 @@ edition.workspace = true
 
 # Temporary, opt-in instrumentation. See docs/cache-diagnostics.md for removal.
 [features]
-cache-diagnostics = ["dep:libc", "dep:uuid"]
+cache-diagnostics = ["dep:libc"]
 
 [dependencies]
 zevria-responses = { workspace = true }
@@ -16,7 +16,7 @@ zevria-model = { workspace = true }
 zevria-session-api = { workspace = true }
 anyhow = { workspace = true }
 libc = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
+uuid = { workspace = true }
 eventsource-stream = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
@@ -31,6 +31,7 @@ tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 zevria-tools = { workspace = true }
 zevria-transcript = { workspace = true }
 zevria-workflow = { workspace = true }

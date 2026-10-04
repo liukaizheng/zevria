@@ -196,16 +196,13 @@ pub(crate) struct ContinuationState {
     pub(crate) response_output: Vec<serde_json::Value>,
 }
 
-/// How long a websocket handshake may take before the attempt is abandoned,
-/// so a black-holed connect can't hang a turn indefinitely.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Everything needed to (re)establish the OpenAI Responses websocket. The base
 /// URL and headers are captured once at startup so the adapter can rebuild the
 /// connection after the server drops an idle socket.
 pub(crate) struct OpenAiWebSocketConfig {
     pub(crate) url: String,
     pub(crate) headers: HeaderMap,
+    pub(crate) connect_timeout: std::time::Duration,
 }
 
 pub(crate) struct OpenAiWebSocketConnection {
@@ -221,12 +218,12 @@ impl OpenAiWebSocketConfig {
         for (name, value) in &self.headers {
             request.headers_mut().insert(name, value.clone());
         }
-        let (socket, response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
+        let (socket, response) = tokio::time::timeout(self.connect_timeout, connect_async(request))
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
                     "connecting to the OpenAI websocket timed out after {}s",
-                    CONNECT_TIMEOUT.as_secs()
+                    self.connect_timeout.as_secs()
                 )
             })??;
         let websocket_connection_request_id = response_request_id(response.headers());
@@ -250,6 +247,15 @@ pub(crate) fn is_http_upgrade_required(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Authentication and invalid routing/configuration are not recovery signals.
+pub(crate) fn retryable_connect_error(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<WebSocketError>() {
+        Some(WebSocketError::Http(response)) => response.status().is_server_error(),
+        Some(WebSocketError::Url(_) | WebSocketError::HttpFormat(_)) => false,
+        _ => true,
+    }
+}
+
 pub(crate) struct OpenAiParkedWebSocket {
     pub(crate) session: OpenAiWebSocketSession,
     pub(crate) config: OpenAiWebSocketConfig,
@@ -269,9 +275,16 @@ impl OpenAiParkedWebSocket {
     /// history. A failed handshake leaves the old socket and all its state
     /// intact.
     pub(crate) async fn reconnect(&mut self) -> anyhow::Result<()> {
-        let next_generation = self.socket_generation.checked_add(1).ok_or_else(|| {
-            anyhow::anyhow!("the OpenAI websocket generation counter was exhausted")
-        })?;
+        let next_generation = if self.session.terminal_status()
+            == Some(crate::websocket_session::OpenAiWebSocketTerminalCategory::NotConnected)
+        {
+            // Lazy first establishment is generation zero, not a replacement.
+            self.socket_generation
+        } else {
+            self.socket_generation.checked_add(1).ok_or_else(|| {
+                anyhow::anyhow!("the OpenAI websocket generation counter was exhausted")
+            })?
+        };
         let connection = self.config.connect().await?;
         let session = OpenAiWebSocketSession::new(connection.socket);
         self.session = session;
@@ -327,6 +340,7 @@ pub struct OpenAiProvider {
     pub(crate) ws: OpenAiParkedWebSocket,
     pub(crate) responses_url: reqwest::Url,
     pub(crate) transport: OpenAiTransport,
+    pub(crate) recovery: crate::recovery::RecoveryPolicy,
     pub(crate) compaction_url: Option<reqwest::Url>,
     pub(crate) compaction_timeout: std::time::Duration,
     pub(crate) input_token_count_url: Option<reqwest::Url>,
@@ -334,6 +348,8 @@ pub struct OpenAiProvider {
     pub(crate) input_token_count_unsupported: bool,
     pub(crate) api_key: String,
     pub(crate) http: reqwest::Client,
+    /// Token counting/remote compaction retain their own request deadlines.
+    pub(crate) maintenance_http: reqwest::Client,
 }
 
 impl OpenAiProvider {
@@ -351,6 +367,7 @@ impl OpenAiProvider {
             profile.profile
         );
         let endpoint = &profile.endpoint;
+        endpoint.network.validate(&profile.profile.provider)?;
         endpoint.web_search.validate(&profile.profile.provider)?;
         validate_prompt_cache_key(endpoint.compatibility.send_prompt_cache_key, cache_key)?;
         let session_headers = session_routing_headers(profile, session_id)?;
@@ -387,6 +404,49 @@ impl OpenAiProvider {
         session_id: &str,
         cache_key: &str,
     ) -> anyhow::Result<Self> {
+        Self::construct(
+            profile,
+            reasoning_level,
+            preamble,
+            tools,
+            session_id,
+            cache_key,
+            true,
+        )
+        .await
+    }
+
+    /// Router initialization does local validation only. The active completion
+    /// owns its first connection attempt, including a failed handshake.
+    pub(crate) async fn unconnected(
+        profile: &ResolvedModelProfile,
+        reasoning_level: ReasoningLevel,
+        preamble: &str,
+        tools: ToolServerHandle,
+        session_id: &str,
+        cache_key: &str,
+    ) -> anyhow::Result<Self> {
+        Self::construct(
+            profile,
+            reasoning_level,
+            preamble,
+            tools,
+            session_id,
+            cache_key,
+            false,
+        )
+        .await
+    }
+
+    async fn construct(
+        profile: &ResolvedModelProfile,
+        reasoning_level: ReasoningLevel,
+        preamble: &str,
+        tools: ToolServerHandle,
+        session_id: &str,
+        cache_key: &str,
+        preconnect: bool,
+    ) -> anyhow::Result<Self> {
         let session_headers =
             Self::validate_profile_settings(profile, reasoning_level, session_id, cache_key)?;
         let endpoint = &profile.endpoint;
@@ -397,7 +457,12 @@ impl OpenAiProvider {
             .build()
             .map_err(anyhow::Error::from)?;
 
+        let maintenance_http = reqwest::Client::builder()
+            .default_headers(session_headers.clone())
+            .build()?;
+        let recovery = crate::recovery::RecoveryPolicy::from(&endpoint.network);
         let http = reqwest::Client::builder()
+            .connect_timeout(recovery.connect_timeout)
             .default_headers(session_headers.clone())
             .build()?;
         let mut websocket_headers = client.headers().clone();
@@ -405,11 +470,21 @@ impl OpenAiProvider {
         let websocket_config = OpenAiWebSocketConfig {
             url: endpoints.websocket.to_string(),
             headers: websocket_headers,
+            connect_timeout: recovery.connect_timeout,
         };
         let websocket_log_url = redacted_url_for_logging(&websocket_config.url);
         let http_log_url = redacted_url_for_logging(endpoints.http.as_str());
         let (session, transport, websocket_connection_request_id) = if endpoint.supports_websockets
+            && !preconnect
         {
+            (
+                OpenAiWebSocketSession::disconnected(
+                    crate::websocket_session::OpenAiWebSocketTerminalCategory::NotConnected,
+                ),
+                OpenAiTransport::WebSocket,
+                None,
+            )
+        } else if endpoint.supports_websockets {
             match websocket_config.connect().await {
                 Ok(connection) => (
                     OpenAiWebSocketSession::new(connection.socket),
@@ -431,6 +506,7 @@ impl OpenAiProvider {
                         None,
                     )
                 }
+                Err(error) if !retryable_connect_error(&error) => return Err(error),
                 Err(error) => {
                     tracing::warn!(
                         websocket_url = %websocket_log_url,
@@ -505,6 +581,7 @@ impl OpenAiProvider {
             },
             responses_url: endpoints.http,
             transport,
+            recovery,
             compaction_url: endpoint
                 .compaction
                 .url
@@ -521,6 +598,7 @@ impl OpenAiProvider {
             input_token_count_unsupported: false,
             api_key: endpoint.api_key().to_string(),
             http,
+            maintenance_http,
         })
     }
 

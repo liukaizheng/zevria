@@ -403,6 +403,7 @@ fn retries_backward_clocks_and_rejected_events_cannot_restart_or_rewind_a_call()
     event_at(
         &mut app,
         SessionEvent::TurnRetrying {
+            call: 1,
             turn_id: TEST_TURN_ID,
             attempt: 1,
             max_attempts: 3,
@@ -644,6 +645,7 @@ fn call_start_stream_tools_and_completion_share_headers_not_status_indices() {
     assert_eq!(labels(&app), ["#1", "#(1 - 1)"]);
     for attempt in [1, 2] {
         app.reduce_without_effects(SessionEvent::TurnRetrying {
+            call: 1,
             turn_id: TEST_TURN_ID,
             attempt,
             max_attempts: 4,
@@ -656,7 +658,7 @@ fn call_start_stream_tools_and_completion_share_headers_not_status_indices() {
         );
         let text = rendered_text(&mut app, 160, 35);
         assert!(text.contains(&format!("attempt {attempt}/4")));
-        assert!(text.contains("connection lost: offline"));
+        assert!(text.contains("request interrupted: offline"));
         assert_eq!(text.matches("● Assistant · #(1 - 1)").count(), 1);
     }
     app.reduce_without_effects(SessionEvent::CompactionStarted {

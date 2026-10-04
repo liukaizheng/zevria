@@ -208,7 +208,7 @@ impl ResponsesRouter {
             .ok_or_else(|| anyhow::anyhow!("invalid Responses router slot {index}"))?;
         if slot.runtime.is_none() {
             let cache_key = profile_cache_key(&self.session_id, &slot.profile);
-            let runtime = OpenAiProvider::connect(
+            let runtime = OpenAiProvider::unconnected(
                 &slot.profile,
                 level,
                 &self.preamble,

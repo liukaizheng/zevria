@@ -5634,6 +5634,7 @@ fn retry_notice_is_replaced_by_accepted_progress() {
     let turn_id = TurnId::new(89);
     start_empty_turn(&mut app, turn_id, SessionMode::Build);
     app.reduce_without_effects(SessionEvent::TurnRetrying {
+        call: 1,
         turn_id,
         attempt: 2,
         max_attempts: 4,

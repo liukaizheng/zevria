@@ -499,6 +499,7 @@ mod tests {
             base_url,
             api_key: LiteralApiKey::new("test-key"),
             supports_websockets: true,
+            network: Default::default(),
             session_id_header: None,
             models: std::collections::BTreeMap::from([(
                 "gpt-test".to_string(),

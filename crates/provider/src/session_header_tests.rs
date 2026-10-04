@@ -92,7 +92,7 @@ async fn session_turn(
         provider,
         state,
         &discard_updates(),
-        &fast_recovery_policy(1),
+        &fast_recovery_policy(4),
     )
     .await
 }

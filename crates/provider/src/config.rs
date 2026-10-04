@@ -43,8 +43,11 @@ pub struct ProviderConfig {
     /// this URL's scheme.
     pub base_url: String,
     pub api_key: LiteralApiKey,
-    /// Prefer a best-effort WebSocket preconnect before sticky HTTP fallback.
+    /// Prefer WebSocket before sticky HTTP fallback.
     pub supports_websockets: bool,
+    /// Completion transport deadlines and the shared recovery budget.
+    #[serde(default)]
+    pub network: NetworkConfig,
     /// Optional routing header whose value is the persistent conversation ID.
     /// Omission sends no session header; the name is provider-specific.
     #[serde(default)]
@@ -75,6 +78,7 @@ impl fmt::Debug for ProviderConfig {
             )
             .field("api_key", &self.api_key)
             .field("supports_websockets", &self.supports_websockets)
+            .field("network", &self.network)
             .field("session_id_header", &self.session_id_header)
             .field("models", &self.models)
             .field("compatibility", &self.compatibility)
@@ -104,6 +108,7 @@ impl ProviderConfig {
         }
         parse_session_id_header(provider, self.session_id_header.as_deref())?;
         validate_additional_params(provider, &self.additional_params)?;
+        self.network.validate(provider)?;
         self.web_search.validate(provider)?;
         self.compaction.validate(provider)?;
         self.input_token_count.validate(provider)
@@ -118,6 +123,7 @@ impl ProviderConfig {
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
             supports_websockets: self.supports_websockets,
+            network: self.network.clone(),
             session_id_header: self.session_id_header.clone(),
             compatibility: self.compatibility.clone(),
             additional_params: self.additional_params.clone(),
@@ -125,6 +131,65 @@ impl ProviderConfig {
             input_token_count: self.input_token_count.clone(),
             web_search: self.web_search.clone(),
         }
+    }
+}
+
+/// Completion-only networking policy. Never serialized into a Responses request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkConfig {
+    pub connect_timeout_seconds: u64,
+    pub request_start_timeout_seconds: u64,
+    pub stall_warning_seconds: u64,
+    pub response_idle_timeout_seconds: u64,
+    /// Includes the initial attempt, reconnect handshakes, and HTTP fallback.
+    pub max_attempts: usize,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_seconds: 30,
+            request_start_timeout_seconds: 30,
+            stall_warning_seconds: 30,
+            response_idle_timeout_seconds: 180,
+            max_attempts: 4,
+        }
+    }
+}
+
+impl NetworkConfig {
+    pub(crate) fn validate(&self, provider: &str) -> anyhow::Result<()> {
+        let prefix = format!("providers.{provider}.network");
+        for (field, seconds) in [
+            ("connect_timeout_seconds", self.connect_timeout_seconds),
+            (
+                "request_start_timeout_seconds",
+                self.request_start_timeout_seconds,
+            ),
+            ("stall_warning_seconds", self.stall_warning_seconds),
+            (
+                "response_idle_timeout_seconds",
+                self.response_idle_timeout_seconds,
+            ),
+        ] {
+            anyhow::ensure!(seconds > 0, "{prefix}.{field} must be greater than zero");
+            anyhow::ensure!(
+                std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_secs(seconds))
+                    .is_some(),
+                "{prefix}.{field} is too large for a monotonic deadline"
+            );
+        }
+        anyhow::ensure!(
+            self.stall_warning_seconds < self.response_idle_timeout_seconds,
+            "{prefix}.stall_warning_seconds must be shorter than response_idle_timeout_seconds"
+        );
+        anyhow::ensure!(
+            self.max_attempts > 0,
+            "{prefix}.max_attempts must be greater than zero"
+        );
+        Ok(())
     }
 }
 
@@ -407,6 +472,7 @@ pub struct ProviderEndpoint {
     pub base_url: String,
     pub(crate) api_key: LiteralApiKey,
     pub supports_websockets: bool,
+    pub network: NetworkConfig,
     /// Optional provider-specific header carrying the persistent conversation ID.
     pub session_id_header: Option<String>,
     pub compatibility: ResponsesCompatibilityConfig,
@@ -433,6 +499,7 @@ impl fmt::Debug for ProviderEndpoint {
             .field("base_url", &self.redacted_base_url())
             .field("api_key", &self.api_key)
             .field("supports_websockets", &self.supports_websockets)
+            .field("network", &self.network)
             .field("session_id_header", &self.session_id_header)
             .field("compatibility", &self.compatibility)
             .field("additional_params", &self.additional_params)
@@ -657,6 +724,7 @@ mod tests {
             base_url: base_url.to_string(),
             api_key: LiteralApiKey::new(key),
             supports_websockets: true,
+            network: Default::default(),
             session_id_header: None,
             models: BTreeMap::from([
                 ("gpt-5.6-sol".to_string(), model(272_000)),
@@ -735,6 +803,73 @@ mod tests {
                 .endpoint
                 .supports_websockets
         );
+    }
+
+    #[test]
+    fn network_defaults_validation_and_all_role_profiles() {
+        let mut config = provider("https://example.test/responses", "key");
+        let mut value = serde_json::to_value(&config).unwrap();
+        value.as_object_mut().unwrap().remove("network");
+        let omitted: ProviderConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(omitted.network, NetworkConfig::default());
+        value["network"] = json!({"response_idle_timeout_seconds":600});
+        let partial: ProviderConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(partial.network.stall_warning_seconds, 30);
+        assert_eq!(partial.network.response_idle_timeout_seconds, 600);
+        for field in [
+            "connect_timeout_seconds",
+            "request_start_timeout_seconds",
+            "stall_warning_seconds",
+            "response_idle_timeout_seconds",
+            "max_attempts",
+        ] {
+            let mut network = serde_json::to_value(NetworkConfig::default()).unwrap();
+            network[field] = json!(0);
+            let network: NetworkConfig = serde_json::from_value(network).unwrap();
+            assert!(network.validate("test").is_err(), "{field}");
+        }
+        for network in [
+            NetworkConfig {
+                connect_timeout_seconds: u64::MAX,
+                ..NetworkConfig::default()
+            },
+            NetworkConfig {
+                stall_warning_seconds: 180,
+                ..NetworkConfig::default()
+            },
+            NetworkConfig {
+                stall_warning_seconds: 181,
+                ..NetworkConfig::default()
+            },
+        ] {
+            assert!(network.validate("test").is_err());
+        }
+        for invalid in [
+            json!({"max_attempts":-1}),
+            json!({"response_idle_timeout_seconds":0.5}),
+            json!({"unknown":3}),
+        ] {
+            assert!(serde_json::from_value::<NetworkConfig>(invalid).is_err());
+        }
+        config.network = partial.network;
+        let routing = ModelRouting::resolve(
+            &BTreeMap::from([
+                ("openai".into(), config.clone()),
+                ("gateway".into(), config.clone()),
+            ]),
+            &modes(),
+            90,
+        )
+        .unwrap();
+        for role in ModelRole::ALL {
+            assert_eq!(routing.for_role(role).endpoint.network, config.network);
+        }
+        for profile in routing.catalog.values() {
+            assert_eq!(
+                profile.endpoint.network, config.network,
+                "model switches select the same provider-owned policy"
+            );
+        }
     }
 
     #[test]

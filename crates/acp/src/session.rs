@@ -69,6 +69,8 @@ struct State {
     skill_requests: HashMap<String, PendingSkillRequest>,
     last_terminal_turn: Option<TurnId>,
     streams: HashMap<TurnId, StreamSegments>,
+    network_scope: Option<(TurnId, usize, usize)>,
+    network_status: Option<zevria_session_api::event::NetworkStatus>,
     known_tools: KnownTools,
     hosted_search: crate::project::HostedSearchProjection,
     subtasks: crate::project::SubtaskProjection,
@@ -76,6 +78,29 @@ struct State {
     unavailable: Option<String>,
     response_usage: Option<ResponseUsageSnapshot>,
     context_usage: Option<ContextTokenSnapshot>,
+}
+
+impl State {
+    fn accept_network(&mut self, turn_id: TurnId, call: usize, attempt: usize) -> bool {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.turn_id == Some(turn_id))
+            || self.last_terminal_turn.is_some_and(|last| turn_id <= last)
+            || !self
+                .network_scope
+                .is_some_and(|(id, current_call, current_attempt)| {
+                    id == turn_id
+                        && call == current_call
+                        && attempt > 0
+                        && attempt >= current_attempt
+                })
+        {
+            return false;
+        }
+        self.network_scope = Some((turn_id, call, attempt));
+        true
+    }
 }
 
 struct PendingMode {
@@ -169,6 +194,8 @@ impl LiveSession {
                 skill_requests: HashMap::new(),
                 last_terminal_turn: None,
                 streams: HashMap::new(),
+                network_scope: None,
+                network_status: None,
                 known_tools: KnownTools::new(),
                 hosted_search: crate::project::HostedSearchProjection::default(),
                 subtasks: crate::project::SubtaskProjection::default(),
@@ -948,13 +975,28 @@ impl LiveSession {
                         counts,
                     })?;
             }
-            // Native presentation telemetry; ACP prompt/status surfaces are unchanged.
-            SessionEvent::ModelCallStarted { .. } => {}
+            SessionEvent::ModelCallStarted { turn_id, call } => {
+                let mut state = self.state.lock().expect("ACP session state poisoned");
+                if call > 0
+                    && state
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.turn_id == Some(turn_id))
+                    && state
+                        .network_scope
+                        .is_none_or(|(id, previous, _)| id == turn_id && call > previous)
+                {
+                    state.network_scope = Some((turn_id, call, 0));
+                    state.network_status = None;
+                }
+            }
             SessionEvent::TurnStarted { turn_id, mode, .. } => {
                 let mut state = self.state.lock().expect("ACP session state poisoned");
                 // ModeChanged owns explicit workflow selection. A turn's
                 // execution mode is not a replacement for that selection.
                 state.streams.entry(turn_id).or_default().reset();
+                state.network_scope = Some((turn_id, 1, 0));
+                state.network_status = None;
                 if let Some(pending) = &mut state.pending {
                     pending.turn_id = Some(turn_id);
                     pending.mode = mode;
@@ -1092,13 +1134,88 @@ impl LiveSession {
                 self.send_update(diagnostic_update(Some(turn_id), "failure", &error))?;
                 self.handle_turn_terminal(turn_id, false, Some(error))?;
             }
+            SessionEvent::NetworkStatus {
+                turn_id,
+                call,
+                attempt,
+                max_attempts,
+                transport,
+                status,
+            } => {
+                use zevria_session_api::event::NetworkStatus;
+                let report = {
+                    let mut state = self.state.lock().expect("ACP session state poisoned");
+                    if !state.accept_network(turn_id, call, attempt)
+                        || state.network_status.as_ref() == Some(&status)
+                    {
+                        false
+                    } else {
+                        // Routine first-attempt phases are internal metadata,
+                        // not diagnostics. Still acknowledge recovery from a
+                        // displayed quiet warning, even on the first attempt.
+                        let report = match &status {
+                            NetworkStatus::Quiet { .. } => true,
+                            NetworkStatus::ProgressResumed => {
+                                attempt > 1
+                                    || matches!(
+                                        state.network_status,
+                                        Some(NetworkStatus::Quiet { .. })
+                                    )
+                            }
+                            NetworkStatus::AttemptStarted
+                            | NetworkStatus::Connecting
+                            | NetworkStatus::AwaitingResponse => attempt > 1,
+                        };
+                        state.network_status = Some(status.clone());
+                        report
+                    }
+                };
+                if report {
+                    let message = match status {
+                        NetworkStatus::AttemptStarted => {
+                            format!("Starting {transport:?} attempt {attempt}/{max_attempts}")
+                        }
+                        NetworkStatus::Connecting => format!(
+                            "Connecting via {transport:?} · attempt {attempt}/{max_attempts}"
+                        ),
+                        NetworkStatus::AwaitingResponse => {
+                            format!("Awaiting response · attempt {attempt}/{max_attempts}")
+                        }
+                        NetworkStatus::Quiet { idle_for, retry_in } => format!(
+                            "No response progress for {}s · {} in {}m {}s · attempt {attempt}/{max_attempts}",
+                            idle_for.as_secs(),
+                            if attempt < max_attempts {
+                                "automatic retry"
+                            } else {
+                                "request will stop"
+                            },
+                            retry_in.as_secs() / 60,
+                            retry_in.as_secs() % 60
+                        ),
+                        NetworkStatus::ProgressResumed => "Response progress resumed".to_string(),
+                    };
+                    self.send_update(diagnostic_update(
+                        Some(turn_id),
+                        &format!("network_{call}_{attempt}"),
+                        &message,
+                    ))?;
+                }
+            }
             SessionEvent::TurnRetrying {
                 turn_id,
+                call,
                 attempt,
                 max_attempts,
                 retry_after,
                 error,
             } => {
+                {
+                    let mut state = self.state.lock().expect("ACP session state poisoned");
+                    if !state.accept_network(turn_id, call, attempt) {
+                        return Ok(());
+                    }
+                    state.network_status = None;
+                }
                 self.send_update(retry_diagnostic(
                     turn_id,
                     attempt,
@@ -1260,6 +1377,10 @@ impl LiveSession {
                 return Ok(());
             }
             state.last_terminal_turn = Some(turn_id);
+            if state.network_scope.is_some_and(|(id, _, _)| id == turn_id) {
+                state.network_scope = None;
+                state.network_status = None;
+            }
             let ready_artifact = match &state.plan {
                 PlanWorkflowState::Ready { artifact } => Some(artifact.clone()),
                 _ => None,

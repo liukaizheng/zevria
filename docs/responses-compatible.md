@@ -143,6 +143,13 @@ auxiliary endpoints; `additional_params` can hold gateway-specific fields.
       "base_url": "https://api.openai.com/v1/responses",
       "api_key": "replace-with-api-key",
       "supports_websockets": true,
+      "network": {
+        "connect_timeout_seconds": 30,
+        "request_start_timeout_seconds": 30,
+        "stall_warning_seconds": 30,
+        "response_idle_timeout_seconds": 180,
+        "max_attempts": 4
+      },
       "compatibility": {
         "send_reasoning": true,
         "send_reasoning_encrypted_content": true,
@@ -476,6 +483,53 @@ Changing compatibility is a genuine request-property/input-shape boundary.
 - `false` skips WebSocket entirely and sends complete history over HTTP/SSE.
 
 Zevria does not support alternate vendor socket dialects.
+
+### Completion networking and automatic recovery
+
+`providers.<name>.network` is optional; omission (including individual omitted
+fields) enables the defaults shown above. Durations are positive integer seconds
+that must fit monotonic deadlines. The warning must be shorter than the idle
+limit, and `max_attempts` must be positive. Zero does not mean unlimited.
+
+A completion warns after 30 seconds of no meaningful response progress and
+retries its immutable prepared request after 180 seconds of inactivity. The
+watchdog covers the wait for the first meaningful event and all subsequent
+streaming. Reasoning, function arguments, and hosted-search advancement count;
+keepalives, unknown metadata, repeated statuses, and late prior-response events
+do not. A steadily progressing response can run longer than three minutes.
+Increase the idle threshold for unusually quiet reasoning models.
+
+Connection establishment and request start each have independent 30-second
+limits. HTTP request start ends at response headers; WebSocket request start
+ends when the socket write is acknowledged. There is no generic HTTP total-body
+timeout for completions. Exact token counts and remote compaction retain their
+separate bounded request timeouts, while synthetic summary completions inherit
+the watchdog (without normal UI progress).
+
+Four attempts **total**, including the initial attempt, cover connection,
+dispatch, and response consumption across both transports. Reconnect handshake
+failures and stale-ID resends consume that same budget. WebSocket gets at most
+one same-transport recovery before sticky HTTP fallback, reserving an HTTP attempt
+when possible; HTTP 426 falls back immediately. Bounded jittered exponential
+backoff is announced with the exact delay used. Cancellation interrupts all waits.
+Exhaustion returns one actionable failure, not an automatic restart of the turn.
+
+Healthy first attempts keep the ordinary running/streaming display, without
+connection-phase details or ACP network diagnostics. Those details appear only
+for quiet warnings and recovery. Quiet warnings preserve the preview and state
+uncertainty rather than claiming a disconnection. Actual retries replace incomplete previews, not resume tokens.
+Incomplete answers and partial function calls are never committed or executed;
+completed local tool work is not rerun. Upstream generation or hosted searches
+may nevertheless repeat and incur charges because disconnecting cannot prove
+that remote work stopped. Provider timers do not apply to local tools, approval
+waits, parked healthy sockets, or external ACP agents; external-worker Plan and
+Review deadline policies are unchanged.
+
+Network policy follows the resolved provider profile through root sessions,
+model switches, and internal Build/Explore children. Timing, retry counts, and
+network statuses are never included in Responses payloads, instructions, tool
+definitions/order, prepared input, routing headers, or `prompt_cache_key`. The
+provider's cacheable prompt prefix remains unchanged.
 
 When enabled, `prompt_cache_key` is a 64-character lowercase SHA-256 digest.
 Its length-delimited inputs are a format-version marker, the session or child

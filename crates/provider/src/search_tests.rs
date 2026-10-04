@@ -438,11 +438,12 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
 }
 
 #[tokio::test]
-async fn http_retry_keeps_distinct_observed_attempts_and_identical_controls() {
+async fn http_idle_retry_keeps_distinct_observed_attempts_and_identical_controls() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/responses", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
+        let mut stalled = Vec::new();
         for index in 0..2 {
             let (mut socket, _) = listener.accept().await.unwrap();
             requests.push(receive_http_json(&mut socket).await.body);
@@ -473,7 +474,12 @@ async fn http_retry_keeps_distinct_observed_attempts_and_identical_controls() {
                     .to_string(),
                 ));
             }
-            send_http_response(&mut socket, "200 OK", "text/event-stream", body).await;
+            if index == 0 {
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len() + 1000, body).as_bytes()).await.unwrap();
+                stalled.push(socket);
+            } else {
+                send_http_response(&mut socket, "200 OK", "text/event-stream", body).await;
+            }
         }
         assert_eq!(requests[0], requests[1]);
     });
@@ -486,7 +492,10 @@ async fn http_retry_keeps_distinct_observed_attempts_and_identical_controls() {
         &mut openai,
         &mut state,
         &progress,
-        &fast_recovery_policy(1),
+        &RecoveryPolicy {
+            response_idle_timeout: std::time::Duration::from_millis(100),
+            ..fast_recovery_policy(2)
+        },
     )
     .await
     .unwrap();
@@ -562,7 +571,7 @@ async fn websocket_to_http_fallback_retains_activity_and_search_definition() {
         &mut openai,
         &mut AttemptState::default(),
         &progress,
-        &fast_recovery_policy(0),
+        &fast_recovery_policy(2),
     )
     .await
     .unwrap();
@@ -678,7 +687,7 @@ async fn stale_continuation_keeps_native_search_replay_and_attempt_identity() {
     run_turn("first question", &mut openai, &mut state, &progress)
         .await
         .unwrap();
-    run_turn("second question", &mut openai, &mut state, &progress)
+    recovery_followup("second question", &mut openai, &mut state, &progress)
         .await
         .unwrap();
     server.await.unwrap();

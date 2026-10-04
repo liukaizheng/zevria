@@ -126,7 +126,17 @@ impl App {
             .conversation_cache()
             .streaming()
             .map_or(0, |(_, height)| height);
-        let status_lines = operation_status_lines(&parts.tail);
+        let mut status_lines = operation_status_lines(&parts.tail);
+        if let Some((message, warning)) = &parts.network_status {
+            status_lines.push(Line::from(Span::styled(
+                message.clone(),
+                Style::default().fg(if *warning {
+                    theme().feedback.warning
+                } else {
+                    theme().text.muted
+                }),
+            )));
+        }
         let status_height = wrapped_height(&status_lines, wrap_width);
         // Committed entries already own a trailing gap. A streamed message or
         // header-only tail needs a blank row before the roleless status block.
@@ -352,7 +362,7 @@ fn operation_status_lines(tail: &ConversationTail<'_>) -> Vec<Line<'static>> {
         } => {
             let delay = match countdown {
                 RetryCountdown::Immediate => "reconnecting now".to_string(),
-                RetryCountdown::Elapsed => "reconnecting…".to_string(),
+                RetryCountdown::Elapsed => "waiting for next attempt to start".to_string(),
                 RetryCountdown::Pending(remaining) => {
                     let seconds = remaining
                         .as_secs()
@@ -380,7 +390,7 @@ fn operation_status_lines(tail: &ConversationTail<'_>) -> Vec<Line<'static>> {
     ])];
     if let ConversationTail::Retrying { notice, .. } = tail {
         push_plain_text(
-            &format!("connection lost: {}", notice.error),
+            &format!("request interrupted: {}", notice.error),
             crate::chrome::dim_style(),
             &mut lines,
         );

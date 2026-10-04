@@ -160,38 +160,62 @@ is an exact extension after target-specific projection.
 
 ## WebSocket lifecycle and recovery
 
-When `supports_websockets = true`, slot initialization performs a best-effort,
-30-second handshake. A successful socket is parked in a continuously pumped
-session that handles Ping/Pong and terminal frames while no model future is
-actively reading.
+Slot initialization performs local setup only. With `supports_websockets = true`,
+the first completion establishes its socket **inside that request's attempt
+budget**. Failed startup and replacement handshakes consume attempts too. A
+successful socket is parked in a continuously pumped session that handles
+Ping/Pong and terminal frames between model calls; parked healthy sockets have
+no inactivity timer.
 
-- HTTP 426 immediately selects sticky HTTP for that slot.
-- Other startup handshake failures leave WebSocket preferred; the first model
-  request gets the normal bounded reconnect path.
-- A successful replacement socket increments generation, clears continuation,
-  and forces complete replay.
-- Failed replacement handshakes preserve the prior parked state until retry or
-  fallback; no half-installed generation is exposed.
+Each prepared completion gets **four attempts total by default**, including its
+initial connection/dispatch/response attempt, across WebSocket and HTTP together.
+There is at most one same-transport WebSocket recovery, with an HTTP attempt
+reserved when the remaining budget permits. HTTP 426 selects sticky HTTP
+immediately; HTTP-only configuration skips WebSocket entirely. A stale-ID full
+resend also consumes an attempt. Fallback never starts a new budget. Authentication,
+configuration, malformed protocol, semantic failure, and input-size rejection
+remain terminal rather than triggering transport recovery.
 
-Sessions have no model-call count ceiling. Independently, each logical model
-request has bounded transport recovery over the same immutable request. The
-adapter bounds reconnect attempts, backoff, send timeout, first-event timeout,
-and diagnostic body size. There is no mid-stream inactivity deadline after the
-first valid event.
+Connection establishment and request-start work each default to 30-second
+limits. Request start means the WebSocket write acknowledgement or HTTP response
+headers. After that, one monotonic progress watchdog covers both the first event
+and the whole response: warn after **30 seconds without meaningful progress**,
+then abandon the attempt after **180 seconds of inactivity**. Accepted lifecycle,
+text/reasoning/refusal, function arguments, output-item/content-part advancement,
+and hosted-search advancement reset it. Repeated statuses without advancement,
+Ping/Pong, comments, empty SSE data, `[DONE]` without a terminal response, ignored
+metadata, unknown events, and prior-response events do not. Optional sequence
+numbers help deduplicate events but are not required from compatible gateways.
 
-When WebSocket recovery is exhausted, only that profile switches permanently
-to HTTP for the router's lifetime. Other slots retain their own WebSocket and
-continuation state.
+There is **no total duration limit on a progressing completion**. Users of quiet
+reasoning models can increase `providers.<name>.network.response_idle_timeout_seconds`.
+The complete policy is documented in `responses-compatible.md`. Summary completions
+use this watchdog; token counting and remote compaction retain their separate
+non-streaming request deadlines. Local tools, approval waits, and external ACP
+agents are not subject to these completion timers. External-agent Review deadlines
+and the unbounded Plan-worker policy are unchanged.
+
+Timeout follows normal attempt finalization, including hosted-search checkpoint
+persistence. HTTP drops its old response stream; WebSocket terminates its pump and
+invalidates the ambiguous continuation before replay on a fresh generation.
+Cancellation interrupts every phase, including backoff. Budget exhaustion yields
+one actionable failure; it never restarts the entire turn. Only that profile's
+fallback is sticky; other slots retain independent state.
 
 ### Retry presentation contract
 
 Both HTTP and WebSocket recovery announce the actual delay before the next
 attempt as `SessionEvent::TurnRetrying.retry_after`. The announced duration is
-the same value used for backoff sleep. Zero means immediate reconnect, notably
-when a close was already observed on a parked socket before the next request;
-otherwise the existing bounded exponential backoff and recovery budgets are
-unchanged. This internal typed event adds no ACP wire-schema field and does not
-change replay, tool execution, cancellation, error classification, or fallback.
+the same value used for backoff sleep: capped exponential backoff with bounded
+75–100% jitter. The attempt number identifies the upcoming attempt within the
+shared total budget. A parked reconnect starts attempt one rather than spending
+a separate retry cycle. `NetworkStatus` reports attempt start, connecting,
+awaiting response, quiet warning, and resumed progress, correlated by turn,
+model-call number, and attempt. These events are presentation metadata, not
+assistant messages or model input. Frontends still track all phases for lifecycle
+and stale-event guards, but hide routine first-attempt start/connect/awaiting
+updates. The TUI keeps its ordinary running/streaming display until a quiet
+warning or retry occurs; each new model call starts quietly again.
 
 The TUI uses receipt time and its monotonic presentation clock to derive a live
 countdown in a non-persisted, roleless status block. It has no Assistant header
@@ -204,22 +228,30 @@ accents, and chat separators. The status and its blank boundary stay outside
 message caches and selection/copy history.
 
 A retry headline looks like
-`◐ ⚠ reconnecting (attempt 2/5) · next attempt in 4s · 12s`, with warning-colored
+`◐ ⚠ reconnecting (attempt 2/4) · next attempt in 1s · 12s`, with warning-colored
 text and plain muted connection-error details below it. A positive remainder
 rounds up (500 ms displays `next attempt in 1s`); zero announced delay displays
-`reconnecting now`; expired nonzero backoff displays `reconnecting…`, not an
-assertion that the handshake started or succeeded. The `◐ ◓ ◑ ◒` spinner
+`reconnecting now`; elapsed backoff says it is waiting for the next attempt to
+start. The actual attempt-start event removes the countdown and displays the
+transport phase, rather than leaving an expired reconnect countdown visible. The `◐ ◓ ◑ ◒` spinner
 animates in 250 ms frames throughout positive backoff, immediate reconnect,
 and expired backoff, as it does for waiting/tool execution, streaming, and
 compaction. Queueing and busy, visible-pane-only redraws can introduce small
-display lag. Accepted progress replaces the notice, and the whole-operation
-elapsed time continues through recovery and tools.
+display lag. A quiet warning is separate from the preview, for example:
+`No response progress for 30s · automatic retry in 2m 30s.` It does not claim the
+network is disconnected or erase text already shown. Resumed progress clears it.
+New calls, completion, failure, and cancellation clear stale status; child panes
+remain isolated. The whole-operation elapsed time continues through recovery and
+tools. The worker-only `/retry` command has no new root-turn meaning.
 
 ACP projects a one-time diagnostic through its existing bounded retry channel:
 `Provider retry N/M (next attempt in Ss): <error>` for positive delay (seconds
-rounded up), or the existing `Provider retry N/M: <error>` for zero. Identifiers,
-stream-reset semantics, and diagnostic retention are unchanged; ACP-only panes
-receive no fabricated native timer. Synthetic compaction reporters continue
+rounded up), or the existing `Provider retry N/M: <error>` for zero. Low-volume
+network transitions use that diagnostic mechanism without resetting the answer
+stream. Routine first-attempt phases produce no diagnostics, including initial
+progress. Resumed progress is reported after a quiet warning or during recovery.
+Actual retries retain segment-reset semantics. Stale turn/call/attempt
+updates are ignored; ACP-only panes receive no fabricated native timer. Synthetic compaction reporters continue
 suppressing provider progress and retries: compaction shows its elapsed line,
 not internal summary-request recovery details.
 
@@ -230,10 +262,16 @@ relay error), the slot:
 
 1. invalidates continuation with `stale_response_id`;
 2. clears the partial preview;
-3. resends the already prepared complete request once on the same socket.
+3. spends the next attempt on the already prepared complete request, on the same
+   socket only if the WebSocket recovery allowance and shared budget permit it.
 
 A replacement socket never receives an old response ID first; reconnect always
-starts with complete replay.
+starts with complete replay. Recovery is a fresh generation attempt, **not**
+token-level resumption via `previous_response_id`. Failed partial answers never
+enter replay input or become completed assistant records; partial tool calls
+never dispatch. Previously completed local tools and durable records are untouched.
+Dropping a connection cannot prove upstream computation stopped: retries may
+repeat provider-side generation or hosted searches and incur additional charges.
 
 ## HTTP/SSE behavior
 
@@ -241,10 +279,11 @@ When WebSockets are disabled or a slot has fallen back, every request is an
 HTTP POST to that provider's exact configured Responses URL. HTTP never sends
 `previous_response_id`; it always sends the complete target-specific input.
 
-The response must be `text/event-stream`. Headers and the first syntactically
-valid nonempty event must arrive within their bounded deadlines. HTTP 5xx,
-request errors, stream loss before terminal output, and first-event timeout use
-bounded retry. Terminal 4xx, malformed events, or semantic failed/incomplete
+The response must be `text/event-stream`. Headers have the request-start deadline;
+meaningful response progress has the shared warning/inactivity deadlines throughout
+streaming. The SSE parser future stays alive across warnings, preserving partial
+frames. HTTP 5xx, request errors, stream loss before terminal output, and typed
+`response_idle_timeout` failures use the shared bounded retry policy. Terminal 4xx, malformed events, or semantic failed/incomplete
 Responses fail without retry. Error bodies are bounded to 4 KiB.
 
 Streaming previews, native output capture, usage events, and replay-derived

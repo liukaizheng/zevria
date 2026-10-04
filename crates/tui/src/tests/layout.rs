@@ -442,6 +442,7 @@ fn transcript_entry_and_tail_accents_follow_semantic_colors() {
     let mut retrying = App::new();
     start_empty_turn(&mut retrying, TEST_TURN_ID, SessionMode::Build);
     retrying.reduce_without_effects(SessionEvent::TurnRetrying {
+        call: 1,
         turn_id: TEST_TURN_ID,
         attempt: 2,
         max_attempts: 4,
@@ -449,7 +450,10 @@ fn transcript_entry_and_tail_accents_follow_semantic_colors() {
         error: "offline".to_string(),
     });
     assert_eq!(gutter_cell(&mut retrying, "reconnecting").symbol(), " ");
-    assert_eq!(gutter_cell(&mut retrying, "connection lost:").symbol(), " ");
+    assert_eq!(
+        gutter_cell(&mut retrying, "request interrupted:").symbol(),
+        " "
+    );
 
     let mut compacting = App::new();
     compacting.reduce_without_effects(SessionEvent::CompactionStarted {
@@ -1249,6 +1253,7 @@ fn timer_only_tails_reuse_one_blank_history_gap_without_a_leading_gap() {
     for event in [
         None,
         Some(SessionEvent::TurnRetrying {
+            call: 1,
             turn_id: TEST_TURN_ID,
             attempt: 2,
             max_attempts: 4,
@@ -1465,6 +1470,7 @@ fn wrapped_tail_boundaries_project_correctly_when_scrolled_or_bottom_followed() 
             .into(),
         },
         SessionEvent::TurnRetrying {
+            call: 1,
             turn_id: TEST_TURN_ID,
             attempt: 2,
             max_attempts: 5,
@@ -1517,7 +1523,7 @@ fn wrapped_tail_boundaries_project_correctly_when_scrolled_or_bottom_followed() 
                 let status_text = status_text.split_whitespace().collect::<Vec<_>>().join(" ");
                 assert_eq!(
                     status_text,
-                    "◐ ⚠ reconnecting (attempt 2/5) · next attempt in 4s · 0s connection lost: **literal error** with enough words to wrap last error row"
+                    "◐ ⚠ reconnecting (attempt 2/5) · next attempt in 4s · 0s request interrupted: **literal error** with enough words to wrap last error row"
                 );
             }
             for height in [1, 4, 8, 12, 20] {

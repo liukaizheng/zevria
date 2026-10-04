@@ -1124,9 +1124,8 @@ impl App {
                 path.display()
             )),
             SessionEvent::AssistantStreamUpdated { turn_id, snapshot } => {
-                if !self.session.progress(turn_id) { return effects; }
+                if !self.session.preview_progress(turn_id) { return effects; }
                 if let Some(attempt) = snapshot.attempt {
-                    let _ = self.session.clear_stream(turn_id);
                     self.conversation.update_native_web_search(attempt, self.session.call_header());
                 } else if let Some(message) = snapshot.message.and_then(conversation::without_tool_calls) {
                     self.session.stream(turn_id, message);
@@ -1268,15 +1267,20 @@ impl App {
                 self.conversation
                     .push_error("Turn cancelled".to_string());
             }
+            SessionEvent::NetworkStatus { turn_id, call, attempt, max_attempts, transport, status } => {
+                self.session.network_status(turn_id, call, attempt, max_attempts, transport, status);
+            }
             SessionEvent::TurnRetrying {
                 turn_id,
+                call,
                 attempt,
                 max_attempts,
                 retry_after,
                 error,
             } => {
-                self.session
-                    .retry(turn_id, attempt, max_attempts, retry_after, error);
+                if self.session.accepts_network(turn_id, call, attempt) {
+                    self.session.retry(turn_id, attempt, max_attempts, retry_after, error);
+                }
             }
         }
         effects

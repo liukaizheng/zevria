@@ -1466,6 +1466,7 @@ fn semantic_status_precedence_covers_focus_activity_plan_and_warnings() {
     });
     assert_eq!(waiting.status_for_test().primary, "Build · Streaming");
     waiting.reduce_without_effects(SessionEvent::TurnRetrying {
+        call: 1,
         turn_id: TEST_TURN_ID,
         attempt: 2,
         max_attempts: 4,

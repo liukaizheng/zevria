@@ -1,4 +1,41 @@
 use crate::*;
+
+#[tokio::test]
+async fn network_status_is_call_scoped_and_does_not_fence_unread_preview() {
+    use crate::event::{NetworkStatus, NetworkTransport};
+    let (sender, mut receiver) = session_event_channel(8);
+    let reporter = ProgressReporter::new(sender).with_model_call(3);
+    reporter.stream_updated(Message::assistant("keep this preview"));
+    reporter
+        .network_status(
+            2,
+            4,
+            NetworkTransport::Http,
+            NetworkStatus::Quiet {
+                idle_for: std::time::Duration::from_secs(30),
+                retry_in: std::time::Duration::from_secs(150),
+            },
+        )
+        .await;
+    assert!(matches!(
+        receiver.recv().await,
+        Some(SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+            call: 3,
+            attempt: 2,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        receiver.recv().await,
+        Some(SessionUpdate::Streams(SessionStreamBatch {
+            root: Some(SessionStreamState {
+                message: Some(Message::Assistant { .. }),
+                ..
+            }),
+            ..
+        }))
+    ));
+}
 #[tokio::test]
 async fn retry_reporter_forwards_delay_and_silent_reporters_suppress_progress() {
     let (sender, mut receiver) = session_event_channel(8);
@@ -16,6 +53,7 @@ async fn retry_reporter_forwards_delay_and_silent_reporters_suppress_progress() 
     assert_eq!(
         receiver.try_recv(),
         Ok(SessionUpdate::Lifecycle(SessionEvent::TurnRetrying {
+            call: 1,
             turn_id: turn.id,
             attempt: 2,
             max_attempts: 5,
@@ -33,6 +71,14 @@ async fn retry_reporter_forwards_delay_and_silent_reporters_suppress_progress() 
     );
     silent
         .retrying(1, 5, retry_after, "hidden summary retry".into())
+        .await;
+    silent
+        .network_status(
+            1,
+            4,
+            crate::event::NetworkTransport::Http,
+            crate::event::NetworkStatus::Connecting,
+        )
         .await;
     silent.stream_updated(Message::assistant("hidden summary"));
     silent.stream_cleared();
@@ -429,6 +475,7 @@ async fn unread_root_lifecycle_events_fence_older_streams() {
         },
         SessionEvent::TurnCancelled { turn_id },
         SessionEvent::TurnRetrying {
+            call: 1,
             turn_id,
             attempt: 1,
             max_attempts: 3,

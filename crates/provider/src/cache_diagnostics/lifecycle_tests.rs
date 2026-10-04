@@ -372,7 +372,7 @@ async fn baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_rese
         assert!(matches!(provider.compact(compact).await.unwrap(), CompactResult::Replacement(_)));
         assert_eq!(inspect(&provider), before, "maintenance cannot dispatch or advance diagnostic state");
         assert_eq!(saved(), before_disk, "maintenance cannot replace persistent state");
-        let policy = RecoveryPolicy { max_reconnect_attempts: 1, backoff_base: std::time::Duration::ZERO, backoff_cap: std::time::Duration::ZERO, ..Default::default() };
+        let policy = RecoveryPolicy { max_attempts: 2, backoff_base: std::time::Duration::ZERO, backoff_cap: std::time::Duration::ZERO, ..Default::default() };
         let mut state = AttemptState::default();
         run_turn_request_with_recovery(next_request(), &mut provider, &mut state, &discard_updates(), &policy).await.unwrap();
         let after = inspect(&provider);
@@ -381,7 +381,7 @@ async fn baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_rese
         assert_ne!(after_disk, before_disk);
         assert_ne!(after.0, before.0);
         assert_eq!(after.1, 4);
-        let no_retry = RecoveryPolicy { max_reconnect_attempts: 0, ..policy };
+        let no_retry = RecoveryPolicy { max_attempts: 1, ..policy };
         for _ in 0..2 {
             assert!(run_turn_request_with_recovery(next_request(), &mut provider, &mut state, &discard_updates(), &no_retry).await.is_err());
             assert_eq!(inspect(&provider).0, after.0, "invalid/partial attempts cannot promote baseline");

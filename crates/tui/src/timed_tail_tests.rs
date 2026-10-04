@@ -34,12 +34,320 @@ fn elapsed(app: &mut App) -> Option<Duration> {
 
 fn retry_event(attempt: usize, delay: Duration, error: &str) -> SessionEvent {
     SessionEvent::TurnRetrying {
+        call: 1,
         turn_id: TEST_TURN_ID,
         attempt,
         max_attempts: 5,
         retry_after: delay,
         error: error.into(),
     }
+}
+
+fn network_event(
+    call: usize,
+    attempt: usize,
+    status: zevria_session_api::event::NetworkStatus,
+) -> SessionEvent {
+    SessionEvent::NetworkStatus {
+        turn_id: TEST_TURN_ID,
+        call,
+        attempt,
+        max_attempts: 4,
+        transport: zevria_session_api::event::NetworkTransport::Http,
+        status,
+    }
+}
+
+#[test]
+fn routine_first_attempts_keep_the_ordinary_display_for_each_model_call() {
+    use zevria_session_api::event::{NetworkStatus, NetworkTransport};
+    for transport in [NetworkTransport::WebSocket, NetworkTransport::Http] {
+        let mut app = App::new();
+        let now = Instant::now();
+        start_at(&mut app, now);
+        let status = |call, attempt, status| SessionEvent::NetworkStatus {
+            turn_id: TEST_TURN_ID,
+            call,
+            attempt,
+            max_attempts: 4,
+            transport,
+            status,
+        };
+        for call in [1, 2] {
+            reduce_at(
+                &mut app,
+                SessionEvent::ModelCallStarted {
+                    turn_id: TEST_TURN_ID,
+                    call,
+                },
+                now,
+            );
+            let waiting = rendered_text(&mut app, 160, 20);
+            assert!(waiting.contains("running…"));
+            for phase in [
+                NetworkStatus::AttemptStarted,
+                NetworkStatus::Connecting,
+                NetworkStatus::AwaitingResponse,
+            ] {
+                reduce_at(&mut app, status(call, 1, phase), now);
+                assert!(app.render_parts().network_status.is_none());
+                assert_eq!(rendered_text(&mut app, 160, 20), waiting);
+            }
+            reduce_at(
+                &mut app,
+                SessionEvent::AssistantStreamUpdated {
+                    turn_id: TEST_TURN_ID,
+                    snapshot: Message::assistant("normal preview").into(),
+                },
+                now,
+            );
+            let streaming = rendered_text(&mut app, 160, 20);
+            reduce_at(
+                &mut app,
+                status(call, 1, NetworkStatus::ProgressResumed),
+                now,
+            );
+            assert_eq!(rendered_text(&mut app, 160, 20), streaming);
+            if call == 1 {
+                // A prior call's recovery must not make the next call noisy.
+                reduce_at(&mut app, retry_event(2, Duration::ZERO, "offline"), now);
+                reduce_at(
+                    &mut app,
+                    status(call, 2, NetworkStatus::AttemptStarted),
+                    now,
+                );
+                assert!(app.render_parts().network_status.is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn retry_attempts_still_show_transport_phases_and_clear_the_countdown() {
+    use zevria_session_api::event::{NetworkStatus, NetworkTransport};
+    for (transport, name) in [
+        (NetworkTransport::WebSocket, "WebSocket"),
+        (NetworkTransport::Http, "HTTP"),
+    ] {
+        let mut app = App::new();
+        let now = Instant::now();
+        start_at(&mut app, now);
+        reduce_at(
+            &mut app,
+            retry_event(2, Duration::from_secs(1), "offline"),
+            now,
+        );
+        let status = |status| SessionEvent::NetworkStatus {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+            attempt: 2,
+            max_attempts: 4,
+            transport,
+            status,
+        };
+        for (phase, text) in [
+            (
+                NetworkStatus::AttemptStarted,
+                format!("Starting {name} attempt"),
+            ),
+            (NetworkStatus::Connecting, format!("Connecting via {name}")),
+            (
+                NetworkStatus::AwaitingResponse,
+                format!("Awaiting {name} response"),
+            ),
+        ] {
+            reduce_at(&mut app, status(phase), now + Duration::from_secs(1));
+            assert!(app.retry_notice().is_none());
+            assert_eq!(
+                app.render_parts().network_status,
+                Some((format!("{text} · attempt 2/4"), false))
+            );
+            let rendered = rendered_text(&mut app, 160, 20);
+            assert!(rendered.contains(&text));
+            assert!(!rendered.contains("reconnecting"));
+        }
+        reduce_at(
+            &mut app,
+            status(NetworkStatus::ProgressResumed),
+            now + Duration::from_secs(2),
+        );
+        assert!(app.render_parts().network_status.is_none());
+    }
+}
+
+#[test]
+fn network_warning_preserves_preview_and_rejects_stale_call_attempt_and_turn_statuses() {
+    use zevria_session_api::event::NetworkStatus;
+    let mut app = App::new();
+    let now = Instant::now();
+    start_at(&mut app, now);
+    reduce_at(
+        &mut app,
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+        },
+        now,
+    );
+    reduce_at(
+        &mut app,
+        network_event(1, 1, NetworkStatus::AttemptStarted),
+        now,
+    );
+    reduce_at(
+        &mut app,
+        SessionEvent::AssistantStreamUpdated {
+            turn_id: TEST_TURN_ID,
+            snapshot: Message::assistant("preview stays visible").into(),
+        },
+        now,
+    );
+    let quiet = NetworkStatus::Quiet {
+        idle_for: Duration::from_secs(30),
+        retry_in: Duration::from_secs(150),
+    };
+    reduce_at(
+        &mut app,
+        network_event(1, 1, quiet.clone()),
+        now + Duration::from_secs(30),
+    );
+    let text = rendered_text(&mut app, 160, 20);
+    assert!(text.contains("preview stays visible"));
+    assert!(text.contains("No response progress for 30s · automatic retry in 2m 30s"));
+    // A coalesced/repeated snapshot is not evidence of classified progress.
+    reduce_at(
+        &mut app,
+        SessionEvent::AssistantStreamUpdated {
+            turn_id: TEST_TURN_ID,
+            snapshot: Message::assistant("preview stays visible").into(),
+        },
+        now + Duration::from_secs(31),
+    );
+    assert!(rendered_text(&mut app, 160, 20).contains("No response progress"));
+    reduce_at(
+        &mut app,
+        network_event(1, 1, NetworkStatus::ProgressResumed),
+        now + Duration::from_secs(35),
+    );
+    assert!(!rendered_text(&mut app, 160, 20).contains("No response progress"));
+    assert!(rendered_text(&mut app, 160, 20).contains("preview stays visible"));
+    reduce_at(
+        &mut app,
+        retry_event(2, Duration::from_secs(1), "idle timeout"),
+        now + Duration::from_secs(180),
+    );
+    reduce_at(
+        &mut app,
+        network_event(1, 2, NetworkStatus::AttemptStarted),
+        now + Duration::from_secs(181),
+    );
+    assert!(app.retry_notice().is_none());
+    assert!(!rendered_text(&mut app, 160, 20).contains("reconnecting"));
+    reduce_at(
+        &mut app,
+        network_event(1, 1, quiet.clone()),
+        now + Duration::from_secs(182),
+    );
+    assert!(!rendered_text(&mut app, 160, 20).contains("No response progress"));
+    reduce_at(
+        &mut app,
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 2,
+        },
+        now + Duration::from_secs(183),
+    );
+    reduce_at(
+        &mut app,
+        network_event(1, 4, quiet.clone()),
+        now + Duration::from_secs(184),
+    );
+    assert!(app.render_parts().network_status.is_none());
+    reduce_at(
+        &mut app,
+        network_event(2, 1, quiet.clone()),
+        now + Duration::from_secs(185),
+    );
+    assert!(app.render_parts().network_status.is_some());
+    reduce_at(
+        &mut app,
+        SessionEvent::TurnCancelled {
+            turn_id: TEST_TURN_ID,
+        },
+        now + Duration::from_secs(186),
+    );
+    reduce_at(
+        &mut app,
+        network_event(2, 1, quiet),
+        now + Duration::from_secs(187),
+    );
+    assert!(app.render_parts().network_status.is_none());
+}
+
+#[test]
+fn child_network_warning_is_isolated_from_root_preview_and_cleared_on_completion() {
+    use zevria_session_api::event::NetworkStatus;
+    let now = Instant::now();
+    let mut root = App::new();
+    start_at(&mut root, now);
+    reduce_at(
+        &mut root,
+        SessionEvent::AssistantStreamUpdated {
+            turn_id: TEST_TURN_ID,
+            snapshot: Message::assistant("root preview").into(),
+        },
+        now,
+    );
+    let mut views = test_session_views(root);
+    let id = SubtaskId::new("network-child");
+    views.apply(SessionEvent::SubtaskLaunched {
+        turn_id: TEST_TURN_ID,
+        call_id: "launch".into(),
+        entry_index: 0,
+        descriptor: child_descriptor("network-child", "network child"),
+    });
+    for event in [
+        SessionEvent::TurnStarted {
+            turn_id: TEST_TURN_ID,
+            message: Message::user("child"),
+            mode: SessionMode::Build,
+        },
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+        },
+        SessionEvent::AssistantStreamUpdated {
+            turn_id: TEST_TURN_ID,
+            snapshot: Message::assistant("child preview").into(),
+        },
+        network_event(
+            1,
+            1,
+            NetworkStatus::Quiet {
+                idle_for: Duration::from_secs(30),
+                retry_in: Duration::from_secs(150),
+            },
+        ),
+    ] {
+        views.apply(SessionEvent::SubtaskSession {
+            id: id.clone(),
+            event: Box::new(event),
+        });
+    }
+    let text = rendered_views_text(&mut views, 160, 25);
+    assert!(text.contains("root preview") && !text.contains("No response progress"));
+    views.handle_event(ctrl('i'));
+    let text = rendered_views_text(&mut views, 160, 25);
+    assert!(text.contains("child preview") && text.contains("No response progress"));
+    views.apply(SessionEvent::SubtaskSession {
+        id,
+        event: Box::new(SessionEvent::TurnCompleted {
+            turn_id: TEST_TURN_ID,
+            message: Message::assistant("child complete"),
+            display_attempt_id: None,
+        }),
+    });
+    assert!(!rendered_views_text(&mut views, 160, 25).contains("No response progress"));
 }
 
 const TIMED_FRAMES: [(u64, &str); 6] = [
@@ -559,19 +867,19 @@ fn retry_countdown_rounds_up_expires_without_recovery_and_uses_warning_style() {
         (500, "◑", "next attempt in 1s"),
         (750, "◒", "next attempt in 1s"),
         (1000, "◐", "next attempt in 1s"),
-        (1500, "◑", "reconnecting…"),
-        (1750, "◒", "reconnecting…"),
-        (2000, "◐", "reconnecting…"),
-        (2249, "◐", "reconnecting…"),
-        (2250, "◓", "reconnecting…"),
-        (2500, "◑", "reconnecting…"),
-        (2750, "◒", "reconnecting…"),
-        (3000, "◐", "reconnecting…"),
+        (1500, "◑", "waiting for next attempt to start"),
+        (1750, "◒", "waiting for next attempt to start"),
+        (2000, "◐", "waiting for next attempt to start"),
+        (2249, "◐", "waiting for next attempt to start"),
+        (2250, "◓", "waiting for next attempt to start"),
+        (2500, "◑", "waiting for next attempt to start"),
+        (2750, "◒", "waiting for next attempt to start"),
+        (3000, "◐", "waiting for next attempt to start"),
     ] {
         app.observe_clock(received + Duration::from_millis(millis));
         let text = rendered_text(&mut app, 120, 14);
         assert!(text.contains(wording));
-        assert!(text.contains("connection lost: **literal error**"));
+        assert!(text.contains("request interrupted: **literal error**"));
         assert!(text.contains("second error line"));
         assert_spinner(&text, glyph);
         assert!(!text.contains("Assistant"));
@@ -596,9 +904,9 @@ fn retry_countdown_rounds_up_expires_without_recovery_and_uses_warning_style() {
     let rows = rendered_rows(&mut app, 120, 14);
     let error_y = rows
         .iter()
-        .position(|row| row.contains("connection lost:"))
+        .position(|row| row.contains("request interrupted:"))
         .unwrap();
-    let error_offset = rows[error_y].find("connection lost:").unwrap();
+    let error_offset = rows[error_y].find("request interrupted:").unwrap();
     let error_x = crate::text::display_width(&rows[error_y][..error_offset]);
     assert_eq!(
         buffer[(error_x as u16, error_y as u16)].fg,

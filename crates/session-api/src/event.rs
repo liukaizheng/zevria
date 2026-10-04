@@ -198,11 +198,21 @@ pub enum SessionEvent {
         turn_id: TurnId,
         snapshot: ContextTokenSnapshot,
     },
+    /// Transient completion networking metadata, never assistant/model input.
+    NetworkStatus {
+        turn_id: TurnId,
+        call: usize,
+        attempt: usize,
+        max_attempts: usize,
+        transport: NetworkTransport,
+        status: NetworkStatus,
+    },
     /// The provider lost its connection mid-turn and is reconnecting; the
     /// turn is still in flight. Frontends should show a transient status,
     /// not a failure.
     TurnRetrying {
         turn_id: TurnId,
+        call: usize,
         attempt: usize,
         max_attempts: usize,
         /// Delay before the next recovery attempt; zero means immediate reconnect.
@@ -718,14 +728,17 @@ impl SessionEventReceiver {
     pub(super) fn lifecycle_update(&mut self, event: SequencedSessionEvent) -> SessionUpdate {
         let existing = hosted_activity_update(&event.event, &mut self.hosted_actions);
         match &event.event {
-            SessionEvent::WebSearchUpdated { .. } => {}
+            SessionEvent::WebSearchUpdated { .. } | SessionEvent::NetworkStatus { .. } => {}
             SessionEvent::AgentRunUpdated {
                 event: AgentRunEvent::ResponseDisplay { .. },
                 ..
             } => {}
             SessionEvent::AgentRunUpdated { .. } if existing => {}
             SessionEvent::SubtaskSession { event, .. }
-                if matches!(event.as_ref(), SessionEvent::WebSearchUpdated { .. }) => {}
+                if matches!(
+                    event.as_ref(),
+                    SessionEvent::WebSearchUpdated { .. } | SessionEvent::NetworkStatus { .. }
+                ) => {}
             SessionEvent::SubtaskSession { id, .. } | SessionEvent::SubtaskStatus { id, .. } => {
                 let fence = self.subtask_fences.entry(id.clone()).or_default();
                 *fence = (*fence).max(event.sequence);
@@ -941,6 +954,25 @@ pub(super) fn agent_preview_segments_match(left: &AgentRunEvent, right: &AgentRu
     }
 }
 
+/// Completion transport, shared by frontend diagnostics and provider recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkTransport {
+    WebSocket,
+    Http,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkStatus {
+    AttemptStarted,
+    Connecting,
+    AwaitingResponse,
+    Quiet {
+        idle_for: std::time::Duration,
+        retry_in: std::time::Duration,
+    },
+    ProgressResumed,
+}
+
 /// Core-owned reliable checkpoint handoff, not a frontend event. The provider
 /// cannot clear a finalized attempt or retry until persistence acknowledges it.
 pub struct AttemptCheckpoint {
@@ -958,6 +990,7 @@ pub struct ProgressReporter {
     pub(super) input_token_limit: u64,
     pub(super) context_window_tokens: u64,
     pub(super) suppressed: bool,
+    call: usize,
     web_search: Arc<Mutex<Vec<crate::WebSearchAttemptRecord>>>,
     checkpoints: Option<mpsc::UnboundedSender<AttemptCheckpoint>>,
 }
@@ -991,6 +1024,7 @@ impl ProgressReporter {
             suppressed: false,
             web_search: Arc::new(Mutex::new(Vec::new())),
             checkpoints: None,
+            call: 1,
         }
     }
 
@@ -1012,6 +1046,34 @@ impl ProgressReporter {
             suppressed: true,
             web_search: Arc::new(Mutex::new(Vec::new())),
             checkpoints: None,
+            call: 1,
+        }
+    }
+
+    pub fn with_model_call(mut self, call: usize) -> Self {
+        self.call = call;
+        self
+    }
+
+    pub async fn network_status(
+        &self,
+        attempt: usize,
+        max_attempts: usize,
+        transport: NetworkTransport,
+        status: NetworkStatus,
+    ) {
+        if !self.suppressed {
+            let _ = self
+                .events
+                .send(SessionEvent::NetworkStatus {
+                    turn_id: self.turn.id,
+                    call: self.call,
+                    attempt,
+                    max_attempts,
+                    transport,
+                    status,
+                })
+                .await;
         }
     }
 
@@ -1157,6 +1219,7 @@ impl ProgressReporter {
             .events
             .send(SessionEvent::TurnRetrying {
                 turn_id: self.turn.id,
+                call: self.call,
                 attempt,
                 max_attempts,
                 retry_after,

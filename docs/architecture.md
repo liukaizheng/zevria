@@ -637,11 +637,20 @@ persisted/model-input data and selection/copy history.
 
 Retry status uses the same info-colored animated `StatusIcon::Running` glyph,
 followed by a warning glyph and warning-colored headline/elapsed text, for example
-`◐ ⚠ reconnecting (attempt 2/5) · next attempt in 4s · 12s`.
+`◐ ⚠ reconnecting (attempt 2/4) · next attempt in 1s · 12s`.
 Plain muted connection-error lines wrap below it. Positive remaining delays
 round up to seconds, zero announced delay means `reconnecting now`, and an
-expired nonzero delay remains `reconnecting…` until accepted progress replaces
-it. Animation continues throughout positive backoff, immediate reconnect, and
+expired nonzero delay says it is waiting for the next attempt to start. A scoped
+`NetworkStatus::AttemptStarted` ends the backoff display and shows the actual
+transport phase during recovery. Routine first-attempt start/connect/awaiting
+statuses remain internally tracked but add no network detail to the ordinary
+running/streaming display. This resets for each model call. Quiet warnings live
+beside the preview rather than replacing it; resumed progress clears them. Turn, model-call, and attempt correlation
+rejects stale statuses, and new calls/terminal outcomes clear them. These
+metadata events do not fence unread stream previews. ACP reports low-volume
+transitions as diagnostics only for quiet warnings, recovery phases, and resumed
+progress after a warning/recovery; healthy first attempts remain silent. Only an
+actual retry resets answer segments. Animation continues throughout positive backoff, immediate reconnect, and
 expired backoff. No retry history is retained in the status block. Scrolling,
 selection/copy history boundaries, and existing status-bar precedence are
 unchanged. Persistence and handoff warnings still own the primary status field;
@@ -1321,6 +1330,43 @@ and Build children use the distinct Builder role. Neither child role is installe
 in the root router merely because its profile is selectable.
 A failure or HTTP fallback in one slot cannot poison another slot.
 
+`providers.<name>.network` in `models.jsonc` follows `ProviderEndpoint` and
+`ResolvedModelProfile` into every runtime, including model switches and internal
+Build/Explore children. Its optional, field-defaulted settings are
+`connect_timeout_seconds: 30`, `request_start_timeout_seconds: 30`,
+`stall_warning_seconds: 30`, `response_idle_timeout_seconds: 180`, and
+`max_attempts: 4`. Durations must be positive and representable, warning shorter
+than inactivity, and attempts positive. Provider `recovery.rs` owns the runtime
+policy, one attempt budget, monotonic progress clock, and capped jittered backoff;
+Responses protocol classification owns meaningful advancement and duplicate/
+prior-response filtering.
+
+Router initialization is local: its first completion's connection establishment
+is inside the same budget as dispatch and streaming. Four total attempts span
+WebSocket, failed handshakes, stale-ID full-input resends, and sticky HTTP fallback.
+At most one same-transport WebSocket recovery is allowed; remaining budget is
+reserved for HTTP when possible. HTTP 426 selects HTTP immediately. One progress
+watchdog runs after request start, before the first event and throughout streaming:
+warn at 30 seconds of silence, abandon/finalize at 180. Arbitrary reads, keepalives,
+unknown metadata, duplicate statuses, and late prior-response events cannot keep
+a response alive. Reasoning/function arguments/hosted-search advancement can;
+there is no total wall-clock limit on useful work. The SSE read future survives
+warnings, and timeouts finalize hosted-search records before retry. Timed-out or
+cancelled WebSocket pumps are terminated and cannot be reused.
+
+Recovery stays inside one provider completion and reuses its immutable
+`PreparedRequest`; it never restarts the core tool loop or redispatches completed
+local tools. Partial tool calls cannot execute or become completed records.
+Remote work may repeat after disconnects. Instructions, tool order, input, routing
+headers, and cache keys are unchanged; network metadata never enters provider
+payloads or the cacheable prefix. Cancellation keeps the existing core select
+and interrupts connect, request start, streaming, warnings, and backoff. Exhaustion
+returns one actionable failure. Token counts and remote compaction retain their
+own bounded request deadlines; summaries inherit the completion watchdog. Local
+tools, approval waits, healthy parked sockets, and external ACP workers are not
+replayed or given these timers; external Review deadlines and unbounded Plan
+worker policy are unchanged.
+
 Build, Plan, and Review project one shared root transcript through the active
 profile. Each role's resolved context policy controls pre-commit capacity,
 automatic/manual/edit/mid-turn compaction, retained-user selection, skill
@@ -1991,9 +2037,13 @@ described in [TUI interaction](tui-interaction.md). Root operation cancellation
 drops the active provider future and therefore its HTTP stream, terminates an
 active WebSocket generation, stops command process groups, cancels
 queued/running children, records completed work already observed locally, and
-emits `TurnCancelled`. No mid-stream model
-idle timeout is configured: after the 30-second first-event deadline, a
-healthy in-progress stream may remain quiet indefinitely.
+emits exactly one `TurnCancelled` outcome. Completion networking defaults to a
+30-second quiet warning and a 180-second response-progress inactivity deadline,
+including mid-stream silence. Four total attempts share one budget across
+WebSocket and HTTP. Cancellation interrupts connection, request start, streaming,
+warning, and backoff; a progressing stream still has no total duration limit.
+These timers never restart completed local tools or impose deadlines on approval
+waits or external ACP worker processes.
 
 Shell commands default to a five-minute wall-clock timeout and 1 MiB combined
 stdout/stderr capture. The configured limits apply identically to root

@@ -143,7 +143,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             };
             let (checkpoints, mut checkpoint_rx) =
                 mpsc::unbounded_channel::<zevria_session_api::event::AttemptCheckpoint>();
-            let request_progress = progress.clone().with_checkpoints(checkpoints);
+            let request_progress = progress
+                .clone()
+                .with_model_call(call + 1)
+                .with_checkpoints(checkpoints);
             let mut checkpointed = HashMap::<String, u64>::new();
             let mut checkpoint_failure = None;
             let completion_result = {
