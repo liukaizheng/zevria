@@ -112,7 +112,7 @@ fn assert_spinner(text: &str, expected: &str) {
 }
 
 #[test]
-fn numbered_header_only_tail_keeps_clock_outside_cache_selection_and_gutter() {
+fn numbered_header_only_tail_refreshes_decoration_outside_selection_and_gutter() {
     let mut app = App::new();
     let now = Instant::now();
     start_at(&mut app, now);
@@ -127,7 +127,11 @@ fn numbered_header_only_tail_keeps_clock_outside_cache_selection_and_gutter() {
     let reference = rendered_buffer(&mut app, 100, 20);
     let content = conversation_content_area(&reference, false);
     let (lines, header_height) = app.view_cache().streaming().unwrap();
-    let cached = lines.to_vec();
+    let header_spans = lines[0].spans[..2].to_vec();
+    assert_eq!(
+        lines[0].spans[2].style.fg,
+        Some(crate::theme::theme().text.muted)
+    );
     let rebuilds = (app.view_cache().rebuilds, app.view_cache().block_rebuilds);
     assert_eq!(header_height, 1);
     assert_blank_conversation_row(&reference, content.y + 1);
@@ -151,9 +155,16 @@ fn numbered_header_only_tail_keeps_clock_outside_cache_selection_and_gutter() {
     for (millis, glyph) in TIMED_FRAMES {
         app.observe_clock(now + Duration::from_millis(millis));
         let text = rendered_text(&mut app, 100, 20);
-        assert_eq!(text.matches("● Assistant · #(1 - 1)").count(), 1);
+        assert_eq!(
+            text.matches(&format!("● Assistant · #(1 - 1) · {}s", millis / 1000))
+                .count(),
+            1
+        );
         assert_spinner(&text, glyph);
-        assert_eq!(app.view_cache().streaming().unwrap().0, cached);
+        assert_eq!(
+            app.view_cache().streaming().unwrap().0[0].spans[..2],
+            header_spans
+        );
         assert_eq!(
             (app.view_cache().rebuilds, app.view_cache().block_rebuilds),
             rebuilds
@@ -178,8 +189,9 @@ fn numbered_header_only_tail_keeps_clock_outside_cache_selection_and_gutter() {
         retry_event(1, Duration::from_secs(4), "offline"),
         now + Duration::from_secs(3),
     );
-    assert!(rendered_text(&mut app, 100, 20).contains("4s · 3s"));
-    assert_eq!(app.view_cache().streaming().unwrap().0, cached);
+    let text = rendered_text(&mut app, 100, 20);
+    assert!(text.contains("4s · 3s"));
+    assert!(text.contains("● Assistant · #(1 - 1) · 3s"));
     reduce_at(
         &mut app,
         SessionEvent::CompactionStarted {
@@ -188,8 +200,9 @@ fn numbered_header_only_tail_keeps_clock_outside_cache_selection_and_gutter() {
         },
         now + Duration::from_secs(4),
     );
-    assert!(rendered_text(&mut app, 100, 20).contains("Compacting context… · 4s"));
-    assert_eq!(app.view_cache().streaming().unwrap().0, cached);
+    let text = rendered_text(&mut app, 100, 20);
+    assert!(text.contains("Compacting context… · 4s"));
+    assert!(text.contains("● Assistant · #(1 - 1) · 4s"));
     reduce_at(
         &mut app,
         SessionEvent::TurnCancelled {
@@ -199,6 +212,135 @@ fn numbered_header_only_tail_keeps_clock_outside_cache_selection_and_gutter() {
     );
     assert!(!rendered_text(&mut app, 100, 20).contains("● Assistant"));
     assert!(app.view_cache().streaming().is_none());
+}
+
+#[test]
+fn timed_stream_headers_advance_without_tokens_or_semantic_body_rebuilds() {
+    for message in [
+        assistant_message(vec![
+            AssistantContent::text("**cached Markdown**\n\n```rust\nfn main() {}\n```"),
+            AssistantContent::text("another cached block"),
+        ]),
+        opaque_reasoning_message(),
+        Message::assistant(""),
+        Message::User {
+            content: Vec::new(),
+        },
+    ] {
+        for width in [8, 26, 30, 100] {
+            let mut app = App::new();
+            let now = Instant::now();
+            start_at(&mut app, now);
+            reduce_at(
+                &mut app,
+                SessionEvent::ModelCallStarted {
+                    turn_id: TEST_TURN_ID,
+                    call: 1,
+                },
+                now,
+            );
+            reduce_at(
+                &mut app,
+                SessionEvent::AssistantStreamUpdated {
+                    turn_id: TEST_TURN_ID,
+                    snapshot: message.clone().into(),
+                },
+                now,
+            );
+            let buffer = rendered_buffer(&mut app, width, 30);
+            let wrap_width = conversation_content_area(&buffer, false).width.max(1);
+            let body = app.view_cache().streaming().unwrap().0[1..].to_vec();
+            let rebuilt = app.view_cache().block_rebuilds;
+            for seconds in [0, 9, 10, 59, 60, 65, 3599, 3600, 3723] {
+                app.observe_clock(now + Duration::from_secs(seconds));
+                rendered_buffer(&mut app, width, 30);
+                let (lines, height) = app.view_cache().streaming().unwrap();
+                assert_eq!(
+                    line_text(&lines[0]),
+                    format!(
+                        "● Assistant · #(1 - 1) · {}",
+                        crate::text::format_elapsed(Duration::from_secs(seconds))
+                    )
+                );
+                assert_eq!(lines[1..], body);
+                assert_eq!(
+                    height,
+                    crate::layout::prepare::wrapped_height(lines, wrap_width)
+                );
+                assert_eq!(app.view_cache().block_rebuilds, rebuilt);
+                assert!(
+                    app.history().is_empty(),
+                    "streaming decoration is not history"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn terminals_freeze_uncommitted_clocks_without_retaining_transient_headers_or_bodies() {
+    for terminal in [
+        SessionEvent::TurnCompleted {
+            turn_id: TEST_TURN_ID,
+            message: opaque_reasoning_message(),
+            display_attempt_id: None,
+        },
+        SessionEvent::TurnRecovered {
+            turn_id: TEST_TURN_ID,
+            display_attempt_id: None,
+        },
+        SessionEvent::TurnFailed {
+            turn_id: TEST_TURN_ID,
+            error: "failed".into(),
+        },
+        SessionEvent::TurnRejected {
+            turn_id: TEST_TURN_ID,
+            error: "rejected".into(),
+        },
+        SessionEvent::TurnCancelled {
+            turn_id: TEST_TURN_ID,
+        },
+    ] {
+        for streaming in [
+            None,
+            Some(Message::assistant("transient content")),
+            Some(opaque_reasoning_message()),
+        ] {
+            let mut app = App::new();
+            let now = Instant::now();
+            start_at(&mut app, now);
+            reduce_at(
+                &mut app,
+                SessionEvent::ModelCallStarted {
+                    turn_id: TEST_TURN_ID,
+                    call: 1,
+                },
+                now + Duration::from_secs(3),
+            );
+            let header = app.render_parts().assistant_header.unwrap();
+            if let Some(message) = streaming {
+                reduce_at(
+                    &mut app,
+                    SessionEvent::AssistantStreamUpdated {
+                        turn_id: TEST_TURN_ID,
+                        snapshot: message.into(),
+                    },
+                    now + Duration::from_secs(4),
+                );
+            }
+            assert!(rendered_text(&mut app, 100, 20).contains("● Assistant"));
+            reduce_at(&mut app, terminal.clone(), now + Duration::from_secs(10));
+            app.observe_clock(now + Duration::from_secs(100));
+            let text = rendered_text(&mut app, 100, 20);
+            assert!(!text.contains("● Assistant"));
+            assert!(!text.contains("transient content"));
+            assert!(app.view_cache().streaming().is_none());
+            assert_eq!(
+                app.render_parts().header_timings.elapsed(header),
+                Some(Duration::from_secs(7))
+            );
+        }
+    }
 }
 
 #[test]
@@ -750,6 +892,80 @@ fn multiline_retry_errors_wrap_as_plain_text_and_small_viewports_remain_bounded(
     }
     app.observe_clock(now + Duration::from_secs(3600));
     assert!(rendered_text(&mut app, 120, 40).contains("1h 00m 00s"));
+}
+
+#[test]
+fn child_call_clocks_are_independent_across_switches_and_hidden_completion() {
+    let mut root = App::new();
+    // Pin all event receipt to observed future instants so the workspace's
+    // real-time forwarding cannot introduce subsecond nondeterminism.
+    let now = Instant::now() + Duration::from_secs(60);
+    start_at(&mut root, now);
+    reduce_at(
+        &mut root,
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+        },
+        now,
+    );
+    let mut views = test_session_views(root);
+    let id = SubtaskId::new("timed-child");
+    views.apply(SessionEvent::SubtaskLaunched {
+        turn_id: TEST_TURN_ID,
+        call_id: "launch".into(),
+        entry_index: 0,
+        descriptor: child_descriptor("timed-child", "timed child"),
+    });
+    views.handle_event(ctrl('i'));
+    views.observe_clock(now + Duration::from_secs(10));
+    for event in [
+        SessionEvent::TurnStarted {
+            turn_id: TEST_TURN_ID,
+            message: Message::user("child prompt"),
+            mode: SessionMode::Build,
+        },
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+        },
+    ] {
+        views.apply(SessionEvent::SubtaskSession {
+            id: id.clone(),
+            event: Box::new(event),
+        });
+    }
+    assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 0s"));
+    views.observe_clock(now + Duration::from_secs(15));
+    assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 5s"));
+    views.handle_event(ctrl('o'));
+    views.observe_clock(now + Duration::from_secs(25));
+    assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 25s"));
+    views.handle_event(ctrl('i'));
+    views.observe_clock(now + Duration::from_secs(30));
+    assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 20s"));
+    views.handle_event(ctrl('o'));
+    views.observe_clock(now + Duration::from_secs(50));
+    views.apply(SessionEvent::SubtaskSession {
+        id: id.clone(),
+        event: Box::new(SessionEvent::TurnCompleted {
+            turn_id: TEST_TURN_ID,
+            message: Message::assistant("child done"),
+            display_attempt_id: None,
+        }),
+    });
+    assert_eq!(views.visible_child_id(), None, "completion stayed hidden");
+    assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 50s"));
+    views.handle_event(ctrl('i'));
+    assert!(!views.clock_required());
+    views.observe_clock(now + Duration::from_secs(100));
+    let text = rendered_views_text(&mut views, 120, 25);
+    assert!(text.contains("● Assistant · #(1 - 1) · 20s"));
+    assert!(!text.contains("running…"));
+    views.handle_event(ctrl('o'));
+    assert!(views.clock_required());
+    views.observe_clock(now + Duration::from_secs(101));
+    assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 1m 41s"));
 }
 
 #[test]

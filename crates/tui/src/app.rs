@@ -14,7 +14,9 @@ mod pane;
 mod render_state;
 mod session;
 mod submission;
-pub(crate) use render_state::{ComposerChrome, ConversationTail, PlanDialogView, RenderParts};
+pub(crate) use render_state::{
+    ComposerChrome, ConversationTail, HeaderTimings, PlanDialogView, RenderParts,
+};
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -1033,11 +1035,15 @@ impl App {
                 self.conversation.push_user_turn(message, turn);
             }
             SessionEvent::ModelCallStarted { turn_id, call } => {
-                if self.session.model_call_started(turn_id, call)
-                    && let Some(turn) = self.session.display_turn()
-                {
-                    let header = self.conversation.allocate_call(turn);
-                    self.session.bind_call_header(header);
+                let previous = self.session.call_header();
+                if self.session.model_call_started(turn_id, call) {
+                    let now = self.session.observed_at();
+                    self.conversation.finish_header(previous, now);
+                    if let Some(turn) = self.session.display_turn() {
+                        let header = self.conversation.allocate_call(turn);
+                        self.conversation.start_header(header, now);
+                        self.session.bind_call_header(header);
+                    }
                 }
             }
             SessionEvent::EnsembleStarted {
@@ -1133,9 +1139,17 @@ impl App {
                 if !self.session.progress(turn_id) {
                     return effects;
                 }
+                let now = self.session.observed_at();
+                let header = self.session.call_header();
                 let _ = self.session.clear_stream(turn_id);
-                self.conversation.finish_tool_results(&message, &[]);
-                self.conversation.commit_response(message, display_attempt_id.as_deref(), ToolCallStatus::Executing, self.session.call_header());
+                for finished in self.conversation.finish_tool_results(&message, &[]) {
+                    self.conversation.finish_header(Some(finished), now);
+                }
+                self.conversation.commit_response(message, display_attempt_id.as_deref(), ToolCallStatus::Executing, header);
+                // Keep the message's clock live while its commands/tools execute.
+                if !header.is_some_and(|header| self.conversation.header_has_executing_tool_calls(header)) {
+                    self.conversation.finish_header(header, now);
+                }
             }
             SessionEvent::ToolResults {
                 turn_id,
@@ -1145,7 +1159,9 @@ impl App {
                 if !self.session.progress(turn_id) {
                     return effects;
                 }
-                self.conversation.finish_tool_results(&message, &metadata);
+                for header in self.conversation.finish_tool_results(&message, &metadata) {
+                    self.conversation.finish_header(Some(header), self.session.observed_at());
+                }
             }
             SessionEvent::SubtaskLaunched {
                 call_id,
@@ -1199,8 +1215,7 @@ impl App {
             | SessionEvent::QuestionAsked { .. }
             | SessionEvent::QuestionClosed { .. } => {}
             SessionEvent::TurnCompleted { turn_id, message, display_attempt_id } => {
-                let header = self.session.call_header();
-                let Some(_kind) = self.session.finish(turn_id) else {
+                let Some((_kind, header)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
                 self.edit.reject();
@@ -1209,14 +1224,14 @@ impl App {
                     .commit_response(message, display_attempt_id.as_deref(), ToolCallStatus::Finished, header);
             }
             SessionEvent::TurnRecovered { turn_id, .. } => {
-                let Some(_kind) = self.session.finish(turn_id) else {
+                let Some((_kind, _)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
                 self.edit.reject();
                 self.conversation.interrupt_executing_tool_calls();
             }
             SessionEvent::TurnRejected { turn_id, error } => {
-                let Some(kind) = self.session.finish(turn_id) else {
+                let Some((kind, _)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
                 self.edit.reject();
@@ -1229,7 +1244,7 @@ impl App {
                 self.conversation.push_error(error);
             }
             SessionEvent::TurnFailed { turn_id, error } => {
-                let Some(kind) = self.session.finish(turn_id) else {
+                let Some((kind, _)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
                 self.edit.reject();
@@ -1241,7 +1256,7 @@ impl App {
                 self.conversation.push_error(error);
             }
             SessionEvent::TurnCancelled { turn_id } => {
-                let Some(kind) = self.session.finish(turn_id) else {
+                let Some((kind, _)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
                 self.edit.reject();
@@ -1265,6 +1280,19 @@ impl App {
             }
         }
         effects
+    }
+
+    /// Capture the header before accepted terminal handling clears the active call.
+    /// Already settled messages keep their frozen duration; finishing is idempotent.
+    fn finish_turn(
+        &mut self,
+        turn_id: TurnId,
+    ) -> Option<(OperationKind, Option<crate::presentation::NativeHeader>)> {
+        let header = self.session.call_header();
+        let kind = self.session.finish(turn_id)?;
+        self.conversation
+            .finish_header(header, self.session.observed_at());
+        Some((kind, header))
     }
 
     fn accept_pending_edit(&mut self, effects: &mut Vec<AppEffect>) {

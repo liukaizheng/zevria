@@ -11,6 +11,25 @@ const fn role_label(role: ModelRole) -> &'static str {
     }
 }
 
+/// Read-only pane-local durations evaluated once against the observed UI clock.
+/// This projection is decoration only; it never changes a semantic block revision.
+#[derive(Default)]
+pub(crate) struct HeaderTimings {
+    elapsed: std::collections::HashMap<crate::presentation::NativeHeader, Duration>,
+}
+
+impl HeaderTimings {
+    pub(crate) fn observe(conversation: &ConversationState, now: Instant) -> Self {
+        Self {
+            elapsed: conversation.header_timings(now).collect(),
+        }
+    }
+
+    pub(crate) fn elapsed(&self, header: crate::presentation::NativeHeader) -> Option<Duration> {
+        self.elapsed.get(&header).copied()
+    }
+}
+
 /// Derived conversation tail consumed directly by rendering.
 pub(crate) enum ConversationTail<'a> {
     None,
@@ -100,6 +119,7 @@ pub(crate) struct RenderParts<'a> {
     pub(crate) plan_dialog: Option<PlanDialogView<'a>>,
     pub(crate) tail: ConversationTail<'a>,
     pub(crate) assistant_header: Option<crate::presentation::NativeHeader>,
+    pub(crate) header_timings: HeaderTimings,
     pub(crate) pending_header: bool,
     pub(crate) status: StatusBarView,
     pub(crate) view: &'a mut ViewState,
@@ -395,6 +415,7 @@ impl App {
             plan_dialog,
             tail,
             assistant_header,
+            header_timings: HeaderTimings::observe(conversation, session.observed_at()),
             pending_header,
             status,
             view,

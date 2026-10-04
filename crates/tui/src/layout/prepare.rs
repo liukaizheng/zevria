@@ -12,7 +12,7 @@ use crate::presentation::{
     tool_result_plain_text,
 };
 use crate::status_icon::StatusIcon;
-use crate::text::display_width;
+use crate::text::{display_width, format_elapsed};
 use crate::theme::theme;
 use crate::viewport::RowRange;
 use ratatui::{
@@ -131,9 +131,21 @@ fn append_native_header(header: &mut Line<'static>, identity: Option<NativeHeade
     }
 }
 
-pub(crate) fn pending_assistant_header(identity: NativeHeader) -> Line<'static> {
+pub(crate) fn native_assistant_header(
+    identity: NativeHeader,
+    elapsed_seconds: Option<u64>,
+) -> Line<'static> {
     let mut header = role_header("Assistant", theme().roles.assistant);
     append_native_header(&mut header, Some(identity));
+    if let Some(seconds) = elapsed_seconds {
+        header.spans.push(Span::styled(
+            format!(
+                " · {}",
+                format_elapsed(std::time::Duration::from_secs(seconds))
+            ),
+            Style::default().fg(theme().text.muted),
+        ));
+    }
     header
 }
 
@@ -513,6 +525,8 @@ fn render_web_activity(
 }
 
 pub(crate) struct RenderedBlockRows {
+    /// Native assistant decoration can be replaced without touching body lines.
+    pub(crate) assistant_header_line: Option<usize>,
     pub(crate) fold_header: Option<FoldHeader>,
     pub(crate) content_line_start: usize,
     pub(crate) body: RowRange,
@@ -558,6 +572,10 @@ pub(crate) fn render_conversation_block(
         // provide the boundary row when present.
         lines.push(Line::default());
     }
+    let assistant_header_line = (!acp
+        && header_role == Some(PresentationRole::Assistant)
+        && matches!(identity, Some(NativeHeader::Assistant { .. })))
+    .then_some(lines.len() - block_start);
     if let Some(role) = header_role {
         let (label, color) = presentation_role(role);
         let mut header = role_header(label, color);
@@ -646,6 +664,7 @@ pub(crate) fn render_conversation_block(
     let start = wrapped_height(&lines[block_start..content_start], wrap_width);
     let height = wrapped_height(&lines[content_start..], wrap_width);
     RenderedBlockRows {
+        assistant_header_line,
         fold_header,
         content_line_start: content_start - block_start,
         body: RowRange::from_start_len(start, height),

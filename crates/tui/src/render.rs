@@ -96,6 +96,7 @@ impl App {
         {
             let cache = parts.view.conversation_cache_mut();
             cache.set_appearance(parts.appearance);
+            cache.set_header_timings(std::mem::take(&mut parts.header_timings));
             cache.refresh(
                 parts.history,
                 parts.selected,

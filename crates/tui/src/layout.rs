@@ -19,8 +19,8 @@ use ratatui::text::{Line, Span};
 use rig_core::message::Message;
 
 use crate::app::{
-    ActiveSelection, EntryFolds, FoldState, HistoryEntry, Selection, SelectionScope, SpanRole,
-    ToolCallStatus, TurnStartTarget,
+    ActiveSelection, EntryFolds, FoldState, HeaderTimings, HistoryEntry, Selection, SelectionScope,
+    SpanRole, ToolCallStatus, TurnStartTarget,
 };
 use crate::chrome::style_selected_line;
 use crate::layout::prepare::{
@@ -83,6 +83,8 @@ struct PresentationBlockLayout {
     fingerprint: BlockFingerprint,
     width: u16,
     lines: Vec<Line<'static>>,
+    assistant_header_line: Option<usize>,
+    elapsed_seconds: Option<u64>,
     body_line_start: usize,
     fold_header: Option<FoldHeader>,
     height: usize,
@@ -118,6 +120,8 @@ impl PresentationBlockLayout {
             fingerprint,
             width,
             lines,
+            assistant_header_line: rows.assistant_header_line,
+            elapsed_seconds: None,
             body_line_start: rows.content_line_start,
             fold_header: rows.fold_header,
             height,
@@ -126,6 +130,35 @@ impl PresentationBlockLayout {
             role: block.role,
         }
     }
+
+    fn header_is_current(&self, timings: &HeaderTimings) -> bool {
+        self.assistant_header_line.is_none()
+            || self.elapsed_seconds == header_elapsed_seconds(self.fingerprint.header, timings)
+    }
+
+    /// Refresh only decoration, retaining Markdown/highlighting and folded body lines.
+    fn refresh_header(&mut self, timings: &HeaderTimings) {
+        let (Some(line), Some(header)) = (self.assistant_header_line, self.fingerprint.header)
+        else {
+            return;
+        };
+        let seconds = header_elapsed_seconds(Some(header), timings);
+        if self.elapsed_seconds == seconds {
+            return;
+        }
+        self.elapsed_seconds = seconds;
+        self.lines[line] = prepare::native_assistant_header(header, seconds);
+        let start = wrapped_height(&self.lines[..self.body_line_start], self.width);
+        self.rows = RowRange::from_start_len(start, self.rows.len());
+        self.height = self.rows.end();
+        self.decoration = RowRange::new(self.decoration.start(), self.height);
+    }
+}
+
+fn header_elapsed_seconds(header: Option<NativeHeader>, timings: &HeaderTimings) -> Option<u64> {
+    header
+        .and_then(|header| timings.elapsed(header))
+        .map(|elapsed| elapsed.as_secs())
 }
 
 /// Physical decoration rows, measured alongside selection content. Roleless
@@ -179,6 +212,7 @@ impl EntryLayout {
         previous_reasoning: bool,
         appearance: TranscriptAppearance,
         entry_folds: EntryFolds<'_>,
+        timings: &HeaderTimings,
     ) -> bool {
         self.span.is_none()
             && self.appearance == appearance
@@ -195,6 +229,7 @@ impl EntryLayout {
                     previous_reasoning,
                     appearance,
                     entry_folds,
+                    timings,
                 ),
                 // These entries are immutable once committed.
                 HistoryEntry::PlanArtifact(_)
@@ -226,6 +261,7 @@ impl EntryLayout {
         previous_reasoning: bool,
         appearance: TranscriptAppearance,
         entry_folds: EntryFolds<'_>,
+        timings: &HeaderTimings,
     ) -> Option<usize> {
         if slot.as_ref().is_some_and(|cached| {
             cached.matches(
@@ -236,6 +272,7 @@ impl EntryLayout {
                 previous_reasoning,
                 appearance,
                 entry_folds,
+                timings,
             )
         }) {
             return None;
@@ -253,6 +290,7 @@ impl EntryLayout {
             previous_reasoning,
             appearance,
             entry_folds,
+            timings,
         );
         *slot = Some(built);
         Some(rebuilt_blocks)
@@ -306,6 +344,7 @@ impl EntryLayout {
         previous_reasoning: bool,
         appearance: TranscriptAppearance,
         entry_folds: EntryFolds<'_>,
+        timings: &HeaderTimings,
     ) -> bool {
         let Some(cached) = &self.conversation_blocks else {
             return false;
@@ -320,10 +359,11 @@ impl EntryLayout {
             appearance,
             entry_folds,
         ) {
-            if !cached
-                .next()
-                .is_some_and(|layout| layout.width == width && layout.fingerprint == expected)
-            {
+            if !cached.next().is_some_and(|layout| {
+                layout.width == width
+                    && layout.fingerprint == expected
+                    && layout.header_is_current(timings)
+            }) {
                 return false;
             }
         }
@@ -340,6 +380,7 @@ impl EntryLayout {
         previous_reasoning: bool,
         appearance: TranscriptAppearance,
         entry_folds: EntryFolds<'_>,
+        timings: &HeaderTimings,
     ) -> (Self, usize) {
         let mut lines = Vec::new();
         let message_folded = entry_folds.is_message_folded();
@@ -356,6 +397,7 @@ impl EntryLayout {
                     previous_reasoning,
                     appearance,
                     entry_folds,
+                    timings,
                 );
                 rebuilt_blocks = rebuilt;
                 let items = if message_folded && let Some(first) = blocks.first() {
@@ -629,6 +671,7 @@ fn build_conversation_blocks(
     previous_reasoning: bool,
     appearance: TranscriptAppearance,
     entry_folds: EntryFolds<'_>,
+    timings: &HeaderTimings,
 ) -> (Vec<PresentationBlockLayout>, ItemRanges, usize) {
     let mut reusable = reusable_blocks
         .into_iter()
@@ -647,13 +690,14 @@ fn build_conversation_blocks(
         appearance,
         entry_folds,
     ) {
-        let layout = match reusable.remove(&block.id) {
+        let mut layout = match reusable.remove(&block.id) {
             Some(layout) if layout.width == width && layout.fingerprint == fingerprint => layout,
             _ => {
                 rebuilt += 1;
                 PresentationBlockLayout::render(block, fingerprint, width)
             }
         };
+        layout.refresh_header(timings);
         items.push((index, layout.rows.shifted(prefix_height)));
         prefix_height = prefix_height.saturating_add(layout.height);
         lines.extend(layout.lines.iter().cloned());
@@ -666,6 +710,7 @@ fn build_conversation_blocks(
 struct StreamingLayout {
     width: u16,
     header: Option<NativeHeader>,
+    elapsed_seconds: Option<u64>,
     blocks: Vec<PresentationBlockLayout>,
     lines: Vec<Line<'static>>,
     height: usize,
@@ -680,6 +725,7 @@ pub(crate) struct ConversationCache {
     streaming: Option<StreamingLayout>,
     tail_reasoning: bool,
     appearance: TranscriptAppearance,
+    header_timings: HeaderTimings,
     /// Entry rebuilds since startup, so tests can assert cache hits.
     #[cfg(test)]
     pub(crate) rebuilds: usize,
@@ -692,6 +738,11 @@ pub(crate) struct ConversationCache {
 impl ConversationCache {
     pub(crate) fn set_appearance(&mut self, appearance: TranscriptAppearance) {
         self.appearance = appearance;
+    }
+
+    /// Install decoration state before refreshing committed and streaming layouts.
+    pub(crate) fn set_header_timings(&mut self, timings: HeaderTimings) {
+        self.header_timings = timings;
     }
 
     /// Drop cached committed entries at and after a semantic replacement
@@ -756,6 +807,7 @@ impl ConversationCache {
                 entry_previous_reasoning,
                 self.appearance,
                 entry_folds,
+                &self.header_timings,
             );
             #[cfg(not(test))]
             let _ = rebuilt;
@@ -1015,6 +1067,7 @@ impl ConversationCache {
         header: Option<NativeHeader>,
         width: u16,
     ) {
+        let elapsed_seconds = header_elapsed_seconds(header, &self.header_timings);
         let entry = streaming.and_then(|message| {
             HistoryEntry::from_message(message.clone(), ToolCallStatus::Finished)
         });
@@ -1024,15 +1077,19 @@ impl ConversationCache {
                 return;
             };
             if self.streaming.as_ref().is_some_and(|cached| {
-                cached.width == width && cached.header == Some(header) && cached.blocks.is_empty()
+                cached.width == width
+                    && cached.header == Some(header)
+                    && cached.blocks.is_empty()
+                    && cached.elapsed_seconds == elapsed_seconds
             }) {
                 return;
             }
-            let lines = vec![crate::layout::prepare::pending_assistant_header(header)];
+            let lines = vec![prepare::native_assistant_header(header, elapsed_seconds)];
             let height = wrapped_height(&lines, width);
             self.streaming = Some(StreamingLayout {
                 width,
                 header: Some(header),
+                elapsed_seconds,
                 blocks: Vec::new(),
                 lines,
                 height,
@@ -1057,6 +1114,7 @@ impl ConversationCache {
             self.tail_reasoning,
             TranscriptAppearance::Native,
             EntryFolds::none(),
+            &self.header_timings,
         );
         #[cfg(test)]
         {
@@ -1068,6 +1126,7 @@ impl ConversationCache {
         self.streaming = Some(StreamingLayout {
             width,
             header,
+            elapsed_seconds,
             blocks,
             lines,
             height,
@@ -1157,6 +1216,191 @@ mod tests {
             HistoryEntry::Error("A visible error.".into()),
             HistoryEntry::CompactionDivider,
         ]
+    }
+
+    #[test]
+    fn elapsed_decoration_refreshes_wrapping_folds_and_covered_geometry_without_body_rebuilds() {
+        use crate::app::{ConversationState, FoldKey};
+        use std::time::{Duration, Instant};
+
+        fn assert_geometry(actual: &EntryLayout, expected: &EntryLayout) {
+            assert_eq!(actual.lines, expected.lines);
+            assert_eq!(actual.height, expected.height);
+            assert_eq!(actual.items, expected.items);
+            assert_eq!(actual.selection, expected.selection);
+            assert_eq!(actual.extent(), expected.extent());
+            assert_eq!(actual.height, wrapped_height(&actual.lines, actual.width));
+            let decorations = |entry: &EntryLayout| {
+                entry
+                    .decorations
+                    .iter()
+                    .map(|decoration| (decoration.rows, decoration.role, decoration.card))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(decorations(actual), decorations(expected));
+        }
+
+        let now = Instant::now();
+        let mut conversation = ConversationState::default();
+        let turn = conversation.allocate_turn();
+        conversation.push_user_turn(Message::user("before"), turn);
+        let header = conversation.allocate_call(turn);
+        conversation.start_header(header, now);
+        conversation.commit_response(
+            Message::Assistant {
+                id: None,
+                content: vec![
+                    AssistantContent::text("**cached Markdown**\n\n```rust\nfn main() {}\n```"),
+                    AssistantContent::text("second block\n\nlast row"),
+                ],
+            },
+            None,
+            ToolCallStatus::Finished,
+            Some(header),
+        );
+        let turn = conversation.allocate_turn();
+        conversation.push_user_turn(Message::user("after"), turn);
+        let targets = conversation.turn_starts(false);
+        let HistoryEntry::Conversation(entry) = &conversation.history()[1] else {
+            panic!()
+        };
+        let block_id = entry.blocks[0].id;
+        let mut saw_growth = false;
+        for width in [1, 8, 27, 30, 100] {
+            for folding in ["none", "block", "message", "span", "span+message"] {
+                for scope in [
+                    None,
+                    Some(SelectionScope::Block),
+                    Some(SelectionScope::Message),
+                ] {
+                    let selected = scope.map(|scope| ActiveSelection {
+                        selection: Selection {
+                            history_index: 1,
+                            content_index: 0,
+                        },
+                        scope,
+                    });
+                    let mut folds = FoldState::default();
+                    if folding == "block" {
+                        folds.fold(FoldKey::Block {
+                            history_index: 1,
+                            id: block_id,
+                        });
+                    }
+                    if folding.contains("message") {
+                        folds.fold(FoldKey::Message { history_index: 1 });
+                    }
+                    if folding.contains("span") {
+                        folds.fold(FoldKey::Span { start: 0, end: 1 });
+                    }
+                    let mut cache = ConversationCache::default();
+                    cache.set_header_timings(HeaderTimings::observe(
+                        &conversation,
+                        now + Duration::from_secs(9),
+                    ));
+                    cache.refresh(conversation.history(), selected, width, false, &folds);
+                    let rebuilt = cache.block_rebuilds;
+                    let real = cache.covered.get(&1).unwrap_or(&cache.entries[1]);
+                    let bodies = real
+                        .conversation_blocks
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|block| block.lines[block.body_line_start..].to_vec())
+                        .collect::<Vec<_>>();
+                    let first_header_height = real.items[0].1.start();
+                    for seconds in [10, 59, 60, 3723] {
+                        let at = now + Duration::from_secs(seconds);
+                        cache.set_header_timings(HeaderTimings::observe(&conversation, at));
+                        cache.refresh(conversation.history(), selected, width, false, &folds);
+                        assert_eq!(cache.block_rebuilds, rebuilt);
+                        let real = cache.covered.get(&1).unwrap_or(&cache.entries[1]);
+                        assert_eq!(
+                            real.conversation_blocks
+                                .as_ref()
+                                .unwrap()
+                                .iter()
+                                .map(|block| block.lines[block.body_line_start..].to_vec())
+                                .collect::<Vec<_>>(),
+                            bodies
+                        );
+                        let header_height = wrapped_height(&real.lines[..1], width);
+                        assert_eq!(real.items[0].1.start(), header_height);
+                        saw_growth |= header_height > first_header_height;
+                        if !folding.contains("span") {
+                            let offset = cache.entries[0].extent();
+                            assert_eq!(
+                                cache.selection_at_bottom(RowRange::from_start_len(
+                                    offset,
+                                    header_height
+                                )),
+                                None,
+                                "header decoration is not selectable"
+                            );
+                            assert_eq!(
+                                cache
+                                    .selection_at_bottom(RowRange::from_start_len(
+                                        offset + header_height,
+                                        1
+                                    ))
+                                    .unwrap()
+                                    .history_index,
+                                1
+                            );
+                        }
+                        // A cold layout is the geometry oracle, including message folds
+                        // and retained layouts hidden under span summaries.
+                        let mut fresh = ConversationCache::default();
+                        fresh.set_header_timings(HeaderTimings::observe(&conversation, at));
+                        fresh.refresh(conversation.history(), selected, width, false, &folds);
+                        for (actual, expected) in cache.entries.iter().zip(&fresh.entries) {
+                            assert_geometry(actual, expected);
+                        }
+                        for (index, actual) in &cache.covered {
+                            assert_geometry(actual, &fresh.covered[index]);
+                        }
+                        assert_eq!(
+                            cache.turn_start_positions(&targets),
+                            fresh.turn_start_positions(&targets)
+                        );
+                        let rows = cache.entries.iter().map(EntryLayout::extent).sum::<usize>();
+                        for row in 0..rows {
+                            assert_eq!(cache.semantic_anchor(row), fresh.semantic_anchor(row));
+                            assert_eq!(
+                                cache.selection_at_bottom(RowRange::from_start_len(row, 1)),
+                                fresh.selection_at_bottom(RowRange::from_start_len(row, 1))
+                            );
+                        }
+                        let entry_rebuilds = cache.rebuilds;
+                        cache.set_header_timings(HeaderTimings::observe(
+                            &conversation,
+                            at + Duration::from_millis(250),
+                        ));
+                        cache.refresh(conversation.history(), selected, width, false, &folds);
+                        assert_eq!(
+                            cache.rebuilds, entry_rebuilds,
+                            "subsecond ticks leave the header cache intact"
+                        );
+                    }
+                    if folding.contains("span") {
+                        folds.unfold(FoldKey::Span { start: 0, end: 1 });
+                        cache.refresh(conversation.history(), selected, width, false, &folds);
+                        assert!(cache.covered.is_empty());
+                        assert_eq!(
+                            cache.entries[1].lines[0].to_string(),
+                            "● Assistant · #(1 - 1) · 1h 02m 03s"
+                        );
+                        if selected.is_none() {
+                            assert_eq!(
+                                cache.block_rebuilds, rebuilt,
+                                "uncovering reuses updated bodies"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(saw_growth, "exercise wrapping across duration boundaries");
     }
 
     #[test]

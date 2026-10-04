@@ -1,4 +1,4 @@
-//! Rebuildable, pane-local native header numbering, never engine/edit IDs.
+//! Rebuildable, pane-local native header numbering and session-only call timing.
 
 use super::*;
 use crate::app::ConversationState;
@@ -47,6 +47,555 @@ fn labels(app: &App) -> Vec<String> {
         })
         .map(|header| header.to_string())
         .collect()
+}
+
+fn event_at(app: &mut App, event: SessionEvent, now: Instant) {
+    assert!(app.reduce_at(event, now).is_empty());
+}
+
+fn duration(app: &mut App, turn: usize, call: usize) -> Option<Duration> {
+    app.render_parts()
+        .header_timings
+        .elapsed(assistant(turn, call))
+}
+
+#[test]
+fn call_durations_exclude_dispatch_delay_and_freeze_independently_after_tools() {
+    let mut app = App::new();
+    enter_insert(&mut app);
+    app.set_input_for_test("prompt", 6);
+    let now = Instant::now();
+    assert!(app.handle_event_at(ctrl_enter(), now).is_some());
+    event_at(
+        &mut app,
+        SessionEvent::TurnStarted {
+            turn_id: TEST_TURN_ID,
+            message: Message::user("prompt"),
+            mode: SessionMode::Build,
+        },
+        now + Duration::from_secs(3),
+    );
+    app.observe_clock(now + Duration::from_secs(11));
+    assert_eq!(duration(&mut app, 1, 1), None);
+    assert!(!rendered_text(&mut app, 120, 30).contains("● Assistant"));
+    event_at(
+        &mut app,
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+        },
+        now + Duration::from_secs(12),
+    );
+    let text = rendered_text(&mut app, 120, 30);
+    assert!(text.contains("● Assistant · #(1 - 1) · 0s"));
+    assert!(text.contains("running… · 12s"));
+    event_at(
+        &mut app,
+        SessionEvent::AssistantStreamUpdated {
+            turn_id: TEST_TURN_ID,
+            snapshot: Message::assistant("first response").into(),
+        },
+        now + Duration::from_secs(14),
+    );
+    assert!(rendered_text(&mut app, 120, 30).contains("● Assistant · #(1 - 1) · 2s"));
+    event_at(
+        &mut app,
+        SessionEvent::Intermediate {
+            turn_id: TEST_TURN_ID,
+            display_attempt_id: None,
+            message: assistant_message(vec![
+                AssistantContent::text("first response"),
+                tool_call("slow", None, "command", json!({"command":"slow tool"})),
+            ]),
+        },
+        now + Duration::from_secs(24),
+    );
+    event_at(
+        &mut app,
+        SessionEvent::ToolResults {
+            turn_id: TEST_TURN_ID,
+            message: Message::tool_result("slow", "command", "done"),
+            metadata: Vec::new(),
+        },
+        now + Duration::from_secs(70),
+    );
+    let text = rendered_text(&mut app, 120, 30);
+    assert_eq!(text.matches("● Assistant").count(), 1);
+    assert!(text.contains("● Assistant · #(1 - 1) · 58s"));
+    assert!(text.contains("running… · 1m 10s"));
+    event_at(
+        &mut app,
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 2,
+        },
+        now + Duration::from_secs(80),
+    );
+    assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(58)));
+    assert_eq!(duration(&mut app, 1, 2), Some(Duration::ZERO));
+    assert!(rendered_text(&mut app, 120, 30).contains("● Assistant · #(1 - 2) · 0s"));
+    event_at(
+        &mut app,
+        SessionEvent::TurnCompleted {
+            turn_id: TEST_TURN_ID,
+            message: Message::assistant("second response"),
+            display_attempt_id: None,
+        },
+        now + Duration::from_secs(145),
+    );
+    app.observe_clock(now + Duration::from_secs(3723));
+    let text = rendered_text(&mut app, 120, 30);
+    assert!(text.contains("● Assistant · #(1 - 1) · 58s"));
+    assert!(text.contains("● Assistant · #(1 - 2) · 1m 05s"));
+    assert!(!text.contains("running…"));
+    assert_eq!(duration(&mut app, 1, 2), Some(Duration::from_secs(65)));
+    app.select_for_test(cursor(1, 0));
+    assert_eq!(
+        app.handle_event(key(KeyCode::Char('y'))),
+        Some(UiAction::Copy {
+            text: "first response".into(),
+        })
+    );
+}
+
+#[test]
+fn long_command_headers_tick_without_events_until_all_their_tools_finish() {
+    for mut app in [App::new(), App::subtask_inspect("slow child command")] {
+        let now = Instant::now();
+        for event in [
+            SessionEvent::TurnStarted {
+                turn_id: TEST_TURN_ID,
+                message: Message::user("prompt"),
+                mode: SessionMode::Build,
+            },
+            SessionEvent::ModelCallStarted {
+                turn_id: TEST_TURN_ID,
+                call: 1,
+            },
+        ] {
+            event_at(&mut app, event, now);
+        }
+        event_at(
+            &mut app,
+            SessionEvent::Intermediate {
+                turn_id: TEST_TURN_ID,
+                display_attempt_id: None,
+                message: assistant_message(vec![
+                    tool_call(
+                        "slow-a",
+                        None,
+                        "command",
+                        json!({"command":"first slow command"}),
+                    ),
+                    tool_call(
+                        "slow-b",
+                        None,
+                        "command",
+                        json!({"command":"second slow command"}),
+                    ),
+                ]),
+            },
+            now + Duration::from_secs(2),
+        );
+        rendered_text(&mut app, 120, 30);
+        let body = app.view_cache().entries()[1].lines[1..].to_vec();
+        let rebuilt = app.view_cache().block_rebuilds;
+        for seconds in [12, 59, 60, 120] {
+            app.observe_clock(now + Duration::from_secs(seconds));
+            let text = rendered_text(&mut app, 120, 30);
+            assert!(text.contains(&format!(
+                "● Assistant · #(1 - 1) · {}",
+                crate::text::format_elapsed(Duration::from_secs(seconds))
+            )));
+            assert_eq!(text.matches("● Assistant").count(), 1);
+            assert!(app.is_busy());
+            assert!(!app.render_parts().pending_header);
+            assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(seconds)));
+            assert_eq!(app.view_cache().entries()[1].lines[1..], body);
+            assert_eq!(app.view_cache().block_rebuilds, rebuilt);
+        }
+        for (turn_id, call, seconds) in [
+            (TEST_TURN_ID, "slow-a", 150),
+            (TEST_TURN_ID, "slow-a", 155), // Duplicate result.
+            (TEST_TURN_ID, "unknown", 160),
+            (TurnId::new(99), "slow-b", 165), // Stale turn.
+        ] {
+            event_at(
+                &mut app,
+                SessionEvent::ToolResults {
+                    turn_id,
+                    message: Message::tool_result(call, "command", "done"),
+                    metadata: Vec::new(),
+                },
+                now + Duration::from_secs(seconds),
+            );
+        }
+        app.observe_clock(now + Duration::from_secs(170));
+        assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(170)));
+        assert_eq!(tool_status(&app, 1, 0), ToolCallStatus::Finished);
+        assert_eq!(tool_status(&app, 1, 1), ToolCallStatus::Executing);
+        event_at(
+            &mut app,
+            SessionEvent::ToolResults {
+                turn_id: TEST_TURN_ID,
+                message: Message::tool_result("slow-b", "command", "done"),
+                metadata: Vec::new(),
+            },
+            now + Duration::from_secs(180),
+        );
+        app.observe_clock(now + Duration::from_secs(240));
+        let text = rendered_text(&mut app, 120, 30);
+        assert!(text.contains("● Assistant · #(1 - 1) · 3m 00s"));
+        assert!(text.contains("running… · 4m 00s"));
+        assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(180)));
+    }
+}
+
+#[test]
+fn late_tool_results_only_finish_their_own_header_not_a_new_model_call() {
+    let mut app = App::new();
+    let now = Instant::now();
+    for event in [
+        SessionEvent::TurnStarted {
+            turn_id: TEST_TURN_ID,
+            message: Message::user("prompt"),
+            mode: SessionMode::Build,
+        },
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+        },
+    ] {
+        event_at(&mut app, event, now);
+    }
+    event_at(
+        &mut app,
+        SessionEvent::Intermediate {
+            turn_id: TEST_TURN_ID,
+            display_attempt_id: None,
+            message: assistant_message(vec![tool_call(
+                "slow",
+                None,
+                "command",
+                json!({"command":"slow command"}),
+            )]),
+        },
+        now + Duration::from_secs(2),
+    );
+    event_at(
+        &mut app,
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 2,
+        },
+        now + Duration::from_secs(20),
+    );
+    for seconds in [30, 40] {
+        event_at(
+            &mut app,
+            SessionEvent::ToolResults {
+                turn_id: TEST_TURN_ID,
+                message: Message::tool_result("slow", "command", "late result"),
+                metadata: Vec::new(),
+            },
+            now + Duration::from_secs(seconds),
+        );
+        assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(20)));
+        assert_eq!(
+            duration(&mut app, 1, 2),
+            Some(Duration::from_secs(seconds - 20))
+        );
+    }
+    app.observe_clock(now + Duration::from_secs(50));
+    assert!(rendered_text(&mut app, 120, 30).contains("● Assistant · #(1 - 2) · 30s"));
+}
+
+#[test]
+fn terminal_events_stop_headers_with_pending_commands() {
+    for terminal in [
+        SessionEvent::TurnCompleted {
+            turn_id: TEST_TURN_ID,
+            message: Message::assistant("done"),
+            display_attempt_id: None,
+        },
+        SessionEvent::TurnRecovered {
+            turn_id: TEST_TURN_ID,
+            display_attempt_id: None,
+        },
+        SessionEvent::TurnFailed {
+            turn_id: TEST_TURN_ID,
+            error: "failed".into(),
+        },
+        SessionEvent::TurnRejected {
+            turn_id: TEST_TURN_ID,
+            error: "rejected".into(),
+        },
+        SessionEvent::TurnCancelled {
+            turn_id: TEST_TURN_ID,
+        },
+    ] {
+        let mut app = App::new();
+        let now = Instant::now();
+        for event in [
+            SessionEvent::TurnStarted {
+                turn_id: TEST_TURN_ID,
+                message: Message::user("prompt"),
+                mode: SessionMode::Build,
+            },
+            SessionEvent::ModelCallStarted {
+                turn_id: TEST_TURN_ID,
+                call: 1,
+            },
+        ] {
+            event_at(&mut app, event, now);
+        }
+        event_at(
+            &mut app,
+            SessionEvent::Intermediate {
+                turn_id: TEST_TURN_ID,
+                display_attempt_id: None,
+                message: assistant_message(vec![tool_call(
+                    "slow",
+                    None,
+                    "command",
+                    json!({"command":"slow command"}),
+                )]),
+            },
+            now + Duration::from_secs(2),
+        );
+        event_at(&mut app, terminal, now + Duration::from_secs(120));
+        event_at(
+            &mut app,
+            SessionEvent::ToolResults {
+                turn_id: TEST_TURN_ID,
+                message: Message::tool_result("slow", "command", "late result"),
+                metadata: Vec::new(),
+            },
+            now + Duration::from_secs(180),
+        );
+        app.observe_clock(now + Duration::from_secs(300));
+        assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(120)));
+        assert!(!app.is_busy());
+    }
+}
+
+#[test]
+fn retries_backward_clocks_and_rejected_events_cannot_restart_or_rewind_a_call() {
+    let mut app = App::new();
+    let now = Instant::now();
+    event_at(
+        &mut app,
+        SessionEvent::TurnStarted {
+            turn_id: TEST_TURN_ID,
+            message: Message::user("prompt"),
+            mode: SessionMode::Build,
+        },
+        now,
+    );
+    event_at(
+        &mut app,
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+        },
+        now + Duration::from_secs(5),
+    );
+    event_at(
+        &mut app,
+        SessionEvent::TurnRetrying {
+            turn_id: TEST_TURN_ID,
+            attempt: 1,
+            max_attempts: 3,
+            retry_after: Duration::from_secs(20),
+            error: "offline".into(),
+        },
+        now + Duration::from_secs(6),
+    );
+    app.observe_clock(now + Duration::from_secs(17));
+    for (turn_id, call) in [(TEST_TURN_ID, 0), (TEST_TURN_ID, 1), (TurnId::new(99), 2)] {
+        event_at(
+            &mut app,
+            SessionEvent::ModelCallStarted { turn_id, call },
+            now + Duration::from_secs(17),
+        );
+        assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(12)));
+        assert_eq!(active_header(&mut app), Some(assistant(1, 1)));
+    }
+    for stale in [
+        SessionEvent::TurnCompleted {
+            turn_id: TurnId::new(99),
+            message: Message::assistant("stale"),
+            display_attempt_id: None,
+        },
+        SessionEvent::TurnCancelled {
+            turn_id: TurnId::new(99),
+        },
+        SessionEvent::Intermediate {
+            turn_id: TurnId::new(99),
+            message: Message::assistant("stale"),
+            display_attempt_id: None,
+        },
+    ] {
+        event_at(&mut app, stale, now + Duration::from_secs(18));
+    }
+    app.observe_clock(now + Duration::from_secs(7));
+    assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(13)));
+    event_at(
+        &mut app,
+        SessionEvent::StreamCleared {
+            turn_id: TEST_TURN_ID,
+        },
+        now + Duration::from_secs(20),
+    );
+    assert!(rendered_text(&mut app, 120, 20).contains("● Assistant · #(1 - 1) · 15s"));
+    event_at(
+        &mut app,
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 2,
+        },
+        now + Duration::from_secs(25),
+    );
+    assert_eq!(
+        duration(&mut app, 1, 1),
+        Some(Duration::from_secs(20)),
+        "superseded calls stop"
+    );
+    assert_eq!(duration(&mut app, 1, 2), Some(Duration::ZERO));
+    for call in [0, 1, 2] {
+        event_at(
+            &mut app,
+            SessionEvent::ModelCallStarted {
+                turn_id: TEST_TURN_ID,
+                call,
+            },
+            now + Duration::from_secs(32),
+        );
+        assert_eq!(duration(&mut app, 1, 2), Some(Duration::from_secs(7)));
+    }
+    event_at(
+        &mut app,
+        SessionEvent::TurnCompleted {
+            turn_id: TEST_TURN_ID,
+            message: Message::assistant("done"),
+            display_attempt_id: None,
+        },
+        now + Duration::from_secs(35),
+    );
+    event_at(
+        &mut app,
+        SessionEvent::TurnCancelled {
+            turn_id: TEST_TURN_ID,
+        },
+        now + Duration::from_secs(100),
+    );
+    assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(20)));
+    assert_eq!(duration(&mut app, 1, 2), Some(Duration::from_secs(10)));
+    assert_eq!(
+        labels(&app),
+        ["#1", "#(1 - 2)"],
+        "no message created just to retain a timer"
+    );
+}
+
+#[test]
+fn accepted_edits_prune_timing_before_ordinal_reuse_and_restore_discards_it() {
+    for accepted in [false, true] {
+        let mut app = App::new();
+        let now = Instant::now();
+        for (id, offset, seconds) in [(1, 0, 5), (2, 10, 11)] {
+            let turn_id = TurnId::new(id);
+            let at = now + Duration::from_secs(offset);
+            event_at(
+                &mut app,
+                SessionEvent::TurnStarted {
+                    turn_id,
+                    message: Message::user(format!("prompt {id}")),
+                    mode: SessionMode::Build,
+                },
+                at,
+            );
+            event_at(
+                &mut app,
+                SessionEvent::ModelCallStarted { turn_id, call: 1 },
+                at,
+            );
+            event_at(
+                &mut app,
+                SessionEvent::TurnCompleted {
+                    turn_id,
+                    message: Message::assistant(format!("answer {id}")),
+                    display_attempt_id: None,
+                },
+                at + Duration::from_secs(seconds),
+            );
+        }
+        assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(5)));
+        assert_eq!(duration(&mut app, 2, 1), Some(Duration::from_secs(11)));
+        app.select_for_test(cursor(2, 0));
+        ctrl_e(&mut app);
+        assert_eq!(app.input(), "prompt 2", "recall excludes decoration");
+        app.set_input_for_test("replacement", 11);
+        assert!(matches!(
+            app.handle_event_at(ctrl_enter(), now + Duration::from_secs(30)),
+            Some(UiAction::EditTranscript(_))
+        ));
+        assert_eq!(duration(&mut app, 2, 1), Some(Duration::from_secs(11)));
+        if accepted {
+            event_at(
+                &mut app,
+                SessionEvent::TurnStarted {
+                    turn_id: TurnId::new(3),
+                    message: Message::user("replacement"),
+                    mode: SessionMode::Build,
+                },
+                now + Duration::from_secs(32),
+            );
+            assert_eq!(duration(&mut app, 2, 1), None);
+            event_at(
+                &mut app,
+                SessionEvent::ModelCallStarted {
+                    turn_id: TurnId::new(3),
+                    call: 1,
+                },
+                now + Duration::from_secs(40),
+            );
+            assert_eq!(duration(&mut app, 2, 1), Some(Duration::ZERO));
+            event_at(
+                &mut app,
+                SessionEvent::TurnCompleted {
+                    turn_id: TurnId::new(3),
+                    message: Message::assistant("new answer"),
+                    display_attempt_id: None,
+                },
+                now + Duration::from_secs(42),
+            );
+            assert_eq!(duration(&mut app, 2, 1), Some(Duration::from_secs(2)));
+        } else {
+            event_at(
+                &mut app,
+                SessionEvent::TurnRejected {
+                    turn_id: TurnId::new(3),
+                    error: "rejected".into(),
+                },
+                now + Duration::from_secs(32),
+            );
+            assert_eq!(duration(&mut app, 2, 1), Some(Duration::from_secs(11)));
+        }
+        assert_eq!(duration(&mut app, 1, 1), Some(Duration::from_secs(5)));
+        app.restore(vec![
+            TranscriptItem::Message(Message::user("restored prompt")),
+            TranscriptItem::Message(Message::assistant("restored answer")),
+        ]);
+        app.observe_clock(now + Duration::from_secs(100));
+        assert_eq!(duration(&mut app, 1, 1), None);
+        assert_eq!(duration(&mut app, 2, 1), None);
+        rendered_text(&mut app, 120, 20);
+        assert_eq!(
+            line_text(&app.view_cache().entries()[1].lines[0]),
+            "● Assistant · #(1 - 1)"
+        );
+    }
 }
 
 #[test]
@@ -380,6 +929,22 @@ fn prompt_metadata_only_rebuilds_native_header_and_never_changes_copy_recall_or_
     assert_eq!(active_header(&mut acp), None);
     assert_eq!(acp.status_for_test().primary, "ACP worker title");
     assert!(!rendered_text(&mut acp, 120, 15).contains('#'));
+    acp.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
+        turn_id: TEST_TURN_ID,
+        snapshot: Message::assistant("ACP output").into(),
+    });
+    acp.observe_clock(Instant::now() + Duration::from_secs(65));
+    rendered_text(&mut acp, 120, 15);
+    assert_eq!(
+        line_text(&acp.view_cache().streaming().unwrap().0[0]),
+        "● Assistant"
+    );
+    complete(&mut acp, 1, "ACP output");
+    rendered_text(&mut acp, 120, 15);
+    assert_eq!(
+        line_text(&acp.view_cache().entries()[1].lines[0]),
+        "● Assistant"
+    );
 }
 
 #[test]
@@ -644,6 +1209,16 @@ fn missing_authoritative_call_metadata_leaves_assistant_unnumbered() {
     assert!(text.contains("● You · #1"));
     assert!(text.contains("● Assistant"));
     assert!(!text.contains("#("));
+    assert_eq!(
+        line_text(&app.view_cache().entries()[1].lines[0]),
+        "● Assistant"
+    );
+    app.observe_clock(Instant::now() + Duration::from_secs(65));
+    rendered_text(&mut app, 100, 20);
+    assert_eq!(
+        line_text(&app.view_cache().entries()[1].lines[0]),
+        "● Assistant"
+    );
 }
 
 #[test]

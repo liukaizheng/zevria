@@ -1,6 +1,7 @@
 //! Committed conversation projection, correlation indexes, and selection.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use super::interaction::SelectionScope;
 
@@ -510,12 +511,30 @@ struct HostedAttempt {
     tool_status: ToolCallStatus,
 }
 
+/// TUI-observed assistant work (generation and its tools), never provider telemetry
+/// or transcript data.
+#[derive(Debug)]
+enum HeaderTiming {
+    Running(Instant),
+    Finished(Duration),
+}
+
+impl HeaderTiming {
+    fn elapsed(&self, now: Instant) -> Duration {
+        match *self {
+            Self::Running(started_at) => now.saturating_duration_since(started_at),
+            Self::Finished(elapsed) => elapsed,
+        }
+    }
+}
+
 /// Ordered observations retain runtime-only calls until restore. The history
-/// boundary lets accepted edits discard numbering along with the removed branch.
+/// boundary lets accepted edits discard numbering and timing with the removed branch.
 #[derive(Debug)]
 struct HeaderObservation {
     history_index: usize,
     header: NativeHeader,
+    timing: Option<HeaderTiming>,
 }
 
 #[derive(Debug, Default)]
@@ -561,7 +580,47 @@ impl ConversationState {
         self.headers.push(HeaderObservation {
             history_index: self.history.len(),
             header,
+            timing: None,
         });
+    }
+
+    pub(crate) fn start_header(&mut self, header: NativeHeader, now: Instant) {
+        if matches!(header, NativeHeader::Assistant { .. })
+            && let Some(observation) = self
+                .headers
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.header == header)
+        {
+            // A duplicate observation must never reset a running or finished call.
+            observation.timing.get_or_insert(HeaderTiming::Running(now));
+        }
+    }
+
+    pub(crate) fn finish_header(&mut self, header: Option<NativeHeader>, now: Instant) {
+        if let Some(header) = header
+            && let Some(observation) = self
+                .headers
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.header == header)
+            && let Some(timing @ HeaderTiming::Running(_)) = &mut observation.timing
+        {
+            *timing = HeaderTiming::Finished(timing.elapsed(now));
+        }
+    }
+
+    /// Unknown starts (including restored headers) do not acquire a zero duration.
+    pub(crate) fn header_timings(
+        &self,
+        now: Instant,
+    ) -> impl Iterator<Item = (NativeHeader, Duration)> + '_ {
+        self.headers.iter().filter_map(move |observation| {
+            observation
+                .timing
+                .as_ref()
+                .map(|timing| (observation.header, timing.elapsed(now)))
+        })
     }
 
     pub(crate) fn represents_header(&self, header: NativeHeader) -> bool {
@@ -1162,6 +1221,16 @@ impl ConversationState {
         !self.executing_tool_calls.is_empty()
     }
 
+    pub(crate) fn header_has_executing_tool_calls(&self, header: NativeHeader) -> bool {
+        self.executing_tool_calls
+            .values()
+            .flatten()
+            .any(|location| {
+                matches!(self.history.get(location.history_index),
+                Some(HistoryEntry::Conversation(entry)) if entry.header == Some(header))
+            })
+    }
+
     fn tool_call_at(&self, location: ToolCallLocation) -> Option<&ToolCall> {
         let HistoryEntry::Conversation(entry) = self.history.get(location.history_index)? else {
             return None;
@@ -1259,14 +1328,17 @@ impl ConversationState {
         sync_subtask_rows(entry, location.block_id, &mut self.block_ids);
     }
 
+    /// Return only headers whose last executing tool was settled by these results.
+    /// A late or duplicate result must not stop a newer model call's clock.
     pub(crate) fn finish_tool_results(
         &mut self,
         message: &Message,
         metadata: &[ToolResultMetadata],
-    ) {
+    ) -> Vec<NativeHeader> {
         let Message::User { content } = message else {
-            return;
+            return Vec::new();
         };
+        let mut headers = Vec::new();
         let mut metadata_by_id: HashMap<&str, Vec<usize>> = HashMap::new();
         for (index, metadata) in metadata.iter().enumerate() {
             metadata_by_id
@@ -1290,9 +1362,18 @@ impl ConversationState {
                 Some(&metadata[candidates.remove(position)])
             });
             if let Some(location) = self.select_executing_call(result) {
+                if let Some(HistoryEntry::Conversation(entry)) =
+                    self.history.get(location.history_index)
+                    && let Some(header) = entry.header
+                    && !headers.contains(&header)
+                {
+                    headers.push(header);
+                }
                 self.finish_tool_call(location, result, matched_metadata);
             }
         }
+        headers.retain(|&header| !self.header_has_executing_tool_calls(header));
+        headers
     }
 
     pub(crate) fn interrupt_executing_tool_calls(&mut self) {
@@ -2038,7 +2119,7 @@ impl ConversationState {
                     {
                         self.update_web_search((**attempt).clone());
                     }
-                    self.finish_tool_results(&message, &[]);
+                    let _ = self.finish_tool_results(&message, &[]);
                     self.commit_response(
                         message,
                         provider.display_attempt_id(),
@@ -2049,7 +2130,7 @@ impl ConversationState {
                 TranscriptItem::ToolResults {
                     message, metadata, ..
                 } => {
-                    self.finish_tool_results(&message, &metadata);
+                    let _ = self.finish_tool_results(&message, &metadata);
                     self.push_message(message, ToolCallStatus::Executing);
                 }
                 TranscriptItem::SessionModels(_)

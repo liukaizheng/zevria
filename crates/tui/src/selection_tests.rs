@@ -48,6 +48,84 @@ fn assert_user_jump(app: &mut App, chord: char, expected: Option<Selection>) {
 }
 
 #[test]
+fn elapsed_header_wrapping_keeps_selected_and_folded_body_paint_separate() {
+    let body = "first line\n\nsecond line\n\nlast line";
+    let mut saw_growth = false;
+    for width in 27..=36 {
+        for folded in [false, true] {
+            let mut app = App::new();
+            let now = Instant::now();
+            for event in [
+                SessionEvent::TurnStarted {
+                    turn_id: TEST_TURN_ID,
+                    message: Message::User {
+                        content: Vec::new(),
+                    },
+                    mode: SessionMode::Build,
+                },
+                SessionEvent::ModelCallStarted {
+                    turn_id: TEST_TURN_ID,
+                    call: 1,
+                },
+            ] {
+                assert!(app.reduce_at(event, now).is_empty());
+            }
+            let header = app.render_parts().assistant_header;
+            // Hosted output can own a live native header in committed history.
+            app.conversation_projection_mut().commit_response(
+                Message::assistant(body),
+                None,
+                ToolCallStatus::Finished,
+                header,
+            );
+            app.select_message_for_test(cursor(0, 0));
+            if folded {
+                app.handle_event(key(KeyCode::Char('z')));
+                app.handle_event(key(KeyCode::Char('c')));
+            }
+            app.set_view_for_test(0, false);
+            let mut first_height = None;
+            let mut rebuilt = None;
+            for seconds in [9, 10, 59, 60] {
+                app.observe_clock(now + Duration::from_secs(seconds));
+                let buffer = rendered_buffer(&mut app, width, 30);
+                let content = conversation_content_area(&buffer, false);
+                let layout = &app.view_cache().entries()[0];
+                let header_height =
+                    crate::layout::prepare::wrapped_height(&layout.lines[..1], content.width);
+                saw_growth |= header_height > *first_height.get_or_insert(header_height);
+                let selected = layout.selection.unwrap();
+                assert_eq!(selected.start(), header_height);
+                assert!(selected.end() <= usize::from(content.height));
+                for row in 0..selected.end() {
+                    assert_eq!(
+                        buffer[(content.x, content.y + row as u16)].bg == SELECTION_BG,
+                        row >= selected.start(),
+                        "only body rows receive selection paint"
+                    );
+                }
+                assert_eq!(
+                    app.view_cache().block_rebuilds,
+                    *rebuilt.get_or_insert(app.view_cache().block_rebuilds)
+                );
+                assert_eq!(app.selection(), cursor(0, 0));
+                assert_eq!(app.folds().entry(0).is_message_folded(), folded);
+                assert!(!app.view_follow());
+                assert_eq!(app.view_scroll(), 0);
+            }
+            assert_eq!(
+                app.handle_event(key(KeyCode::Char('y'))),
+                Some(UiAction::Copy { text: body.into() })
+            );
+        }
+    }
+    assert!(
+        saw_growth,
+        "the duration crossed a real wrapped-header boundary"
+    );
+}
+
+#[test]
 fn user_jumps_group_native_text_and_images_and_skip_non_user_entries() {
     let image = zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
     let mut app = App::new();

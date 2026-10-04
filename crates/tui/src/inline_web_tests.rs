@@ -99,6 +99,110 @@ fn publish(app: &mut App, attempt: WebSearchAttemptRecord) {
 }
 
 #[test]
+fn hosted_header_stays_live_while_its_native_command_executes() {
+    let mut app = App::new();
+    let now = Instant::now();
+    for event in [
+        SessionEvent::TurnStarted {
+            turn_id: TEST_TURN_ID,
+            message: Message::user("search then run"),
+            mode: SessionMode::Build,
+        },
+        SessionEvent::ModelCallStarted {
+            turn_id: TEST_TURN_ID,
+            call: 1,
+        },
+    ] {
+        assert!(app.reduce_at(event, now).is_empty());
+    }
+    let mut attempt = ordered_attempt();
+    attempt.presentation.push(part(
+        5,
+        AssistantPartIdentity::Tool,
+        AssistantPresentationContent::NativeTool {
+            call_id: "slow".into(),
+        },
+    ));
+    attempt.finish(Outcome::Completed);
+    assert!(
+        app.reduce_at(
+            SessionEvent::AssistantStreamUpdated {
+                turn_id: TEST_TURN_ID,
+                snapshot: AssistantStreamSnapshot {
+                    message: None,
+                    attempt: Some(attempt.clone())
+                },
+            },
+            now + Duration::from_secs(1)
+        )
+        .is_empty()
+    );
+    assert!(
+        app.reduce_at(
+            SessionEvent::Intermediate {
+                turn_id: TEST_TURN_ID,
+                display_attempt_id: Some(attempt.id.clone()),
+                message: assistant_message(vec![tool_call(
+                    "slow",
+                    None,
+                    "command",
+                    json!({"command":"slow command"})
+                )]),
+            },
+            now + Duration::from_secs(2)
+        )
+        .is_empty()
+    );
+    rendered_text(&mut app, 120, 40);
+    let rebuilt = app.view_cache().block_rebuilds;
+    for seconds in [12, 61] {
+        app.observe_clock(now + Duration::from_secs(seconds));
+        let text = rendered_text(&mut app, 120, 40);
+        assert_eq!(text.matches("● Assistant").count(), 1);
+        assert!(text.contains(&format!(
+            "● Assistant · #(1 - 1) · {}",
+            crate::text::format_elapsed(Duration::from_secs(seconds))
+        )));
+        assert!(text.contains("slow command ◐"));
+        assert!(!app.render_parts().pending_header);
+        assert_eq!(app.view_cache().block_rebuilds, rebuilt);
+    }
+    assert!(
+        app.reduce_at(
+            SessionEvent::ToolResults {
+                turn_id: TEST_TURN_ID,
+                message: Message::tool_result("slow", "command", "done"),
+                metadata: vec![file_metadata(
+                    "slow",
+                    None,
+                    "command",
+                    ToolCallOutcome::Success,
+                    Vec::new()
+                )],
+            },
+            now + Duration::from_secs(70)
+        )
+        .is_empty()
+    );
+    attempt.touch();
+    assert!(
+        app.reduce_at(
+            SessionEvent::WebSearchUpdated {
+                turn_id: TEST_TURN_ID,
+                attempt
+            },
+            now + Duration::from_secs(90)
+        )
+        .is_empty()
+    );
+    app.observe_clock(now + Duration::from_secs(100));
+    let text = rendered_text(&mut app, 120, 40);
+    assert_eq!(text.matches("● Assistant").count(), 1);
+    assert!(text.contains("● Assistant · #(1 - 1) · 1m 10s"));
+    assert!(text.contains("slow command ✓"));
+}
+
+#[test]
 fn native_web_content_replaces_pending_header_and_keeps_its_call_on_revisions() {
     let mut app = App::new();
     app.reduce_without_effects(SessionEvent::TurnStarted {
@@ -153,6 +257,204 @@ fn native_web_content_replaces_pending_header_and_keeps_its_call_on_revisions() 
             .count(),
         1
     );
+}
+
+#[test]
+fn hosted_headers_keep_ticking_in_history_without_rebuilding_bodies_and_freeze_on_handoff() {
+    for activity_only in [false, true] {
+        for intermediate in [false, true] {
+            let mut app = App::new();
+            let now = Instant::now();
+            for event in [
+                SessionEvent::TurnStarted {
+                    turn_id: TEST_TURN_ID,
+                    message: Message::user("search"),
+                    mode: SessionMode::Build,
+                },
+                SessionEvent::ModelCallStarted {
+                    turn_id: TEST_TURN_ID,
+                    call: 1,
+                },
+            ] {
+                assert!(app.reduce_at(event, now).is_empty());
+            }
+            let mut attempt = ordered_attempt();
+            if activity_only {
+                attempt.presentation.clear();
+            }
+            assert!(
+                app.reduce_at(
+                    SessionEvent::AssistantStreamUpdated {
+                        turn_id: TEST_TURN_ID,
+                        snapshot: AssistantStreamSnapshot {
+                            message: None,
+                            attempt: Some(attempt.clone())
+                        },
+                    },
+                    now + Duration::from_secs(1)
+                )
+                .is_empty()
+            );
+            rendered_text(&mut app, 120, 40);
+            let bodies = app.view_cache().entries()[1].lines[1..].to_vec();
+            let rebuilds = app.view_cache().block_rebuilds;
+            for seconds in [9, 10, 59, 60, 65] {
+                app.observe_clock(now + Duration::from_secs(seconds));
+                let text = rendered_text(&mut app, 120, 40);
+                assert_eq!(text.matches("● Assistant").count(), 1);
+                assert!(text.contains(&format!(
+                    "● Assistant · #(1 - 1) · {}",
+                    crate::text::format_elapsed(Duration::from_secs(seconds))
+                )));
+                assert!(!app.render_parts().pending_header);
+                assert!(app.view_cache().streaming().is_none());
+                assert_eq!(app.view_cache().entries()[1].lines[1..], bodies);
+                assert_eq!(app.view_cache().block_rebuilds, rebuilds);
+            }
+            if intermediate {
+                assert!(
+                    app.reduce_at(
+                        SessionEvent::Intermediate {
+                            turn_id: TEST_TURN_ID,
+                            message: Message::assistant("canonical"),
+                            display_attempt_id: Some(attempt.id.clone()),
+                        },
+                        now + Duration::from_secs(70)
+                    )
+                    .is_empty()
+                );
+            }
+            assert!(
+                app.reduce_at(
+                    SessionEvent::ModelCallStarted {
+                        turn_id: TEST_TURN_ID,
+                        call: 2
+                    },
+                    now + Duration::from_secs(80)
+                )
+                .is_empty()
+            );
+            attempt.finish(Outcome::Completed);
+            assert!(
+                app.reduce_at(
+                    SessionEvent::WebSearchUpdated {
+                        turn_id: TEST_TURN_ID,
+                        attempt
+                    },
+                    now + Duration::from_secs(82)
+                )
+                .is_empty()
+            );
+            let text = rendered_text(&mut app, 120, 40);
+            let frozen = if intermediate { "1m 10s" } else { "1m 20s" };
+            assert!(text.contains(&format!("● Assistant · #(1 - 1) · {frozen}")));
+            assert!(text.contains("● Assistant · #(1 - 2) · 2s"));
+            assert!(
+                app.reduce_at(
+                    SessionEvent::TurnCompleted {
+                        turn_id: TEST_TURN_ID,
+                        message: Message::assistant("final"),
+                        display_attempt_id: None,
+                    },
+                    now + Duration::from_secs(85)
+                )
+                .is_empty()
+            );
+            app.observe_clock(now + Duration::from_secs(200));
+            let text = rendered_text(&mut app, 120, 40);
+            assert_eq!(text.matches("● Assistant").count(), 2);
+            assert!(text.contains(&format!("● Assistant · #(1 - 1) · {frozen}")));
+            assert!(text.contains("● Assistant · #(1 - 2) · 5s"));
+        }
+    }
+}
+
+#[test]
+fn every_accepted_terminal_freezes_retained_hosted_output_and_stale_terminals_do_not() {
+    for terminal in 0..5 {
+        let mut app = App::new();
+        let now = Instant::now();
+        for event in [
+            SessionEvent::TurnStarted {
+                turn_id: TEST_TURN_ID,
+                message: Message::user("search"),
+                mode: SessionMode::Build,
+            },
+            SessionEvent::ModelCallStarted {
+                turn_id: TEST_TURN_ID,
+                call: 1,
+            },
+        ] {
+            assert!(app.reduce_at(event, now).is_empty());
+        }
+        let header = app.render_parts().assistant_header.unwrap();
+        let attempt = ordered_attempt();
+        assert!(
+            app.reduce_at(
+                SessionEvent::AssistantStreamUpdated {
+                    turn_id: TEST_TURN_ID,
+                    snapshot: AssistantStreamSnapshot {
+                        message: None,
+                        attempt: Some(attempt.clone())
+                    },
+                },
+                now + Duration::from_secs(2)
+            )
+            .is_empty()
+        );
+        assert!(
+            app.reduce_at(
+                SessionEvent::TurnFailed {
+                    turn_id: TurnId::new(99),
+                    error: "stale failure".into()
+                },
+                now + Duration::from_secs(4)
+            )
+            .is_empty()
+        );
+        app.observe_clock(now + Duration::from_secs(6));
+        assert!(rendered_text(&mut app, 120, 40).contains("● Assistant · #(1 - 1) · 6s"));
+        let event = match terminal {
+            0 => SessionEvent::TurnCompleted {
+                turn_id: TEST_TURN_ID,
+                message: Message::assistant("canonical"),
+                display_attempt_id: Some(attempt.id),
+            },
+            1 => SessionEvent::TurnRecovered {
+                turn_id: TEST_TURN_ID,
+                display_attempt_id: Some(attempt.id),
+            },
+            2 => SessionEvent::TurnFailed {
+                turn_id: TEST_TURN_ID,
+                error: "failed".into(),
+            },
+            3 => SessionEvent::TurnRejected {
+                turn_id: TEST_TURN_ID,
+                error: "rejected".into(),
+            },
+            _ => SessionEvent::TurnCancelled {
+                turn_id: TEST_TURN_ID,
+            },
+        };
+        assert!(
+            app.reduce_at(event, now + Duration::from_secs(7))
+                .is_empty()
+        );
+        rendered_text(&mut app, 120, 40);
+        let cached = app.view_cache().entries()[1].lines.clone();
+        let rebuilt = app.view_cache().block_rebuilds;
+        app.observe_clock(now + Duration::from_secs(100));
+        let text = rendered_text(&mut app, 120, 40);
+        assert_eq!(text.matches("● Assistant").count(), 1);
+        assert!(text.contains("● Assistant · #(1 - 1) · 7s"));
+        assert_eq!(
+            app.render_parts().header_timings.elapsed(header),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(app.view_cache().entries()[1].lines, cached);
+        assert_eq!(app.view_cache().block_rebuilds, rebuilt);
+        assert!(app.view_cache().streaming().is_none());
+    }
 }
 
 #[test]
