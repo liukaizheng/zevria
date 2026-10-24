@@ -558,6 +558,9 @@ capabilities, and the separate ensemble-worker profile.
 
 ## Storage and safety
 
+See the [Privacy Policy](PRIVACY.md) for provider data flows, local retention,
+and deletion controls.
+
 Zevria executes tools with the filesystem and process permissions of its user.
 **It does not provide an operating-system sandbox.** Plan/Explore restrictions
 and delegated workspace ownership are not security isolation. The ACP frontend
