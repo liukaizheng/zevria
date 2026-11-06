@@ -157,10 +157,28 @@ impl PlanHandoff {
 
 /// Validated but not yet committed candidate carried through `ToolContext`.
 /// Fields are private so only the fixed validator can construct one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlanCandidate {
     title: String,
     markdown: String,
+}
+
+impl<'de> Deserialize<'de> for PlanCandidate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            title: String,
+            markdown: String,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        Self::validate(fields.title, fields.markdown, MAX_PLAN_ARTIFACT_BYTES)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl rig_core::tool::ContextValue for PlanCandidate {
+    const KEY: &'static str = "zevria.plan_candidate";
 }
 
 impl PlanCandidate {
@@ -518,6 +536,33 @@ mod tests {
             "# {title}\n\n## Goal\nShip it.\n\n## Decisions\nUse Rust.\n\n\
              ## Implementation\nBuild it.\n\n## Validation\nTest it.\n\n## Risks\nNone."
         )
+    }
+
+    #[test]
+    fn rig_context_deserialization_revalidates_plan_candidates() {
+        let title = "Validated context candidate";
+        let candidate =
+            PlanCandidate::validate(title.into(), valid_markdown(title), MAX_PLAN_ARTIFACT_BYTES)
+                .unwrap();
+        let mut context = rig_core::tool::ToolContext::new();
+        context.insert_result(candidate.clone()).unwrap();
+        let restored: rig_core::tool::ToolContext =
+            serde_json::from_value(serde_json::to_value(context).unwrap()).unwrap();
+        assert_eq!(
+            restored.result::<PlanCandidate>().unwrap(),
+            Some(candidate.clone())
+        );
+
+        let mut invalid = serde_json::to_value(candidate).unwrap();
+        invalid["markdown"] = "# Unvalidated content".into();
+        assert!(serde_json::from_value::<PlanCandidate>(invalid.clone()).is_err());
+        invalid["markdown"] = format!(
+            "{}\n{}",
+            valid_markdown(title),
+            "x".repeat(MAX_PLAN_ARTIFACT_BYTES)
+        )
+        .into();
+        assert!(serde_json::from_value::<PlanCandidate>(invalid).is_err());
     }
 
     #[test]

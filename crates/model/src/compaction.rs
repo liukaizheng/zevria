@@ -2,10 +2,9 @@
 
 pub mod replay;
 
-use rig_core::message::{
-    AssistantContent, Message, ReasoningContent, ToolResultContent, UserContent,
-};
+use rig_core::message::{AssistantContent, Message, ToolResultContent, UserContent};
 use serde::{Deserialize, Serialize};
+use zevria_content::reasoning::{self, ReasoningContent};
 
 use crate::OwnedModelRequestItem;
 
@@ -227,25 +226,28 @@ fn message_payload_bytes(message: &Message) -> usize {
             };
             total.saturating_add(bytes)
         }),
-        Message::Assistant { content, .. } => content.iter().fold(0, |total, item| {
+        Message::Assistant(assistant) => assistant.content.iter().fold(0, |total, item| {
             let bytes = match item {
                 AssistantContent::Text(text) => text.text.len(),
-                AssistantContent::ToolCall(call) => call
-                    .function
-                    .name
-                    .len()
-                    .saturating_add(json_argument_bytes(&call.function.arguments)),
+                AssistantContent::ToolCall(call) => call.function.name.len().saturating_add(
+                    json_argument_bytes(&serde_json::Value::String(call.function.raw_arguments())),
+                ),
                 AssistantContent::Reasoning(reasoning) => {
-                    reasoning.content.iter().fold(0_usize, |total, item| {
-                        total.saturating_add(match item {
-                            ReasoningContent::Text { text, .. }
-                            | ReasoningContent::Summary(text) => text.len(),
-                            ReasoningContent::Encrypted(_) => ENCRYPTED_REASONING_MARKER.len(),
-                            ReasoningContent::Redacted { .. } => REDACTED_REASONING_MARKER.len(),
+                    reasoning::blocks(reasoning)
+                        .iter()
+                        .fold(0_usize, |total, item| {
+                            total.saturating_add(match item {
+                                ReasoningContent::Text { text, .. }
+                                | ReasoningContent::Summary(text) => text.len(),
+                                ReasoningContent::Encrypted(_) => ENCRYPTED_REASONING_MARKER.len(),
+                                ReasoningContent::Redacted { .. } => {
+                                    REDACTED_REASONING_MARKER.len()
+                                }
+                            })
                         })
-                    })
                 }
                 AssistantContent::Image(image) => serialized_semantic_bytes(image),
+                other => serialized_semantic_bytes(other),
             };
             total.saturating_add(bytes)
         }),
@@ -271,6 +273,12 @@ fn replace_reasoning_opaque_content(value: &mut serde_json::Value) {
         };
         if block.get("type").and_then(serde_json::Value::as_str) != Some("reasoning") {
             continue;
+        }
+        if let Some(item) = block
+            .get_mut("native")
+            .and_then(|native| native.get_mut("item"))
+        {
+            *item = opaque_safe_provider_json(item);
         }
         let Some(reasoning) = block
             .get_mut("content")
@@ -337,7 +345,10 @@ pub fn opaque_safe_provider_json(value: &serde_json::Value) -> serde_json::Value
                         walk(value);
                     }
                 }
-                if matches!(kind.as_deref(), Some("redacted" | "redacted_reasoning")) {
+                if matches!(
+                    kind.as_deref(),
+                    Some("redacted" | "redacted_reasoning" | "redacted_thinking")
+                ) {
                     if let Some(data) = values.get_mut("data") {
                         *data = serde_json::Value::String(REDACTED_REASONING_MARKER.to_string());
                     }
@@ -397,8 +408,8 @@ fn image_accounting_projection(message: &Message) -> (Message, usize) {
                 }
             }
         }
-        Message::Assistant { content, .. } => {
-            for block in content {
+        Message::Assistant(assistant) => {
+            for block in &mut assistant.content {
                 if let AssistantContent::Image(image) = block {
                     strip(image);
                 }
@@ -622,16 +633,17 @@ mod tests {
 
     #[test]
     fn opaque_reasoning_size_never_changes_message_estimates() {
-        let message = |encrypted: String, redacted: String| Message::Assistant {
-            id: Some("provider-message-id".to_string()),
-            content: vec![AssistantContent::Reasoning(rig_core::message::Reasoning {
-                id: Some("reasoning-id".to_string()),
-                content: vec![
-                    ReasoningContent::Summary("visible summary".to_string()),
-                    ReasoningContent::Encrypted(encrypted),
-                    ReasoningContent::Redacted { data: redacted },
-                ],
-            })],
+        let message = |encrypted: String, redacted: String| {
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::Reasoning(zevria_content::reasoning::from_blocks(
+                    Some("reasoning-id".to_string()),
+                    vec![
+                        ReasoningContent::Summary("visible summary".to_string()),
+                        ReasoningContent::Encrypted(encrypted),
+                        ReasoningContent::Redacted { data: redacted },
+                    ],
+                )),
+            ]))
         };
         let short = estimate_message_tokens(&message("ten bytes!".to_string(), "x".to_string()));
         let large = estimate_message_tokens(&message("x".repeat(300_000), "y".repeat(200_000)));
@@ -644,14 +656,17 @@ mod tests {
         let text_estimate = estimate_message_tokens(&Message::user(text));
         assert_eq!(text_estimate.payload_tokens, approximate_tokens(text));
 
-        let call = |arguments| Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(
-                rig_core::message::ToolCall::new(
-                    rig_core::message::ToolCallId::new("call").expect("nonempty"),
-                    rig_core::message::ToolFunction::new("tool".to_string(), arguments),
-                ),
-            )],
+        let call = |arguments| {
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                    rig_core::message::CallId::from_wire("call"),
+                    rig_core::message::ToolFunction::new(
+                        rig_core::message::ToolName::new("tool".to_string())
+                            .expect("nonempty tool name"),
+                        arguments,
+                    ),
+                )),
+            ]))
         };
         let empty = estimate_message_tokens(&call(serde_json::json!({})));
         let with_user_id = estimate_message_tokens(&call(serde_json::json!({

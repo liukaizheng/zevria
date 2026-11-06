@@ -171,7 +171,11 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
         app.reduce_at(
             SessionEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
-                message: Message::tool_result("slow", "command", "done"),
+                message: Message::tool_result(
+                    rig_core::message::CallId::from_wire("slow"),
+                    rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                    "done"
+                ),
                 metadata: vec![file_metadata(
                     "slow",
                     None,
@@ -744,11 +748,10 @@ fn compacted_native_attempt_restores_the_live_text_and_order_without_duplication
 
 #[test]
 fn headings_follow_visible_runs_across_committed_and_streamed_boundaries() {
-    let message = |text: &str| Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Reasoning(Reasoning::summaries(vec![
-            text.into(),
-        ]))],
+    let message = |text: &str| {
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![text.into()])),
+        ]))
     };
     let mut app = App::new();
     app.seed_history_entry(history_message(message("one")));
@@ -769,14 +772,12 @@ fn headings_follow_visible_runs_across_committed_and_streamed_boundaries() {
         vec![ReasoningContent::Encrypted("opaque".into())],
         vec![],
     ] {
-        let mut reasoning = Reasoning::summaries(Vec::new());
-        reasoning.content = content;
+        let reasoning = zevria_content::reasoning::from_blocks(None, content);
         assert!(
             HistoryEntry::from_message(
-                Message::Assistant {
-                    id: None,
-                    content: vec![AssistantContent::Reasoning(reasoning)]
-                },
+                Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                    AssistantContent::Reasoning(reasoning)
+                ])),
                 ToolCallStatus::Finished
             )
             .is_none()

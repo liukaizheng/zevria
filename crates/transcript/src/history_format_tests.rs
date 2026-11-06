@@ -245,13 +245,12 @@ fn tool_result_sidecars_cannot_turn_ordinary_messages_into_lifecycle_records() {
 
 #[test]
 fn marker_shaped_tool_arguments_are_data_but_checkpoint_sidecars_are_not() {
-    use rig_core::message::{AssistantContent, ToolCall, ToolCallId, ToolFunction};
-    let message = Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::ToolCall(ToolCall::new(
-            ToolCallId::new_or_mint("ordinary-call"),
+    use rig_core::message::{AssistantContent, CallId, ToolCall, ToolFunction};
+    let message = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::ToolCall(ToolCall::new(
+            CallId::from_wire("ordinary-call"),
             ToolFunction::new(
-                "inspect_json".into(),
+                rig_core::message::ToolName::new("inspect_json").expect("nonempty tool name"),
                 json!({
                     "zevria_skill_activation_v2": {}, "zevria_subtask_results": [],
                     "zevria_provider_replay": {"version": 1},
@@ -260,8 +259,8 @@ fn marker_shaped_tool_arguments_are_data_but_checkpoint_sidecars_are_not() {
                     "replay": {"version": 1, "provider": "openai.responses"},
                 }),
             ),
-        ))],
-    };
+        )),
+    ]));
     let ordinary = TranscriptItem::Message(message.clone());
     let value = serde_json::to_value(&ordinary).unwrap();
     assert_eq!(

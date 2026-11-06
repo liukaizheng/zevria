@@ -45,7 +45,12 @@ mod tests {
                 TranscriptItem::Message(Message::user("kick off")),
                 TranscriptItem::ToolResults {
                     skill_applications: Vec::new(),
-                    message: Message::tool_result("call-1", "launch_subtasks", "status: launched"),
+                    message: Message::tool_result(
+                        rig_core::message::CallId::from_wire("call-1"),
+                        rig_core::message::ToolName::new("launch_subtasks")
+                            .expect("nonempty tool name"),
+                        "status: launched",
+                    ),
                     metadata: vec![ToolResultMetadata {
                         diagnostic: None,
                         id: "call-1".to_string(),
@@ -117,8 +122,8 @@ fn plural_mixed_terminal_metadata_restores_every_accepted_identity_in_input_orde
     .collect();
     let item = TranscriptItem::ToolResults {
         message: rig_core::message::Message::tool_result(
-            "outer",
-            "launch_subtasks",
+            rig_core::message::CallId::from_wire("outer"),
+            rig_core::message::ToolName::new("launch_subtasks").expect("nonempty tool name"),
             "entry 0: completed report; entry 1: failed; entry 2/3: cancelled",
         ),
         metadata: vec![ToolResultMetadata {

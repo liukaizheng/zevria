@@ -37,7 +37,6 @@ use rig_agent::tool::{
     Tool, ToolContext,
     server::{ToolServer, ToolServerHandle},
 };
-use rig_core::providers::openai::responses_api::ReasoningSummaryLevel;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -69,6 +68,7 @@ use zevria_model::ModelRequest;
 use zevria_model::ModelRequestItem;
 use zevria_model::ProviderReplay;
 use zevria_model::TokenUsage;
+use zevria_model::openai::ReasoningSummaryLevel;
 use zevria_session_api::ModelProvider;
 use zevria_session_api::SessionCommand;
 use zevria_session_api::SessionEvent;
@@ -313,16 +313,6 @@ fn captured_log_subscriber(logs: CapturedLogs) -> impl tracing::Subscriber + Sen
         .with_target(false)
         .with_writer(logs)
         .finish()
-}
-
-fn test_model() -> ResponsesCompletionModel {
-    let client = openai::Client::builder()
-        .api_key("test-key")
-        .base_url("http://127.0.0.1/v1")
-        .build()
-        .expect("test client should build");
-
-    client.completion_model("gpt-test")
 }
 
 #[derive(Clone)]
@@ -615,7 +605,6 @@ fn test_session_with_pump(
         #[cfg(feature = "cache-diagnostics")]
         cache_diagnostics: Default::default(),
         profile: zevria_foundation::ModelProfileRef::new("test-provider", "gpt-test"),
-        model: test_model(),
         context_window_tokens: 272_000,
         input_token_limit: 272_000,
         preamble: "Test instructions".to_string(),
@@ -1223,7 +1212,7 @@ async fn exact_input_count_posts_the_complete_logical_request_without_touching_c
         OpenAiWebSocketSession::disconnected(OpenAiWebSocketTerminalCategory::HttpFallback),
         None,
     );
-    openai.model.model = "gpt-count".to_string();
+    openai.profile.model = "gpt-count".to_string();
     openai.compatibility = ResponsesCompatibilityConfig::default();
     openai.responses_parameters = Some(json!({
         "prompt_cache_key": "test-session",
@@ -1481,7 +1470,7 @@ async fn configured_remote_compaction_posts_ordered_input_and_preserves_opaque_o
         .await
         .expect("WebSocket client");
     let mut openai = test_session_with_url(&format!("ws://{ws_address}"), socket, None);
-    openai.model.model = "gpt-plan".to_string();
+    openai.profile.model = "gpt-plan".to_string();
     openai.responses_parameters = Some(json!({
         "reasoning": {"effort": "medium", "summary": "detailed"}
     }));
@@ -2288,10 +2277,7 @@ fn usage_events(receiver: &mut SessionEventReceiver) -> Vec<TokenUsage> {
 }
 
 fn text_with_openai_extras(text: &str, extras: Value) -> Text {
-    Text {
-        text: text.to_string(),
-        additional_params: AdditionalParams::from_entries(Some(("openai_responses", extras))),
-    }
+    zevria_content::citations::text_with_openai_extras(text, extras)
 }
 
 #[test]
@@ -2319,18 +2305,16 @@ fn terminal_replay_is_authoritative_over_the_streaming_preview() {
             "annotations": [{"type": "citation", "source": "terminal"}]
         }),
     );
-    let expected = Message::Assistant {
-        id: Some("msg_terminal".to_string()),
-        content: vec![AssistantContent::Text(text)],
-    };
+    let expected = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::Text(text),
+    ]));
 
     assert_eq!(actual, expected);
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_terminal".to_string()),
-            content: vec![AssistantContent::text("draft")],
-        },
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("draft")
+        ])),
         "the accumulator remains only an in-flight preview"
     );
 }
@@ -2429,7 +2413,7 @@ async fn foreign_replay_uses_portable_text_and_correlated_tool_projection() {
         ],
     );
     let canonical = replay.to_message().expect("canonical foreign message");
-    let Message::Assistant { content, .. } = &canonical else {
+    let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = &canonical else {
         panic!("canonical replay must be assistant history");
     };
     let call = content
@@ -2443,7 +2427,7 @@ async fn foreign_replay_uses_portable_text_and_correlated_tool_projection() {
         content: vec![rig_core::message::UserContent::ToolResult(
             rig_core::message::ToolResult {
                 call: call.id,
-                provider: call.provider,
+                is_error: false,
                 name: call.function.name,
                 content: vec![rig_core::message::ToolResultContent::text("tool output")],
             },
@@ -2615,13 +2599,12 @@ fn reasoning_preview_matches_canonical_replay_order() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Reasoning(message_reasoning(
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Reasoning(message_reasoning(
                 Some("rs_enc".to_string()),
                 vec![ReasoningContent::Encrypted("cipher draft".to_string())],
-            ))],
-        }
+            ))
+        ]))
     );
 
     record_item(
@@ -2638,9 +2621,8 @@ fn reasoning_preview_matches_canonical_replay_order() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Reasoning(message_reasoning(
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Reasoning(message_reasoning(
                 Some("rs_enc".to_string()),
                 vec![
                     ReasoningContent::Text {
@@ -2649,8 +2631,8 @@ fn reasoning_preview_matches_canonical_replay_order() {
                     },
                     ReasoningContent::Encrypted("cipher draft".to_string()),
                 ],
-            ))],
-        }
+            ))
+        ]))
     );
 
     record_item(
@@ -2667,9 +2649,8 @@ fn reasoning_preview_matches_canonical_replay_order() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Reasoning(message_reasoning(
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Reasoning(message_reasoning(
                 Some("rs_enc".to_string()),
                 vec![
                     ReasoningContent::Summary("streamed summary".to_string()),
@@ -2679,8 +2660,8 @@ fn reasoning_preview_matches_canonical_replay_order() {
                     },
                     ReasoningContent::Encrypted("cipher draft".to_string()),
                 ],
-            ))],
-        }
+            ))
+        ]))
     );
 
     let reasoning_done_item = json!({
@@ -2705,23 +2686,20 @@ fn reasoning_preview_matches_canonical_replay_order() {
         output_text_delta_at("answer", 5, 1, "msg_enc"),
     );
 
-    let expected = Message::Assistant {
-        id: Some("msg_enc".to_string()),
-        content: vec![
-            AssistantContent::Reasoning(message_reasoning(
-                Some("rs_enc".to_string()),
-                vec![
-                    ReasoningContent::Summary("final summary".to_string()),
-                    ReasoningContent::Text {
-                        text: "final reasoning".to_string(),
-                        signature: None,
-                    },
-                    ReasoningContent::Encrypted("cipher final".to_string()),
-                ],
-            )),
-            AssistantContent::text("answer"),
-        ],
-    };
+    let expected = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::Reasoning(message_reasoning(
+            Some("rs_enc".to_string()),
+            vec![
+                ReasoningContent::Summary("final summary".to_string()),
+                ReasoningContent::Text {
+                    text: "final reasoning".to_string(),
+                    signature: None,
+                },
+                ReasoningContent::Encrypted("cipher final".to_string()),
+            ],
+        )),
+        AssistantContent::text("answer"),
+    ]));
     assert_eq!(attempt_message(&state), expected);
 
     let response = completed_output_event(
@@ -2785,13 +2763,16 @@ fn malformed_streamed_tool_arguments_are_preserved_for_a_tool_failure() {
     let message = accumulator
         .assistant_message()
         .expect("malformed arguments should remain a tool call");
-    let Message::Assistant { content, .. } = message else {
+    let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = message else {
         panic!("expected assistant message");
     };
     let Some(AssistantContent::ToolCall(call)) = content.first() else {
         panic!("expected tool call");
     };
-    assert_eq!(call.function.arguments, json!("{"));
+    assert_eq!(
+        zevria_content::message::tool_arguments(&call.function),
+        json!("{")
+    );
 }
 
 #[tokio::test]
@@ -2909,7 +2890,7 @@ async fn changed_mode_tools_and_instructions_force_full_replay() {
     let tools = policy_tools();
     let mut openai = test_session(socket, None);
     openai.tools = tools;
-    openai.model.model = "gpt-fixed".to_string();
+    openai.profile.model = "gpt-fixed".to_string();
     let mut state = AttemptState::default();
 
     let plan = RequestParts {
@@ -3209,7 +3190,7 @@ async fn changed_history_and_model_properties_force_full_replay() {
     .await
     .expect("edited history should replay in full");
 
-    openai.model.model = "gpt-test-changed".to_string();
+    openai.profile.model = "gpt-test-changed".to_string();
     run_turn(
         "third question",
         &mut openai,
@@ -3278,10 +3259,9 @@ async fn run_turn_chains_incrementally_and_ignores_late_done() {
     .expect("first turn should complete");
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_1".to_string()),
-            content: vec![AssistantContent::text("first answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("first answer")
+        ]))
     );
     assert_eq!(state.history.len(), 2);
     assert_eq!(continuation_response_id(&openai), Some("resp_1"));
@@ -3300,10 +3280,9 @@ async fn run_turn_chains_incrementally_and_ignores_late_done() {
     .expect("second turn should complete");
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_test".to_string()),
-            content: vec![AssistantContent::text("second answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("second answer")
+        ]))
     );
     assert_eq!(state.history.len(), 4);
     assert_eq!(continuation_response_id(&openai), Some("resp_2"));
@@ -3616,10 +3595,9 @@ async fn a_done_completion_with_usage_reports_it_once() {
     assert_eq!(usage_events(&mut receiver), [expected_token_usage()]);
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_done_usage".to_string()),
-            content: vec![AssistantContent::text("answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("answer")
+        ]))
     );
     server.await.expect("server task should finish");
 }
@@ -3716,10 +3694,9 @@ async fn provider_reconnects_and_replays_prompt_after_idle_drop() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_reconnect".to_string()),
-            content: vec![AssistantContent::text("recovered answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("recovered answer")
+        ]))
     );
     assert_eq!(state.history.len(), 2);
     assert_eq!(continuation_response_id(&openai), Some("resp_reconnect"));
@@ -3821,10 +3798,9 @@ async fn relayed_upstream_disconnect_reconnects_and_replays_prompt() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_relayed".to_string()),
-            content: vec![AssistantContent::text("recovered answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("recovered answer")
+        ]))
     );
     assert_eq!(continuation_response_id(&openai), Some("resp_relayed"));
 
@@ -3951,10 +3927,9 @@ async fn reconnect_replays_full_history_without_a_stale_id_round_trip() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_recovered".to_string()),
-            content: vec![AssistantContent::text("recovered answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("recovered answer")
+        ]))
     );
     assert_eq!(continuation_response_id(&openai), Some("resp_recovered"));
 
@@ -4096,10 +4071,9 @@ async fn run_turn_retries_missing_response_id_with_full_history_once() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_2".to_string()),
-            content: vec![AssistantContent::text("recovered answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("recovered answer")
+        ]))
     );
     assert_eq!(state.history.len(), 4);
     assert_eq!(continuation_response_id(&openai), Some("resp_fresh"));
@@ -4577,7 +4551,6 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         #[cfg(feature = "cache-diagnostics")]
         cache_diagnostics: Default::default(),
         profile: test_profile_ref(),
-        model: test_model(),
         context_window_tokens: 272_000,
         input_token_limit: 272_000,
         preamble: "Test instructions".to_string(),
@@ -4660,10 +4633,9 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
     );
     assert_eq!(
         engine.history().last(),
-        Some(&Message::Assistant {
-            id: Some("msg_final".to_string()),
-            content: vec![AssistantContent::text("finished once")],
-        })
+        Some(&Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![AssistantContent::text("finished once")])
+        ))
     );
     server.await.expect("server task should finish");
 }
@@ -5611,10 +5583,9 @@ async fn turn_survives_repeated_drops_within_the_recovery_budget() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_persist".to_string()),
-            content: vec![AssistantContent::text("made it through")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("made it through")
+        ]))
     );
 
     // Each recovery cycle announced itself as a retry, never a failure.
@@ -5800,10 +5771,9 @@ async fn a_healthy_socket_remains_incremental_after_more_than_sixty_seconds_idle
     assert_eq!(openai.ws.socket_generation, original_generation);
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_fresh".to_string()),
-            content: vec![AssistantContent::text("fresh socket answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("fresh socket answer")
+        ]))
     );
     assert_eq!(
         continuation_response_id(&openai),
@@ -5878,7 +5848,7 @@ async fn http_only_transport_posts_full_streaming_request_and_accumulates_fragme
 
     let endpoint = format!("http://{address}/custom/responses?version=1");
     let mut openai = connect_http_test_provider(endpoint, ToolServer::new().run()).await;
-    openai.model.model = "gpt-explore".to_string();
+    openai.profile.model = "gpt-explore".to_string();
     let mut state = AttemptState::default();
     let (sender, mut events) = session_event_channel(32);
     let parts = RequestParts {
@@ -5974,10 +5944,9 @@ async fn http_response_done_completes_with_native_output_and_usage() {
     assert_eq!(usage_events(&mut events), vec![expected_token_usage()]);
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_http_done".to_string()),
-            content: vec![AssistantContent::text("done answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("done answer")
+        ]))
     );
     let replay = state
         .history_replays
@@ -6251,10 +6220,9 @@ async fn http_retries_server_errors_and_partial_stream_loss_with_identical_reque
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_retry".to_string()),
-            content: vec![AssistantContent::text("clean answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("clean answer")
+        ]))
     );
     let requests = server.await.expect("HTTP retry server");
     assert_eq!(requests.len(), 3);
@@ -6420,10 +6388,9 @@ async fn http_idle_timeout_retries_even_after_unknown_event() {
 
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_slow_http".to_string()),
-            content: vec![AssistantContent::text("finished")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("finished")
+        ]))
     );
     let (first, second) = server.await.expect("slow HTTP server");
     assert_eq!(first, second, "the timeout retry must reuse its snapshot");
@@ -6682,10 +6649,9 @@ async fn startup_websocket_426_immediately_selects_sticky_http() {
     assert_eq!(continuation_response_id(&openai), None);
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_426".to_string()),
-            content: vec![AssistantContent::text("HTTP selected")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("HTTP selected")
+        ]))
     );
     let request = server.await.expect("426 transport server");
     assert!(request.body.get("previous_response_id").is_none());
@@ -6783,10 +6749,9 @@ async fn exhausted_websocket_retries_fall_back_with_full_input_and_remain_http()
     assert_eq!(openai.transport, OpenAiTransport::Http);
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_http_sticky".to_string()),
-            content: vec![AssistantContent::text("sticky answer")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("sticky answer")
+        ]))
     );
 
     let (initial, replayed, fallback, sticky) = server.await.expect("sticky transport server");
@@ -6930,8 +6895,8 @@ async fn http_tool_followup_replays_complete_native_history_without_continuation
         vec![native_call]
     );
     state.history.push(Message::tool_result(
-        "call_http_tool",
-        "count_once",
+        rig_core::message::CallId::from_wire("call_http_tool"),
+        rig_core::message::ToolName::new("count_once").expect("nonempty tool name"),
         "counted",
     ));
     state.history_replays.push(None);
@@ -6959,10 +6924,9 @@ async fn http_tool_followup_replays_complete_native_history_without_continuation
     }
     assert_eq!(
         attempt_message(&state),
-        Message::Assistant {
-            id: Some("msg_http_final".to_string()),
-            content: vec![AssistantContent::text("tool finished")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("tool finished")
+        ]))
     );
 }
 
@@ -7189,10 +7153,11 @@ async fn http_only_responses_gateway_supports_arbitrary_models_tools_and_replay(
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(
         engine.history().last(),
-        Some(&Message::Assistant {
-            id: Some("msg_gateway_final".to_string()),
-            content: vec![AssistantContent::text("Gateway complete")],
-        })
+        Some(&Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![AssistantContent::text(
+                "Gateway complete"
+            )])
+        ))
     );
     drop(engine);
 
@@ -7209,10 +7174,9 @@ async fn http_only_responses_gateway_supports_arbitrary_models_tools_and_replay(
     assert_eq!(replays[0].items, vec![reasoning, call]);
     assert_eq!(
         replays[1].to_message().expect("final replay projection"),
-        Message::Assistant {
-            id: Some("msg_gateway_final".to_string()),
-            content: vec![AssistantContent::text("Gateway complete")],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("Gateway complete")
+        ]))
     );
     assert!(
         loaded
@@ -7798,10 +7762,9 @@ async fn failed_profile_does_not_poison_another_router_slot() {
         .expect("Build profile remains healthy");
     assert_eq!(
         response.message(),
-        &Message::Assistant {
-            id: Some("msg_healthy".to_string()),
-            content: vec![AssistantContent::text("healthy")],
-        }
+        &Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::text("healthy")
+        ]))
     );
     assert!(
         failing_server

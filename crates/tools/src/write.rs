@@ -116,7 +116,13 @@ impl Tool for WriteTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let (output, changes) = self.execute(args)?;
-        context.insert_result(ToolResultDetail::FileChanges(changes));
+        context
+            .insert_result(ToolResultDetail::FileChanges(changes))
+            .map_err(|error| {
+                FileToolError::io(format!(
+                    "file was written but mutation metadata could not be published: {error}"
+                ))
+            })?;
         Ok(output)
     }
 }
@@ -171,8 +177,10 @@ mod tests {
             .expect("create");
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("file changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert!(matches!(changes[0].change, FileChange::Add { .. }));
 
         let (_updated, context) = run_with_context(&tool, args("file.txt", "after\n"))
@@ -184,8 +192,10 @@ mod tests {
         );
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("file changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         match &changes[0].change {
             FileChange::Update { unified_diff, .. } => {
                 assert!(unified_diff.contains("-before"));
@@ -208,8 +218,10 @@ mod tests {
         assert!(result.contains("wrote 0 bytes"));
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert_eq!(
             changes[0].change,
             FileChange::Add {
@@ -229,8 +241,10 @@ mod tests {
             .expect("write");
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert!(matches!(
             &changes[0].change,
             FileChange::Update {
@@ -258,8 +272,10 @@ mod tests {
             .expect("write");
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         let FileChange::Update { unified_diff, .. } = &changes[0].change else {
             panic!("expected a complete update: {:?}", changes[0].change);
         };
@@ -293,8 +309,10 @@ mod tests {
         assert!(result.contains("previous file content unavailable:"));
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         let FileChange::Update { unified_diff, .. } = &changes[0].change else {
             panic!("expected additions-only update: {:?}", changes[0].change);
         };
@@ -329,8 +347,10 @@ mod tests {
         );
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert_eq!(
             changes[0].change,
             FileChange::Add {
@@ -356,10 +376,18 @@ mod tests {
         ] {
             let mut context = ToolContext::new();
             let result = tools
-                .execute("write", &arguments.to_string(), &mut context)
+                .snapshot()
+                .get("write")
+                .unwrap()
+                .execute(arguments.to_string(), &mut context)
                 .await;
             assert!(result.is_error_kind(ToolErrorKind::InvalidArgs));
-            assert!(context.result::<ToolResultDetail>().is_none());
+            assert!(
+                context
+                    .result::<ToolResultDetail>()
+                    .expect("result metadata decodes")
+                    .is_none()
+            );
         }
     }
 }

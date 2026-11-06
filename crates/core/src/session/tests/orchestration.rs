@@ -26,32 +26,34 @@ impl Tool for LaunchFixture {
         ToolExecutionError::other(error.to_string())
     }
     async fn call(&self, context: &mut ToolContext, _: NoArgs) -> Result<String, Self::Error> {
-        let turn = context.get::<TurnContext>().unwrap();
+        let turn = context.scope::<TurnContext>().unwrap();
         self.authorized.lock().unwrap().push(turn.build_subtasks);
         if self.cancel {
             turn.cancellation().cancel();
         }
         let entries = self.entries.lock().unwrap().pop_front().unwrap_or_default();
-        context.insert_result(ToolResultDetail::Subtasks(
-            entries
-                .into_iter()
-                .enumerate()
-                .map(|(index, id)| SubtaskEntryMetadata {
-                    index,
-                    status: if self.fail {
-                        SubtaskStatus::Failed
-                    } else {
-                        SubtaskStatus::Completed
-                    },
-                    launch: Some(SubtaskLaunchMetadata {
-                        id: SubtaskId::new(id),
-                        title: "independent work".into(),
-                        kind: SubtaskKind::Explore,
-                        workspace: None,
-                    }),
-                })
-                .collect(),
-        ));
+        context
+            .insert_result(ToolResultDetail::Subtasks(
+                entries
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, id)| SubtaskEntryMetadata {
+                        index,
+                        status: if self.fail {
+                            SubtaskStatus::Failed
+                        } else {
+                            SubtaskStatus::Completed
+                        },
+                        launch: Some(SubtaskLaunchMetadata {
+                            id: SubtaskId::new(id),
+                            title: "independent work".into(),
+                            kind: SubtaskKind::Explore,
+                            workspace: None,
+                        }),
+                    })
+                    .collect(),
+            ))
+            .expect("test metadata serializes");
         if let Some(path) = &self.break_persistence {
             std::fs::rename(path, path.with_extension("backup")).unwrap();
             std::fs::create_dir(path).unwrap();
@@ -64,13 +66,11 @@ impl Tool for LaunchFixture {
     }
 }
 fn calls(ids: &[&str]) -> Message {
-    Message::Assistant {
-        id: None,
-        content: ids
-            .iter()
+    Message::Assistant(rig_core::message::AssistantMessage::new(
+        ids.iter()
             .map(|id| named_tool_call(id, LAUNCH_SUBTASKS_TOOL_NAME, json!({})))
             .collect(),
-    }
+    ))
 }
 fn fixture(
     script: Vec<Message>,

@@ -175,14 +175,13 @@ async fn model_proposed_skill_uses_exact_capacity_instead_of_legacy_tracker_tota
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: Some("activate-review".to_string()),
-            content: vec![named_tool_call(
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "activate-review-call",
                 SKILL_TOOL_NAME,
                 json!({"skill": "review"}),
-            )],
-        }),
+            )]),
+        )),
         Ok(Message::assistant("activated successfully")),
     ])
     .with_input_counts([
@@ -238,10 +237,9 @@ async fn model_proposed_skill_uses_exact_capacity_instead_of_legacy_tracker_tota
 #[tokio::test]
 async fn provider_failure_resets_provider_and_next_prompt_recovers() {
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![tool_call("call", "once")],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![tool_call("call", "once")]),
+        )),
         Err(anyhow::anyhow!("scripted continuation failure")),
         Ok(Message::assistant("recovered")),
     ]);
@@ -317,13 +315,12 @@ async fn finite_tool_continuations_complete_with_sequential_calls_and_preserved_
     let provider = ScriptedProvider::new(
         (0..CONTINUATIONS)
             .map(|index| {
-                Ok(Message::Assistant {
-                    id: None,
-                    content: vec![tool_call(
+                Ok(Message::Assistant(
+                    rig_core::message::AssistantMessage::new(vec![tool_call(
                         &format!("call-{index}"),
                         &format!("value-{index}"),
-                    )],
-                })
+                    )]),
+                ))
             })
             .chain([Ok(Message::assistant("all continuations completed"))]),
     );
@@ -405,7 +402,7 @@ async fn finite_tool_continuations_complete_with_sequential_calls_and_preserved_
             };
             assert!(
                 matches!(content.as_slice(), [UserContent::ToolResult(result)]
-                if result.call.as_str() == format!("call-{}", index - 1)
+                if result.call.wire().as_ref() == format!("call-{}", index - 1)
                     && result.name == "echo"
                     && result.content == vec![ToolResultContent::text(format!("value-{}", index - 1))])
             );

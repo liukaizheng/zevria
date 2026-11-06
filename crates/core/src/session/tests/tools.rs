@@ -101,14 +101,13 @@ async fn ensemble_plan_gate_denies_out_of_order_calls_and_keeps_progress_recover
     gate.apply_batch(&batch);
     assert!(!gate.ensemble.as_ref().expect("gate").requires_question());
 
-    let unnecessary_question = call_batch(Message::Assistant {
-        id: None,
-        content: vec![named_tool_call(
+    let unnecessary_question = call_batch(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![named_tool_call(
             "duplicate-question",
             QUESTION_TOOL_NAME,
             json!({}),
-        )],
-    });
+        )]),
+    ));
     let batch = {
         let scope = ToolExecutionScope::new(&engine, SessionMode::Plan, &policy, &turn, &gate);
         execute_tool_calls(
@@ -179,16 +178,17 @@ async fn ensemble_plan_question_gate_rejects_same_batch_and_malformed_attempts()
 
     let title = "Question gated plan";
     let markdown = valid_plan_markdown(title, "Wait for the question result.");
-    let mixed = assistant_tool_calls(&Message::Assistant {
-        id: None,
-        content: vec![
+    let mixed = assistant_tool_calls(&Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![
             named_tool_call("same-batch-question", QUESTION_TOOL_NAME, json!({})),
             match submit_plan_call(title, &markdown) {
-                Message::Assistant { mut content, .. } => content.remove(0),
+                Message::Assistant(rig_core::message::AssistantMessage { mut content, .. }) => {
+                    content.remove(0)
+                }
                 _ => unreachable!(),
             },
-        ],
-    });
+        ]),
+    ));
     let batch = {
         let scope = ToolExecutionScope::new(&engine, SessionMode::Plan, &policy, &turn, &gate);
         execute_tool_calls(&scope, &mixed, ActiveSkills::default(), &gate).await
@@ -208,14 +208,13 @@ async fn ensemble_plan_question_gate_rejects_same_batch_and_malformed_attempts()
             .is_none()
     );
 
-    let malformed = assistant_tool_calls(&Message::Assistant {
-        id: None,
-        content: vec![named_tool_call(
+    let malformed = assistant_tool_calls(&Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![named_tool_call(
             "malformed-question",
             QUESTION_TOOL_NAME,
             serde_json::Value::String("{".to_string()),
-        )],
-    });
+        )]),
+    ));
     let batch = {
         let scope = ToolExecutionScope::new(&engine, SessionMode::Plan, &policy, &turn, &gate);
         execute_tool_calls(&scope, &malformed, ActiveSkills::default(), &gate).await
@@ -279,19 +278,18 @@ fn post_reports_tail_reconstructs_reconciliation_and_terminal_question() {
             RECONCILE_REPORTS_TOOL_NAME,
             "accepted",
         ),
-        TranscriptItem::Message(Message::Assistant {
-            id: None,
-            content: vec![named_tool_call(
+        TranscriptItem::Message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "tail-question",
                 QUESTION_TOOL_NAME,
                 json!({}),
-            )],
-        }),
+            )]),
+        )),
         TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
             message: Message::tool_result(
-                "tail-question",
-                QUESTION_TOOL_NAME,
+                rig_core::message::CallId::from_wire("tail-question"),
+                rig_core::message::ToolName::new(QUESTION_TOOL_NAME).expect("nonempty tool name"),
                 r#"{"status":"dismissed"}"#,
             ),
             metadata: vec![ToolResultMetadata {
@@ -362,17 +360,16 @@ async fn one_batch_activates_each_distinct_skill_once() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: Some("two-skills".to_string()),
-            content: vec![
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
                 named_tool_call("commit-call", SKILL_TOOL_NAME, json!({"skill": "commit"})),
                 named_tool_call(
                     "review-call",
                     SKILL_TOOL_NAME,
                     json!({"skill": "review", "args": "inspect"}),
                 ),
-            ],
-        }),
+            ]),
+        )),
         Ok(Message::assistant("done")),
     ]);
     let requests = provider.requests.clone();
@@ -427,13 +424,12 @@ async fn mixed_batches_return_ordinary_and_subtask_results_together() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
                 tool_call("call-echo", "ordinary"),
                 launch_call("call-launch", "new explore task"),
-            ],
-        }),
+            ]),
+        )),
         Ok(Message::assistant("all wrapped up")),
     ]);
     let requests = provider.requests.clone();
@@ -542,13 +538,12 @@ async fn parallel_launches_in_one_batch_run_concurrently() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
                 launch_call("call-a", "first explore task"),
                 launch_call("call-b", "second explore task"),
-            ],
-        }),
+            ]),
+        )),
         Ok(Message::assistant("both reports considered")),
     ]);
     let (_directory, transcript) = test_transcript();

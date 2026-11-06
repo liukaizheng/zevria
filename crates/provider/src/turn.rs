@@ -5,15 +5,12 @@ use crate::recovery::{
 };
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures_util::StreamExt;
+#[cfg(test)]
+use rig_core::message::Message;
 use rig_core::{
-    completion::{CompletionError, CompletionModel},
-    message::Message,
-    providers::openai::responses_api::{
-        CompletionResponse as OpenAiCompletionResponse, Include, ResponseStatus,
-        streaming::ResponseChunkKind,
-    },
+    error::ProviderError as CompletionError,
+    providers::openai::responses_api::ResponsesToolDefinition,
 };
-use rig_reqwest::openai_websocket::ResponsesWebSocketEvent;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message as WebSocketMessage};
 use zevria_model::CompactResult;
 use zevria_model::InputTokenCount;
@@ -21,7 +18,11 @@ use zevria_model::ModelInputTooLarge;
 use zevria_model::ModelRequest;
 use zevria_model::ModelResponse;
 use zevria_model::ProviderReplay;
+use zevria_model::openai::ResponseStatus;
 use zevria_responses::protocol::{ProgressObservation, ResponseProgress};
+use zevria_responses::wire::{
+    CompletionResponse as OpenAiCompletionResponse, ResponseChunkKind, ResponsesWebSocketEvent,
+};
 use zevria_session_api::CompactFuture;
 use zevria_session_api::InputTokenCountFuture;
 use zevria_session_api::ModelProvider;
@@ -42,7 +43,7 @@ use crate::{
 };
 use zevria_responses::{
     accumulator::{response_cache_write_tokens, response_token_usage},
-    protocol::{into_openai_request_with_instructions, parse_server_event},
+    protocol::parse_server_event,
 };
 
 /// Marks a turn that failed because a websocket connection was lost rather
@@ -284,49 +285,24 @@ pub(crate) async fn prepare_turn_request(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
 ) -> anyhow::Result<PreparedRequest> {
-    let messages = model_request.owned_messages();
-    let prompt = messages
-        .last()
-        .cloned()
-        .unwrap_or_else(|| Message::user("provider-native compacted context"));
-    let history = messages
-        .get(..messages.len().saturating_sub(1))
-        .unwrap_or_default()
-        .to_vec();
-    let tool_definitions = openai.tools.static_tool_defs();
-    let model = &openai.model;
-    let mut completion_request = model
-        .completion_request(prompt)
-        .messages(history)
-        .additional_params_opt(openai.prepared_responses_parameters())
-        .tools(tool_definitions)
-        .build();
-    if let Some(allowed_tool_names) = model_request.allowed_tool_names {
-        completion_request
-            .tools
-            .retain(|tool| allowed_tool_names.iter().any(|name| name == &tool.name));
-    }
-
-    let mut request = into_openai_request_with_instructions(
-        model.model.clone(),
-        completion_request,
-        model_request.instructions,
-    )?;
-    request.stream = None;
-    request.additional_parameters.background = None;
-    request.additional_parameters.previous_response_id = None;
-    request.additional_parameters.store = openai.compatibility.send_store.then_some(false);
-    request.additional_parameters.include = openai
-        .compatibility
-        .send_reasoning_encrypted_content
-        .then(|| vec![Include::ReasoningEncryptedContent]);
-    if openai.compatibility.strict_tools {
-        request.tools = request
-            .tools
-            .into_iter()
-            .map(|tool| tool.with_strict())
-            .collect();
-    }
+    let catalog = openai.tools.snapshot();
+    let mut tools = catalog
+        .definitions()
+        .iter()
+        .filter(|tool| {
+            model_request
+                .allowed_tool_names
+                .is_none_or(|names| names.iter().any(|name| name == tool.name.as_str()))
+        })
+        .map(|tool| ResponsesToolDefinition::from(tool.as_ref().clone()))
+        .map(|tool| {
+            if openai.compatibility.strict_tools {
+                tool.with_strict()
+            } else {
+                tool
+            }
+        })
+        .collect::<Vec<_>>();
 
     let search_advertised = openai.web_search.enabled
         && model_request.allowed_tool_names.is_none_or(|names| {
@@ -335,10 +311,33 @@ pub(crate) async fn prepare_turn_request(
                 .any(|name| name == zevria_foundation::WEB_SEARCH_TOOL_NAME)
         });
     if search_advertised {
-        request.tools.push(openai.web_search.tool()?);
+        tools.push(openai.web_search.tool()?);
     }
 
-    let mut request_properties = serde_json::to_value(request)?;
+    let mut tools = tools
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    if !openai.compatibility.strict_tools {
+        // Compatibility profiles intentionally omit this field, including
+        // Rig 0.46's newly explicit `strict: false` on function tools.
+        for tool in &mut tools {
+            if let Some(fields) = tool.as_object_mut() {
+                fields.remove("strict");
+            }
+        }
+    }
+    let mut request_properties = openai
+        .prepared_responses_parameters()
+        .unwrap_or_else(|| serde_json::json!({}));
+    request_properties["model"] = openai.profile.model.clone().into();
+    request_properties["instructions"] = model_request.instructions.into();
+    if !tools.is_empty() {
+        request_properties["tools"] = tools.into();
+    }
+    if openai.compatibility.send_store {
+        request_properties["store"] = false.into();
+    }
     let properties = request_properties
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("the OpenAI request did not serialize as an object"))?;
@@ -1219,8 +1218,7 @@ async fn run_model_request_inner(
                     abandon_attempt(openai, state);
                     return Err(classify_input_size(
                         true,
-                        CompletionError::ProviderError(diagnostic_detail(&error.to_string()))
-                            .into(),
+                        CompletionError::Provider(diagnostic_detail(&error.to_string())).into(),
                     ));
                 }
                 if error_reports_websocket_connection_limit(error.error.code.as_deref()) {
@@ -1265,7 +1263,7 @@ async fn run_model_request_inner(
                             )
                             .into());
                 }
-                return Err(CompletionError::ProviderError(message).into());
+                return Err(CompletionError::Provider(message).into());
             }
             ResponsesWebSocketEvent::Done(done) => {
                 let response_id = done.response_id().map(ToOwned::to_owned);
@@ -1368,7 +1366,6 @@ async fn run_model_request_inner(
                     }
                 }
             }
-            ResponsesWebSocketEvent::Unknown(_) => {}
         }
     }
 }
@@ -1656,11 +1653,8 @@ async fn run_http_model_request_inner(
         let size_rejection = status == reqwest::StatusCode::PAYLOAD_TOO_LARGE
             || serde_json::from_str::<serde_json::Value>(&detail)
                 .is_ok_and(|value| structured_input_size(&value));
-        let error = CompletionError::from_http_response_with_request_id(
-            status,
-            detail,
-            upstream_request_id.clone(),
-        );
+        let error = CompletionError::from_http_response(status, detail)
+            .with_provider_request_id(upstream_request_id.clone());
         if size_rejection {
             return Err(HttpAttemptError::Terminal {
                 error: classify_input_size(true, error.into()),
@@ -1826,8 +1820,7 @@ async fn run_http_model_request_inner(
                 return Err(HttpAttemptError::terminal_response(
                     classify_input_size(
                         input_size_code(error.error.code.as_deref()),
-                        CompletionError::ProviderError(diagnostic_detail(&error.to_string()))
-                            .into(),
+                        CompletionError::Provider(diagnostic_detail(&error.to_string())).into(),
                     ),
                     &upstream_request_id,
                 ));
@@ -1946,7 +1939,6 @@ async fn run_http_model_request_inner(
                     }
                 }
             }
-            ResponsesWebSocketEvent::Unknown(_) => {}
         }
     }
 }

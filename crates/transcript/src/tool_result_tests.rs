@@ -51,10 +51,9 @@ fn mixed_results() -> TranscriptItem {
             content: cases
                 .iter()
                 .map(|(id, name, _, _)| {
-                    UserContent::tool_result_with_call_id(
-                        *id,
-                        format!("provider-{id}"),
-                        *name,
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire(format!("provider-{id}")),
+                        rig_core::message::ToolName::new(*name).expect("nonempty tool name"),
                         vec![ToolResultContent::text("plain result")],
                     )
                 })
@@ -105,13 +104,10 @@ fn mixed_details_round_trip_in_the_existing_sidecar_without_entering_model_input
         let UserContent::ToolResult(result) = result else {
             panic!("tool result")
         };
-        assert_eq!(metadata.id, result.call.as_str());
+        assert_eq!(metadata.id, result.call.wire().as_ref());
         assert_eq!(
             metadata.call_id.as_deref(),
-            result
-                .provider
-                .as_ref()
-                .map(|provider| provider.call_id.as_str())
+            result.call.provider().map(|provider| provider.as_str())
         );
         assert_eq!(metadata.tool_name, result.name);
     }

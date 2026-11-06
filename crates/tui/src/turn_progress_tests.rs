@@ -114,7 +114,11 @@ fn call_durations_exclude_dispatch_delay_and_freeze_independently_after_tools() 
         &mut app,
         SessionEvent::ToolResults {
             turn_id: TEST_TURN_ID,
-            message: Message::tool_result("slow", "command", "done"),
+            message: Message::tool_result(
+                rig_core::message::CallId::from_wire("slow"),
+                rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                "done",
+            ),
             metadata: Vec::new(),
         },
         now + Duration::from_secs(70),
@@ -224,7 +228,11 @@ fn long_command_headers_tick_without_events_until_all_their_tools_finish() {
                 &mut app,
                 SessionEvent::ToolResults {
                     turn_id,
-                    message: Message::tool_result(call, "command", "done"),
+                    message: Message::tool_result(
+                        rig_core::message::CallId::from_wire(call),
+                        rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                        "done",
+                    ),
                     metadata: Vec::new(),
                 },
                 now + Duration::from_secs(seconds),
@@ -238,7 +246,11 @@ fn long_command_headers_tick_without_events_until_all_their_tools_finish() {
             &mut app,
             SessionEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
-                message: Message::tool_result("slow-b", "command", "done"),
+                message: Message::tool_result(
+                    rig_core::message::CallId::from_wire("slow-b"),
+                    rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                    "done",
+                ),
                 metadata: Vec::new(),
             },
             now + Duration::from_secs(180),
@@ -295,7 +307,11 @@ fn late_tool_results_only_finish_their_own_header_not_a_new_model_call() {
             &mut app,
             SessionEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
-                message: Message::tool_result("slow", "command", "late result"),
+                message: Message::tool_result(
+                    rig_core::message::CallId::from_wire("slow"),
+                    rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                    "late result",
+                ),
                 metadata: Vec::new(),
             },
             now + Duration::from_secs(seconds),
@@ -368,7 +384,11 @@ fn terminal_events_stop_headers_with_pending_commands() {
             &mut app,
             SessionEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
-                message: Message::tool_result("slow", "command", "late result"),
+                message: Message::tool_result(
+                    rig_core::message::CallId::from_wire("slow"),
+                    rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                    "late result",
+                ),
                 metadata: Vec::new(),
             },
             now + Duration::from_secs(180),
@@ -675,7 +695,11 @@ fn call_start_stream_tools_and_completion_share_headers_not_status_indices() {
     for id in ["a", "b"] {
         app.reduce_without_effects(SessionEvent::ToolResults {
             turn_id: TEST_TURN_ID,
-            message: Message::tool_result(id, "command", "done"),
+            message: Message::tool_result(
+                rig_core::message::CallId::from_wire(id),
+                rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                "done",
+            ),
             metadata: Vec::new(),
         });
     }
@@ -1023,11 +1047,19 @@ fn restore_counts_typed_anchors_and_canonical_responses_not_metadata_or_projecti
             json!({}),
         )])),
         TranscriptItem::ToolResults {
-            message: Message::tool_result("a", "command", "result"),
+            message: Message::tool_result(
+                rig_core::message::CallId::from_wire("a"),
+                rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                "result",
+            ),
             metadata: Vec::new(),
             skill_applications: Vec::new(),
         },
-        TranscriptItem::Message(Message::tool_result("b", "command", "legacy result")),
+        TranscriptItem::Message(Message::tool_result(
+            rig_core::message::CallId::from_wire("b"),
+            rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+            "legacy result",
+        )),
         TranscriptItem::Compaction(checkpoint()),
         TranscriptItem::SessionMode(SessionMode::Plan),
         TranscriptItem::Error {

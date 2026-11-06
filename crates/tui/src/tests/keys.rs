@@ -1268,13 +1268,12 @@ fn select_mode_navigates_messages_then_blocks_and_clamps_in_each_scope() {
             UserContent::Text(Text::new("user two")),
         ],
     }));
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![
             AssistantContent::text("assistant one"),
             AssistantContent::text("assistant two"),
-        ],
-    }));
+        ]),
+    )));
     app.seed_history_entry(HistoryEntry::Error("network down".to_string()));
     rendered_text(&mut app, 80, 20);
     double_escape(&mut app);
@@ -1899,7 +1898,7 @@ fn ctrl_e_ignores_non_editable_selections() {
     let mut document = App::new();
     document.seed_history_entry(history_message(Message::User {
         content: vec![UserContent::Document(Document {
-            data: DocumentSourceKind::String("payload".to_string()),
+            data: rig_core::message::DocumentData::Text("payload".to_string()),
             media_type: None,
             additional_params: None,
         })],
@@ -2234,16 +2233,19 @@ fn yank_copies_only_the_selected_content_item() {
     let mut app = App::new();
     app.seed_history_entry(history_message(Message::user("a question")));
     let long_arguments = json!({ "city": "Paris", "detail": "x".repeat(300) });
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![
             AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new_or_mint("call_1"),
-                ToolFunction::new("get_weather".to_string(), long_arguments.clone()),
+                CallId::from_wire("call_1"),
+                ToolFunction::new(
+                    rig_core::message::ToolName::new("get_weather".to_string())
+                        .expect("nonempty tool name"),
+                    long_arguments.clone(),
+                ),
             )),
             AssistantContent::Text(Text::new("# Answer\n\ndone")),
-        ],
-    }));
+        ]),
+    )));
     app.seed_history_entry(HistoryEntry::Error("network down".to_string()));
     app.seed_history_entry(history_message(Message::System {
         content: "system guidance".to_string(),

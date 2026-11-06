@@ -327,10 +327,13 @@ impl ModelProvider for SearchBeforeToolProvider {
             self.called = true;
             let _guard = DropFlag(self.dropped.clone());
             progress.web_search_updated(attempt()).await;
-            Ok(model_response(Message::Assistant {
-                id: None,
-                content: vec![named_tool_call("local", "verify_search_durable", json!({}))],
-            }))
+            Ok(model_response(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![named_tool_call(
+                    "local",
+                    "verify_search_durable",
+                    json!({}),
+                )]),
+            )))
         })
     }
     fn reset(&mut self) {}

@@ -2368,21 +2368,24 @@ pub fn latest_successful_task_snapshot(items: &[TranscriptItem]) -> Option<TaskL
             continue;
         };
         match message {
-            Message::Assistant { content, .. } => {
-                for (content_index, content) in content.iter().enumerate() {
+            Message::Assistant(assistant) => {
+                for (content_index, content) in assistant.content.iter().enumerate() {
                     let AssistantContent::ToolCall(call) = content else {
                         continue;
                     };
-                    if call.function.name != TASK_TOOL_NAME {
+                    if call.function.name != TASK_TOOL_NAME
+                        || call.function.invalid_arguments.is_some()
+                    {
                         continue;
                     }
-                    let Ok(snapshot) = TaskList::from_tool_arguments(&call.function.arguments)
+                    let Ok(snapshot) =
+                        TaskList::from_tool_arguments(&call.function.arguments_value())
                     else {
                         continue;
                     };
                     pending.push(PendingTaskCall {
                         id: call.id.to_string(),
-                        call_id: provider_call_id(call.provider.as_ref()).cloned(),
+                        call_id: provider_call_id(call.id.provider()).map(str::to_owned),
                         item_index,
                         content_index,
                         snapshot,
@@ -2422,13 +2425,13 @@ pub fn latest_successful_task_snapshot(items: &[TranscriptItem]) -> Option<TaskL
 }
 
 fn select_pending_task_call(pending: &[PendingTaskCall], result: &ToolResult) -> Option<usize> {
-    let result_call_id = provider_call_id(result.provider.as_ref()).map(String::as_str);
+    let result_call_id = provider_call_id(result.call.provider());
     [true, false].into_iter().find_map(|exact_call_id| {
         pending
             .iter()
             .enumerate()
             .filter(|(_, call)| {
-                call.id == result.call.as_str()
+                call.id == result.call.wire().as_ref()
                     && call_ids_match(call.call_id.as_deref(), result_call_id, exact_call_id)
             })
             .max_by_key(|(_, call)| (call.item_index, std::cmp::Reverse(call.content_index)))
@@ -2441,11 +2444,11 @@ fn take_matching_metadata<'metadata>(
     available: &mut Vec<usize>,
     result: &ToolResult,
 ) -> Option<&'metadata ToolResultMetadata> {
-    let result_call_id = provider_call_id(result.provider.as_ref()).map(String::as_str);
+    let result_call_id = provider_call_id(result.call.provider());
     [true, false].into_iter().find_map(|exact_call_id| {
         let position = available.iter().position(|&index| {
             let metadata = &metadata[index];
-            metadata.id == result.call.as_str()
+            metadata.id == result.call.wire().as_ref()
                 && metadata.tool_name == result.name
                 && call_ids_match(metadata.call_id.as_deref(), result_call_id, exact_call_id)
         })?;
@@ -2462,8 +2465,8 @@ fn call_ids_match(left: Option<&str>, right: Option<&str>, exact_call_id: bool) 
     }
 }
 
-fn provider_call_id(provider: Option<&ProviderCallId>) -> Option<&String> {
-    provider.map(|provider| &provider.call_id)
+fn provider_call_id(provider: Option<&ProviderCallId>) -> Option<&str> {
+    provider.map(ProviderCallId::as_str)
 }
 
 /// User/direct-skill prompts and typed Plan handoff instructions eligible for
@@ -2777,9 +2780,7 @@ mod tool_result_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::message::{
-        AssistantContent, Reasoning, ToolCall, ToolCallId, ToolFunction, ToolResultContent,
-    };
+    use rig_core::message::{AssistantContent, CallId, ToolCall, ToolFunction, ToolResultContent};
     use serde_json::json;
 
     use crate::skill::{SkillApplication, SkillName, SkillSnapshot};
@@ -2829,10 +2830,9 @@ mod tests {
         TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
             message: Message::User {
-                content: vec![UserContent::tool_result_with_call_id(
-                    "call_1",
-                    "provider_call_1",
-                    "write",
+                content: vec![UserContent::tool_result(
+                    rig_core::message::CallId::from_wire("provider_call_1"),
+                    rig_core::message::ToolName::new("write").expect("nonempty tool name"),
                     vec![ToolResultContent::text("wrote 13 bytes to src/new.rs")],
                 )],
             },
@@ -2841,18 +2841,20 @@ mod tests {
     }
 
     fn task_call(id: &str, step: &str) -> TranscriptItem {
-        TranscriptItem::Message(Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new_or_mint(id),
-                ToolFunction::new(
-                    TASK_TOOL_NAME.to_string(),
-                    json!({
-                        "tasks": [{"step": step, "status": "in_progress"}]
-                    }),
+        TranscriptItem::Message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(
+                ToolCall::new(
+                    CallId::from_wire(id),
+                    ToolFunction::new(
+                        rig_core::message::ToolName::new(TASK_TOOL_NAME.to_string())
+                            .expect("nonempty tool name"),
+                        json!({
+                            "tasks": [{"step": step, "status": "in_progress"}]
+                        }),
+                    ),
                 ),
-            ))],
-        })
+            )]),
+        ))
     }
 
     fn task_result(id: &str, outcome: ToolCallOutcome) -> TranscriptItem {
@@ -2860,8 +2862,8 @@ mod tests {
             skill_applications: Vec::new(),
             message: Message::User {
                 content: vec![UserContent::tool_result(
-                    id,
-                    TASK_TOOL_NAME,
+                    rig_core::message::CallId::from_wire(id),
+                    rig_core::message::ToolName::new(TASK_TOOL_NAME).expect("nonempty tool name"),
                     vec![ToolResultContent::text(if outcome.is_success() {
                         "Task list updated: 0/1 completed, 1 in progress, 0 pending."
                     } else {
@@ -2892,23 +2894,26 @@ mod tests {
         vec![
             mode_item(),
             TranscriptItem::Message(Message::user("hello")),
-            TranscriptItem::Message(Message::Assistant {
-                id: Some("msg_1".to_string()),
-                content: vec![
-                    AssistantContent::Reasoning(Reasoning::summaries(vec![
+            TranscriptItem::Message(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![
+                    AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
                         "pondering".to_string(),
                     ])),
                     AssistantContent::ToolCall(ToolCall::new(
-                        ToolCallId::new_or_mint("call_1"),
-                        ToolFunction::new("lookup".to_string(), json!({"query": "rust"})),
+                        CallId::from_wire("call_1"),
+                        ToolFunction::new(
+                            rig_core::message::ToolName::new("lookup".to_string())
+                                .expect("nonempty tool name"),
+                            json!({"query": "rust"}),
+                        ),
                     )),
                     AssistantContent::text("answer"),
-                ],
-            }),
+                ]),
+            )),
             compound_tool_results(),
             TranscriptItem::Message(Message::tool_result(
-                "legacy_call",
-                "legacy_tool",
+                rig_core::message::CallId::from_wire("legacy_call"),
+                rig_core::message::ToolName::new("legacy_tool").expect("nonempty tool name"),
                 "legacy result",
             )),
             TranscriptItem::Error {
@@ -2932,8 +2937,8 @@ mod tests {
 
         // A result with no success metadata is not authoritative.
         items.push(TranscriptItem::Message(Message::tool_result(
-            "interrupted",
-            TASK_TOOL_NAME,
+            rig_core::message::CallId::from_wire("interrupted"),
+            rig_core::message::ToolName::new(TASK_TOOL_NAME).expect("nonempty tool name"),
             "Task list updated: 0/1 completed, 1 in progress, 0 pending.",
         )));
         let snapshot = latest_successful_task_snapshot(&items).expect("first snapshot survives");
@@ -3220,8 +3225,8 @@ mod tests {
             skill_applications: Vec::new(),
             message: Message::User {
                 content: vec![UserContent::tool_result(
-                    "large-files",
-                    "write",
+                    rig_core::message::CallId::from_wire("large-files"),
+                    rig_core::message::ToolName::new("write").expect("nonempty tool name"),
                     vec![ToolResultContent::text("plain result remains available")],
                 )],
             },
@@ -3356,8 +3361,8 @@ mod tests {
                 skill_applications: Vec::new(),
                 message: Message::User {
                     content: vec![UserContent::tool_result(
-                        "call-noise",
-                        "echo",
+                        rig_core::message::CallId::from_wire("call-noise"),
+                        rig_core::message::ToolName::new("echo").expect("nonempty tool name"),
                         vec![ToolResultContent::text(
                             "<skill name=\"review\"> tool noise",
                         )],
@@ -3402,22 +3407,24 @@ mod tests {
 
     #[test]
     fn successful_skill_result_without_typed_application_is_rejected() {
-        let call = TranscriptItem::Message(Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new_or_mint("skill-call"),
-                ToolFunction::new(
-                    SKILL_TOOL_NAME.to_string(),
-                    json!({"skill": "review", "args": "inspect"}),
+        let call = TranscriptItem::Message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(
+                ToolCall::new(
+                    CallId::from_wire("skill-call"),
+                    ToolFunction::new(
+                        rig_core::message::ToolName::new(SKILL_TOOL_NAME.to_string())
+                            .expect("nonempty tool name"),
+                        json!({"skill": "review", "args": "inspect"}),
+                    ),
                 ),
-            ))],
-        });
+            )]),
+        ));
         let result = TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
             message: Message::User {
                 content: vec![UserContent::tool_result(
-                    "skill-call",
-                    SKILL_TOOL_NAME,
+                    rig_core::message::CallId::from_wire("skill-call"),
+                    rig_core::message::ToolName::new(SKILL_TOOL_NAME).expect("nonempty tool name"),
                     vec![ToolResultContent::text(
                         "<skill name=\"review\">\nReview instructions\n</skill>\n\ninspect",
                     )],

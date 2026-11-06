@@ -2,15 +2,12 @@
 
 use std::collections::BTreeMap;
 
+use crate::openai::{AssistantContent as OpenAiAssistantContent, Output, ReasoningSummary};
 use anyhow::Context as _;
-use rig_core::{
-    message::{
-        AssistantContent, Message, Reasoning, ReasoningContent, Text, ToolCall, ToolCallId,
-        ToolFunction,
-    },
-    providers::openai::responses_api::{
-        AssistantContent as OpenAiAssistantContent, Output, ReasoningSummary,
-    },
+use rig_core::message::{AssistantContent, CallId, Message, Text, ToolCall, ToolFunction};
+use zevria_content::{
+    message::tool_call_from_wire_text,
+    reasoning::{self, ReasoningContent},
 };
 
 use serde::{Deserialize, Serialize};
@@ -201,8 +198,7 @@ impl ProviderReplay {
                     if !function.id.is_empty() {
                         tool_correlations.insert(function.id, portable_id.clone());
                     }
-                    let id = ToolCallId::new(portable_id)
-                        .expect("portable tool-call identifiers are nonempty");
+                    let id = CallId::from_wire(portable_id);
                     content.push(AssistantContent::ToolCall(ToolCall::new(
                         id,
                         ToolFunction::new(
@@ -215,7 +211,7 @@ impl ProviderReplay {
             }
         }
 
-        let message = (!content.is_empty()).then_some(Message::Assistant { id: None, content });
+        let message = (!content.is_empty()).then_some(Message::from(content));
         Ok(PortableReplayProjection {
             message,
             tool_correlations,
@@ -238,7 +234,6 @@ impl ProviderReplay {
         self.validate()
             .map_err(|reason| anyhow::anyhow!("invalid provider replay envelope: {reason}"))?;
 
-        let mut message_id = None;
         let mut content = Vec::new();
         for (index, item) in self.items.iter().cloned().enumerate() {
             let output: Output = serde_json::from_value(item).with_context(|| {
@@ -246,9 +241,6 @@ impl ProviderReplay {
             })?;
             match output {
                 Output::Message(message) => {
-                    if message_id.is_none() {
-                        message_id = Some(message.id);
-                    }
                     content.extend(message.content.into_iter().map(|block| match block {
                         OpenAiAssistantContent::OutputText(text) => {
                             // Rig's wire conversion retains non-empty unknown
@@ -272,10 +264,11 @@ impl ProviderReplay {
                         );
                     }
                     let arguments = normalize_tool_arguments(function.arguments.as_str());
-                    content.push(AssistantContent::ToolCall(ToolCall::from_dual_wire(
+                    content.push(AssistantContent::ToolCall(tool_call_from_wire_text(
                         function.id,
                         function.call_id,
                         ToolFunction::new(function.name, arguments),
+                        function.arguments.as_str().to_owned(),
                     )));
                 }
                 Output::Reasoning {
@@ -288,10 +281,10 @@ impl ProviderReplay {
                     let reasoning_content =
                         canonical_reasoning_content(summary, reasoning_text, encrypted_content);
                     if !reasoning_content.is_empty() {
-                        content.push(AssistantContent::Reasoning(Reasoning {
-                            id: Some(id),
-                            content: reasoning_content,
-                        }));
+                        content.push(AssistantContent::Reasoning(reasoning::from_blocks(
+                            Some(id),
+                            reasoning_content,
+                        )));
                     }
                 }
                 Output::Unknown(_) => {}
@@ -302,10 +295,7 @@ impl ProviderReplay {
             anyhow::bail!("provider replay contained no assistant content");
         }
 
-        Ok(Message::Assistant {
-            id: message_id,
-            content,
-        })
+        Ok(Message::from(content))
     }
 
     /// Estimate a replay-only ledger. Known Responses output shapes are
@@ -477,7 +467,6 @@ fn canonical_reasoning_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::message::AdditionalParams;
     use serde_json::json;
 
     fn test_profile() -> ModelProfileRef {
@@ -509,18 +498,34 @@ mod tests {
     }
 
     #[test]
+    fn native_tool_argument_text_survives_the_rig_canonical_projection() {
+        let raw = r#"{ "command": "echo 界", "ratio": 1.0 }"#;
+        let replay = ProviderReplay::openai_responses(
+            ModelProfileRef::new("test", "model"),
+            vec![json!({
+                "type":"function_call", "id":"fc_raw", "call_id":"call_raw", "name":"command", "arguments":raw, "status":"completed",
+            })],
+        );
+        let Message::Assistant(assistant) = replay.to_message().unwrap() else {
+            panic!("assistant")
+        };
+        let AssistantContent::ToolCall(call) = &assistant.content[0] else {
+            panic!("tool call")
+        };
+        assert_eq!(zevria_content::message::raw_tool_arguments(call), raw);
+        assert_eq!(call.function.arguments["command"], "echo 界");
+        assert_eq!(call.native.as_ref().unwrap().item["id"], "fc_raw");
+        assert_eq!(replay.items[0]["arguments"], raw);
+    }
+
+    #[test]
     fn replay_conversion_is_ordered_lossless_and_normalizes_tool_arguments() {
         let annotated_extras = json!({
             "annotations": [{"type": "citation", "title": "source"}],
             "future_text_field": {"kept": true}
         });
-        let annotated_text = Text {
-            text: "first block".to_string(),
-            additional_params: AdditionalParams::from_entries(Some((
-                "openai_responses",
-                annotated_extras,
-            ))),
-        };
+        let annotated_text =
+            zevria_content::citations::text_with_openai_extras("first block", annotated_extras);
         let malformed_arguments = r#"{"city":"#;
         let items = vec![
             json!({
@@ -600,51 +605,54 @@ mod tests {
 
         assert_eq!(
             message,
-            Message::Assistant {
-                id: Some("msg_first".to_string()),
-                content: vec![
-                    AssistantContent::Text(annotated_text),
-                    AssistantContent::text("cannot comply"),
-                    AssistantContent::Reasoning(Reasoning {
-                        id: Some("rs_1".to_string()),
-                        content: vec![
-                            ReasoningContent::Summary("summary one".to_string()),
-                            ReasoningContent::Summary("summary two".to_string()),
-                            ReasoningContent::Text {
-                                text: "private one".to_string(),
-                                signature: None,
-                            },
-                            ReasoningContent::Text {
-                                text: "private two".to_string(),
-                                signature: None,
-                            },
-                            ReasoningContent::Encrypted("ciphertext".to_string()),
-                        ],
-                    }),
-                    AssistantContent::ToolCall(ToolCall::from_dual_wire(
-                        "fc_valid",
-                        "call_valid",
-                        ToolFunction::new(
-                            "weather".to_string(),
-                            json!({"city": "Paris", "units": 1.0}),
-                        ),
-                    )),
-                    AssistantContent::text("second block"),
-                    AssistantContent::ToolCall(ToolCall::from_dual_wire(
-                        "fc_malformed",
-                        "call_malformed",
-                        ToolFunction::new(
-                            "weather".to_string(),
-                            serde_json::Value::String(malformed_arguments.to_string()),
-                        ),
-                    )),
-                    AssistantContent::ToolCall(ToolCall::from_dual_wire(
-                        "fc_empty",
-                        "call_empty",
-                        ToolFunction::new("refresh".to_string(), json!({})),
-                    )),
-                ],
-            }
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::Text(annotated_text),
+                AssistantContent::text("cannot comply"),
+                AssistantContent::Reasoning(zevria_content::reasoning::from_blocks(
+                    Some("rs_1".to_string()),
+                    vec![
+                        ReasoningContent::Summary("summary one".to_string()),
+                        ReasoningContent::Summary("summary two".to_string()),
+                        ReasoningContent::Text {
+                            text: "private one".to_string(),
+                            signature: None,
+                        },
+                        ReasoningContent::Text {
+                            text: "private two".to_string(),
+                            signature: None,
+                        },
+                        ReasoningContent::Encrypted("ciphertext".to_string()),
+                    ]
+                )),
+                AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
+                    "fc_valid",
+                    "call_valid",
+                    ToolFunction::new(
+                        rig_core::message::ToolName::new("weather".to_string())
+                            .expect("nonempty tool name"),
+                        json!({"city": "Paris", "units": 1.0})
+                    ),
+                )),
+                AssistantContent::text("second block"),
+                AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
+                    "fc_malformed",
+                    "call_malformed",
+                    ToolFunction::new(
+                        rig_core::message::ToolName::new("weather".to_string())
+                            .expect("nonempty tool name"),
+                        serde_json::Value::String(malformed_arguments.to_string())
+                    ),
+                )),
+                AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
+                    "fc_empty",
+                    "call_empty",
+                    ToolFunction::new(
+                        rig_core::message::ToolName::new("refresh".to_string())
+                            .expect("nonempty tool name"),
+                        json!({})
+                    ),
+                )),
+            ]))
         );
         assert_eq!(
             replay.items, items,
@@ -701,23 +709,30 @@ mod tests {
             .expect("deterministic projection");
         assert_eq!(first, second);
         let message = first.message.expect("visible portable message");
-        let Message::Assistant { id, content } = message else {
+        let Message::Assistant(assistant) = message else {
             panic!("portable replay must be an assistant message");
         };
-        assert_eq!(id, None);
+        assert_eq!(assistant.origin, None);
+        let content = assistant.content;
         assert_eq!(content.len(), 3);
         assert_eq!(content[0], AssistantContent::text("visible answer"));
         assert_eq!(content[1], AssistantContent::text("visible refusal"));
         let AssistantContent::ToolCall(call) = &content[2] else {
             panic!("portable replay must retain the function call");
         };
-        assert!(call.provider.is_none());
-        assert!(call.id.as_str().starts_with("zevria_call_"));
-        assert_ne!(call.id.as_str(), "call_native");
+        assert!(call.native.is_none());
+        assert!(call.id.wire().as_ref().starts_with("zevria_call_"));
+        assert_ne!(call.id.wire().as_ref(), "call_native");
         assert_eq!(call.function.name, "command");
-        assert_eq!(call.function.arguments, json!({"command": "pwd"}));
-        assert_eq!(first.tool_correlations["call_native"], call.id.as_str());
-        assert_eq!(first.tool_correlations["fc_native"], call.id.as_str());
+        assert_eq!(call.function.arguments_value(), json!({"command": "pwd"}));
+        assert_eq!(
+            first.tool_correlations["call_native"],
+            call.id.wire().as_ref()
+        );
+        assert_eq!(
+            first.tool_correlations["fc_native"],
+            call.id.wire().as_ref()
+        );
         let serialized = serde_json::to_string(&content).expect("portable content JSON");
         for omitted in [
             "msg_native",

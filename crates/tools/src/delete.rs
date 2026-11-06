@@ -100,7 +100,13 @@ impl Tool for DeleteTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let (output, changes) = self.execute(args)?;
-        context.insert_result(ToolResultDetail::FileChanges(changes));
+        context
+            .insert_result(ToolResultDetail::FileChanges(changes))
+            .map_err(|error| {
+                FileToolError::io(format!(
+                    "file was deleted but mutation metadata could not be published: {error}"
+                ))
+            })?;
         Ok(output)
     }
 }
@@ -144,8 +150,10 @@ mod tests {
         assert!(result.contains("(12 bytes)"));
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert_eq!(
             changes[0].change,
             FileChange::Delete {
@@ -166,8 +174,10 @@ mod tests {
             .expect("delete");
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         let FileChange::Omitted {
             operation,
             reason,
@@ -196,8 +206,10 @@ mod tests {
             .expect("delete");
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert_eq!(
             changes[0].change,
             FileChange::Delete {
@@ -221,7 +233,12 @@ mod tests {
         ] {
             let mut context = ToolContext::new();
             assert!(tool.call(&mut context, arguments).await.is_err());
-            assert!(context.result::<ToolResultDetail>().is_none());
+            assert!(
+                context
+                    .result::<ToolResultDetail>()
+                    .expect("result metadata decodes")
+                    .is_none()
+            );
         }
         assert!(outside.path().join("file.txt").exists());
     }

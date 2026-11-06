@@ -1,16 +1,18 @@
 //! Tools orchestration.
 
 use super::*;
+use zevria_foundation::ToolContextRuntimeExt;
 
 #[cfg(test)]
 #[path = "tools_metadata_tests.rs"]
 mod metadata_tests;
 
 pub(super) fn assistant_tool_calls(message: &Message) -> Vec<ToolCall> {
-    let Message::Assistant { content, .. } = message else {
+    let Message::Assistant(assistant) = message else {
         return Vec::new();
     };
-    content
+    assistant
+        .content
         .iter()
         .filter_map(|content| match content {
             AssistantContent::ToolCall(call) => Some(call.clone()),
@@ -19,13 +21,10 @@ pub(super) fn assistant_tool_calls(message: &Message) -> Vec<ToolCall> {
         .collect()
 }
 
-pub(super) fn tool_arguments_for_dispatch(arguments: &serde_json::Value) -> String {
-    match arguments {
-        // Adapters preserve malformed streamed JSON as a string. Dispatch the
-        // original bytes so Rig returns its useful argument error to the model.
-        serde_json::Value::String(arguments) => arguments.clone(),
-        arguments => arguments.to_string(),
-    }
+pub(super) fn tool_arguments_for_dispatch(function: &rig_core::message::ToolFunction) -> String {
+    // Never turn Rig's partially recovered object into an executable call.
+    // Invalid arguments must reach dispatch as the original model bytes.
+    function.raw_arguments()
 }
 
 #[derive(Debug)]
@@ -78,7 +77,7 @@ pub(super) fn cancelled_slot(call: &ToolCall) -> ToolCallSlot {
 /// Strict parsing is engine-owned; raw tool dispatch cannot admit an application.
 pub(super) fn skill_call_request(call: &ToolCall) -> anyhow::Result<SkillRequest> {
     Ok(serde_json::from_str(&tool_arguments_for_dispatch(
-        &call.function.arguments,
+        &call.function,
     ))?)
 }
 
@@ -101,22 +100,28 @@ pub(super) async fn dispatch_tool_call(
     reconciliation_catalog: Option<&ReportReconciliationCatalog>,
     skill_context: Option<&zevria_instructions::skill::SkillContext>,
 ) -> ToolCallSlot {
-    let arguments = tool_arguments_for_dispatch(&call.function.arguments);
+    let arguments = tool_arguments_for_dispatch(&call.function);
     // Per-call context carries the assistant call id into the tool, so tools
     // that announce work to the frontend (the subtask tool) can correlate
     // their events with this pending call's row.
     let mut context = ToolContext::new();
-    context.insert(ToolCallId(call.id.to_string()));
-    context.insert(turn.clone());
+    context
+        .insert(ToolCallId(call.id.to_string()))
+        .expect("call IDs are serializable");
+    context.insert_scope(turn.clone());
     if let Some(skill_context) = skill_context {
-        context.insert(skill_context.clone());
+        context.insert_scope(skill_context.clone());
     }
     if let Some(catalog) = reconciliation_catalog {
-        context.insert(catalog.clone());
+        context.insert_scope(catalog.clone());
     }
-    let execution = tools
-        .execute(&call.function.name, &arguments, &mut context)
-        .await;
+    let catalog = tools.snapshot();
+    let execution = match catalog.get(call.function.name.as_str()) {
+        Some(tool) => tool.execute(arguments, &mut context).await,
+        None => rig_core::tool::ToolResult::failed(rig_core::tool::ToolExecutionError::not_found(
+            format!("tool `{}` not found", call.function.name),
+        )),
+    };
     let mut outcome = ToolCallOutcome::from(&execution);
     let model_output = execution.output().render();
     let diagnostic = (!execution.is_success()).then(|| model_output.clone());
@@ -128,8 +133,14 @@ pub(super) async fn dispatch_tool_call(
     // Mutation metadata is truthful even when a later apply or rollback step
     // failed. Do not erase it merely because Rig classified the call as an
     // error.
-    let detail = context.result::<ToolResultDetail>().cloned();
-    if context.result::<ToolCancelled>().is_some() {
+    let detail = context
+        .result::<ToolResultDetail>()
+        .expect("published tool details must decode");
+    if context
+        .result::<ToolCancelled>()
+        .expect("published cancellation must decode")
+        .is_some()
+    {
         outcome = ToolCallOutcome::Cancelled;
     } else if !outcome.is_success()
         && detail
@@ -141,12 +152,18 @@ pub(super) async fn dispatch_tool_call(
         outcome = ToolCallOutcome::Cancelled;
     }
     let candidate = (execution.is_success() && call.function.name == SUBMIT_PLAN_TOOL_NAME)
-        .then(|| context.result::<PlanCandidate>().cloned())
+        .then(|| {
+            context
+                .result::<PlanCandidate>()
+                .expect("published Plan candidates must validate")
+        })
         .flatten();
     let reconciliation = (execution.is_success()
         && call.function.name == RECONCILE_REPORTS_TOOL_NAME)
         .then(|| {
-            let accepted = context.result::<ValidatedReportReconciliation>()?.clone();
+            let accepted = context
+                .result::<ValidatedReportReconciliation>()
+                .expect("published reconciliation must decode")?;
             let catalog = reconciliation_catalog?;
             accepted.declaration.clone().validate(catalog).ok()
         })
@@ -157,18 +174,18 @@ pub(super) async fn dispatch_tool_call(
     ToolCallSlot {
         result: UserContent::ToolResult(ToolResult {
             call: call.id.clone(),
-            provider: call.provider.clone(),
             name: call.function.name.clone(),
             content: vec![ToolResultContent::text(output)],
+            is_error: !outcome.is_success(),
         }),
         metadata: ToolResultMetadata {
             diagnostic,
             id: call.id.to_string(),
             call_id: call
-                .provider
-                .as_ref()
-                .map(|provider| provider.call_id.clone()),
-            tool_name: call.function.name.clone(),
+                .id
+                .provider()
+                .map(|provider| provider.as_str().to_owned()),
+            tool_name: call.function.name.to_string(),
             outcome,
             detail,
         },
@@ -531,18 +548,18 @@ impl ToolCallSlot {
         Self {
             result: UserContent::ToolResult(ToolResult {
                 call: call.id.clone(),
-                provider: call.provider.clone(),
                 name: call.function.name.clone(),
                 content: vec![ToolResultContent::text(output)],
+                is_error: !outcome.is_success(),
             }),
             metadata: ToolResultMetadata {
                 diagnostic: None,
                 id: call.id.to_string(),
                 call_id: call
-                    .provider
-                    .as_ref()
-                    .map(|provider| provider.call_id.clone()),
-                tool_name: call.function.name.clone(),
+                    .id
+                    .provider()
+                    .map(|provider| provider.as_str().to_owned()),
+                tool_name: call.function.name.to_string(),
                 outcome,
                 detail: None,
             },

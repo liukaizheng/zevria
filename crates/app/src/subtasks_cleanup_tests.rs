@@ -1,5 +1,7 @@
 use super::*;
 use rig_agent::tool::Tool;
+#[cfg(test)]
+use zevria_foundation::ToolContextRuntimeExt;
 use zevria_tools::{LaunchSubtaskSpec, LaunchSubtaskType, LaunchSubtasksArgs, LaunchSubtasksTool};
 
 #[cfg(unix)]
@@ -20,7 +22,7 @@ async fn cancellation_and_supervisor_abort_quiesce_commands_before_workspace_reu
         let token = cancellation.clone();
         let call = tokio::spawn(async move {
             let mut context = ToolContext::new();
-            context.insert(
+            context.insert_scope(
                 TurnContext::new(TurnId::new(1), SessionMode::Build, token)
                     .with_build_subtasks(true),
             );
@@ -64,8 +66,11 @@ async fn cancellation_and_supervisor_abort_quiesce_commands_before_workspace_reu
         assert_eq!(
             context
                 .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .as_ref()
                 .and_then(|detail| detail.subtasks().first())
                 .and_then(|entry| entry.launch.as_ref())
+                .cloned()
                 .unwrap()
                 .workspace
                 .as_deref(),
@@ -75,6 +80,7 @@ async fn cancellation_and_supervisor_abort_quiesce_commands_before_workspace_reu
             assert!(
                 context
                     .result::<zevria_foundation::ToolCancelled>()
+                    .expect("result metadata decodes")
                     .is_some()
             );
         }
@@ -292,7 +298,7 @@ async fn build_tools_execute_with_inherited_guidance_and_persist_artifacts_and_b
     let tool = LaunchSubtasksTool::new(channels.launcher.clone(), root.path().to_path_buf());
     let call = tokio::spawn(async move {
         let mut context = ToolContext::new();
-        context.insert(
+        context.insert_scope(
             TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new())
                 .with_build_subtasks(true),
         );
@@ -355,8 +361,11 @@ async fn build_tools_execute_with_inherited_guidance_and_persist_artifacts_and_b
     assert!(result.unwrap().contains("workspace: page"));
     let metadata = context
         .result::<ToolResultDetail>()
+        .expect("result metadata decodes")
+        .as_ref()
         .and_then(|detail| detail.subtasks().first())
         .and_then(|entry| entry.launch.as_ref())
+        .cloned()
         .unwrap();
     let items = zevria_transcript::transcript::load(
         &root

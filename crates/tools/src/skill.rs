@@ -78,7 +78,10 @@ mod tests {
             r#"{"skill":"UPPER"}"#,
         ] {
             let result = tools
-                .execute("skill", arguments, &mut ToolContext::new())
+                .snapshot()
+                .get("skill")
+                .unwrap()
+                .execute(arguments.to_owned(), &mut ToolContext::new())
                 .await;
             assert!(result.is_error_kind(ToolErrorKind::InvalidArgs));
         }

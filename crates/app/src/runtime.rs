@@ -1088,7 +1088,7 @@ mod tests {
             &crate::config::test_config(),
         )
         .unwrap();
-        let definitions = tools.static_tool_defs();
+        let definitions = tools.snapshot().take_definitions();
         assert_eq!(
             definitions
                 .iter()

@@ -285,17 +285,16 @@ impl ModelProvider for RepeatedSkillProvider {
             if self.calls == 2 && self.cancel_on_failure {
                 progress.turn().cancellation().cancel();
             }
-            ModelResponse::plain(Message::Assistant {
-                id: None,
-                content: vec![
+            ModelResponse::plain(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![
                     named_tool_call(
                         "repeated",
                         SKILL_TOOL_NAME,
                         json!({"skill":"commit"})
                     );
                     if self.calls == 2 { 2 } else { 1 }
-                ],
-            })
+                ]),
+            ))
         })
     }
     fn reset(&mut self) {}

@@ -24,7 +24,13 @@ async fn execute(
     args: Value,
 ) -> (rig_core::tool::ToolResult, ToolContext) {
     let mut context = ToolContext::new();
-    let result = tools.execute(name, &args.to_string(), &mut context).await;
+    let catalog = tools.snapshot();
+    let result = match catalog.get(name) {
+        Some(tool) => tool.execute(args.to_string(), &mut context).await,
+        None => rig_core::tool::ToolResult::failed(rig_core::tool::ToolExecutionError::not_found(
+            format!("tool `{name}` not found"),
+        )),
+    };
     (result, context)
 }
 
@@ -42,7 +48,8 @@ async fn private_registries_have_exact_tools_and_independent_structured_roots() 
         let tools = build_isolated_build_tools(path, CommandConfig::default()).unwrap();
         assert_eq!(
             tools
-                .static_tool_defs()
+                .snapshot()
+                .take_definitions()
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
@@ -65,7 +72,12 @@ async fn private_registries_have_exact_tools_and_independent_structured_roots() 
         .await;
         assert!(result.is_success());
         assert_eq!(
-            context.result::<ToolResultDetail>().unwrap().file_changes()[0].path,
+            context
+                .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .unwrap()
+                .file_changes()[0]
+                .path,
             std::fs::canonicalize(path).unwrap().join("same.txt")
         );
         let (result, _) = execute(&tools, "edit", json!({"file_path":"same.txt","replacements":[{"old_string":text,"new_string":"edited"}],"move_to":"moved.txt"})).await;

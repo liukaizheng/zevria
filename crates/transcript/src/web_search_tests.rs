@@ -526,7 +526,7 @@ fn native_tool_bindings_are_addresses_not_executable_copies() {
     );
     let canonical = replay.to_message().unwrap();
     assert!(
-        matches!(canonical, rig_core::message::Message::Assistant { content, .. } if content.iter().any(|part| matches!(part, rig_core::message::AssistantContent::ToolCall(call) if call.id == "provider-call")))
+        matches!(canonical, rig_core::message::Message::Assistant(rig_core::message::AssistantMessage { content, .. }) if content.iter().any(|part| matches!(part, rig_core::message::AssistantContent::ToolCall(call) if call.id.wire().as_ref() == "provider-call")))
     );
 }
 

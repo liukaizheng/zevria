@@ -48,20 +48,19 @@ fn display(
 
 #[test]
 fn duplicate_children_have_distinct_lifecycles_and_parent_finishes_only_at_batch_result() {
-    let call = Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::ToolCall(ToolCall::from_dual_wire(
+    let call = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
             "fc-outer",
             "outer",
             rig_core::message::ToolFunction::new(
-                "launch_subtasks".into(),
+                rig_core::message::ToolName::new("launch_subtasks").expect("nonempty tool name"),
                 json!({"tasks":[
                     {"title":"Duplicate title","prompt":"first","type":"explore"},
                     {"title":"Duplicate title","prompt":"second","type":"explore"}
                 ]}),
             ),
-        ))],
-    };
+        )),
+    ]));
     let mut known = KnownTools::new();
     let workspace = Path::new("/startup");
     let mut updates = project_tool_calls(&call, workspace, &mut known);
@@ -123,7 +122,11 @@ fn duplicate_children_have_distinct_lifecycles_and_parent_finishes_only_at_batch
                 .collect(),
         )),
     };
-    let result = Message::tool_result("outer", "launch_subtasks", "one failure and one report");
+    let result = Message::tool_result(
+        rig_core::message::CallId::from_wire("outer"),
+        rig_core::message::ToolName::new("launch_subtasks").expect("nonempty tool name"),
+        "one failure and one report",
+    );
     updates.extend(projection.results(std::slice::from_ref(&metadata)));
     assert_eq!(display(&updates)["outer"].1, ToolCallStatus::InProgress);
     updates.extend(project_tool_results(

@@ -36,6 +36,42 @@ fn subtask() -> Vec<SubtaskEntryMetadata> {
 }
 
 #[test]
+fn rig_context_roundtrips_data_but_never_serializes_live_capabilities() {
+    struct LiveCapability(std::sync::Mutex<String>);
+    let mut context = rig_core::tool::ToolContext::new();
+    context.insert_scope(LiveCapability(std::sync::Mutex::new(
+        "PRIVATE_RUNTIME_CAPABILITY".into(),
+    )));
+    context
+        .insert(ToolCallId("correlated-call".into()))
+        .unwrap();
+    let detail = ToolResultDetail::Subtasks(subtask());
+    context.insert_result(detail.clone()).unwrap();
+
+    let live = context.scope::<LiveCapability>().unwrap();
+    assert_eq!(*live.0.lock().unwrap(), "PRIVATE_RUNTIME_CAPABILITY");
+    let dispatch = context.for_dispatch();
+    assert!(std::sync::Arc::ptr_eq(
+        &live,
+        &dispatch.scope::<LiveCapability>().unwrap()
+    ));
+    assert_eq!(dispatch.result::<ToolResultDetail>().unwrap(), None);
+
+    let wire = serde_json::to_string(&context).unwrap();
+    assert!(!wire.contains("PRIVATE_RUNTIME_CAPABILITY"));
+    let restored: rig_core::tool::ToolContext = serde_json::from_str(&wire).unwrap();
+    assert!(restored.scope::<LiveCapability>().is_none());
+    assert_eq!(
+        restored.get::<ToolCallId>().unwrap(),
+        Some(ToolCallId("correlated-call".into()))
+    );
+    assert_eq!(restored.result::<ToolResultDetail>().unwrap(), Some(detail));
+    let published = serde_json::to_string(&context.result_context()).unwrap();
+    assert!(!published.contains("correlated-call"));
+    assert!(!published.contains("PRIVATE_RUNTIME_CAPABILITY"));
+}
+
+#[test]
 fn ordinary_metadata_omits_detail_and_accepts_explicit_null() {
     let metadata = metadata(None);
     let mut wire = serde_json::to_value(&metadata).unwrap();

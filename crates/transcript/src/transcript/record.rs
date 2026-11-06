@@ -58,7 +58,8 @@ mod tests {
     }
 
     fn text_ptr(message: &Message) -> *const u8 {
-        let Message::Assistant { content, .. } = message else {
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = message
+        else {
             panic!("assistant")
         };
         let AssistantContent::Text(text) = &content[0] else {

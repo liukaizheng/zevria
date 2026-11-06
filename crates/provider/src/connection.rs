@@ -1,16 +1,6 @@
 //! Responses transport lifecycle and provider construction.
 
 use rig_agent::tool::server::ToolServerHandle;
-use rig_core::{
-    client::CompletionClient,
-    providers::openai::responses_api::{
-        AdditionalParameters, Include, Reasoning, ReasoningSummaryLevel,
-    },
-};
-use rig_reqwest::{
-    client::DefaultTransportBuilder,
-    providers::openai::{self, ResponsesCompletionModel},
-};
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
@@ -21,6 +11,7 @@ use tokio_tungstenite::{
     },
 };
 use zevria_foundation::{ModelProfileRef, ReasoningLevel};
+use zevria_model::openai::ReasoningSummaryLevel;
 
 use crate::{
     config::{InputTokenCountConfig, ResolvedModelProfile, ResponsesCompatibilityConfig},
@@ -324,7 +315,6 @@ pub struct OpenAiProvider {
     #[cfg(feature = "cache-diagnostics")]
     pub(crate) cache_diagnostics: crate::cache_diagnostics::DiagnosticState,
     pub(crate) profile: ModelProfileRef,
-    pub(crate) model: ResponsesCompletionModel,
     #[allow(dead_code)]
     pub(crate) context_window_tokens: u64,
     pub(crate) input_token_limit: u64,
@@ -389,7 +379,7 @@ impl OpenAiProvider {
         Ok(session_headers)
     }
 
-    /// Build the Rig model and make one cancellable, best-effort WebSocket
+    /// Prepare the transport and make one cancellable, best-effort WebSocket
     /// preconnect. HTTP 426 selects HTTP immediately; other handshake failures
     /// leave a disconnected WebSocket preference so the first request gets the
     /// normal bounded reconnect budget before falling back. The `cache_key` is
@@ -451,12 +441,6 @@ impl OpenAiProvider {
             Self::validate_profile_settings(profile, reasoning_level, session_id, cache_key)?;
         let endpoint = &profile.endpoint;
         let endpoints = OpenAiResponseEndpoints::parse(&endpoint.base_url)?;
-        let client = openai::Client::builder()
-            .base_url(endpoints.http.as_str())
-            .api_key(endpoint.api_key())
-            .build()
-            .map_err(anyhow::Error::from)?;
-
         let maintenance_http = reqwest::Client::builder()
             .default_headers(session_headers.clone())
             .build()?;
@@ -465,7 +449,10 @@ impl OpenAiProvider {
             .connect_timeout(recovery.connect_timeout)
             .default_headers(session_headers.clone())
             .build()?;
-        let mut websocket_headers = client.headers().clone();
+        let mut websocket_headers = HeaderMap::new();
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", endpoint.api_key()))?;
+        authorization.set_sensitive(true);
+        websocket_headers.insert("authorization", authorization);
         websocket_headers.extend(session_headers);
         let websocket_config = OpenAiWebSocketConfig {
             url: endpoints.websocket.to_string(),
@@ -536,18 +523,13 @@ impl OpenAiProvider {
             )
         };
 
-        let responses_parameters = AdditionalParameters {
-            include: endpoint
-                .compatibility
-                .send_reasoning_encrypted_content
-                .then(|| vec![Include::ReasoningEncryptedContent]),
-            prompt_cache_key: endpoint
-                .compatibility
-                .send_prompt_cache_key
-                .then(|| cache_key.to_string()),
-            ..Default::default()
-        };
-        let model = client.completion_model(&profile.profile.model);
+        let mut responses_parameters = serde_json::json!({});
+        if endpoint.compatibility.send_reasoning_encrypted_content {
+            responses_parameters["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+        }
+        if endpoint.compatibility.send_prompt_cache_key {
+            responses_parameters["prompt_cache_key"] = cache_key.into();
+        }
         let input_token_count_url =
             resolve_input_token_count_url(&endpoints.http, &endpoint.input_token_count)?;
 
@@ -558,11 +540,10 @@ impl OpenAiProvider {
                 transport == OpenAiTransport::Http && endpoint.supports_websockets,
             ),
             profile: profile.profile.clone(),
-            model,
             context_window_tokens: profile.context_window_tokens,
             input_token_limit: profile.input_token_limit,
             preamble: preamble.to_string(),
-            responses_parameters: Some(responses_parameters.to_json()),
+            responses_parameters: Some(responses_parameters),
             reasoning_level,
             reasoning_summary_level: profile.reasoning_summary_level.clone(),
             compatibility: endpoint.compatibility.clone(),
@@ -622,16 +603,10 @@ impl OpenAiProvider {
             .clone()
             .unwrap_or_else(|| serde_json::json!({}));
         if self.compatibility.send_reasoning {
-            let reasoning = AdditionalParameters {
-                reasoning: Some(
-                    Reasoning::new()
-                        .with_effort(crate::config::reasoning_effort(self.reasoning_level))
-                        .with_summary_level(self.reasoning_summary_level.clone()),
-                ),
-                ..Default::default()
-            }
-            .to_json();
-            parameters["reasoning"] = reasoning["reasoning"].clone();
+            parameters["reasoning"] = serde_json::json!({
+                "effort": crate::config::reasoning_effort(self.reasoning_level),
+                "summary": self.reasoning_summary_level,
+            });
         }
         Some(parameters)
     }

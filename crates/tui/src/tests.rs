@@ -58,12 +58,12 @@ use ratatui::{
     style::{Color, Modifier},
 };
 use rig_core::message::{
-    Document, DocumentSourceKind, Reasoning, ReasoningContent, Text, ToolCall, ToolCallId,
-    ToolFunction, ToolResult, ToolResultContent,
+    CallId, Document, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent,
 };
 use serde_json::json;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
+use zevria_content::reasoning::ReasoningContent;
 use zevria_foundation::FileChange;
 use zevria_foundation::FileChangeOperation;
 use zevria_foundation::FileChangeOutput;
@@ -497,44 +497,51 @@ fn tool_call(
     name: &str,
     arguments: serde_json::Value,
 ) -> AssistantContent {
-    let function = ToolFunction::new(name.to_string(), arguments);
+    let function = ToolFunction::new(
+        rig_core::message::ToolName::new(name.to_string()).expect("nonempty tool name"),
+        arguments,
+    );
     AssistantContent::ToolCall(match call_id {
-        Some(call_id) => ToolCall::from_dual_wire(id, call_id, function),
-        None => ToolCall::new(ToolCallId::new_or_mint(id), function),
+        Some(call_id) => zevria_content::message::tool_call_from_wire(id, call_id, function),
+        None => ToolCall::new(CallId::from_wire(id), function),
     })
 }
 
 fn assistant_message(content: Vec<AssistantContent>) -> Message {
-    Message::Assistant { id: None, content }
+    Message::Assistant(rig_core::message::AssistantMessage::new(content))
 }
 
 fn mixed_reasoning_message() -> Message {
-    assistant_message(vec![AssistantContent::Reasoning(Reasoning {
-        id: Some("reasoning-mixed".to_string()),
-        content: vec![
-            ReasoningContent::Encrypted(MIXED_ENCRYPTED_REASONING_PAYLOAD.to_string()),
-            ReasoningContent::Summary(READABLE_REASONING_SUMMARY.to_string()),
-            ReasoningContent::Redacted {
-                data: MIXED_REDACTED_REASONING_PAYLOAD.to_string(),
-            },
-            ReasoningContent::Text {
-                text: READABLE_REASONING_TEXT.to_string(),
-                signature: Some(MIXED_REASONING_SIGNATURE.to_string()),
-            },
-        ],
-    })])
+    assistant_message(vec![AssistantContent::Reasoning(
+        zevria_content::reasoning::from_blocks(
+            Some("reasoning-mixed".to_string()),
+            vec![
+                ReasoningContent::Encrypted(MIXED_ENCRYPTED_REASONING_PAYLOAD.to_string()),
+                ReasoningContent::Summary(READABLE_REASONING_SUMMARY.to_string()),
+                ReasoningContent::Redacted {
+                    data: MIXED_REDACTED_REASONING_PAYLOAD.to_string(),
+                },
+                ReasoningContent::Text {
+                    text: READABLE_REASONING_TEXT.to_string(),
+                    signature: Some(MIXED_REASONING_SIGNATURE.to_string()),
+                },
+            ],
+        ),
+    )])
 }
 
 fn opaque_reasoning_message() -> Message {
-    assistant_message(vec![AssistantContent::Reasoning(Reasoning {
-        id: Some("reasoning-opaque".to_string()),
-        content: vec![
-            ReasoningContent::Encrypted(OPAQUE_ENCRYPTED_REASONING_PAYLOAD.to_string()),
-            ReasoningContent::Redacted {
-                data: OPAQUE_REDACTED_REASONING_PAYLOAD.to_string(),
-            },
-        ],
-    })])
+    assistant_message(vec![AssistantContent::Reasoning(
+        zevria_content::reasoning::from_blocks(
+            Some("reasoning-opaque".to_string()),
+            vec![
+                ReasoningContent::Encrypted(OPAQUE_ENCRYPTED_REASONING_PAYLOAD.to_string()),
+                ReasoningContent::Redacted {
+                    data: OPAQUE_REDACTED_REASONING_PAYLOAD.to_string(),
+                },
+            ],
+        ),
+    )])
 }
 
 fn assert_opaque_reasoning_absent(text: &str, payloads: &[&str]) {
@@ -561,8 +568,16 @@ fn tool_result_message(
 ) -> Message {
     let content = vec![ToolResultContent::text(output)];
     let result = match call_id {
-        Some(call_id) => UserContent::tool_result_with_call_id(id, call_id, name, content),
-        None => UserContent::tool_result(id, name, content),
+        Some(call_id) => UserContent::tool_result(
+            rig_core::message::CallId::from_wire(call_id),
+            rig_core::message::ToolName::new(name).expect("nonempty tool name"),
+            content,
+        ),
+        None => UserContent::tool_result(
+            rig_core::message::CallId::from_wire(id),
+            rig_core::message::ToolName::new(name).expect("nonempty tool name"),
+            content,
+        ),
     };
     Message::User {
         content: vec![result],
@@ -1087,9 +1102,10 @@ fn launch_state_with_result(outcome: ToolCallOutcome, output: &str) -> crate::ap
         arguments: None,
         status: ToolCallStatus::Finished,
         result: Some(ToolResult {
-            call: ToolCallId::new_or_mint("call-diagnostic"),
-            provider: None,
-            name: "launch_subtasks".to_string(),
+            call: CallId::from_wire("call-diagnostic"),
+            is_error: false,
+            name: rig_core::message::ToolName::new("launch_subtasks".to_string())
+                .expect("nonempty tool name"),
             content: vec![ToolResultContent::text(output)],
         }),
         metadata: Some(unlaunched_metadata("call-diagnostic", outcome)),

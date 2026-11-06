@@ -3,9 +3,9 @@ use super::*;
 #[test]
 fn local_display_diagnostics_leave_model_result_bytes_unchanged() {
     let call = ToolCall::new(
-        rig_core::message::ToolCallId::new_or_mint("correlated"),
+        rig_core::message::CallId::from_wire("correlated"),
         rig_core::message::ToolFunction::new(
-            "command".into(),
+            rig_core::message::ToolName::new("command").expect("nonempty tool name"),
             serde_json::json!({"command":"echo"}),
         ),
     );

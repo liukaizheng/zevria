@@ -752,7 +752,11 @@ fn tools_keep_waiting_and_retry_tails_and_progress_replaces_the_notice() {
         &mut app,
         SessionEvent::ToolResults {
             turn_id: TEST_TURN_ID,
-            message: Message::tool_result("call-slow", "command", "done"),
+            message: Message::tool_result(
+                rig_core::message::CallId::from_wire("call-slow"),
+                rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                "done",
+            ),
             metadata: Vec::new(),
         },
         now + Duration::from_secs(15),

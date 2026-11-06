@@ -110,23 +110,32 @@ mod tests {
     use super::*;
     #[test]
     fn durable_command_replay_keeps_the_bounded_initial_title_and_full_payloads() {
-        use rig_core::message::{AssistantContent, Message, ToolCall, ToolCallId, ToolFunction};
+        use rig_core::message::{AssistantContent, CallId, Message, ToolCall, ToolFunction};
         use zevria_foundation::ToolCallOutcome;
         use zevria_foundation::ToolResultMetadata;
 
         let command = format!("rtk rg {}", "long-pattern".repeat(20));
         let input = serde_json::json!({"command": command});
         let items = [
-            TranscriptItem::Message(Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::ToolCall(ToolCall::new(
-                    ToolCallId::new_or_mint("durable-call"),
-                    ToolFunction::new("command".into(), input.clone()),
-                ))],
-            }),
+            TranscriptItem::Message(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(
+                    ToolCall::new(
+                        CallId::from_wire("durable-call"),
+                        ToolFunction::new(
+                            rig_core::message::ToolName::new("command")
+                                .expect("nonempty tool name"),
+                            input.clone(),
+                        ),
+                    ),
+                )]),
+            )),
             TranscriptItem::ToolResults {
                 skill_applications: Vec::new(),
-                message: Message::tool_result("durable-call", "command", "found"),
+                message: Message::tool_result(
+                    rig_core::message::CallId::from_wire("durable-call"),
+                    rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                    "found",
+                ),
                 metadata: vec![ToolResultMetadata {
                     diagnostic: None,
                     id: "durable-call".into(),

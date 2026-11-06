@@ -1219,14 +1219,9 @@ async fn fatal_active_replay_bypasses_control_backpressure_and_discards_queued_w
         events,
         receiver,
     );
-    let repeated = Message::Assistant {
-        id: None,
-        content: vec![named_tool_call(
-            "repeated",
-            SKILL_TOOL_NAME,
-            json!({"skill":"commit"}),
-        )],
-    };
+    let repeated = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call("repeated", SKILL_TOOL_NAME, json!({"skill":"commit"})),
+    ]));
     let first = run.call(&mut calls).await;
     first.response.send(Ok(repeated.clone())).unwrap();
     let second = run.call(&mut calls).await;
@@ -1249,13 +1244,16 @@ async fn fatal_active_replay_bypasses_control_backpressure_and_discards_queued_w
     // Even a control reply already blocked in send cannot prevent polling the
     // active future and observing its typed fatal result.
     tokio::task::yield_now().await;
-    let Message::Assistant { mut content, .. } = repeated else {
+    let Message::Assistant(rig_core::message::AssistantMessage { mut content, .. }) = repeated
+    else {
         unreachable!()
     };
     content.push(content[0].clone());
     second
         .response
-        .send(Ok(Message::Assistant { id: None, content }))
+        .send(Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(content),
+        )))
         .unwrap();
     let error = tokio::time::timeout(TIMEOUT, &mut run.task)
         .await

@@ -916,7 +916,7 @@ pub struct ReportReconciliation {
     pub unavailable_decisions: Vec<UnavailableDecisionAccounting>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReconciliationNextStep {
     Question,
     SubmitPlan,
@@ -931,10 +931,14 @@ impl fmt::Display for ReconciliationNextStep {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatedReportReconciliation {
     pub declaration: ReportReconciliation,
     pub next_step: ReconciliationNextStep,
+}
+
+impl rig_core::tool::ContextValue for ValidatedReportReconciliation {
+    const KEY: &'static str = "zevria.report_reconciliation";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

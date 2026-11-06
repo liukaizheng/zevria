@@ -945,29 +945,26 @@ async fn repeat_skill_applications_use_the_same_path_without_replacing_pins() {
     let provider = ScriptedProvider::new([
         // One batch asks for `commit` twice: the first call dispatches,
         // the batch-local guard answers the duplicate.
-        Ok(Message::Assistant {
-            id: Some("load-twice".to_string()),
-            content: vec![
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
                 skill_call("call-1", "commit"),
                 skill_call("call-2", "commit"),
-            ],
-        }),
+            ]),
+        )),
         // The next batch reapplies `commit`: typed active state answers it.
-        Ok(Message::Assistant {
-            id: Some("load-again".to_string()),
-            content: vec![named_tool_call(
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "call-3",
                 SKILL_TOOL_NAME,
                 json!({"skill": "commit", "args": "later application"}),
-            )],
-        }),
+            )]),
+        )),
         Ok(Message::assistant("done")),
         // A direct `$review` invocation already activated the snapshot,
         // so the tool path is guarded symmetrically.
-        Ok(Message::Assistant {
-            id: Some("load-review".to_string()),
-            content: vec![skill_call("call-4", "review")],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![skill_call("call-4", "review")]),
+        )),
         Ok(Message::assistant("done again")),
     ]);
     let (_directory, transcript) = test_transcript();
@@ -1027,14 +1024,13 @@ async fn tool_and_direct_paths_share_one_activation_per_name() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: Some("activate-commit".to_string()),
-            content: vec![named_tool_call(
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "commit-tool",
                 SKILL_TOOL_NAME,
                 json!({"skill": "commit", "args": "first tool application"}),
-            )],
-        }),
+            )]),
+        )),
         Ok(Message::assistant("tool activation complete")),
         Ok(Message::assistant("direct commit complete")),
         Ok(Message::assistant("first direct review complete")),
@@ -1119,9 +1115,8 @@ async fn engine_admits_valid_names_without_dispatch_and_rejects_malformed_argume
     let skills = test_skills();
     let tools = ToolServer::new().tool(MissingRequestSkillTool).run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: Some("missing-request".to_string()),
-            content: vec![
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
                 named_tool_call(
                     "missing-request-call",
                     SKILL_TOOL_NAME,
@@ -1132,8 +1127,8 @@ async fn engine_admits_valid_names_without_dispatch_and_rejects_malformed_argume
                     SKILL_TOOL_NAME,
                     json!({"skill": "review", "unexpected": true}),
                 ),
-            ],
-        }),
+            ]),
+        )),
         Ok(Message::assistant("recovered")),
     ]);
     let (_directory, transcript) = test_transcript();
@@ -1184,14 +1179,13 @@ async fn resumed_skill_pin_is_reapplied_by_stateless_dispatch() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: Some("load-resumed".to_string()),
-            content: vec![named_tool_call(
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "call-1",
                 SKILL_TOOL_NAME,
                 json!({"skill": "commit"}),
-            )],
-        }),
+            )]),
+        )),
         Ok(Message::assistant("done")),
     ]);
     let (_directory, transcript) = test_transcript();
@@ -1303,14 +1297,13 @@ async fn oversized_tool_activation_fails_without_mutating_typed_state() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: Some("oversized-tool".to_string()),
-            content: vec![named_tool_call(
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "oversized-tool-call",
                 SKILL_TOOL_NAME,
                 json!({"skill": "commit"}),
-            )],
-        }),
+            )]),
+        )),
         Ok(Message::assistant("recovered")),
     ]);
     let (_directory, transcript) = test_transcript();

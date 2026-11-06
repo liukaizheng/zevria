@@ -1,32 +1,15 @@
 //! OpenAI request and server-event protocol conversion.
 
+use crate::wire::{ResponseChunk, ResponsesWebSocketEvent};
 use rig_core::{
-    completion::{CompletionError, CompletionRequest as RigCompletionRequest},
-    message::Message,
-    providers::openai::responses_api::{
-        CompletionRequest, InputItem, streaming::StreamingCompletionChunk,
+    error::ProviderError as CompletionError,
+    message::{
+        AssistantContent, DocumentData, DocumentSourceKind, Image, Message, MimeType,
+        ToolResultContent, UserContent,
     },
 };
-use rig_reqwest::openai_websocket::ResponsesWebSocketEvent;
 use serde::Deserialize;
-
-pub fn into_openai_request_with_instructions(
-    model: String,
-    mut request: RigCompletionRequest,
-    instructions: &str,
-) -> anyhow::Result<CompletionRequest> {
-    anyhow::ensure!(
-        !request
-            .chat_history
-            .iter()
-            .any(|message| matches!(message, Message::System { .. })),
-        "raw system messages must be typed directives"
-    );
-    request.preamble = Some(instructions.into());
-    let mut request = CompletionRequest::try_from((model, request))?;
-    request.instructions = Some(instructions.into());
-    Ok(request)
-}
+use serde_json::{Value, json};
 
 /// Convert one legacy/provider-neutral message with Rig's normal Responses
 /// conversion. Native assistant replay bypasses this helper entirely.
@@ -35,12 +18,86 @@ pub fn message_to_openai_input(message: Message) -> anyhow::Result<Vec<serde_jso
         !matches!(message, Message::System { .. }),
         "raw system messages must be typed directives"
     );
-    let items = <Vec<InputItem>>::try_from(message)?;
-    items
-        .into_iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(anyhow::Error::from)
+    let user_item = |part| json!({"type":"message", "role":"user", "content":[part]});
+    let mut items = Vec::new();
+    match message {
+        Message::System { .. } => unreachable!("system messages were rejected above"),
+        Message::User { content } => {
+            for part in content {
+                items.push(match part {
+                UserContent::Text(text) => user_item(json!({"type":"input_text", "text":text.text})),
+                UserContent::Image(image) => user_item(image_input(image)?),
+                UserContent::Document(document) => user_item(match document.data {
+                    DocumentData::Text(text) => json!({"type":"input_text", "text":text}),
+                    DocumentData::File(DocumentSourceKind::FileId(id)) => json!({"type":"input_file", "file_id":id}),
+                    DocumentData::File(DocumentSourceKind::Url(url)) => json!({"type":"input_file", "file_url":url}),
+                    DocumentData::File(DocumentSourceKind::Base64(data)) => json!({"type":"input_file", "file_data":format!("data:application/pdf;base64,{data}"), "filename":"document.pdf"}),
+                    _ => anyhow::bail!("unsupported Responses document source"),
+                }),
+                UserContent::ToolResult(result) => {
+                    let mut parts = result.content.into_iter().map(|part| match part {
+                        ToolResultContent::Text(text) => Ok(json!({"type":"input_text", "text":text.text})),
+                        ToolResultContent::Json { value } => Ok(json!({"type":"input_text", "text":value.to_string()})),
+                        ToolResultContent::Image(image) => image_input(image),
+                    }).collect::<anyhow::Result<Vec<_>>>()?;
+                    let output = match parts.as_mut_slice() {
+                        [part] if part["type"] == "input_text" => part["text"].take(),
+                        _ => Value::Array(parts),
+                    };
+                    json!({"type":"function_call_output", "call_id":result.call.to_string(), "output":output, "status":"completed"})
+                }
+                _ => anyhow::bail!("unsupported Responses user content"),
+            });
+            }
+        }
+        Message::Assistant(assistant) => {
+            for block in assistant.content {
+                match block {
+                    AssistantContent::Text(text) if !text.text.is_empty() => items
+                        .push(json!({"type":"message", "role":"assistant", "content":text.text})),
+                    AssistantContent::Text(_) => {}
+                    AssistantContent::ToolCall(call) => {
+                        let mut item = json!({"type":"function_call", "call_id":call.id.to_string(), "name":call.function.name, "arguments":call.function.raw_arguments(), "status":"completed"});
+                        if let Some(id) = call
+                            .native
+                            .as_ref()
+                            .and_then(|native| native.item.get("id"))
+                            .and_then(Value::as_str)
+                            .filter(|id| id.starts_with("fc_"))
+                        {
+                            item["id"] = id.into();
+                        }
+                        items.push(item);
+                    }
+                    AssistantContent::Reasoning(reasoning) => {
+                        if let Some(native) = reasoning.native.filter(|native| {
+                            native.item.get("id").and_then(Value::as_str).is_some()
+                        }) {
+                            items.push(native.item);
+                        }
+                    }
+                    _ => anyhow::bail!("unsupported Responses assistant content"),
+                }
+            }
+        }
+    }
+    Ok(items)
+}
+
+fn image_input(image: Image) -> anyhow::Result<Value> {
+    let mut part = json!({"type":"input_image", "detail":image.detail.unwrap_or_default()});
+    match image.data {
+        DocumentSourceKind::Base64(data) => {
+            let media_type = image
+                .media_type
+                .ok_or_else(|| anyhow::anyhow!("base64 images require a media type"))?;
+            part["image_url"] = format!("data:{};base64,{data}", media_type.to_mime_type()).into();
+        }
+        DocumentSourceKind::Url(url) => part["image_url"] = url.into(),
+        DocumentSourceKind::FileId(id) => part["file_id"] = id.into(),
+        _ => anyhow::bail!("unsupported Responses image source"),
+    }
+    Ok(part)
 }
 
 pub fn is_known_streaming_event(kind: &str) -> bool {
@@ -311,12 +368,22 @@ pub fn parse_server_event(
         "response.done" => serde_json::from_str(payload)
             .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
             .map_err(CompletionError::from),
-        kind if is_known_streaming_event(kind) => match serde_json::from_str(payload)? {
-            StreamingCompletionChunk::Response(response) => {
-                Ok(Some(ResponsesWebSocketEvent::Response(response)))
-            }
-            StreamingCompletionChunk::Delta(item) => Ok(Some(ResponsesWebSocketEvent::Item(item))),
-        },
+        kind if matches!(
+            kind,
+            "response.created"
+                | "response.in_progress"
+                | "response.completed"
+                | "response.failed"
+                | "response.incomplete"
+        ) =>
+        {
+            serde_json::from_str::<ResponseChunk>(payload)
+                .map(|chunk| Some(ResponsesWebSocketEvent::Response(Box::new(chunk))))
+                .map_err(CompletionError::from)
+        }
+        kind if is_known_streaming_event(kind) => serde_json::from_str(payload)
+            .map(|item| Some(ResponsesWebSocketEvent::Item(item)))
+            .map_err(CompletionError::from),
         kind => {
             tracing::trace!(target: "zevria_provider::protocol", kind, "ignoring an unknown OpenAI response event");
             Ok(None)

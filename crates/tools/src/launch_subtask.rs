@@ -274,7 +274,13 @@ impl LaunchSubtasksTool {
         }
         let metadata: Vec<_> = entries.into_iter().map(|(entry, _)| entry).collect();
         if let Some(context) = result_context {
-            context.insert_result(ToolResultDetail::Subtasks(metadata.clone()));
+            context
+                .insert_result(ToolResultDetail::Subtasks(metadata.clone()))
+                .map_err(|error| {
+                    LaunchSubtasksError::Failed(format!(
+                        "{output}\nsubtask metadata could not be published: {error}"
+                    ))
+                })?;
         }
         // Cancellation is a property of the parent turn, not inferred from a
         // single child's status. Retain all successful reports on either error.
@@ -515,18 +521,25 @@ impl Tool for LaunchSubtasksTool {
         // A missing id degrades the frontend correlation, never the call.
         let call_id = context
             .get::<ToolCallId>()
-            .map(|id| id.0.clone())
+            .ok()
+            .flatten()
+            .map(|id| id.0)
             .unwrap_or_default();
-        let turn = context.get::<TurnContext>().cloned().unwrap_or_else(|| {
-            TurnContext::new(
-                TurnId::new(0),
-                SessionMode::Build,
-                tokio_util::sync::CancellationToken::new(),
-            )
-        });
+        let turn = context
+            .scope::<TurnContext>()
+            .map(|turn| turn.as_ref().clone())
+            .unwrap_or_else(|| {
+                TurnContext::new(
+                    TurnId::new(0),
+                    SessionMode::Build,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+            });
         let execution = self.execute(args, &call_id, turn, Some(context)).await;
         if matches!(execution, Err(LaunchSubtasksError::Cancelled(_))) {
-            context.insert_result(ToolCancelled);
+            context
+                .insert_result(ToolCancelled)
+                .expect("cancellation markers serialize");
         }
         let (output, _) = execution?;
         Ok(output)
@@ -676,7 +689,9 @@ mod tests {
         autocomplete_requests(channels.requests, "found it in config.rs");
 
         let mut context = ToolContext::new();
-        context.insert(ToolCallId("call-7".to_string()));
+        context
+            .insert(ToolCallId("call-7".to_string()))
+            .expect("call IDs serialize");
         let returned = tool
             .call(
                 &mut context,
@@ -690,8 +705,11 @@ mod tests {
 
         let metadata = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
+            .as_ref()
             .and_then(|detail| detail.subtasks().first())
             .and_then(|entry| entry.launch.as_ref())
+            .cloned()
             .expect("launch metadata extension");
         assert_eq!(metadata.title, "map config loading");
         assert_eq!(metadata.kind, SubtaskKind::Explore);
@@ -742,6 +760,8 @@ mod tests {
         assert_eq!(
             context
                 .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .as_ref()
                 .and_then(|detail| detail.subtasks().first())
                 .and_then(|entry| entry.launch.as_ref())
                 .map(|metadata| metadata.title.as_str()),
@@ -810,8 +830,11 @@ mod tests {
                 .expect("any nonblank title should launch");
             let metadata = context
                 .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .as_ref()
                 .and_then(|detail| detail.subtasks().first())
                 .and_then(|entry| entry.launch.as_ref())
+                .cloned()
                 .expect("launch metadata");
             assert_eq!(metadata.title, expected);
             assert!(report.contains(&format!("subtask: {expected} (")));
@@ -841,7 +864,12 @@ mod tests {
                         .contains(&format!("{field} must not be empty"))
                 );
                 assert_eq!(tool.map_error(error).kind(), ToolErrorKind::InvalidArgs);
-                assert!(context.result::<ToolResultDetail>().is_none());
+                assert!(
+                    context
+                        .result::<ToolResultDetail>()
+                        .expect("result metadata decodes")
+                        .is_none()
+                );
                 assert!(channels.requests.try_recv().is_err(), "nothing was queued");
             }
         }
@@ -859,9 +887,11 @@ mod tests {
             .run();
 
         let unknown = tools
+            .snapshot()
+            .get("launch_subtasks")
+            .unwrap()
             .execute(
-                "launch_subtasks",
-                &serde_json::json!({"tasks": [{
+                serde_json::json!({"tasks": [{
                     "title": "explore the codebase",
                     "prompt": "a broad look",
                     "type": "explore",
@@ -877,9 +907,11 @@ mod tests {
         );
 
         let bad_type = tools
+            .snapshot()
+            .get("launch_subtasks")
+            .unwrap()
             .execute(
-                "launch_subtasks",
-                &serde_json::json!({"tasks": [{
+                serde_json::json!({"tasks": [{
                     "title": "explore the codebase",
                     "prompt": "a broad look",
                     "type": "review"

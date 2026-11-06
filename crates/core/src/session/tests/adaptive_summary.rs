@@ -357,14 +357,24 @@ async fn irreducible_empty_non_size_and_cancellation_preserve_history() {
 async fn unsafe_boundaries_are_skipped_without_counting_or_dispatch_and_malformed_sources_fail() {
     let mut source = vec![
         OwnedModelRequestItem::message(Message::user("oldest")),
-        OwnedModelRequestItem::message(Message::Assistant {
-            id: None,
-            content: vec![tool_call("a", "one"), tool_call("b", "two")],
-        }),
+        OwnedModelRequestItem::message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
+                tool_call("a", "one"),
+                tool_call("b", "two"),
+            ]),
+        )),
         OwnedModelRequestItem::message(Message::User {
             content: vec![
-                UserContent::tool_result("a", "echo", vec![ToolResultContent::text("one")]),
-                UserContent::tool_result("b", "echo", vec![ToolResultContent::text("two")]),
+                UserContent::tool_result(
+                    rig_core::message::CallId::from_wire("a"),
+                    rig_core::message::ToolName::new("echo").expect("nonempty tool name"),
+                    vec![ToolResultContent::text("one")],
+                ),
+                UserContent::tool_result(
+                    rig_core::message::CallId::from_wire("b"),
+                    rig_core::message::ToolName::new("echo").expect("nonempty tool name"),
+                    vec![ToolResultContent::text("two")],
+                ),
             ],
         }),
         OwnedModelRequestItem::message(Message::user("newest")),
@@ -488,10 +498,12 @@ async fn mid_turn_partial_checkpoint_preserves_a_complete_batch_even_if_dispatch
     let mut provider = PrefixProvider::new(
         Counting::Exact(3),
         [
-            Ok(Message::Assistant {
-                id: None,
-                content: vec![tool_call("a", "one"), tool_call("b", "two")],
-            }),
+            Ok(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![
+                    tool_call("a", "one"),
+                    tool_call("b", "two"),
+                ]),
+            )),
             Ok(Message::assistant("mid-turn summary")),
         ],
     );

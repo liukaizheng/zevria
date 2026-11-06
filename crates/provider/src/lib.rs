@@ -54,17 +54,7 @@ use futures_util::{SinkExt, StreamExt};
 #[cfg(test)]
 use recovery::RecoveryPolicy;
 #[cfg(test)]
-use rig_core::client::CompletionClient;
-#[cfg(test)]
-use rig_core::message::{
-    AdditionalParams, AssistantContent, Message, ReasoningContent, Text, ToolCall, ToolFunction,
-};
-#[cfg(test)]
-use rig_reqwest::{
-    client::DefaultTransportBuilder,
-    openai_websocket::ResponsesWebSocketEvent,
-    providers::openai::{self, ResponsesCompletionModel},
-};
+use rig_core::message::{AssistantContent, Message, Text, ToolFunction};
 #[cfg(test)]
 use tokio_tungstenite::{
     WebSocketStream, connect_async,
@@ -80,9 +70,13 @@ use websocket_session::{
     OpenAiWebSocketInbound, OpenAiWebSocketSession, OpenAiWebSocketTerminalCategory,
 };
 #[cfg(test)]
+use zevria_content::reasoning::ReasoningContent;
+#[cfg(test)]
 use zevria_responses::accumulator::*;
 #[cfg(test)]
 use zevria_responses::protocol::parse_server_event;
+#[cfg(test)]
+use zevria_responses::wire::ResponsesWebSocketEvent;
 #[cfg(test)]
 use zevria_session_api::ProgressReporter;
 

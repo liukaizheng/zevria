@@ -67,10 +67,12 @@ async fn simple_turn_has_authoritative_event_order() {
 #[tokio::test]
 async fn loop_calls_count_dispatches_not_tools_and_restart_for_each_turn() {
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![tool_call("first", "one"), tool_call("second", "two")],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
+                tool_call("first", "one"),
+                tool_call("second", "two"),
+            ]),
+        )),
         Ok(Message::assistant("tools done")),
         Ok(Message::assistant("next answer")),
     ]);

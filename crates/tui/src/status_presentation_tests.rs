@@ -30,7 +30,10 @@ fn native(
     let AssistantContent::ToolCall(call) = tool_call("status-test", None, name, arguments) else {
         unreachable!()
     };
-    let mut state = NativeToolState::new(status, &call.function.arguments);
+    let mut state = NativeToolState::new(
+        status,
+        &zevria_content::message::tool_arguments(&call.function),
+    );
     if let Some(outcome) = outcome {
         state.metadata = Some(file_metadata(
             "status-test",

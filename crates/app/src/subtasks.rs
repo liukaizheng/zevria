@@ -401,11 +401,12 @@ mod build_tests;
 #[cfg(test)]
 mod tests {
     use rig_agent::tool::server::ToolServer;
-    use rig_core::{message::Message, providers::openai::responses_api::ReasoningSummaryLevel};
+    use rig_core::message::Message;
     use zevria_foundation::ModelContextPolicy;
     use zevria_foundation::TurnId;
     use zevria_foundation::subtask::SubtaskKind;
     use zevria_foundation::subtask::SubtaskOutcome;
+    use zevria_model::openai::ReasoningSummaryLevel;
     use zevria_provider::{
         LiteralApiKey, ModelConfig, ProviderConfig, RemoteCompactionConfig,
         ResponsesCompatibilityConfig,
@@ -477,15 +478,14 @@ mod tests {
 
     #[test]
     fn assistant_reports_join_only_text_content() {
-        use rig_core::message::{AssistantContent, Reasoning};
-        let message = Message::Assistant {
-            id: None,
-            content: vec![
-                AssistantContent::Reasoning(Reasoning::summaries(vec!["thinking".to_string()])),
-                AssistantContent::text("first part"),
-                AssistantContent::text("second part"),
-            ],
-        };
+        use rig_core::message::AssistantContent;
+        let message = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+                "thinking".to_string(),
+            ])),
+            AssistantContent::text("first part"),
+            AssistantContent::text("second part"),
+        ]));
         assert_eq!(assistant_plain_text(&message), "first part\nsecond part");
         assert_eq!(assistant_plain_text(&Message::user("nope")), "");
     }

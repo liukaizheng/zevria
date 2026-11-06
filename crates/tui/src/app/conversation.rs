@@ -33,7 +33,7 @@ pub(crate) use crate::presentation::{
     NativeToolCallStatus as ToolCallStatus, NativeToolState as ToolCallState,
 };
 
-fn call_ids_match(left: Option<&String>, right: Option<&String>, exact_call_id: bool) -> bool {
+fn call_ids_match(left: Option<&str>, right: Option<&str>, exact_call_id: bool) -> bool {
     let exact = left == right;
     if exact_call_id {
         exact
@@ -180,8 +180,8 @@ impl HistoryEntry {
                     });
                 }
             }
-            Message::Assistant { content, .. } => {
-                for (index, item) in content.into_iter().enumerate() {
+            Message::Assistant(assistant) => {
+                for (index, item) in assistant.content.into_iter().enumerate() {
                     let kind = match item {
                         AssistantContent::Text(text) => PresentationBlockKind::Text {
                             text: zevria_content::citations::render_text(&text),
@@ -198,7 +198,10 @@ impl HistoryEntry {
                             PresentationBlockKind::Reasoning { parts }
                         }
                         AssistantContent::ToolCall(call) => {
-                            let state = ToolCallState::new(status, &call.function.arguments);
+                            let state = ToolCallState::new(
+                                status,
+                                &zevria_content::message::tool_arguments(&call.function),
+                            );
                             PresentationBlockKind::Tool(PresentedTool::Native {
                                 call: Box::new(call),
                                 state: Box::new(state),
@@ -207,6 +210,7 @@ impl HistoryEntry {
                         AssistantContent::Image(_) => {
                             PresentationBlockKind::Placeholder("[image]".to_string())
                         }
+                        _ => continue,
                     };
                     blocks.push(PresentationBlock {
                         id: PresentationBlockId(index as u64),
@@ -338,12 +342,11 @@ impl HistoryEntry {
 
 pub(crate) fn without_tool_calls(message: Message) -> Option<Message> {
     match message {
-        Message::Assistant { id, content } => {
-            let content = content
-                .into_iter()
-                .filter(|item| !matches!(item, AssistantContent::ToolCall(_)))
-                .collect::<Vec<_>>();
-            (!content.is_empty()).then_some(Message::Assistant { id, content })
+        Message::Assistant(mut assistant) => {
+            assistant
+                .content
+                .retain(|item| !matches!(item, AssistantContent::ToolCall(_)));
+            (!assistant.content.is_empty()).then_some(Message::Assistant(assistant))
         }
         message => Some(message),
     }
@@ -904,9 +907,11 @@ impl ConversationState {
                 }
                 Content::NativeTool { call_id } => {
                     let call = state.canonical.as_ref().and_then(|message| match message {
-                        Message::Assistant { content, .. } => {
-                            content.iter().find_map(|content| match content {
-                                AssistantContent::ToolCall(call) if call.id == call_id.as_str() => {
+                        Message::Assistant(assistant) => {
+                            assistant.content.iter().find_map(|content| match content {
+                                AssistantContent::ToolCall(call)
+                                    if call.id.wire().as_ref() == call_id.as_str() =>
+                                {
                                     Some(call)
                                 }
                                 _ => None,
@@ -919,7 +924,7 @@ impl ConversationState {
                             call: Box::new(call.clone()),
                             state: Box::new(ToolCallState::new(
                                 state.tool_status,
-                                &call.function.arguments,
+                                &zevria_content::message::tool_arguments(&call.function),
                             )),
                         })
                     } else if let Some(tool) = state.acp_tools.get(call_id) {
@@ -1244,15 +1249,15 @@ impl ConversationState {
     }
 
     fn select_executing_call(&self, result: &ToolResult) -> Option<ToolCallLocation> {
-        let candidates = self.executing_tool_calls.get(result.call.as_str())?;
+        let candidates = self.executing_tool_calls.get(result.call.wire().as_ref())?;
         [true, false].into_iter().find_map(|exact_call_id| {
             candidates
                 .iter()
                 .filter(|location| {
                     self.tool_call_at(**location).is_some_and(|call| {
                         call_ids_match(
-                            provider_call_id(call.provider.as_ref()),
-                            provider_call_id(result.provider.as_ref()),
+                            provider_call_id(call.id.provider()),
+                            provider_call_id(result.call.provider()),
                             exact_call_id,
                         )
                     })
@@ -1273,10 +1278,14 @@ impl ConversationState {
         result: &ToolResult,
         metadata: Option<&ToolResultMetadata>,
     ) {
-        if let Some(candidates) = self.executing_tool_calls.get_mut(result.call.as_str()) {
+        if let Some(candidates) = self
+            .executing_tool_calls
+            .get_mut(result.call.wire().as_ref())
+        {
             candidates.retain(|candidate| *candidate != location);
             if candidates.is_empty() {
-                self.executing_tool_calls.remove(result.call.as_str());
+                self.executing_tool_calls
+                    .remove(result.call.wire().as_ref());
             }
         }
         let Some(HistoryEntry::Conversation(entry)) = self.history.get_mut(location.history_index)
@@ -1351,11 +1360,11 @@ impl ConversationState {
                 continue;
             };
             let matched_metadata = [true, false].into_iter().find_map(|exact_call_id| {
-                let candidates = metadata_by_id.get_mut(result.call.as_str())?;
+                let candidates = metadata_by_id.get_mut(result.call.wire().as_ref())?;
                 let position = candidates.iter().position(|&index| {
                     call_ids_match(
-                        metadata[index].call_id.as_ref(),
-                        provider_call_id(result.provider.as_ref()),
+                        metadata[index].call_id.as_deref(),
+                        provider_call_id(result.call.provider()),
                         exact_call_id,
                     )
                 })?;
@@ -1414,7 +1423,7 @@ impl ConversationState {
                 let Some((call, state)) = block.native_tool_mut() else {
                     continue;
                 };
-                if call.id != call_id
+                if call.id.wire().as_ref() != call_id
                     || call.function.name != zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME
                 {
                     continue;
@@ -2351,7 +2360,11 @@ mod tests {
         );
         conversation.push_message(Message::system("system"), ToolCallStatus::Finished);
         conversation.push_message(
-            Message::tool_result("call", "command", "tool output"),
+            Message::tool_result(
+                rig_core::message::CallId::from_wire("call"),
+                rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                "tool output",
+            ),
             ToolCallStatus::Finished,
         );
         conversation.push_entry(HistoryEntry::Error("error".into()));

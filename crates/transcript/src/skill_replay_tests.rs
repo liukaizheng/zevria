@@ -5,9 +5,7 @@ use crate::{
     ToolCallOutcome, ToolResultMetadata,
     transcript::{TranscriptItem, model_history},
 };
-use rig_core::message::{
-    AssistantContent, Message, ToolCall, ToolCallId, ToolFunction, UserContent,
-};
+use rig_core::message::{AssistantContent, CallId, Message, ToolCall, ToolFunction, UserContent};
 use serde_json::json;
 use zevria_foundation::SKILL_TOOL_NAME;
 
@@ -26,9 +24,9 @@ fn batch(applications: Vec<SkillApplication>) -> Vec<TranscriptItem> {
         .enumerate()
         .map(|(index, application)| {
             AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new_or_mint(format!("call-{index}")),
+                CallId::from_wire(format!("call-{index}")),
                 ToolFunction::new(
-                    SKILL_TOOL_NAME.into(),
+                    rig_core::message::ToolName::new(SKILL_TOOL_NAME).expect("nonempty tool name"),
                     json!({"skill": application.name(), "args": "inspect"}),
                 ),
             ))
@@ -40,8 +38,8 @@ fn batch(applications: Vec<SkillApplication>) -> Vec<TranscriptItem> {
             .enumerate()
             .map(|(index, _)| {
                 UserContent::tool_result(
-                    format!("call-{index}"),
-                    SKILL_TOOL_NAME,
+                    rig_core::message::CallId::from_wire(format!("call-{index}")),
+                    rig_core::message::ToolName::new(SKILL_TOOL_NAME).expect("nonempty tool name"),
                     vec![rig_core::message::ToolResultContent::text(
                         "Arbitrary bodyless acknowledgement.",
                     )],
@@ -70,10 +68,9 @@ fn batch(applications: Vec<SkillApplication>) -> Vec<TranscriptItem> {
         })
         .collect();
     vec![
-        TranscriptItem::Message(Message::Assistant {
-            id: None,
-            content: calls,
-        }),
+        TranscriptItem::Message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(calls),
+        )),
         TranscriptItem::ToolResults {
             message,
             metadata,
@@ -164,7 +161,7 @@ fn skill_replay_requires_one_to_one_correlated_accepted_applications() {
                 let UserContent::ToolResult(result) = &mut content[0] else {
                     panic!()
                 };
-                result.name = "other".into();
+                result.name = rig_core::message::ToolName::new("other").unwrap();
             }
             _ => unreachable!(),
         }

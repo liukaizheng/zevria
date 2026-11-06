@@ -1,8 +1,9 @@
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, MessageId, SessionUpdate, TextContent,
 };
-use rig_core::message::{AssistantContent, Message, ReasoningContent};
+use rig_core::message::{AssistantContent, Message};
 use zevria_content::assistant_plain_text;
+use zevria_content::reasoning::{self, ReasoningContent};
 use zevria_foundation::TurnId;
 
 /// Append-only projection of Zevria's complete watch snapshots.
@@ -319,14 +320,14 @@ pub(crate) fn display_message(attempt: &zevria_content::WebSearchAttemptRecord) 
                 Some(AssistantContent::Text(rig_core::message::Text::new(text)))
             }
             zevria_content::AssistantPresentationContent::Reasoning { text } => {
-                Some(AssistantContent::Reasoning(
-                    rig_core::message::Reasoning::summaries(vec![text.clone()]),
-                ))
+                Some(AssistantContent::Reasoning(reasoning::summaries(vec![
+                    text.clone(),
+                ])))
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    (!content.is_empty()).then_some(Message::Assistant { id: None, content })
+    (!content.is_empty()).then_some(Message::from(content))
 }
 
 /// Carried internally on an otherwise empty update; `send_update` lifts this
@@ -433,21 +434,21 @@ pub(crate) fn display_carrier(
 }
 
 pub(crate) fn assistant_reasoning_text(message: &Message) -> String {
-    let Message::Assistant { content, .. } = message else {
+    let Message::Assistant(assistant) = message else {
         return String::new();
     };
-    content
+    assistant
+        .content
         .iter()
         .filter_map(|content| {
             let AssistantContent::Reasoning(reasoning) = content else {
                 return None;
             };
-            let text = reasoning
-                .content
-                .iter()
+            let text = reasoning::blocks(reasoning)
+                .into_iter()
                 .filter_map(|part| match part {
                     ReasoningContent::Summary(text) | ReasoningContent::Text { text, .. } => {
-                        Some(text.as_str())
+                        Some(text)
                     }
                     ReasoningContent::Encrypted(_) | ReasoningContent::Redacted { .. } => None,
                 })

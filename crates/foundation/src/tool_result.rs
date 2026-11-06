@@ -57,13 +57,33 @@ pub struct FileChangeOutput {
 /// Cloneable Rig *call* extension carrying the assistant tool-call id into a
 /// dispatched tool. Tools that announce work to the frontend (the subtask
 /// tool) read it to correlate their events with the pending call row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallId(pub String);
+
+impl rig_core::tool::ContextValue for ToolCallId {
+    const KEY: &'static str = "zevria.tool_call_id";
+}
+
+/// Live per-dispatch capabilities must never be serialized as Rig context data.
+/// Scopes keep cancellation, catalogs, and event channels local to the process.
+pub trait ToolContextRuntimeExt {
+    fn insert_scope<T: std::any::Any + Send + Sync>(&mut self, value: T);
+}
+
+impl ToolContextRuntimeExt for rig_core::tool::ToolContext {
+    fn insert_scope<T: std::any::Any + Send + Sync>(&mut self, value: T) {
+        *self = std::mem::take(self).with_scope(std::sync::Arc::new(value));
+    }
+}
 
 /// Rig result extension set by a running tool that observed turn
 /// cancellation and stopped before producing its ordinary result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCancelled;
+
+impl rig_core::tool::ContextValue for ToolCancelled {
+    const KEY: &'static str = "zevria.tool_cancelled";
+}
 
 /// Model-independent lifecycle outcome for one correlated tool result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +131,10 @@ pub enum ToolResultDetail {
     /// Terminal root-question semantics, including frontend errors. Malformed
     /// model calls and cancellation do not produce a question disposition.
     QuestionDisposition(QuestionTerminalDisposition),
+}
+
+impl rig_core::tool::ContextValue for ToolResultDetail {
+    const KEY: &'static str = "zevria.tool_result_detail";
 }
 
 impl ToolResultDetail {

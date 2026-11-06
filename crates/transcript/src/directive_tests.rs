@@ -1,5 +1,5 @@
 use crate::*;
-use rig_core::message::{AssistantContent, Message, ToolCall, ToolCallId, ToolFunction};
+use rig_core::message::{AssistantContent, CallId, Message, ToolCall, ToolFunction};
 use zevria_model::maintenance::validate_maintenance_input;
 
 fn snapshot() -> SkillSnapshot {
@@ -45,17 +45,23 @@ fn checkpoint() -> TranscriptItem {
     )
 }
 fn call() -> TranscriptItem {
-    TranscriptItem::Message(Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::ToolCall(ToolCall::new(
-            ToolCallId::new_or_mint("pending"),
-            ToolFunction::new("command".into(), serde_json::json!({})),
-        ))],
-    })
+    TranscriptItem::Message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+            CallId::from_wire("pending"),
+            ToolFunction::new(
+                rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                serde_json::json!({}),
+            ),
+        ))]),
+    ))
 }
 fn result() -> TranscriptItem {
     TranscriptItem::ToolResults {
-        message: Message::tool_result("pending", "command", "done"),
+        message: Message::tool_result(
+            rig_core::message::CallId::from_wire("pending"),
+            rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+            "done",
+        ),
         metadata: vec![],
         skill_applications: vec![],
     }

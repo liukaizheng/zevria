@@ -460,10 +460,13 @@ async fn skill_catalog_prospective_capacity_uses_identical_full_instruction_stat
     let limit = engine.prospective_skill_overhead(&policy, &prospective);
     engine.compaction = test_compaction_policy(limit, 100, 0);
     let scope = ToolExecutionScope::new(&engine, SessionMode::Build, &policy, &turn, &gate);
-    let calls = assistant_tool_calls(&Message::Assistant {
-        id: None,
-        content: vec![named_tool_call("one", "skill", json!({"skill":"commit"}))],
-    });
+    let calls = assistant_tool_calls(&Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![named_tool_call(
+            "one",
+            "skill",
+            json!({"skill":"commit"}),
+        )]),
+    ));
     let batch = execute_tool_calls(&scope, &calls, ActiveSkills::default(), &gate).await;
     assert!(batch.skill_applications.is_empty());
     assert_eq!(batch.metadata[0].outcome, ToolCallOutcome::Error);
@@ -673,13 +676,12 @@ async fn mixed_skill_batches_dispatch_nothing_even_concurrent_subtasks_or_plan_t
                         &turn,
                         &gate,
                     );
-                    let mut calls = assistant_tool_calls(&Message::Assistant {
-                        id: None,
-                        content: vec![
+                    let mut calls = assistant_tool_calls(&Message::Assistant(
+                        rig_core::message::AssistantMessage::new(vec![
                             named_tool_call("activate", "skill", json!({"skill":"commit"})),
                             named_tool_call("other", name, json!({})),
-                        ],
-                    });
+                        ]),
+                    ));
                     if reverse {
                         calls.reverse();
                     }
@@ -688,7 +690,7 @@ async fn mixed_skill_batches_dispatch_nothing_even_concurrent_subtasks_or_plan_t
                     assert!(batch.skill_applications.is_empty() && batch.candidate.is_none());
                     assert_eq!(batch.metadata.len(), 2);
                     for (metadata, call) in batch.metadata.iter().zip(&calls) {
-                        assert_eq!(metadata.id, call.id.as_str());
+                        assert_eq!(metadata.id, call.id.wire().as_ref());
                         assert_eq!(
                             metadata.outcome,
                             if cancelled {

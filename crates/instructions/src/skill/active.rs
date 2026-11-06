@@ -161,16 +161,16 @@ pub fn apply_tool_applications(
             let UserContent::ToolResult(result) = block else {
                 continue;
             };
-            let id = result.call.as_str();
-            anyhow::ensure!(seen.insert(id), "duplicate tool result id {id}");
-            let entry = meta.remove(id);
+            let id = result.call.wire();
+            anyhow::ensure!(seen.insert(id.clone()), "duplicate tool result id {id}");
+            let entry = meta.remove(id.as_ref());
             if result.name != SKILL_TOOL_NAME {
                 anyhow::ensure!(
                     entry.is_none_or(|e| e.tool_name != SKILL_TOOL_NAME),
                     "skill metadata has a non-skill result"
                 );
                 anyhow::ensure!(
-                    !by_id.contains_key(id),
+                    !by_id.contains_key(id.as_ref()),
                     "skill application has a non-skill result"
                 );
                 continue;
@@ -181,7 +181,7 @@ pub fn apply_tool_applications(
                 entry.tool_name == SKILL_TOOL_NAME,
                 "skill result metadata name mismatch"
             );
-            let accepted = by_id.remove(id);
+            let accepted = by_id.remove(id.as_ref());
             if entry.outcome.is_success() {
                 let accepted = accepted.ok_or_else(|| {
                     anyhow::anyhow!(

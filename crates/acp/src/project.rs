@@ -217,10 +217,10 @@ pub(crate) fn project_completed_message(
                 }
             }
         }
-        Message::Assistant { content, .. } => {
+        Message::Assistant(assistant) => {
             let mut text_index = 0usize;
             let mut thought_index = 0usize;
-            for item in content {
+            for item in &assistant.content {
                 match item {
                     AssistantContent::Text(text) => {
                         updates.push(AcpSessionUpdate::AgentMessageChunk(content_chunk(
@@ -230,10 +230,8 @@ pub(crate) fn project_completed_message(
                         text_index += 1;
                     }
                     AssistantContent::Reasoning(_) => {
-                        let reasoning = assistant_reasoning_text(&Message::Assistant {
-                            id: None,
-                            content: vec![item.clone()],
-                        });
+                        let reasoning =
+                            assistant_reasoning_text(&Message::from(vec![item.clone()]));
                         if !reasoning.is_empty() {
                             updates.push(AcpSessionUpdate::AgentThoughtChunk(content_chunk(
                                 &reasoning,
@@ -242,7 +240,7 @@ pub(crate) fn project_completed_message(
                             thought_index += 1;
                         }
                     }
-                    AssistantContent::ToolCall(_) | AssistantContent::Image(_) => {}
+                    _ => {}
                 }
             }
         }
@@ -265,13 +263,14 @@ pub(crate) fn project_tool_calls(
         .into_iter()
         .flat_map(|call| {
             let id = call.id.to_string();
-            let kind = tool_kind(&call.function.name, &call.function.arguments);
-            let title = tool_title(&call.function.name, &call.function.arguments);
-            let locations = infer_locations(workspace, &call.function.arguments);
+            let arguments = zevria_content::message::tool_arguments(&call.function);
+            let kind = tool_kind(&call.function.name, &arguments);
+            let title = tool_title(&call.function.name, &arguments);
+            let locations = infer_locations(workspace, &arguments);
             known_tools.insert(
                 id.clone(),
                 KnownTool {
-                    arguments: call.function.arguments.clone(),
+                    arguments: arguments.clone(),
                     kind,
                 },
             );
@@ -280,10 +279,10 @@ pub(crate) fn project_tool_calls(
                     .kind(kind)
                     .status(ToolCallStatus::InProgress)
                     .locations(locations)
-                    .raw_input(call.function.arguments.clone()),
+                    .raw_input(arguments.clone()),
             )];
             if call.function.name == zevria_foundation::TASK_TOOL_NAME
-                && let Ok(tasks) = TaskList::from_tool_arguments(&call.function.arguments)
+                && let Ok(tasks) = TaskList::from_tool_arguments(&arguments)
             {
                 updates.push(AcpSessionUpdate::Plan(task_plan(&tasks)));
             }
@@ -454,10 +453,11 @@ pub(crate) fn content_chunk(text: impl Into<String>, id: impl Into<String>) -> C
 }
 
 pub(crate) fn assistant_tool_calls(message: &Message) -> Vec<&ToolCall> {
-    let Message::Assistant { content, .. } = message else {
+    let Message::Assistant(assistant) = message else {
         return Vec::new();
     };
-    content
+    assistant
+        .content
         .iter()
         .filter_map(|content| match content {
             AssistantContent::ToolCall(call) => Some(call),

@@ -1,7 +1,7 @@
 //! Shared display/portable projection of Responses URL annotations. Raw text
 //! and annotations are never modified in native replay.
 
-use rig_core::message::Text;
+use rig_core::message::{AssistantContent, Text};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 
@@ -91,13 +91,21 @@ fn is_citation_marker(text: &str) -> bool {
             })
 }
 
+/// Preserve Responses text metadata in Rig's native attachment rather than
+/// flattening annotations into the canonical text or the request cache prefix.
+pub fn text_with_openai_extras(text: impl Into<String>, extras: Value) -> Text {
+    match AssistantContent::Text(Text::new(text)).with_native(extras) {
+        AssistantContent::Text(text) => text,
+        _ => unreachable!("attaching native data preserves the block kind"),
+    }
+}
+
 pub fn render_text(text: &Text) -> String {
     render(
         &text.text,
-        text.additional_params
+        text.native
             .as_ref()
-            .and_then(|params| params.get("openai_responses"))
-            .and_then(|extras| extras.get("annotations")),
+            .and_then(|native| native.item.get("annotations")),
     )
 }
 

@@ -223,7 +223,7 @@ impl PromptImage {
         let UserContent::Image(image) = content else {
             return Err(PromptError("expected an image content block"));
         };
-        if image.detail.is_some() || image.additional_params.is_some() {
+        if image.detail.is_some() || image.native.is_some() {
             return Err(PromptError(
                 "image has unsupported provider-specific fields; cannot recall losslessly",
             ));
@@ -648,7 +648,7 @@ impl UserPrompt {
         let blocks = content
             .iter()
             .map(|block| match block {
-                UserContent::Text(text) if text.additional_params.is_none() => {
+                UserContent::Text(text) if text.native.is_none() && text.citations().is_empty() => {
                     Ok(PromptBlock::Text(text.text.clone()))
                 }
                 UserContent::Image(_) => {

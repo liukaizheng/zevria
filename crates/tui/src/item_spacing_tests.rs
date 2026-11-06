@@ -54,10 +54,10 @@ fn top_level_items_have_one_measured_gap_in_native_and_acp_layouts() {
         ]),
         assistant_message(vec![
             AssistantContent::text("first"),
-            AssistantContent::Reasoning(Reasoning {
-                id: None,
-                content: vec![ReasoningContent::Summary("thought".into())],
-            }),
+            AssistantContent::Reasoning(zevria_content::reasoning::from_blocks(
+                None,
+                vec![ReasoningContent::Summary("thought".into())],
+            )),
             tool_call("spacing-tool", None, "command", json!({"command":"pwd"})),
         ]),
         Message::User {
@@ -65,7 +65,7 @@ fn top_level_items_have_one_measured_gap_in_native_and_acp_layouts() {
                 UserContent::text("a user text item that wraps at narrow widths"),
                 image.to_user_content(),
                 UserContent::Document(Document {
-                    data: DocumentSourceKind::String("payload".into()),
+                    data: rig_core::message::DocumentData::Text("payload".into()),
                     media_type: None,
                     additional_params: None,
                 }),
@@ -93,7 +93,8 @@ fn top_level_items_have_one_measured_gap_in_native_and_acp_layouts() {
                 let items = cache.entries()[0].items.clone();
                 assert_eq!(
                     items.len(),
-                    if matches!(message, Message::Assistant { content, .. } if content.len() == 2) {
+                    if matches!(message, Message::Assistant(rig_core::message::AssistantMessage { content, .. }) if content.len() == 2)
+                    {
                         2
                     } else {
                         3
@@ -517,9 +518,9 @@ fn streaming_item_growth_reuses_completed_blocks_and_matches_committed_spacing()
         let mut cache = ConversationCache::default();
         let mut content = vec![AssistantContent::text("complete")];
         let reasoning = mixed_reasoning_message();
-        let Message::Assistant {
+        let Message::Assistant(rig_core::message::AssistantMessage {
             content: thoughts, ..
-        } = reasoning
+        }) = reasoning
         else {
             unreachable!()
         };

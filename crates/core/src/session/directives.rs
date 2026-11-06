@@ -166,11 +166,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     pub(super) fn skill_activation_available(&self, policy: &TurnPolicy) -> bool {
         policy.skills_enabled
             && policy.allows_tool(SKILL_TOOL_NAME)
-            && self
-                .tools
-                .static_tool_defs()
-                .iter()
-                .any(|tool| tool.name == SKILL_TOOL_NAME)
+            && self.tools.snapshot().contains(SKILL_TOOL_NAME)
     }
 
     pub(super) fn instruction_preparation(

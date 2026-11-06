@@ -7,6 +7,8 @@ use std::{
     process::{ExitStatus, Stdio},
     time::Duration,
 };
+#[cfg(test)]
+use zevria_foundation::ToolContextRuntimeExt;
 
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use schemars::{JsonSchema, schema_for};
@@ -214,7 +216,7 @@ impl Tool for CommandTool {
         let per_stream = self.limits.capture_bytes / 2;
         let stdout_task = tokio::spawn(capture_stream(stdout, per_stream));
         let stderr_task = tokio::spawn(capture_stream(stderr, per_stream));
-        let turn = context.get::<TurnContext>().cloned();
+        let turn = context.scope::<TurnContext>();
 
         enum Completion {
             Exited(Result<ExitStatus, std::io::Error>),
@@ -276,7 +278,9 @@ impl Tool for CommandTool {
                 output: rendered,
             }),
             CompletionKind::Cancelled => {
-                context.insert_result(ToolCancelled);
+                context
+                    .insert_result(ToolCancelled)
+                    .expect("cancellation markers serialize");
                 Err(CommandError::Cancelled { output: rendered })
             }
         }
@@ -798,7 +802,7 @@ mod tests {
         let turn = TurnContext::new(TurnId::new(4), SessionMode::Build, cancellation.clone());
         let worker = tokio::spawn(async move {
             let mut context = ToolContext::new();
-            context.insert(turn);
+            context.insert_scope(turn);
             let result = tool
                 .call(
                     &mut context,
@@ -818,7 +822,12 @@ mod tests {
             .expect("command worker should not panic");
         let error = result.expect_err("cancelled command is a tool error");
         assert!(matches!(error, CommandError::Cancelled { .. }));
-        assert!(context.result::<ToolCancelled>().is_some());
+        assert!(
+            context
+                .result::<ToolCancelled>()
+                .expect("result metadata decodes")
+                .is_some()
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!marker.exists(), "a cancelled descendant must not survive");
     }

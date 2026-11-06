@@ -118,10 +118,12 @@ async fn failed_children_surface_as_correlated_tool_errors() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![launch_call("call-a", "doomed explore task")],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![launch_call(
+                "call-a",
+                "doomed explore task",
+            )]),
+        )),
         Ok(Message::assistant("noted the failure")),
     ]);
     let requests = provider.requests.clone();

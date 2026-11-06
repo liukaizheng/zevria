@@ -128,13 +128,17 @@ pub fn replay_safe_prefixes(input: &[ModelRequestItem<'_>]) -> anyhow::Result<Ve
             }
         } else if let Some(message) = item.message_ref() {
             match message {
-                Message::Assistant { content, .. } => {
-                    for block in content {
+                Message::Assistant(assistant) => {
+                    for block in &assistant.content {
                         if let AssistantContent::ToolCall(call) = block {
                             let mut handles = BTreeSet::from([call.id.to_string()]);
-                            if let Some(provider) = &call.provider {
-                                handles.insert(provider.call_id.clone());
-                                handles.extend(provider.item_id.iter().cloned());
+                            if let Some(item) = call.native.as_ref().map(|native| &native.item) {
+                                handles.extend(
+                                    item.get("id")
+                                        .and_then(serde_json::Value::as_str)
+                                        .filter(|id| !id.is_empty())
+                                        .map(str::to_owned),
+                                );
                             }
                             calls.call(handles, (index, true))?;
                         }
@@ -143,11 +147,7 @@ pub fn replay_safe_prefixes(input: &[ModelRequestItem<'_>]) -> anyhow::Result<Ve
                 Message::User { content } => {
                     for block in content {
                         if let UserContent::ToolResult(output) = block {
-                            let mut handles = BTreeSet::from([output.call.to_string()]);
-                            if let Some(provider) = &output.provider {
-                                handles.insert(provider.call_id.clone());
-                                handles.extend(provider.item_id.iter().cloned());
-                            }
+                            let handles = BTreeSet::from([output.call.to_string()]);
                             result(&mut calls, handles, index)?;
                         }
                     }

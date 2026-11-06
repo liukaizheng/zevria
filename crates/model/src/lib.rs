@@ -9,6 +9,7 @@ pub mod config;
 pub mod estimates;
 pub mod maintenance;
 pub mod models;
+pub mod openai;
 pub mod provider_replay;
 pub mod record;
 pub mod request;

@@ -10,7 +10,6 @@ zevria-instructions = { workspace = true }
 zevria-model = { workspace = true }
 anyhow = { workspace = true }
 rig-core = { workspace = true }
-rig-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

@@ -433,7 +433,7 @@ async fn durable_root_command_transcript_resumes_without_redispatch() {
     let durable_result = Message::User {
         content: vec![UserContent::ToolResult(ToolResult {
             call: command.id.clone(),
-            provider: command.provider.clone(),
+            is_error: false,
             name: command.function.name.clone(),
             content: vec![ToolResultContent::text("durable repository evidence")],
         })],
@@ -665,14 +665,13 @@ async fn channel_closure_drains_both_sources_before_returning_none() {
 #[tokio::test]
 async fn question_answer_resumes_the_same_turn_and_persists_as_a_tool_result() {
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![named_tool_call(
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "question-call",
                 QUESTION_TOOL_NAME,
                 json!({}),
-            )],
-        }),
+            )]),
+        )),
         Ok(Message::assistant("Plan updated from the answer.")),
     ]);
     let requests = provider.requests.clone();
@@ -1057,10 +1056,12 @@ async fn multiple_tools_execute_sequentially_and_are_correlated() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: Some("tools".to_string()),
-            content: vec![tool_call("first", "one"), tool_call("second", "two")],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
+                tool_call("first", "one"),
+                tool_call("second", "two"),
+            ]),
+        )),
         Ok(Message::assistant("done")),
     ]);
     let (_directory, transcript) = test_transcript();
@@ -1098,10 +1099,13 @@ async fn multiple_tools_execute_sequentially_and_are_correlated() {
 async fn structured_file_metadata_is_emitted_but_never_enters_model_messages() {
     let tools = ToolServer::new().tool(MetadataTool).run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![named_tool_call("file-call", "metadata", json!({}))],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
+                "file-call",
+                "metadata",
+                json!({}),
+            )]),
+        )),
         Ok(Message::assistant("done")),
     ]);
     let requests = provider.requests.clone();
@@ -1212,14 +1216,13 @@ async fn tool_dispatch_failures_are_model_visible_and_recoverable() {
         .tool(FailingTool)
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
                 named_tool_call("bad_args", "echo", json!({})),
                 named_tool_call("unknown", "missing", json!({})),
                 named_tool_call("failed", "explode", json!({})),
-            ],
-        }),
+            ]),
+        )),
         Ok(Message::assistant("recovered")),
     ]);
     let requests = provider.requests.clone();
@@ -1409,10 +1412,12 @@ async fn denied_launches_never_reach_the_supervisor() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![launch_call("call-a", "denied explore task")],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![launch_call(
+                "call-a",
+                "denied explore task",
+            )]),
+        )),
         Ok(Message::assistant("planned without it")),
     ]);
     let (_directory, transcript) = test_transcript();
@@ -1481,10 +1486,12 @@ async fn supervisor_shutdown_mid_call_fails_the_launch_without_wedging() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![launch_call("call-a", "abandoned explore task")],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![launch_call(
+                "call-a",
+                "abandoned explore task",
+            )]),
+        )),
         Ok(Message::assistant("noted the shutdown")),
     ]);
     let (_directory, transcript) = test_transcript();
@@ -1539,10 +1546,12 @@ async fn failed_launches_are_model_visible_and_recoverable() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![launch_call("call-a", "doomed explore task")],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![launch_call(
+                "call-a",
+                "doomed explore task",
+            )]),
+        )),
         Ok(Message::assistant("noted the failure")),
     ]);
     let (_directory, transcript) = test_transcript();

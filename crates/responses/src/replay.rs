@@ -3,7 +3,7 @@
 //! not a cumulative last-writer-wins map of provider handles.
 
 use crate::protocol::message_to_openai_input;
-use rig_core::message::{AssistantContent, Message, Text, ToolCallId, UserContent};
+use rig_core::message::{AssistantContent, CallId, Message, Text, UserContent};
 use std::collections::{BTreeSet, HashSet};
 use zevria_foundation::ModelProfileRef;
 use zevria_model::ModelRequestItem;
@@ -127,12 +127,11 @@ impl Projection {
                         .portable_projection()?
                         .message
                         .expect("function projection");
-                    if let Message::Assistant { content, .. } = &mut message {
-                        for block in content {
+                    if let Message::Assistant(assistant) = &mut message {
+                        for block in &mut assistant.content {
                             if let AssistantContent::ToolCall(call) = block {
-                                call.id =
-                                    ToolCallId::new(output.clone()).expect("nonempty neutral ID");
-                                call.provider = None;
+                                call.id = CallId::from_wire(output.clone());
+                                call.native = None;
                             }
                         }
                     }
@@ -179,26 +178,28 @@ impl Projection {
     fn message(&mut self, message: &Message) -> anyhow::Result<()> {
         let message = match message {
             Message::System { .. } => anyhow::bail!("raw system messages must be typed directives"),
-            Message::Assistant { content, .. } => {
+            Message::Assistant(assistant) => {
                 self.used_untagged = true;
                 let mut portable = Vec::new();
-                for block in content {
+                for block in &assistant.content {
                     match block {
                         AssistantContent::Text(text) => portable.push(AssistantContent::Text(
                             Text::new(zevria_content::citations::render_text(text)),
                         )),
                         AssistantContent::ToolCall(call) => {
                             let mut handles = BTreeSet::from([call.id.to_string()]);
-                            if let Some(provider) = &call.provider {
-                                handles.insert(provider.call_id.clone());
-                                handles.extend(provider.item_id.iter().cloned());
+                            if let Some(item) = call.native.as_ref().map(|native| &native.item) {
+                                handles.extend(
+                                    item.get("id")
+                                        .and_then(serde_json::Value::as_str)
+                                        .filter(|id| !id.is_empty())
+                                        .map(str::to_owned),
+                                );
                             }
                             let id = self.call(handles, None, false)?.expect("supported call");
                             let mut call = call.clone();
-                            call.id = ToolCallId::new(id).expect("nonempty neutral ID");
-                            call.provider = None;
-                            call.signature = None;
-                            call.additional_params = None;
+                            call.id = CallId::from_wire(id);
+                            call.native = None;
                             portable.push(AssistantContent::ToolCall(call));
                         }
                         AssistantContent::Reasoning(_) => {}
@@ -210,10 +211,7 @@ impl Projection {
                 if portable.is_empty() {
                     return Ok(());
                 }
-                Message::Assistant {
-                    id: None,
-                    content: portable,
-                }
+                Message::from(portable)
             }
             Message::User { content } => {
                 let mut portable = Vec::new();
@@ -222,17 +220,11 @@ impl Projection {
                         portable.push(block.clone());
                         continue;
                     };
-                    let mut handles = BTreeSet::from([result.call.to_string()]);
-                    if let Some(provider) = &result.provider {
-                        handles.insert(provider.call_id.clone());
-                        handles.extend(provider.item_id.iter().cloned());
-                    }
+                    let handles = BTreeSet::from([result.call.to_string()]);
                     let call = self.result(&handles)?;
                     if let Some(output) = &call.output {
                         let mut result = result.clone();
-                        result.call =
-                            ToolCallId::new(output.clone()).expect("nonempty correlation ID");
-                        result.provider = None;
+                        result.call = CallId::from_wire(output.clone());
                         portable.push(UserContent::ToolResult(result));
                     }
                 }

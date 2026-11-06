@@ -55,7 +55,9 @@ fn ledger(name: &str, handle: &str) -> ProviderReplay {
 }
 
 fn tool_result(replay: &ProviderReplay) -> Message {
-    let Message::Assistant { content, .. } = replay.to_message().unwrap() else {
+    let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) =
+        replay.to_message().unwrap()
+    else {
         unreachable!()
     };
     let call = content
@@ -69,7 +71,7 @@ fn tool_result(replay: &ProviderReplay) -> Message {
         content: vec![rig_core::message::UserContent::ToolResult(
             rig_core::message::ToolResult {
                 call: call.id,
-                provider: call.provider,
+                is_error: false,
                 name: call.function.name,
                 content: vec![rig_core::message::ToolResultContent::text(
                     "completed output",
@@ -200,10 +202,19 @@ fn reused_handles_are_occurrence_bound_and_ambiguous_results_fail() {
         ModelRequestItem::message(&ar),
         ModelRequestItem::replay_backed(&bm),
     ];
-    input.push(ModelRequestItem::message(&ar));
+    // Rig 0.46 gives a typed result one correlator. Express conflicting
+    // item/call ownership at the native boundary where both handles exist.
+    let ambiguous = ProviderReplay::openai_responses(
+        a.source_profile.clone(),
+        vec![json!({
+            "type":"function_call_output", "id":a.items[2]["id"],
+            "call_id":"reused", "output":"ambiguous result",
+        })],
+    );
+    input.push(ModelRequestItem::replay_only(&ambiguous));
     assert!(
         zevria_responses::replay::project(&input, &target).is_err(),
-        "old logical/new provider ownership is ambiguous"
+        "old item/new call ownership is ambiguous"
     );
     input.pop();
     input.push(ModelRequestItem::message(&br));
@@ -232,9 +243,9 @@ fn omitted_unsupported_calls_are_not_confused_with_missing_function_results() {
     let result = Message::User {
         content: vec![rig_core::message::UserContent::ToolResult(
             rig_core::message::ToolResult {
-                call: rig_core::message::ToolCallId::new("custom-call").unwrap(),
-                provider: None,
-                name: "unsupported".into(),
+                call: rig_core::message::CallId::from_wire("custom-call"),
+                is_error: false,
+                name: rig_core::message::ToolName::new("unsupported").expect("nonempty tool name"),
                 content: vec![rig_core::message::ToolResultContent::text("omitted output")],
             },
         )],

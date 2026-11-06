@@ -35,7 +35,7 @@ impl Tool for SkillReadTool {
         request: Self::Args,
     ) -> Result<String, Self::Error> {
         let trusted = context
-            .get::<SkillContext>()
+            .scope::<SkillContext>()
             .ok_or_else(|| {
                 SkillReadError("skill_read requires an engine-supplied turn context".into())
             })?

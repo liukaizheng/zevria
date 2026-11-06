@@ -1053,7 +1053,9 @@ fn removed_fold_commands_are_inert_in_normal_and_both_select_scopes() {
             let mut app = App::new();
             span_turn(&mut app, 1, 3);
             app.seed_history_entry(history_message(assistant_message(vec![
-                AssistantContent::Reasoning(Reasoning::summaries(vec!["first\n\nsecond".into()])),
+                AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+                    "first\n\nsecond".into(),
+                ])),
                 AssistantContent::text("answer\n\nmore"),
                 tool_call(
                     "native",
@@ -1442,7 +1444,7 @@ fn zr_does_not_trigger_a_pending_fresh_plan_retry() {
         resolution: PlanResolution::ImplementedFresh,
     });
     app.seed_history_entry(history_message(assistant_message(vec![
-        AssistantContent::Reasoning(Reasoning::summaries(vec!["thought".into()])),
+        AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec!["thought".into()])),
     ])));
     chord(&mut app, 'r');
     assert!(fold_keys(&app).is_empty(), "removed zr must be inert");
@@ -1754,7 +1756,9 @@ fn message_scope_yank_copies_every_visible_block_but_never_tool_output() {
     let mut app = App::new();
     app.restore(vec![
         TranscriptItem::Message(assistant_message(vec![
-            AssistantContent::Reasoning(Reasoning::summaries(vec!["thought".into()])),
+            AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+                "thought".into(),
+            ])),
             tool_call("tool", None, "command", args.clone()),
             AssistantContent::text("answer"),
         ])),

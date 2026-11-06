@@ -129,7 +129,7 @@ pub(super) fn plan_submission_gate_after_reports(
                 let pending_call = match call.function.name.as_str() {
                     "command" => Some(PendingPlanGateCall::Command),
                     RECONCILE_REPORTS_TOOL_NAME => {
-                        let arguments = tool_arguments_for_dispatch(&call.function.arguments);
+                        let arguments = tool_arguments_for_dispatch(&call.function);
                         Some(PendingPlanGateCall::Reconciliation {
                             allowed: ensemble.inspection_completed,
                             declaration: serde_json::from_str(&arguments).ok(),
@@ -142,7 +142,7 @@ pub(super) fn plan_submission_gate_after_reports(
                             && ensemble.question_disposition.is_none(),
                     }),
                     SUBMIT_PLAN_TOOL_NAME => {
-                        let arguments = tool_arguments_for_dispatch(&call.function.arguments);
+                        let arguments = tool_arguments_for_dispatch(&call.function);
                         let candidate = serde_json::from_str::<SubmitPlanArguments>(&arguments)
                             .ok()
                             .and_then(|arguments| {

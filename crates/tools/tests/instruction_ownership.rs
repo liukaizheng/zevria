@@ -26,7 +26,7 @@ async fn tool_descriptions_and_instruction_modules_have_distinct_owners() {
         .tool(SubmitPlanTool::new(1024 * 1024))
         .tool(ReconcileReportsTool)
         .run();
-    let definitions = tools.static_tool_defs();
+    let definitions = tools.snapshot().take_definitions();
     let modules = support::module_docs();
     assert!(
         modules

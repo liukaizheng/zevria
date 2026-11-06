@@ -29,7 +29,7 @@ use agent_client_protocol::schema::{
     },
 };
 use agent_client_protocol::{Channel, Client};
-use rig_core::message::{AssistantContent, Message, ToolCall, ToolCallId, ToolFunction};
+use rig_core::message::{AssistantContent, CallId, Message, ToolCall, ToolFunction};
 use tokio::sync::{mpsc, oneshot};
 use zevria_foundation::QuestionOption;
 use zevria_foundation::QuestionPrompt;
@@ -258,13 +258,16 @@ fn tool_results_omit_titles_and_preserve_correlated_payloads_for_every_outcome()
     ] {
         let mut known = KnownTools::new();
         let calls = project_tool_calls(
-            &Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::ToolCall(ToolCall::new(
-                    ToolCallId::new_or_mint("call"),
-                    ToolFunction::new(name.to_string(), arguments.clone()),
-                ))],
-            },
+            &Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::ToolCall(ToolCall::new(
+                    CallId::from_wire("call"),
+                    ToolFunction::new(
+                        rig_core::message::ToolName::new(name.to_string())
+                            .expect("nonempty tool name"),
+                        arguments.clone(),
+                    ),
+                )),
+            ])),
             workspace,
             &mut known,
         );
@@ -287,7 +290,11 @@ fn tool_results_omit_titles_and_preserve_correlated_payloads_for_every_outcome()
             ToolCallOutcome::Partial,
         ] {
             let updates = project_tool_results(
-                &Message::tool_result("call", name, "output"),
+                &Message::tool_result(
+                    rig_core::message::CallId::from_wire("call"),
+                    rig_core::message::ToolName::new(name).expect("nonempty tool name"),
+                    "output",
+                ),
                 &[ToolResultMetadata {
                     diagnostic: Some("display-only diagnostic".into()),
                     id: "call".to_string(),
@@ -337,7 +344,11 @@ fn tool_results_omit_titles_and_preserve_correlated_payloads_for_every_outcome()
         }
     }
     let unknown = project_tool_results(
-        &Message::tool_result("unknown", "command", "unmatched output"),
+        &Message::tool_result(
+            rig_core::message::CallId::from_wire("unknown"),
+            rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+            "unmatched output",
+        ),
         &[ToolResultMetadata {
             diagnostic: None,
             id: "unknown".to_string(),
@@ -820,9 +831,10 @@ impl SessionRuntimeFactory for FakeFactory {
                                     source_turn_id: turn_id,
                                 };
                                 let call = ToolCall::new(
-                                    ToolCallId::new_or_mint("submit-plan-call"),
+                                    CallId::from_wire("submit-plan-call"),
                                     ToolFunction::new(
-                                        "submit_plan".to_string(),
+                                        rig_core::message::ToolName::new("submit_plan".to_string())
+                                            .expect("nonempty tool name"),
                                         serde_json::json!({
                                             "title": artifact.title.clone(),
                                             "markdown": artifact.markdown.clone(),
@@ -833,18 +845,22 @@ impl SessionRuntimeFactory for FakeFactory {
                                     .send(SessionEvent::Intermediate {
                                         display_attempt_id: None,
                                         turn_id,
-                                        message: Message::Assistant {
-                                            id: None,
-                                            content: vec![AssistantContent::ToolCall(call)],
-                                        },
+                                        message: Message::Assistant(
+                                            rig_core::message::AssistantMessage::new(vec![
+                                                AssistantContent::ToolCall(call),
+                                            ]),
+                                        ),
                                     })
                                     .await;
                                 let _ = events_tx
                                     .send(SessionEvent::ToolResults {
                                         turn_id,
                                         message: Message::tool_result(
-                                            "submit-plan-call",
-                                            "submit_plan",
+                                            rig_core::message::CallId::from_wire(
+                                                "submit-plan-call",
+                                            ),
+                                            rig_core::message::ToolName::new("submit_plan")
+                                                .expect("nonempty tool name"),
                                             "Plan accepted",
                                         ),
                                         metadata: vec![ToolResultMetadata {
@@ -908,9 +924,10 @@ impl SessionRuntimeFactory for FakeFactory {
                             events_tx.stream_updated(turn_id, Message::assistant("hel"));
                             events_tx.stream_updated(turn_id, Message::assistant("hello"));
                             let call = ToolCall::new(
-                                ToolCallId::new_or_mint("call-1"),
+                                CallId::from_wire("call-1"),
                                 ToolFunction::new(
-                                    "command".to_string(),
+                                    rig_core::message::ToolName::new("command".to_string())
+                                        .expect("nonempty tool name"),
                                     serde_json::json!({"command": "printf ok"}),
                                 ),
                             );
@@ -918,16 +935,22 @@ impl SessionRuntimeFactory for FakeFactory {
                                 .send(SessionEvent::Intermediate {
                                     display_attempt_id: None,
                                     turn_id,
-                                    message: Message::Assistant {
-                                        id: None,
-                                        content: vec![AssistantContent::ToolCall(call)],
-                                    },
+                                    message: Message::Assistant(
+                                        rig_core::message::AssistantMessage::new(vec![
+                                            AssistantContent::ToolCall(call),
+                                        ]),
+                                    ),
                                 })
                                 .await;
                             let _ = events_tx
                                 .send(SessionEvent::ToolResults {
                                     turn_id,
-                                    message: Message::tool_result("call-1", "command", "ok"),
+                                    message: Message::tool_result(
+                                        rig_core::message::CallId::from_wire("call-1"),
+                                        rig_core::message::ToolName::new("command")
+                                            .expect("nonempty tool name"),
+                                        "ok",
+                                    ),
                                     metadata: vec![ToolResultMetadata {
                                         diagnostic: None,
                                         id: "call-1".to_string(),

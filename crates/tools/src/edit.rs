@@ -107,13 +107,18 @@ impl Tool for EditTool {
             ToolResultDetail::FileChanges(vec![prepared.file_change(self.max_file_change_bytes)]);
         match prepared.apply() {
             Ok(()) => {
-                context.insert_result(changes);
+                context.insert_result(changes).map_err(|error| {
+                    FileToolError::io(format!(
+                        "edit was applied but mutation metadata could not be published: {error}"
+                    ))
+                })?;
                 Ok("applied edits (1 file changed)".to_string())
             }
             Err(error) => {
                 let surviving = prepared.surviving_changes(self.max_file_change_bytes);
                 if !surviving.is_empty() {
-                    context.insert_result(ToolResultDetail::FileChanges(surviving));
+                    context.insert_result(ToolResultDetail::FileChanges(surviving))
+                        .map_err(|metadata_error| FileToolError::io(format!("{error}; surviving mutation metadata could not be published: {metadata_error}")))?;
                 }
                 Err(error)
             }
@@ -627,8 +632,10 @@ mod tests {
         assert_eq!(fs::read_to_string(path).expect("contents"), "after\n");
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert!(matches!(
             changes[0].change,
             FileChange::Update {
@@ -660,8 +667,10 @@ mod tests {
         );
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         match &changes[0].change {
             FileChange::Update {
                 unified_diff,
@@ -683,8 +692,10 @@ mod tests {
                 .expect("rename");
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert!(matches!(
             &changes[0].change,
             FileChange::Update {
@@ -789,7 +800,12 @@ mod tests {
         ] {
             let mut context = ToolContext::new();
             assert!(tool.call(&mut context, arguments).await.is_err());
-            assert!(context.result::<ToolResultDetail>().is_none());
+            assert!(
+                context
+                    .result::<ToolResultDetail>()
+                    .expect("result metadata decodes")
+                    .is_none()
+            );
         }
         assert_eq!(
             fs::read_to_string(workspace.path().join("source.txt")).expect("source"),
@@ -811,8 +827,10 @@ mod tests {
         .expect("edit");
         let changes = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
             .expect("changes")
-            .file_changes();
+            .file_changes()
+            .to_vec();
         assert!(matches!(
             changes[0].change,
             FileChange::Omitted {

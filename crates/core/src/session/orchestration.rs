@@ -35,11 +35,11 @@ impl OrchestrationGate {
         self.qualified |= batch.metadata.iter().any(|metadata| {
             metadata.tool_name == LAUNCH_SUBTASKS_TOOL_NAME
                 && calls.iter().any(|call| call.function.name == LAUNCH_SUBTASKS_TOOL_NAME
-                    && call.id.as_str() == metadata.id
-                    && call.provider.as_ref().map(|provider| &provider.call_id) == metadata.call_id.as_ref())
+                    && call.id.wire().as_ref() == metadata.id
+                    && call.id.provider().map(|provider| provider.as_str()) == metadata.call_id.as_deref())
                 && content.iter().any(|block| matches!(block, UserContent::ToolResult(result)
-                    if result.call.as_str() == metadata.id && result.name == LAUNCH_SUBTASKS_TOOL_NAME
-                        && result.provider.as_ref().map(|provider| &provider.call_id) == metadata.call_id.as_ref()))
+                    if result.call.wire().as_ref() == metadata.id && result.name == LAUNCH_SUBTASKS_TOOL_NAME
+                        && result.call.provider().map(|provider| provider.as_str()) == metadata.call_id.as_deref()))
                 && metadata.subtasks().iter().filter_map(|entry| entry.launch.as_ref().map(|launch| &launch.id))
                     .collect::<std::collections::HashSet<_>>().len() >= 2
         });
@@ -86,11 +86,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             return Err("orchestration cannot revise or approve a pending Plan workflow; resolve the Plan explicitly first".to_string().into());
         }
         if !policy.allows_tool(LAUNCH_SUBTASKS_TOOL_NAME)
-            || !self
-                .tools
-                .static_tool_defs()
-                .iter()
-                .any(|tool| tool.name == LAUNCH_SUBTASKS_TOOL_NAME)
+            || !self.tools.snapshot().contains(LAUNCH_SUBTASKS_TOOL_NAME)
         {
             return Err(
                 "orchestration requires the registered and permitted launch_subtasks capability"

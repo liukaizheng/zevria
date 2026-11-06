@@ -1,7 +1,7 @@
 //! Ordinary text through the real package validator, engine, and SkillTool.
 //! Scripted selection proves visibility/ordering, not semantic model compliance.
 use rig_agent::tool::{Tool, ToolContext, server::ToolServer};
-use rig_core::message::{AssistantContent, Message, ToolCall, ToolFunction};
+use rig_core::message::{AssistantContent, Message, ToolFunction};
 use serde_json::json;
 use std::{
     collections::VecDeque,
@@ -89,14 +89,16 @@ impl Tool for TaskAction {
     }
 }
 fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
-    Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::ToolCall(ToolCall::from_dual_wire(
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
             format!("fc-{id}"),
             id,
-            ToolFunction::new(name.to_string(), args),
-        ))],
-    }
+            ToolFunction::new(
+                rig_core::message::ToolName::new(name.to_string()).expect("nonempty tool name"),
+                args,
+            ),
+        )),
+    ]))
 }
 fn captured_catalog(
     request: &CapturedRequest,

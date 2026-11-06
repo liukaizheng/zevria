@@ -34,7 +34,13 @@ fn arguments_decode_once_but_copy_keeps_the_original_representation() {
         json!("{ \"command\": \"echo 界\" }"),
         json!("{malformed"),
     ] {
-        let message = assistant_message(vec![tool_call("call", None, "command", raw.clone())]);
+        // Rig 0.46 normalizes canonical arguments; exact wire text belongs
+        // in the native attachment captured at the provider boundary.
+        let wire_text = raw.as_str().map_or_else(|| raw.to_string(), str::to_owned);
+        let call = tool_call("call", None, "command", raw.clone()).with_native(json!({
+            "type":"function_call", "call_id":"call", "name":"command", "arguments":wire_text,
+        }));
+        let message = assistant_message(vec![call]);
         let expected_wire = serde_json::to_string(&message).unwrap();
         let entry = history_message(message.clone());
         let HistoryEntry::Conversation(entry) = entry else {

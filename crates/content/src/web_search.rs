@@ -395,7 +395,6 @@ impl WebSearchAttemptRecord {
     /// Reconstruct presentation from an already validated native output ledger.
     /// Never converts this display trail back into canonical messages.
     pub fn reconcile_native_presentation(&mut self, items: &[Value]) {
-        use rig_core::message::{AdditionalParams, Text};
         self.presentation.clear();
         for (output_index, item) in items.iter().enumerate() {
             let output_index = output_index as u64;
@@ -450,16 +449,10 @@ impl WebSearchAttemptRecord {
                             _ => None,
                         };
                         if let Some(text) = text {
-                            let mut text = Text::new(text);
-                            if let Some(annotations) =
-                                part.get("annotations").and_then(Value::as_array)
-                            {
-                                text.additional_params = AdditionalParams::from_entries([(
-                                    "openai_responses",
-                                    serde_json::json!({"annotations": annotations}),
-                                )]);
-                            }
-                            let text = sanitize_readable(&crate::citations::render_text(&text));
+                            let text = sanitize_readable(&crate::citations::render(
+                                text,
+                                part.get("annotations"),
+                            ));
                             if !text.trim().is_empty() {
                                 push(
                                     AssistantPartIdentity::Content(index as u64),

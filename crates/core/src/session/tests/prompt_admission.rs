@@ -344,10 +344,13 @@ async fn admission_keeps_pending_tool_context_and_does_not_leak_rejected_pins() 
     let policy = engine.policies.policy(SessionMode::Build).clone();
     engine.reconcile_before_dispatch(&policy).unwrap();
     engine
-        .record_required(TranscriptItem::Message(Message::Assistant {
-            id: None,
-            content: vec![named_tool_call("pending", "command", json!({}))],
-        }))
+        .record_required(TranscriptItem::Message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
+                "pending",
+                "command",
+                json!({}),
+            )]),
+        )))
         .unwrap();
     let before = engine.conversation.items().to_vec();
     let bytes = std::fs::read(engine.conversation.path()).unwrap();
@@ -362,7 +365,11 @@ async fn admission_keeps_pending_tool_context_and_does_not_leak_rejected_pins() 
     assert_eq!(std::fs::read(engine.conversation.path()).unwrap(), bytes);
     engine
         .record_required(TranscriptItem::ToolResults {
-            message: Message::tool_result("pending", "command", "done"),
+            message: Message::tool_result(
+                rig_core::message::CallId::from_wire("pending"),
+                rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                "done",
+            ),
             metadata: vec![],
             skill_applications: vec![],
         })
@@ -391,9 +398,8 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
             )
             .unwrap();
         engine.record_required_items(first.records).unwrap();
-        let assistant = Message::Assistant {
-            id: None,
-            content: vec![named_tool_call(
+        let assistant = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            named_tool_call(
                 "correlated",
                 if activates_skill { "skill" } else { "command" },
                 if activates_skill {
@@ -401,8 +407,8 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
                 } else {
                     json!({})
                 },
-            )],
-        };
+            ),
+        ]));
         let result = if activates_skill {
             let policy = engine.policies.policy(SessionMode::Build).clone();
             let turn =
@@ -429,7 +435,11 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
             }
         } else {
             TranscriptItem::ToolResults {
-                message: Message::tool_result("correlated", "command", "stable model result"),
+                message: Message::tool_result(
+                    rig_core::message::CallId::from_wire("correlated"),
+                    rig_core::message::ToolName::new("command").expect("nonempty tool name"),
+                    "stable model result",
+                ),
                 metadata: vec![ToolResultMetadata {
                     diagnostic: None,
                     id: "correlated".into(),

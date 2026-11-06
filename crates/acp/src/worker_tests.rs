@@ -128,8 +128,9 @@ impl SessionRuntimeFactory for WorkerFactory {
                                 tx.send(SessionEvent::ToolResults {
                                     turn_id,
                                     message: Message::tool_result(
-                                        "submit",
-                                        "submit_plan",
+                                        rig_core::message::CallId::from_wire("submit"),
+                                        rig_core::message::ToolName::new("submit_plan")
+                                            .expect("nonempty tool name"),
                                         "accepted candidate",
                                     ),
                                     metadata: vec![ToolResultMetadata {

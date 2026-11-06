@@ -403,7 +403,7 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
             .contains("[Rust guide](https://www.rust-lang.org/learn)")
     );
     assert!(
-        matches!(&portable, Message::Assistant { content, .. } if content.iter().all(|block| !matches!(block,AssistantContent::ToolCall(_))))
+        matches!(&portable, Message::Assistant(rig_core::message::AssistantMessage { content, .. }) if content.iter().all(|block| !matches!(block,AssistantContent::ToolCall(_))))
     );
     let input = transcript::model_input(&items);
     assert!(

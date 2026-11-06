@@ -156,8 +156,8 @@ impl InstructionReplayState {
                 Message::System { .. } => {
                     anyhow::bail!("raw system messages must be typed directives")
                 }
-                Message::Assistant { content, .. } => {
-                    for block in content {
+                Message::Assistant(assistant) => {
+                    for block in &assistant.content {
                         if let AssistantContent::ToolCall(call) = block {
                             anyhow::ensure!(
                                 self.pending.insert(call.id.to_string()),
@@ -170,7 +170,7 @@ impl InstructionReplayState {
                 Message::User { content } => {
                     for block in content {
                         if let UserContent::ToolResult(result) = block {
-                            self.pending.remove(result.call.as_str());
+                            self.pending.remove(result.call.wire().as_ref());
                         }
                     }
                 }

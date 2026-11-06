@@ -29,10 +29,14 @@ impl Tool for DetailTool {
 
     async fn call(&self, context: &mut ToolContext, _: NoArgs) -> Result<String, Self::Error> {
         if let Some(detail) = &self.detail {
-            context.insert_result(detail.clone());
+            context
+                .insert_result(detail.clone())
+                .expect("test metadata serializes");
         }
         if self.cancelled {
-            context.insert_result(ToolCancelled);
+            context
+                .insert_result(ToolCancelled)
+                .expect("test metadata serializes");
         }
         if self.fail {
             Err(ExpectedToolFailure)
@@ -158,7 +162,9 @@ impl Tool for TerminalQuestionTool {
     }
 
     async fn call(&self, context: &mut ToolContext, _: NoArgs) -> Result<String, Self::Error> {
-        context.insert_result(ToolResultDetail::QuestionDisposition(self.0));
+        context
+            .insert_result(ToolResultDetail::QuestionDisposition(self.0))
+            .expect("test metadata serializes");
         if matches!(
             self.0,
             QuestionTerminalDisposition::Unavailable
@@ -208,14 +214,13 @@ async fn live_ensemble_question_gate_accepts_terminal_details_even_on_frontend_e
         );
         assert!(ensemble.requires_question());
         assert!(!ensemble.can_submit());
-        let calls = assistant_tool_calls(&Message::Assistant {
-            id: None,
-            content: vec![named_tool_call(
+        let calls = assistant_tool_calls(&Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "terminal-question",
                 QUESTION_TOOL_NAME,
                 json!({}),
-            )],
-        });
+            )]),
+        ));
         let scope = ToolExecutionScope::new(&engine, SessionMode::Plan, &policy, &turn, &gate);
         let batch = execute_tool_calls(&scope, &calls, ActiveSkills::default(), &gate).await;
         assert_eq!(batch.metadata[0].question_disposition(), Some(disposition));
@@ -265,10 +270,13 @@ async fn every_detail_variant_stays_out_of_provider_continuations() {
             })
             .run();
         let provider = ScriptedProvider::new([
-            Ok(Message::Assistant {
-                id: None,
-                content: vec![named_tool_call("detail-call", "metadata", json!({}))],
-            }),
+            Ok(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![named_tool_call(
+                    "detail-call",
+                    "metadata",
+                    json!({}),
+                )]),
+            )),
             Ok(Message::assistant("done")),
         ]);
         let requests = provider.requests.clone();

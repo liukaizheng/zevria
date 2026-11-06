@@ -3,11 +3,11 @@
 use std::{collections::BTreeMap, fmt};
 
 use reqwest::header::HeaderName;
-use rig_core::providers::openai::responses_api::{ReasoningEffort, ReasoningSummaryLevel};
 use serde::{Deserialize, Serialize};
 use zevria_foundation::ModelContextPolicy;
 use zevria_foundation::ModelProfileRef;
 use zevria_foundation::{ModelRole, ReasoningLevel};
+use zevria_model::openai::ReasoningSummaryLevel;
 use zevria_responses::WebSearchConfig;
 
 /// Literal API credential from the configuration file.
@@ -249,17 +249,8 @@ impl ModelConfig {
     }
 }
 
-// Both enums live in other crates, so Rust's orphan rules rule out a From impl here.
-pub(crate) fn reasoning_effort(level: ReasoningLevel) -> ReasoningEffort {
-    match level {
-        ReasoningLevel::None => ReasoningEffort::None,
-        ReasoningLevel::Minimal => ReasoningEffort::Minimal,
-        ReasoningLevel::Low => ReasoningEffort::Low,
-        ReasoningLevel::Medium => ReasoningEffort::Medium,
-        ReasoningLevel::High => ReasoningEffort::High,
-        ReasoningLevel::Xhigh => ReasoningEffort::Xhigh,
-        ReasoningLevel::Max => ReasoningEffort::Max,
-    }
+pub(crate) fn reasoning_effort(level: ReasoningLevel) -> &'static str {
+    level.as_str()
 }
 
 /// One mode's exact provider/model selection.

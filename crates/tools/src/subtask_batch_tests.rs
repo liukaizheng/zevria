@@ -1,6 +1,8 @@
 use super::*;
 use std::{future::Future, task::Poll, time::Duration};
 use tokio_util::sync::CancellationToken;
+#[cfg(test)]
+use zevria_foundation::ToolContextRuntimeExt;
 use zevria_session_api::{SubtaskChannels, session_event_channel, subtask_channels_with_capacity};
 
 fn fixture(capacity: usize) -> (tempfile::TempDir, LaunchSubtasksTool, SubtaskChannels) {
@@ -28,8 +30,10 @@ fn batch(tasks: Vec<LaunchSubtaskSpec>) -> LaunchSubtasksArgs {
 }
 fn context(token: CancellationToken, build: bool) -> ToolContext {
     let mut context = ToolContext::new();
-    context.insert(ToolCallId("outer-call".into()));
-    context.insert(
+    context
+        .insert(ToolCallId("outer-call".into()))
+        .expect("call IDs serialize");
+    context.insert_scope(
         TurnContext::new(TurnId::new(1), SessionMode::Build, token).with_build_subtasks(build),
     );
     context
@@ -139,7 +143,12 @@ async fn mixed_outcomes_keep_all_reports_and_input_order_even_on_supervisor_shut
             "FIRST_FAILED"
         }));
         assert!(output.find(ids[0].as_str()) < output.find(ids[1].as_str()));
-        let entries = context.result::<ToolResultDetail>().unwrap().subtasks();
+        let entries = context
+            .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
+            .unwrap()
+            .subtasks()
+            .to_vec();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].status, SubtaskStatus::Failed);
         assert_eq!(entries[1].status, SubtaskStatus::Completed);
@@ -192,8 +201,18 @@ async fn queue_cancellation_retains_accepted_identity_and_completed_report_witho
     let output = call.await.unwrap_err().to_string();
     assert!(output.contains("ALREADY_COMPLETED"));
     assert!(output.contains("requested: 3\nlaunched: 1"));
-    assert!(context.result::<ToolCancelled>().is_some());
-    let entries = context.result::<ToolResultDetail>().unwrap().subtasks();
+    assert!(
+        context
+            .result::<ToolCancelled>()
+            .expect("result metadata decodes")
+            .is_some()
+    );
+    let entries = context
+        .result::<ToolResultDetail>()
+        .expect("result metadata decodes")
+        .unwrap()
+        .subtasks()
+        .to_vec();
     assert_eq!(entries[0].launch.as_ref().unwrap().id, id);
     assert_eq!(entries[0].status, SubtaskStatus::Completed);
     assert_eq!(entries.len(), 3);
@@ -239,9 +258,20 @@ async fn execution_cancellation_still_waits_for_all_accepted_children() {
     .await;
     second.outcome.send(SubtaskOutcome::Cancelled).unwrap();
     assert!(call.await.unwrap_err().to_string().contains("KEPT"));
-    assert!(context.result::<ToolCancelled>().is_some());
+    assert!(
+        context
+            .result::<ToolCancelled>()
+            .expect("result metadata decodes")
+            .is_some()
+    );
     assert_eq!(
-        context.result::<ToolResultDetail>().unwrap().subtasks()[1].status,
+        context
+            .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
+            .unwrap()
+            .subtasks()
+            .to_vec()[1]
+            .status,
         SubtaskStatus::Cancelled
     );
 }
@@ -258,7 +288,12 @@ async fn closed_supervisor_keeps_all_unlaunched_slots_and_releases_all_workspace
             .to_string()
             .contains("launched: 0")
     );
-    let entries = context.result::<ToolResultDetail>().unwrap().subtasks();
+    let entries = context
+        .result::<ToolResultDetail>()
+        .expect("result metadata decodes")
+        .unwrap()
+        .subtasks()
+        .to_vec();
     assert_eq!(entries.len(), 2);
     assert!(
         entries
@@ -387,7 +422,12 @@ async fn enqueue_failure_waits_for_accepted_children_and_preserves_completed_rep
             .to_string()
             .contains("COMPLETED_AFTER_ENQUEUE_FAILURE")
     );
-    let entries = context.result::<ToolResultDetail>().unwrap().subtasks();
+    let entries = context
+        .result::<ToolResultDetail>()
+        .expect("result metadata decodes")
+        .unwrap()
+        .subtasks()
+        .to_vec();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].status, SubtaskStatus::Completed);
     assert!(entries[0].launch.is_some());
@@ -396,7 +436,12 @@ async fn enqueue_failure_waits_for_accepted_children_and_preserves_completed_rep
             .iter()
             .all(|entry| entry.launch.is_none() && entry.status == SubtaskStatus::Failed)
     );
-    assert!(context.result::<ToolCancelled>().is_none());
+    assert!(
+        context
+            .result::<ToolCancelled>()
+            .expect("result metadata decodes")
+            .is_none()
+    );
     assert!(
         channels
             .launcher

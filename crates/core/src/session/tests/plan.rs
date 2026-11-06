@@ -112,8 +112,9 @@ async fn plan_recovery_materializes_an_accepted_candidate_after_a_durable_final_
             skill_applications: Vec::new(),
             message: Message::User {
                 content: vec![UserContent::tool_result(
-                    "submit-plan",
-                    SUBMIT_PLAN_TOOL_NAME,
+                    rig_core::message::CallId::from_wire("submit-plan"),
+                    rig_core::message::ToolName::new(SUBMIT_PLAN_TOOL_NAME)
+                        .expect("nonempty tool name"),
                     vec![ToolResultContent::text("Plan artifact accepted.")],
                 )],
             },
@@ -253,8 +254,9 @@ async fn plan_recovery_with_a_published_artifact_only_adds_the_completion_marker
             skill_applications: Vec::new(),
             message: Message::User {
                 content: vec![UserContent::tool_result(
-                    "submit-plan",
-                    SUBMIT_PLAN_TOOL_NAME,
+                    rig_core::message::CallId::from_wire("submit-plan"),
+                    rig_core::message::ToolName::new(SUBMIT_PLAN_TOOL_NAME)
+                        .expect("nonempty tool name"),
                     vec![ToolResultContent::text("Plan artifact accepted.")],
                 )],
             },
@@ -429,14 +431,19 @@ async fn plan_policy_allows_command_and_is_fixed_across_continuations() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: Some("plan-command".to_string()),
-            content: vec![AssistantContent::ToolCall(ToolCall::from_dual_wire(
-                "command-id",
-                "provider-command-id",
-                ToolFunction::new("command".to_string(), json!({"value": "inspect"})),
-            ))],
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(
+                zevria_content::message::tool_call_from_wire(
+                    "command-id",
+                    "provider-command-id",
+                    ToolFunction::new(
+                        rig_core::message::ToolName::new("command".to_string())
+                            .expect("nonempty tool name"),
+                        json!({"value": "inspect"}),
+                    ),
+                ),
+            )]),
+        )),
         Ok(Message::assistant("plan ready")),
     ]);
     let requests = provider.requests.clone();
@@ -499,18 +506,20 @@ async fn plan_policy_denies_file_tools_before_dispatch_and_preserves_correlation
     ]
     .into_iter()
     .map(|(id, call_id, name)| {
-        AssistantContent::ToolCall(ToolCall::from_dual_wire(
+        AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
             id,
             call_id,
-            ToolFunction::new(name.to_string(), json!({"value": name})),
+            ToolFunction::new(
+                rig_core::message::ToolName::new(name.to_string()).expect("nonempty tool name"),
+                json!({"value": name}),
+            ),
         ))
     })
     .collect::<Vec<_>>();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: denied_calls,
-        }),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(denied_calls),
+        )),
         Ok(Message::assistant("recovered with a plan")),
     ]);
     let requests = provider.requests.clone();
@@ -1031,9 +1040,8 @@ async fn duplicate_plan_submission_is_denied_after_first_acceptance() {
     let title = "Durable approval workflow";
     let markdown = valid_plan_markdown(title, "Accept once.");
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
                 named_tool_call(
                     "submit-one",
                     SUBMIT_PLAN_TOOL_NAME,
@@ -1044,8 +1052,8 @@ async fn duplicate_plan_submission_is_denied_after_first_acceptance() {
                     SUBMIT_PLAN_TOOL_NAME,
                     json!({"title": title, "markdown": markdown}),
                 ),
-            ],
-        }),
+            ]),
+        )),
         Ok(Message::assistant("Ready.")),
     ]);
     let tools = ToolServer::new().tool(SubmitPlanStubTool).run();

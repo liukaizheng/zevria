@@ -1,5 +1,5 @@
 use super::*;
-use rig_core::message::{ToolCallId, ToolResult, ToolResultContent, UserContent};
+use rig_core::message::{CallId, ToolResult, ToolResultContent, UserContent};
 use zevria_foundation::ModelProfileRef;
 use zevria_model::ModelInputTooLarge;
 use zevria_model::OwnedModelRequestItem;
@@ -184,7 +184,7 @@ async fn structured_http_and_sse_size_errors_preserve_status_details_and_request
             assert!(
                 error
                     .chain()
-                    .any(|cause| cause.is::<rig_core::completion::CompletionError>()),
+                    .any(|cause| cause.is::<rig_core::error::ProviderError>()),
                 "original completion error remains in the source chain"
             );
         }
@@ -236,10 +236,13 @@ fn profile() -> ModelProfileRef {
     ModelProfileRef::new("openai", "summary-test")
 }
 fn canonical_call(id: &str, provider: &str) -> AssistantContent {
-    AssistantContent::ToolCall(ToolCall::from_dual_wire(
+    AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
         id.to_string(),
         provider.to_string(),
-        ToolFunction::new("command".to_string(), json!({"command":"rtk pwd"})),
+        ToolFunction::new(
+            rig_core::message::ToolName::new("command".to_string()).expect("nonempty tool name"),
+            json!({"command":"rtk pwd"}),
+        ),
     ))
 }
 fn canonical_result(id: &str, provider: &str) -> UserContent {
@@ -248,7 +251,7 @@ fn canonical_result(id: &str, provider: &str) -> UserContent {
     };
     UserContent::ToolResult(ToolResult {
         call: call.id,
-        provider: call.provider,
+        is_error: false,
         name: call.function.name,
         content: vec![ToolResultContent::text("result 雪🚀".repeat(1000))],
     })
@@ -259,7 +262,7 @@ fn native_call(id: &str, handle: &str) -> Value {
 fn mixed_source() -> Vec<OwnedModelRequestItem> {
     vec![
         OwnedModelRequestItem::message(Message::user("oldest indivisible")),
-        OwnedModelRequestItem::message(Message::Assistant { id: Some("canonical-batch".into()), content: vec![canonical_call("a", "shared-a"), canonical_call("b", "shared-b")] }),
+        OwnedModelRequestItem::message(Message::Assistant(rig_core::message::AssistantMessage::new(vec![canonical_call("a", "shared-a"), canonical_call("b", "shared-b")]))),
         OwnedModelRequestItem::message(Message::User { content: vec![canonical_result("a", "shared-a"), canonical_result("b", "shared-b")] }),
         OwnedModelRequestItem::replay_backed(ProviderReplay::openai_responses(profile(), vec![native_call("native-c", "c"), native_call("native-d", "d")])).unwrap(),
         OwnedModelRequestItem::replay_only(ProviderReplay::openai_responses(profile(), vec![json!({"type":"function_call_output", "call_id":"c", "output":"unchanged native result", "extra":[1,2,3]}), json!({"type":"function_call_output", "call_id":"d", "output":{"text":"batched result"}})])).unwrap(),
@@ -306,17 +309,15 @@ fn replay_safe_boundaries_have_real_projection_parity_and_verbatim_mixed_tails()
 #[test]
 fn reused_handles_and_malformed_correlations_match_real_projection() {
     let mut source = vec![
-        OwnedModelRequestItem::message(Message::Assistant {
-            id: None,
-            content: vec![canonical_call("old", "reused")],
-        }),
+        OwnedModelRequestItem::message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![canonical_call("old", "reused")]),
+        )),
         OwnedModelRequestItem::message(Message::User {
             content: vec![canonical_result("old", "reused")],
         }),
-        OwnedModelRequestItem::message(Message::Assistant {
-            id: None,
-            content: vec![canonical_call("new", "reused")],
-        }),
+        OwnedModelRequestItem::message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![canonical_call("new", "reused")]),
+        )),
         OwnedModelRequestItem::message(Message::User {
             content: vec![canonical_result("new", "reused")],
         }),
@@ -336,13 +337,13 @@ fn reused_handles_and_malformed_correlations_match_real_projection() {
         [true, false, true, false, true]
     );
     assert!(analyze(&source).1.is_ok());
-    source[3] = OwnedModelRequestItem::message(Message::User {
-        content: vec![canonical_result("old", "reused")],
-    });
+    source[3] = OwnedModelRequestItem::replay_only(ProviderReplay::openai_responses(
+        profile(), vec![json!({"type":"function_call_output", "id":"old", "call_id":"reused", "output":"ambiguous result"})],
+    )).unwrap();
     let (boundary, projection) = analyze(&source);
     assert!(
         boundary.is_err() && projection.is_err(),
-        "old canonical/new provider handle is ambiguous"
+        "old item/new call handle is ambiguous"
     );
     source.remove(1);
     let (boundary, projection) = analyze(&source);
@@ -352,9 +353,9 @@ fn reused_handles_and_malformed_correlations_match_real_projection() {
     );
     let orphan = vec![OwnedModelRequestItem::message(Message::User {
         content: vec![UserContent::ToolResult(ToolResult {
-            call: ToolCallId::new("missing").unwrap(),
-            provider: None,
-            name: "command".into(),
+            call: CallId::from_wire("missing"),
+            is_error: false,
+            name: rig_core::message::ToolName::new("command").expect("nonempty tool name"),
             content: vec![ToolResultContent::text("orphan")],
         })],
     })];

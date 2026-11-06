@@ -111,7 +111,7 @@ impl RequestReplayState {
                 if matches!(item, TranscriptItem::Error { .. }) {
                     self.current = None;
                 }
-                self.final_response = matches!(item.message(), Some(Message::Assistant { content, .. }) if !content.iter().any(|block| matches!(block, AssistantContent::ToolCall(_))));
+                self.final_response = matches!(item.message(), Some(Message::Assistant(assistant)) if !assistant.content.iter().any(|block| matches!(block, AssistantContent::ToolCall(_))));
             }
         }
         Ok(())

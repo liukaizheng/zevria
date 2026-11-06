@@ -1,7 +1,7 @@
 //! Adapter-owned hosted activity and provisional display text. Runs on the raw
 //! event before Rig's deliberately narrower streaming projection.
 
-use rig_core::message::{AdditionalParams, Text};
+use rig_core::message::Text;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use zevria_content::WebSearchActivity;
@@ -180,10 +180,10 @@ impl SearchState {
         if authority >= 2 {
             let mut text = Text::new(raw);
             if let Some(annotations) = part.get("annotations").and_then(Value::as_array) {
-                text.additional_params = AdditionalParams::from_entries([(
-                    "openai_responses",
+                text = zevria_content::citations::text_with_openai_extras(
+                    raw,
                     serde_json::json!({"annotations": annotations}),
-                )]);
+                );
             }
             self.completed_text.insert(key, text);
         }

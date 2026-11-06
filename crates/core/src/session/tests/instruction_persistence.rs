@@ -290,14 +290,13 @@ async fn resumed_session_reuses_the_pre_shutdown_prefix_after_tool_activation() 
         let guidance = roots(directory.path(), "CURRENT");
         let mut provider = Provider::new(native, "CURRENT_APPLICATION_SENTINEL");
         provider.normal = ScriptedProvider::new([
-            Ok(Message::Assistant {
-                id: None,
-                content: vec![named_tool_call(
+            Ok(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![named_tool_call(
                     "activate-review",
                     "skill",
                     json!({"skill":"review"}),
-                )],
-            }),
+                )]),
+            )),
             Ok(Message::assistant("review activated")),
             Ok(Message::assistant("second reply")),
         ]);

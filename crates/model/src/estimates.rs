@@ -30,8 +30,8 @@ pub fn estimate_model_request_item_for_profile(
     match item {
         ModelRequestItem::Message(message @ Message::Assistant { .. }) => {
             let mut portable = message.clone();
-            if let Message::Assistant { content, .. } = &mut portable {
-                for block in content {
+            if let Message::Assistant(assistant) = &mut portable {
+                for block in &mut assistant.content {
                     if let AssistantContent::Text(text) = block {
                         *text = rig_core::message::Text::new(crate::citations::render_text(text));
                     }

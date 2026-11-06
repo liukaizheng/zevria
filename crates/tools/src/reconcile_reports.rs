@@ -4,6 +4,8 @@ use rig_agent::tool::{Tool, ToolContext};
 use rig_core::tool::ToolExecutionError;
 use schemars::schema_for;
 use zevria_foundation::RECONCILE_REPORTS_TOOL_NAME;
+#[cfg(test)]
+use zevria_foundation::ToolContextRuntimeExt;
 use zevria_workflow::ReportReconciliation;
 use zevria_workflow::ReportReconciliationCatalog;
 use zevria_workflow::ValidatedReportReconciliation;
@@ -66,7 +68,7 @@ impl Tool for ReconcileReportsTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let catalog = context
-            .get::<ReportReconciliationCatalog>()
+            .scope::<ReportReconciliationCatalog>()
             .ok_or_else(|| {
                 ReconcileReportsError::Unavailable(
                     "reconcile_reports requires an active Ensemble Plan ReportsReady catalog"
@@ -74,10 +76,12 @@ impl Tool for ReconcileReportsTool {
                 )
             })?;
         let accepted = args
-            .validate(catalog)
+            .validate(&catalog)
             .map_err(|error| ReconcileReportsError::InvalidArguments(error.to_string()))?;
         let next_step = accepted.next_step;
-        context.insert_result::<ValidatedReportReconciliation>(accepted);
+        context
+            .insert_result::<ValidatedReportReconciliation>(accepted)
+            .map_err(|error| ReconcileReportsError::Unavailable(error.to_string()))?;
         Ok(format!(
             "Reconciliation declaration accepted. The next valid step is `{next_step}`."
         ))
@@ -176,12 +180,17 @@ mod tests {
                     .into(),
         };
         let mut context = ToolContext::new();
-        context.insert(catalog.clone());
+        context.insert_scope(catalog.clone());
         ReconcileReportsTool
             .call(&mut context, args.clone())
             .await
             .unwrap();
-        assert!(context.result::<ValidatedReportReconciliation>().is_some());
+        assert!(
+            context
+                .result::<ValidatedReportReconciliation>()
+                .expect("result metadata decodes")
+                .is_some()
+        );
         assert!(
             ReconcileReportsTool
                 .parameters()
@@ -221,7 +230,7 @@ mod tests {
                 _ => unreachable!(),
             }
             let mut context = ToolContext::new();
-            context.insert(catalog);
+            context.insert_scope(catalog);
             assert!(
                 ReconcileReportsTool
                     .call(&mut context, invalid)
@@ -229,7 +238,12 @@ mod tests {
                     .is_err(),
                 "{invalid_kind}"
             );
-            assert!(context.result::<ValidatedReportReconciliation>().is_none());
+            assert!(
+                context
+                    .result::<ValidatedReportReconciliation>()
+                    .expect("result metadata decodes")
+                    .is_none()
+            );
         }
     }
 
@@ -237,7 +251,7 @@ mod tests {
     async fn accepted_declaration_returns_typed_next_step() {
         let decision_id = decision_id();
         let mut context = ToolContext::new();
-        context.insert(ReportReconciliationCatalog {
+        context.insert_scope(ReportReconciliationCatalog {
             baseline: None,
             decision_ids: vec![decision_id],
             unavailable_decision_ids: Vec::new(),
@@ -250,7 +264,12 @@ mod tests {
             .await
             .expect("valid reconciliation");
         assert!(output.contains("`submit_plan`"));
-        assert!(context.result::<ValidatedReportReconciliation>().is_some());
+        assert!(
+            context
+                .result::<ValidatedReportReconciliation>()
+                .expect("result metadata decodes")
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -265,7 +284,7 @@ mod tests {
         let mut duplicate = declaration(ReportDisagreementClassification::PreferenceTradeoff);
         duplicate.decisions.push(duplicate.decisions[0].clone());
         let mut context = ToolContext::new();
-        context.insert(catalog.clone());
+        context.insert_scope(catalog.clone());
         assert!(
             ReconcileReportsTool
                 .call(&mut context, duplicate)
@@ -278,7 +297,7 @@ mod tests {
         let mut missing = declaration(ReportDisagreementClassification::PreferenceTradeoff);
         missing.decisions.clear();
         let mut context = ToolContext::new();
-        context.insert(catalog.clone());
+        context.insert_scope(catalog.clone());
         assert!(
             ReconcileReportsTool
                 .call(&mut context, missing)
@@ -295,7 +314,7 @@ mod tests {
         let mut unknown = declaration(ReportDisagreementClassification::PreferenceTradeoff);
         unknown.decisions[0].decision_id = unknown_id;
         let mut context = ToolContext::new();
-        context.insert(catalog);
+        context.insert_scope(catalog);
         assert!(
             ReconcileReportsTool
                 .call(&mut context, unknown)
@@ -315,7 +334,7 @@ mod tests {
         };
         let decision_id = decision_id();
         let mut context = ToolContext::new();
-        context.insert(ReportReconciliationCatalog {
+        context.insert_scope(ReportReconciliationCatalog {
             baseline: None,
             decision_ids: vec![decision_id],
             unavailable_decision_ids: Vec::new(),
@@ -325,6 +344,11 @@ mod tests {
             .await
             .expect_err("preference cannot use repository evidence");
         assert!(error.to_string().contains("cannot be resolved"));
-        assert!(context.result::<ValidatedReportReconciliation>().is_none());
+        assert!(
+            context
+                .result::<ValidatedReportReconciliation>()
+                .expect("result metadata decodes")
+                .is_none()
+        );
     }
 }

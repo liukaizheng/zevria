@@ -5,7 +5,7 @@
 //! native Zevria and ACP transcripts the same selection, copying, styling,
 //! and cache invalidation rules.
 
-use rig_core::message::{ProviderCallId, Reasoning, ReasoningContent, ToolCall, ToolResult};
+use rig_core::message::{ProviderCallId, Reasoning, ToolCall, ToolResult};
 use zevria_content::WebSearchStatus;
 use zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME;
 use zevria_foundation::ToolCallOutcome;
@@ -24,12 +24,7 @@ use crate::status_icon::StatusIcon;
 
 /// Yield only plaintext reasoning parts in their original source order.
 pub(crate) fn readable_reasoning_parts(reasoning: &Reasoning) -> impl Iterator<Item = &str> {
-    reasoning.content.iter().filter_map(|part| match part {
-        ReasoningContent::Summary(text) | ReasoningContent::Text { text, .. } => {
-            (!text.trim().is_empty()).then_some(text.as_str())
-        }
-        ReasoningContent::Encrypted(_) | ReasoningContent::Redacted { .. } => None,
-    })
+    zevria_content::reasoning::readable_parts(reasoning)
 }
 
 /// A complete projection replacement retires every ephemeral anchor even if
@@ -520,10 +515,7 @@ impl PresentedTool {
                 {
                     markdown
                 } else {
-                    call.function
-                        .arguments
-                        .as_str()
-                        .map_or_else(|| call.function.arguments.to_string(), str::to_string)
+                    zevria_content::message::raw_tool_arguments(call)
                 }
             }
             Self::Acp(tool) => tool.input_text(),
@@ -941,8 +933,8 @@ pub(crate) struct ConversationEntry {
 }
 
 /// Provider-call identity retained only for native tool-result correlation.
-pub(crate) fn provider_call_id(provider: Option<&ProviderCallId>) -> Option<&String> {
-    provider.map(|provider| &provider.call_id)
+pub(crate) fn provider_call_id(provider: Option<&ProviderCallId>) -> Option<&str> {
+    provider.map(ProviderCallId::as_str)
 }
 
 pub(crate) fn tool_result_plain_text(result: &ToolResult) -> String {

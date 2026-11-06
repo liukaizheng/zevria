@@ -901,22 +901,22 @@ async fn compaction_reinjects_the_latest_successful_task_snapshot() {
         .record_required(TranscriptItem::Message(Message::user("first question")))
         .expect("prompt persists");
     engine
-        .record_completed(TranscriptItem::Message(Message::Assistant {
-            id: None,
-            content: vec![named_tool_call(
+        .record_completed(TranscriptItem::Message(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "task-one",
                 zevria_foundation::TASK_TOOL_NAME,
                 arguments,
-            )],
-        }))
+            )]),
+        )))
         .expect("task call persists");
     engine
         .record_completed(TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
             message: Message::User {
                 content: vec![UserContent::tool_result(
-                    "task-one",
-                    zevria_foundation::TASK_TOOL_NAME,
+                    rig_core::message::CallId::from_wire("task-one"),
+                    rig_core::message::ToolName::new(zevria_foundation::TASK_TOOL_NAME)
+                        .expect("nonempty tool name"),
                     vec![ToolResultContent::text(snapshot.update_summary())],
                 )],
             },
@@ -1723,16 +1723,18 @@ async fn resumed_plan_handoff_history_compacts_manually_or_before_a_new_prompt()
         if tool_history {
             let evidence = "tool evidence ".repeat(180);
             items.extend([
-                TranscriptItem::Message(Message::Assistant {
-                    id: None,
-                    content: vec![tool_call("prior-tool", &evidence)],
-                }),
+                TranscriptItem::Message(Message::Assistant(
+                    rig_core::message::AssistantMessage::new(vec![tool_call(
+                        "prior-tool",
+                        &evidence,
+                    )]),
+                )),
                 TranscriptItem::ToolResults {
                     skill_applications: Vec::new(),
                     message: Message::User {
                         content: vec![UserContent::tool_result(
-                            "prior-tool",
-                            "echo",
+                            rig_core::message::CallId::from_wire("prior-tool"),
+                            rig_core::message::ToolName::new("echo").expect("nonempty tool name"),
                             vec![ToolResultContent::text(evidence)],
                         )],
                     },
@@ -1864,14 +1866,22 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
         let due = projected_tokens == 1_000;
         let (artifact, _) = ready_plan_fixture();
         let handoff = PlanHandoff::new(artifact, "source-session");
-        let tool_response = Message::Assistant {
-            id: None,
-            content: vec![tool_call("first", "one"), tool_call("second", "two")],
-        };
+        let tool_response = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            tool_call("first", "one"),
+            tool_call("second", "two"),
+        ]));
         let tool_results = Message::User {
             content: vec![
-                UserContent::tool_result("first", "echo", vec![ToolResultContent::text("one")]),
-                UserContent::tool_result("second", "echo", vec![ToolResultContent::text("two")]),
+                UserContent::tool_result(
+                    rig_core::message::CallId::from_wire("first"),
+                    rig_core::message::ToolName::new("echo").expect("nonempty tool name"),
+                    vec![ToolResultContent::text("one")],
+                ),
+                UserContent::tool_result(
+                    rig_core::message::CallId::from_wire("second"),
+                    rig_core::message::ToolName::new("echo").expect("nonempty tool name"),
+                    vec![ToolResultContent::text("two")],
+                ),
             ],
         };
         let delta = zevria_model::compaction::estimate_message_tokens(&tool_results).payload_tokens;
@@ -2053,10 +2063,9 @@ async fn mid_turn_compaction_waits_for_the_complete_tool_result_batch() {
         ..TokenUsage::default()
     };
     let provider = ScriptedProvider::with_model_responses([
-        Ok(model_response(Message::Assistant {
-            id: None,
-            content: vec![tool_call("call-mid", "value")],
-        })
+        Ok(model_response(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![tool_call("call-mid", "value")]),
+        ))
         .with_usage(Some(usage))),
         Ok(model_response(Message::assistant("mid-turn summary"))),
         Ok(model_response(Message::assistant("finished"))),

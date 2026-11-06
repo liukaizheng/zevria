@@ -1,6 +1,8 @@
 //! Blocking structured questions for Plan-mode user decisions.
 
 use std::collections::HashSet;
+#[cfg(test)]
+use zevria_foundation::ToolContextRuntimeExt;
 
 use rig_agent::tool::{Tool, ToolContext};
 use rig_core::tool::ToolExecutionError;
@@ -138,11 +140,14 @@ impl Tool for QuestionTool {
         context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        let turn = context.get::<TurnContext>().cloned().ok_or_else(|| {
-            QuestionError::Unavailable(
-                "question requires an active session turn context".to_string(),
-            )
-        })?;
+        let turn = context
+            .scope::<TurnContext>()
+            .map(|turn| turn.as_ref().clone())
+            .ok_or_else(|| {
+                QuestionError::Unavailable(
+                    "question requires an active session turn context".to_string(),
+                )
+            })?;
         let result = self.execute(args, turn).await;
         match &result {
             Ok(output) => {
@@ -154,21 +159,29 @@ impl Tool for QuestionTool {
                     Err(_) => None,
                 };
                 if let Some(disposition) = disposition {
-                    context.insert_result(ToolResultDetail::QuestionDisposition(disposition));
+                    context
+                        .insert_result(ToolResultDetail::QuestionDisposition(disposition))
+                        .expect("question dispositions serialize");
                 }
             }
             Err(QuestionError::InvalidResponse(_)) => {
-                context.insert_result(ToolResultDetail::QuestionDisposition(
-                    QuestionTerminalDisposition::InvalidFrontendResponse,
-                ));
+                context
+                    .insert_result(ToolResultDetail::QuestionDisposition(
+                        QuestionTerminalDisposition::InvalidFrontendResponse,
+                    ))
+                    .expect("question dispositions serialize");
             }
             Err(QuestionError::Unavailable(_)) => {
-                context.insert_result(ToolResultDetail::QuestionDisposition(
-                    QuestionTerminalDisposition::Unavailable,
-                ));
+                context
+                    .insert_result(ToolResultDetail::QuestionDisposition(
+                        QuestionTerminalDisposition::Unavailable,
+                    ))
+                    .expect("question dispositions serialize");
             }
             Err(QuestionError::Cancelled(_)) => {
-                context.insert_result(ToolCancelled);
+                context
+                    .insert_result(ToolCancelled)
+                    .expect("cancellation markers serialize");
             }
             Err(QuestionError::InvalidArguments(_)) => {}
         }
@@ -504,7 +517,7 @@ mod tests {
             let tool = QuestionTool::new(channels.requester);
             let call = tokio::spawn(async move {
                 let mut context = ToolContext::new();
-                context.insert(turn(CancellationToken::new()));
+                context.insert_scope(turn(CancellationToken::new()));
                 let result = tool.call(&mut context, args()).await;
                 (result, context)
             });
@@ -521,6 +534,8 @@ mod tests {
             assert_eq!(
                 context
                     .result::<ToolResultDetail>()
+                    .expect("result metadata decodes")
+                    .as_ref()
                     .and_then(ToolResultDetail::question_disposition),
                 Some(expected)
             );
@@ -533,7 +548,7 @@ mod tests {
         drop(events_rx);
         let tool = QuestionTool::new(question_channels(events_tx).requester);
         let mut context = ToolContext::new();
-        context.insert(turn(CancellationToken::new()));
+        context.insert_scope(turn(CancellationToken::new()));
         assert!(matches!(
             tool.call(&mut context, args()).await,
             Err(QuestionError::Unavailable(_))
@@ -541,6 +556,8 @@ mod tests {
         assert_eq!(
             context
                 .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .as_ref()
                 .and_then(ToolResultDetail::question_disposition),
             Some(QuestionTerminalDisposition::Unavailable)
         );
@@ -551,7 +568,7 @@ mod tests {
         let (events_tx, mut events_rx) = session_event_channel(8);
         let tool = QuestionTool::new(question_channels(events_tx).requester);
         let mut context = ToolContext::new();
-        context.insert(turn(CancellationToken::new()));
+        context.insert_scope(turn(CancellationToken::new()));
         assert!(matches!(
             tool.call(
                 &mut context,
@@ -562,7 +579,12 @@ mod tests {
             .await,
             Err(QuestionError::InvalidArguments(_))
         ));
-        assert!(context.result::<ToolResultDetail>().is_none());
+        assert!(
+            context
+                .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .is_none()
+        );
         assert!(events_rx.try_recv().is_err());
     }
 
@@ -575,7 +597,7 @@ mod tests {
         let child_cancellation = cancellation.clone();
         let call = tokio::spawn(async move {
             let mut context = ToolContext::new();
-            context.insert(turn(child_cancellation));
+            context.insert_scope(turn(child_cancellation));
             let result = tool.call(&mut context, args()).await;
             (result, context)
         });
@@ -583,7 +605,17 @@ mod tests {
         cancellation.cancel();
         let (result, context) = call.await.expect("join");
         assert!(matches!(result, Err(QuestionError::Cancelled(_))));
-        assert!(context.result::<ToolCancelled>().is_some());
-        assert!(context.result::<ToolResultDetail>().is_none());
+        assert!(
+            context
+                .result::<ToolCancelled>()
+                .expect("result metadata decodes")
+                .is_some()
+        );
+        assert!(
+            context
+                .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .is_none()
+        );
     }
 }

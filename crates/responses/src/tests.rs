@@ -1,9 +1,8 @@
+use crate::wire::ResponsesWebSocketEvent;
 use crate::{accumulator::*, protocol::parse_server_event};
-use rig_core::message::{
-    AdditionalParams, AssistantContent, Message, ReasoningContent, Text, ToolCall, ToolFunction,
-};
-use rig_reqwest::openai_websocket::ResponsesWebSocketEvent;
+use rig_core::message::{AssistantContent, Message, Text, ToolFunction};
 use serde_json::{Value, json};
+use zevria_content::reasoning::ReasoningContent;
 fn record_item(accumulator: &mut AssistantMessageAccumulator, value: Value) {
     let event = parse_server_event(&value.to_string())
         .expect("event should parse")
@@ -17,10 +16,7 @@ fn record_item(accumulator: &mut AssistantMessageAccumulator, value: Value) {
 }
 
 fn text_with_openai_extras(text: &str, extras: Value) -> Text {
-    Text {
-        text: text.to_string(),
-        additional_params: AdditionalParams::from_entries(Some(("openai_responses", extras))),
-    }
+    zevria_content::citations::text_with_openai_extras(text, extras)
 }
 
 #[test]
@@ -39,6 +35,86 @@ fn reasoning_text_done_is_a_known_modeled_event() {
     .expect("reasoning terminator should decode");
 
     assert!(matches!(event, Some(ResponsesWebSocketEvent::Item(_))));
+}
+
+#[test]
+fn reasoning_summary_text_done_preserves_indexes_and_replaces_deltas() {
+    for with_deltas in [false, true] {
+        for final_text in ["completed summary", ""] {
+            let mut accumulator = AssistantMessageAccumulator::default();
+            record_item(
+                &mut accumulator,
+                json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": "rs_summary",
+                    "output_index": 2,
+                    "summary_index": 0,
+                    "sequence_number": 1,
+                    "delta": "other summary"
+                }),
+            );
+            if with_deltas {
+                record_item(
+                    &mut accumulator,
+                    json!({
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": "rs_summary",
+                        "output_index": 2,
+                        "summary_index": 3,
+                        "sequence_number": 2,
+                        "delta": "draft summary"
+                    }),
+                );
+            }
+            let event = parse_server_event(
+                &json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": "rs_summary",
+                    "output_index": 2,
+                    "summary_index": 3,
+                    "sequence_number": 3,
+                    "text": final_text
+                })
+                .to_string(),
+            )
+            .expect("summary terminator should decode")
+            .expect("summary terminator should be recognized");
+            let ResponsesWebSocketEvent::Item(item) = event else {
+                panic!("summary terminator should be an item event");
+            };
+            assert_eq!(item.item_id.as_deref(), Some("rs_summary"));
+            assert_eq!(item.output_index, 2);
+            accumulator.record_item(item).unwrap();
+
+            assert_eq!(
+                accumulator.assistant_message().unwrap(),
+                Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                    AssistantContent::Reasoning(message_reasoning(
+                        Some("rs_summary".into()),
+                        vec![
+                            ReasoningContent::Summary("other summary".into()),
+                            ReasoningContent::Summary(final_text.into()),
+                        ],
+                    ))
+                ]))
+            );
+        }
+    }
+}
+
+#[test]
+fn reasoning_summary_text_done_rejects_missing_or_invalid_text() {
+    let mut event = json!({
+        "type": "response.reasoning_summary_text.done",
+        "output_index": 0,
+        "summary_index": 0,
+        "sequence_number": 1
+    });
+    assert!(parse_server_event(&event.to_string()).is_err());
+    for invalid_text in [Value::Null, json!(42)] {
+        event["text"] = invalid_text;
+        assert!(parse_server_event(&event.to_string()).is_err());
+    }
 }
 
 #[test]
@@ -132,28 +208,25 @@ fn sparse_out_of_order_indexes_preserve_content_order() {
         }),
     );
 
-    let expected = Message::Assistant {
-        id: Some("msg_sparse".to_string()),
-        content: vec![
-            AssistantContent::Reasoning(message_reasoning(
-                Some("rs_sparse".to_string()),
-                vec![
-                    ReasoningContent::Summary("summary zero".to_string()),
-                    ReasoningContent::Summary("summary two".to_string()),
-                    ReasoningContent::Text {
-                        text: "reasoning one".to_string(),
-                        signature: None,
-                    },
-                    ReasoningContent::Text {
-                        text: "reasoning three".to_string(),
-                        signature: None,
-                    },
-                ],
-            )),
-            AssistantContent::text("content zero"),
-            AssistantContent::text("content two"),
-        ],
-    };
+    let expected = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::Reasoning(message_reasoning(
+            Some("rs_sparse".to_string()),
+            vec![
+                ReasoningContent::Summary("summary zero".to_string()),
+                ReasoningContent::Summary("summary two".to_string()),
+                ReasoningContent::Text {
+                    text: "reasoning one".to_string(),
+                    signature: None,
+                },
+                ReasoningContent::Text {
+                    text: "reasoning three".to_string(),
+                    signature: None,
+                },
+            ],
+        )),
+        AssistantContent::text("content zero"),
+        AssistantContent::text("content two"),
+    ]));
 
     assert_eq!(
         accumulator
@@ -325,34 +398,39 @@ fn streaming_items_preserve_order_structure_and_done_values() {
             "annotations": [{"type": "citation", "source": "stream"}]
         }),
     );
-    let expected = Message::Assistant {
-        id: Some("msg_1".to_string()),
-        content: vec![
-            AssistantContent::Reasoning(message_reasoning(
-                Some("rs_1".to_string()),
-                vec![
-                    ReasoningContent::Summary("final summary".to_string()),
-                    ReasoningContent::Text {
-                        text: "final reasoning".to_string(),
-                        signature: None,
-                    },
-                    ReasoningContent::Encrypted("ciphertext".to_string()),
-                ],
-            )),
-            AssistantContent::ToolCall(ToolCall::from_dual_wire(
-                "fc_1",
-                "call_1",
-                ToolFunction::new("weather".to_string(), json!({"city": "Paris"})),
-            )),
-            AssistantContent::ToolCall(ToolCall::from_dual_wire(
-                "fc_2",
-                "call_2",
-                ToolFunction::new("weather".to_string(), json!({"city": "Tokyo"})),
-            )),
-            AssistantContent::Text(final_text),
-            AssistantContent::text("refusal text"),
-        ],
-    };
+    let expected = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::Reasoning(message_reasoning(
+            Some("rs_1".to_string()),
+            vec![
+                ReasoningContent::Summary("final summary".to_string()),
+                ReasoningContent::Text {
+                    text: "final reasoning".to_string(),
+                    signature: None,
+                },
+                ReasoningContent::Encrypted("ciphertext".to_string()),
+            ],
+        )),
+        AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
+            "fc_1",
+            "call_1",
+            ToolFunction::new(
+                rig_core::message::ToolName::new("weather".to_string())
+                    .expect("nonempty tool name"),
+                json!({"city": "Paris"}),
+            ),
+        )),
+        AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
+            "fc_2",
+            "call_2",
+            ToolFunction::new(
+                rig_core::message::ToolName::new("weather".to_string())
+                    .expect("nonempty tool name"),
+                json!({"city": "Tokyo"}),
+            ),
+        )),
+        AssistantContent::Text(final_text),
+        AssistantContent::text("refusal text"),
+    ]));
 
     assert_eq!(
         accumulator

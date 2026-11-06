@@ -1180,13 +1180,10 @@ mod tests {
 
     fn conversation_entry() -> HistoryEntry {
         HistoryEntry::from_message(
-            Message::Assistant {
-                id: None,
-                content: vec![
-                    AssistantContent::text("first block\nwith a wrapped line of text\nlast row"),
-                    AssistantContent::text("second block\ninterior row\nlast row"),
-                ],
-            },
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::text("first block\nwith a wrapped line of text\nlast row"),
+                AssistantContent::text("second block\ninterior row\nlast row"),
+            ])),
             ToolCallStatus::Finished,
         )
         .expect("visible conversation blocks")
@@ -1247,13 +1244,10 @@ mod tests {
         let header = conversation.allocate_call(turn);
         conversation.start_header(header, now);
         conversation.commit_response(
-            Message::Assistant {
-                id: None,
-                content: vec![
-                    AssistantContent::text("**cached Markdown**\n\n```rust\nfn main() {}\n```"),
-                    AssistantContent::text("second block\n\nlast row"),
-                ],
-            },
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::text("**cached Markdown**\n\n```rust\nfn main() {}\n```"),
+                AssistantContent::text("second block\n\nlast row"),
+            ])),
             None,
             ToolCallStatus::Finished,
             Some(header),
@@ -1410,9 +1404,8 @@ mod tests {
 
         let mut conversation = ConversationState::default();
         let HistoryEntry::Conversation(mut mixed) = HistoryEntry::from_message(
-            Message::Assistant {
-                id: None,
-                content: [
+            Message::Assistant(rig_core::message::AssistantMessage::new(
+                [
                     "prefix",
                     "diagnostic",
                     "prompt",
@@ -1424,7 +1417,7 @@ mod tests {
                 .into_iter()
                 .map(AssistantContent::text)
                 .collect(),
-            },
+            )),
             ToolCallStatus::Finished,
         )
         .unwrap() else {

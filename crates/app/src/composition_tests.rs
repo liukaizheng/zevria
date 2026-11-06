@@ -48,7 +48,8 @@ async fn production_registry_pins_names_order_and_schemas() {
         131_072,
     )
     .expect("tool server")
-    .static_tool_defs();
+    .snapshot()
+    .take_definitions();
 
     assert_eq!(
         definitions
@@ -199,7 +200,8 @@ async fn empty_skill_registry_keeps_skill_capable_mode_tools_advertised() {
         131_072,
     )
     .expect("tool server")
-    .static_tool_defs();
+    .snapshot()
+    .take_definitions();
     assert!(
         definitions
             .iter()
@@ -224,7 +226,8 @@ async fn explore_registry_is_command_only_and_uses_configured_limits() {
     };
     let definitions = build_explore_tools(workspace.path(), command_config)
         .expect("tool server")
-        .static_tool_defs();
+        .snapshot()
+        .take_definitions();
     assert_eq!(
         definitions
             .iter()
@@ -401,7 +404,8 @@ async fn skill_tool_definition_has_a_stable_bodyless_contract() {
         131_072,
     )
     .expect("tool server")
-    .static_tool_defs();
+    .snapshot()
+    .take_definitions();
     let skill_definition = definitions
         .iter()
         .find(|definition| definition.name == SKILL_TOOL_NAME)

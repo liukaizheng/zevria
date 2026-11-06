@@ -121,10 +121,11 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn filtered_tool_bytes(&self, policy: &TurnPolicy) -> Vec<u8> {
-        let tools = self
-            .tools
-            .static_tool_defs()
-            .into_iter()
+        let catalog = self.tools.snapshot();
+        let tools = catalog
+            .definitions()
+            .iter()
+            .map(|tool| tool.as_ref())
             .filter(|tool| policy.allows_tool(&tool.name))
             .collect::<Vec<_>>();
         serde_json::to_vec(&tools).expect("tools serialize")

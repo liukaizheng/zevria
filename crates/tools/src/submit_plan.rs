@@ -60,7 +60,9 @@ impl Tool for SubmitPlanTool {
     ) -> Result<Self::Output, Self::Error> {
         let candidate =
             PlanCandidate::validate(args.title, args.markdown, self.max_artifact_bytes)?;
-        context.insert_result(candidate);
+        context
+            .insert_result(candidate)
+            .expect("validated Plan text serializes");
         Ok(
             "Plan artifact accepted. Make no more tool calls; provide a short final confirmation."
                 .to_string(),
@@ -89,7 +91,12 @@ mod tests {
             )
             .await
             .expect("valid candidate");
-        assert!(context.result::<PlanCandidate>().is_some());
+        assert!(
+            context
+                .result::<PlanCandidate>()
+                .expect("result metadata decodes")
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -111,7 +118,12 @@ mod tests {
             .expect_err("oversized candidate must fail");
 
         assert!(error.to_string().contains("configured limit"));
-        assert!(context.result::<PlanCandidate>().is_none());
+        assert!(
+            context
+                .result::<PlanCandidate>()
+                .expect("result metadata decodes")
+                .is_none()
+        );
         assert_eq!(
             SubmitPlanTool::new(usize::MAX).max_artifact_bytes,
             MAX_PLAN_ARTIFACT_BYTES

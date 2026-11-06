@@ -1420,14 +1420,13 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
             "conflict-reconciliation",
             root_question_reconciliation(),
         )),
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![named_tool_call(
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "ensemble-question",
                 QUESTION_TOOL_NAME,
                 json!({}),
-            )],
-        }),
+            )]),
+        )),
         Ok(submit_plan_call(title, &markdown)),
         Ok(Message::assistant(
             "Plan submitted after the user's decision.",
@@ -2091,8 +2090,9 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
             skill_applications: Vec::new(),
             message: Message::User {
                 content: vec![UserContent::tool_result(
-                    "submit-plan",
-                    SUBMIT_PLAN_TOOL_NAME,
+                    rig_core::message::CallId::from_wire("submit-plan"),
+                    rig_core::message::ToolName::new(SUBMIT_PLAN_TOOL_NAME)
+                        .expect("nonempty tool name"),
                     vec![ToolResultContent::text("Plan artifact accepted.")],
                 )],
             },

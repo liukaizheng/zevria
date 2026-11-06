@@ -756,15 +756,12 @@ fn modal_bounds_protect_then_reveal_the_unchanged_footer() {
 #[test]
 fn only_selected_content_receives_the_full_width_background_band() {
     let mut app = App::new();
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![
+    app.seed_history_entry(history_message(Message::Assistant(rig_core::message::AssistantMessage::new(vec![
             AssistantContent::text("plain item"),
             AssistantContent::text(
                 "chosen-start-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ-chosen-end",
             ),
-        ],
-    }));
+        ]))));
     app.select_for_test(cursor(0, 1));
 
     let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
@@ -810,13 +807,12 @@ fn selected_content_is_scrolled_into_view_without_repinning_follow() {
         .map(|index| format!("line {index}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![
             AssistantContent::text(tall_content),
             AssistantContent::text("chosen tail"),
-        ],
-    }));
+        ]),
+    )));
     app.set_view_for_test(0, false);
     app.select_for_test(cursor(0, 1));
 
@@ -906,7 +902,7 @@ fn user_message_surfaces_cover_wrapping_blank_rows_and_attachments() {
                             ),
                             image.to_user_content(),
                             UserContent::Document(Document {
-                                data: DocumentSourceKind::String("payload".into()),
+                                data: rig_core::message::DocumentData::Text("payload".into()),
                                 media_type: None,
                                 additional_params: None,
                             }),
@@ -1050,7 +1046,7 @@ fn user_message_surfaces_restore_glyphs_and_styles_after_selection() {
         content: vec![
             UserContent::text("user 界 e\u{301} text\n\nsecond line"),
             UserContent::Document(Document {
-                data: DocumentSourceKind::String("payload".into()),
+                data: rig_core::message::DocumentData::Text("payload".into()),
                 media_type: None,
                 additional_params: None,
             }),
@@ -1712,12 +1708,11 @@ fn internal_role_separator_stays_outside_selection_and_cached_row_ranges() {
 #[test]
 fn renders_assistant_table_as_grid() {
     let mut app = App::new();
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(Text::new(
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(
             "| Name | Score |\n|------|-------|\n| alpha | 1 |",
-        ))],
-    }));
+        ))]),
+    )));
 
     let text = rendered_text(&mut app, 70, 30);
     // Header labels, cell values, and the column separator all reach the
@@ -1733,12 +1728,11 @@ fn renders_assistant_table_as_grid() {
 #[test]
 fn wrapped_list_items_hang_in_the_rendered_buffer() {
     let mut app = App::new();
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(Text::new(
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(
             "- alpha beta gamma delta epsilon zeta eta theta",
-        ))],
-    }));
+        ))]),
+    )));
 
     // 20 columns wide → 18 inside the border, so the item must wrap.
     let text = rendered_text(&mut app, 20, 20);
@@ -1763,12 +1757,11 @@ fn wrapped_list_items_hang_in_the_rendered_buffer() {
 #[test]
 fn multiline_list_items_hang_in_the_rendered_buffer() {
     let mut app = App::new();
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(Text::new(
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(
             "- first line\n  second line",
-        ))],
-    }));
+        ))]),
+    )));
     app.select_for_test(cursor(0, 0));
 
     let text = rendered_text(&mut app, 20, 20);
@@ -1796,12 +1789,11 @@ fn multiline_list_items_hang_in_the_rendered_buffer() {
 #[test]
 fn wide_tables_stay_aligned_in_the_rendered_buffer() {
     let mut app = App::new();
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(Text::new(
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(
             "| Name | Description |\n|------|-------------|\n| a | one two three four |",
-        ))],
-    }));
+        ))]),
+    )));
 
     // 20 columns wide → 18 inside the border: the Description column is
     // narrowed and its cell wraps within the column, so every table line
@@ -1937,13 +1929,12 @@ fn acp_layout_cache_rebuilds_only_the_changed_semantic_block() {
 #[test]
 fn moving_the_selection_repositions_and_clears_the_background_band() {
     let mut app = App::new();
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![
             AssistantContent::text("first item"),
             AssistantContent::text("second item"),
-        ],
-    }));
+        ]),
+    )));
 
     fn row_has_selection_background(app: &mut App, needle: &str) -> bool {
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
@@ -1985,7 +1976,9 @@ fn streamed_deltas_extend_the_rendered_tail() {
         SessionEvent::AssistantStreamUpdated {
             turn_id: TEST_TURN_ID,
             snapshot: (assistant_message(vec![
-                AssistantContent::Reasoning(Reasoning::summaries(vec!["pondering".to_string()])),
+                AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+                    "pondering".to_string(),
+                ])),
                 AssistantContent::text("part one"),
             ]))
             .into(),
@@ -2001,7 +1994,9 @@ fn streamed_deltas_extend_the_rendered_tail() {
         SessionEvent::AssistantStreamUpdated {
             turn_id: TEST_TURN_ID,
             snapshot: (assistant_message(vec![
-                AssistantContent::Reasoning(Reasoning::summaries(vec!["pondering".to_string()])),
+                AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+                    "pondering".to_string(),
+                ])),
                 AssistantContent::text("part one and part two"),
             ]))
             .into(),

@@ -7,9 +7,7 @@ use std::{
 };
 
 use rig_agent::tool::server::ToolServer;
-use rig_core::message::{
-    AssistantContent, Message, ToolCall, ToolFunction, ToolResultContent, UserContent,
-};
+use rig_core::message::{AssistantContent, Message, ToolFunction, ToolResultContent, UserContent};
 use serde_json::json;
 use zevria_core::SessionEngine;
 use zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME;
@@ -107,11 +105,12 @@ fn assistant_batch(second_title: &str, separate_calls: bool, serialized: bool) -
         .into_iter()
         .enumerate()
         .map(|(index, tasks)| {
-            AssistantContent::ToolCall(ToolCall::from_dual_wire(
+            AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(
                 format!("fc-{}", CALL_IDS[index]),
                 CALL_IDS[index],
                 ToolFunction::new(
-                    LAUNCH_SUBTASKS_TOOL_NAME.to_string(),
+                    rig_core::message::ToolName::new(LAUNCH_SUBTASKS_TOOL_NAME.to_string())
+                        .expect("nonempty tool name"),
                     json!({"tasks": tasks}),
                 ),
             ))
@@ -120,13 +119,18 @@ fn assistant_batch(second_title: &str, separate_calls: bool, serialized: bool) -
     if serialized {
         // The submission gate serializes surrounding calls. Internal batch
         // fan-out must still reach the two-request barrier below.
-        content.push(AssistantContent::ToolCall(ToolCall::from_dual_wire(
-            "fc-submit",
-            "submit",
-            ToolFunction::new("submit_plan".into(), json!({})),
-        )));
+        content.push(AssistantContent::ToolCall(
+            zevria_content::message::tool_call_from_wire(
+                "fc-submit",
+                "submit",
+                ToolFunction::new(
+                    rig_core::message::ToolName::new("submit_plan").expect("nonempty tool name"),
+                    json!({}),
+                ),
+            ),
+        ));
     }
-    Message::Assistant { id: None, content }
+    Message::Assistant(rig_core::message::AssistantMessage::new(content))
 }
 
 async fn exercise_batch(
@@ -272,8 +276,8 @@ async fn exercise_batch(
         let UserContent::ToolResult(result) = content else {
             panic!("tool result")
         };
-        assert_eq!(result.call.as_str(), CALL_IDS[slot]);
-        assert_eq!(result.provider.as_ref().unwrap().call_id, CALL_IDS[slot]);
+        assert_eq!(result.call.wire().as_ref(), CALL_IDS[slot]);
+        assert_eq!(result.call.provider().unwrap().as_str(), CALL_IDS[slot]);
         assert_eq!(metadata.id, CALL_IDS[slot]);
         assert_eq!(metadata.call_id.as_deref(), Some(CALL_IDS[slot]));
         let [ToolResultContent::Text(text)] = result.content.as_slice() else {

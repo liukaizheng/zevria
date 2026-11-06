@@ -18,7 +18,9 @@ fn unread_intermediate_fences_reasoning_tool_preview_without_a_stale_tail() {
     );
 
     let tool_message = assistant_message(vec![
-        AssistantContent::Reasoning(Reasoning::summaries(vec!["inspect first".to_string()])),
+        AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+            "inspect first".to_string(),
+        ])),
         tool_call(
             "fc_preview",
             Some("call_preview"),
@@ -63,7 +65,9 @@ fn a_preview_consumed_before_intermediate_is_cleared_by_the_commit() {
     );
 
     let tool_message = assistant_message(vec![
-        AssistantContent::Reasoning(Reasoning::summaries(vec!["inspect first".to_string()])),
+        AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+            "inspect first".to_string(),
+        ])),
         tool_call(
             "fc_consumed",
             Some("call_consumed"),
@@ -1368,16 +1372,14 @@ fn duplicate_file_metadata_follows_result_order() {
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: vec![
-                    UserContent::tool_result_with_call_id(
-                        "same",
-                        "same",
-                        "write",
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("same"),
+                        rig_core::message::ToolName::new("write").expect("nonempty tool name"),
                         vec![ToolResultContent::text("one output")],
                     ),
-                    UserContent::tool_result_with_call_id(
-                        "same",
-                        "same",
-                        "write",
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("same"),
+                        rig_core::message::ToolName::new("write").expect("nonempty tool name"),
                         vec![ToolResultContent::text("two output")],
                     ),
                 ],
@@ -1916,16 +1918,14 @@ fn duplicate_call_identifiers_keep_result_order() {
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: vec![
-                    UserContent::tool_result_with_call_id(
-                        "duplicate",
-                        "same_call",
-                        "first",
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("same_call"),
+                        rig_core::message::ToolName::new("first").expect("nonempty tool name"),
                         vec![ToolResultContent::text("first output")],
                     ),
-                    UserContent::tool_result_with_call_id(
-                        "duplicate",
-                        "same_call",
-                        "second",
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("same_call"),
+                        rig_core::message::ToolName::new("second").expect("nonempty tool name"),
                         vec![ToolResultContent::text("second output")],
                     ),
                 ],
@@ -2020,10 +2020,9 @@ fn mixed_user_intermediate_preserves_only_non_tool_content() {
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: vec![
-                    UserContent::tool_result_with_call_id(
-                        "fc_1",
-                        "call_1",
-                        "command",
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("call_1"),
+                        rig_core::message::ToolName::new("command").expect("nonempty tool name"),
                         vec![ToolResultContent::text("hidden output")],
                     ),
                     UserContent::Text(Text::new("visible note")),
@@ -2413,8 +2412,8 @@ fn restored_calls_are_finished_and_result_content_is_omitted() {
         TranscriptItem::Message(Message::User {
             content: vec![
                 UserContent::tool_result(
-                    "orphan",
-                    "unknown",
+                    rig_core::message::CallId::from_wire("orphan"),
+                    rig_core::message::ToolName::new("unknown").expect("nonempty tool name"),
                     vec![ToolResultContent::text("orphan output")],
                 ),
                 UserContent::Text(Text::new("restored note")),
@@ -2469,17 +2468,22 @@ fn restored_calls_are_finished_and_result_content_is_omitted() {
 fn renders_roles_markdown_reasoning_and_finished_tool_calls() {
     let mut app = App::new();
     app.seed_history_entry(history_message(Message::user("hello there")));
-    app.seed_history_entry(history_message(Message::Assistant {
-        id: None,
-        content: vec![
-            AssistantContent::Reasoning(Reasoning::summaries(vec!["pondering".to_string()])),
+    app.seed_history_entry(history_message(Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+                "pondering".to_string(),
+            ])),
             AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new_or_mint("call_1"),
-                ToolFunction::new("get_weather".to_string(), json!({ "city": "Paris" })),
+                CallId::from_wire("call_1"),
+                ToolFunction::new(
+                    rig_core::message::ToolName::new("get_weather".to_string())
+                        .expect("nonempty tool name"),
+                    json!({ "city": "Paris" }),
+                ),
             )),
             AssistantContent::Text(Text::new("# Heading\n\n- alpha\n- beta")),
-        ],
-    }));
+        ]),
+    )));
 
     let text = rendered_text(&mut app, 70, 30);
     for expected in [
@@ -3706,16 +3710,16 @@ fn concurrent_launch_rows_update_independently_before_the_result_batch() {
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: vec![
-                    UserContent::tool_result_with_call_id(
-                        "fc-call-first",
-                        "call-first",
-                        "launch_subtasks",
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("call-first"),
+                        rig_core::message::ToolName::new("launch_subtasks")
+                            .expect("nonempty tool name"),
                         vec![ToolResultContent::text("first report body")],
                     ),
-                    UserContent::tool_result_with_call_id(
-                        "fc-call-second",
-                        "call-second",
-                        "launch_subtasks",
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("call-second"),
+                        rig_core::message::ToolName::new("launch_subtasks")
+                            .expect("nonempty tool name"),
                         vec![ToolResultContent::text("second report body")],
                     ),
                 ],
@@ -5114,10 +5118,7 @@ fn reconcile_reports_copy_and_restore_keep_full_artifact_access() {
         live.reduce_without_effects(SessionEvent::TurnCompleted {
             display_attempt_id: None,
             turn_id: TEST_TURN_ID,
-            message: Message::Assistant {
-                id: None,
-                content: Vec::new(),
-            },
+            message: Message::Assistant(rig_core::message::AssistantMessage::new(Vec::new())),
         });
         live.set_view_for_test(0, false);
         let live_rendered = rendered_text(&mut live, 160, 80);

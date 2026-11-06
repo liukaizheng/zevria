@@ -1,6 +1,8 @@
 use super::*;
 use rig_core::tool::ToolErrorKind;
 use tokio_util::sync::CancellationToken;
+#[cfg(test)]
+use zevria_foundation::ToolContextRuntimeExt;
 use zevria_session_api::SessionEvent;
 use zevria_session_api::SessionUpdate;
 use zevria_session_api::SubtaskChannels;
@@ -29,7 +31,7 @@ fn args(workspace: Option<&str>) -> LaunchSubtaskSpec {
 fn context_for_mode(mode: Option<SessionMode>, authorized: bool) -> ToolContext {
     let mut context = ToolContext::new();
     if let Some(mode) = mode {
-        context.insert(
+        context.insert_scope(
             TurnContext::new(TurnId::new(1), mode, CancellationToken::new())
                 .with_build_subtasks(authorized),
         );
@@ -59,7 +61,12 @@ async fn invalid_kind_workspace_arguments_reject_before_preparation() {
         let error = tool.call(&mut context, batch(args)).await.unwrap_err();
         assert_eq!(error.to_string(), format!("tasks[0]: {expected}"));
         assert_eq!(tool.map_error(error).kind(), ToolErrorKind::InvalidArgs);
-        assert!(context.result::<ToolResultDetail>().is_none());
+        assert!(
+            context
+                .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .is_none()
+        );
         assert!(channels.requests.try_recv().is_err());
         assert!(!root.path().join("fresh").exists());
     }
@@ -91,12 +98,14 @@ async fn launch_capability_matrix_is_independent_of_nominal_mode() {
                 LaunchSubtasksTool::new(channels.launcher.clone(), root.path().to_path_buf());
             let mut context = ToolContext::new();
             if let Some(mode) = mode {
-                context.insert(
+                context.insert_scope(
                     TurnContext::new(TurnId::new(1), mode, CancellationToken::new())
                         .with_build_subtasks(build_subtasks),
                 );
             }
-            context.insert(ToolCallId("call-mode-matrix".into()));
+            context
+                .insert(ToolCallId("call-mode-matrix".into()))
+                .expect("call IDs serialize");
             let arguments = LaunchSubtaskSpec {
                 r#type: kind,
                 workspace: (kind == LaunchSubtaskType::Build).then(|| "fresh/nested".into()),
@@ -143,8 +152,11 @@ async fn launch_capability_matrix_is_independent_of_nominal_mode() {
                 assert!(result.unwrap().contains("mode matrix report"));
                 let metadata = context
                     .result::<ToolResultDetail>()
+                    .expect("result metadata decodes")
+                    .as_ref()
                     .and_then(|detail| detail.subtasks().first())
                     .and_then(|entry| entry.launch.as_ref())
+                    .cloned()
                     .expect("launch metadata");
                 assert_eq!(metadata.id, descriptor.id);
                 assert_eq!(metadata.kind, descriptor.kind);
@@ -160,9 +172,19 @@ async fn launch_capability_matrix_is_independent_of_nominal_mode() {
                     result.expect_err("missing capability must reject builders regardless of mode");
                 assert_eq!(error.to_string(), ORCHESTRATE_REQUIRED);
                 assert_eq!(tool.map_error(error).kind(), ToolErrorKind::InvalidArgs);
-                assert!(context.result::<ToolResultDetail>().is_none());
+                assert!(
+                    context
+                        .result::<ToolResultDetail>()
+                        .expect("result metadata decodes")
+                        .is_none()
+                );
             }
-            assert!(context.result::<ToolCancelled>().is_none());
+            assert!(
+                context
+                    .result::<ToolCancelled>()
+                    .expect("result metadata decodes")
+                    .is_none()
+            );
             assert!(
                 channels.requests.try_recv().is_err(),
                 "no unexpected launch queued"
@@ -212,7 +234,12 @@ async fn forbidden_builder_modes_reject_before_workspace_resolution_or_reservati
                 "mode {mode:?} must be checked before workspace {workspace:?}"
             );
             assert_eq!(tool.map_error(error).kind(), ToolErrorKind::InvalidArgs);
-            assert!(context.result::<ToolResultDetail>().is_none());
+            assert!(
+                context
+                    .result::<ToolResultDetail>()
+                    .expect("result metadata decodes")
+                    .is_none()
+            );
         }
         // Even an unresolvable startup root must not be inspected first.
         let mut context = context_for_mode(mode, false);
@@ -225,7 +252,12 @@ async fn forbidden_builder_modes_reject_before_workspace_resolution_or_reservati
             missing_startup.map_error(error).kind(),
             ToolErrorKind::InvalidArgs
         );
-        assert!(context.result::<ToolResultDetail>().is_none());
+        assert!(
+            context
+                .result::<ToolResultDetail>()
+                .expect("result metadata decodes")
+                .is_none()
+        );
         assert!(channels.requests.try_recv().is_err());
         assert!(
             channels.launcher.reserve_workspace(&reserved).is_err(),
@@ -408,8 +440,11 @@ async fn accepted_success_failure_and_cancel_keep_workspace_metadata_and_artifac
         let (result, context) = call.await.unwrap();
         let metadata = context
             .result::<ToolResultDetail>()
+            .expect("result metadata decodes")
+            .as_ref()
             .and_then(|detail| detail.subtasks().first())
             .and_then(|entry| entry.launch.as_ref())
+            .cloned()
             .unwrap();
         assert_eq!(metadata.id, request.descriptor.id);
         assert_eq!(metadata.workspace.as_deref(), Some("pages/book-1"));
@@ -440,7 +475,7 @@ async fn already_cancelled_launch_never_creates_a_directory_or_metadata() {
     let token = CancellationToken::new();
     token.cancel();
     let mut context = ToolContext::new();
-    context.insert(
+    context.insert_scope(
         TurnContext::new(TurnId::new(1), SessionMode::Build, token).with_build_subtasks(true),
     );
     assert!(
@@ -448,8 +483,16 @@ async fn already_cancelled_launch_never_creates_a_directory_or_metadata() {
             .await
             .is_err()
     );
-    assert!(context.result::<ToolCancelled>().is_some());
-    let detail = context.result::<ToolResultDetail>().unwrap();
+    assert!(
+        context
+            .result::<ToolCancelled>()
+            .expect("result metadata decodes")
+            .is_some()
+    );
+    let detail = context
+        .result::<ToolResultDetail>()
+        .expect("result metadata decodes")
+        .unwrap();
     assert_eq!(detail.subtasks().len(), 1);
     assert!(detail.subtasks()[0].launch.is_none());
     assert_eq!(detail.subtasks()[0].status, SubtaskStatus::Cancelled);

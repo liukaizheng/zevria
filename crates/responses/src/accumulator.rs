@@ -1,15 +1,18 @@
 //! Streaming assistant-response accumulator.
 
-use rig_core::{
-    message::{
-        AssistantContent, Message, Reasoning as MessageReasoning, ReasoningContent, Text, ToolCall,
-        ToolFunction,
-    },
-    providers::openai::responses_api::{
-        AssistantContent as OpenAiAssistantContent, CompletionResponse as OpenAiCompletionResponse,
-        Output, OutputText, ReasoningSummary,
-        streaming::{ContentPartChunkPart, ItemChunk, ItemChunkKind, SummaryPartChunkPart},
-    },
+use crate::wire::{
+    CompletionResponse as OpenAiCompletionResponse, ContentPartChunkPart, ItemChunk, ItemChunkKind,
+    SummaryPartChunkPart,
+};
+use rig_core::message::{
+    AssistantContent, Message, Reasoning as MessageReasoning, Text, ToolFunction, ToolName,
+};
+use zevria_content::{
+    message::tool_call_from_wire_text,
+    reasoning::{self, ReasoningContent},
+};
+use zevria_model::openai::{
+    AssistantContent as OpenAiAssistantContent, Output, OutputText, ReasoningSummary,
 };
 
 use zevria_model::TokenUsage;
@@ -110,10 +113,7 @@ pub(crate) enum PendingOutput {
     Message(PendingMessage),
     Reasoning(PendingReasoning),
     ToolCall(PendingToolCall),
-    Complete {
-        message_id: Option<String>,
-        content: Vec<AssistantContent>,
-    },
+    Complete { content: Vec<AssistantContent> },
 }
 
 pub(crate) struct PendingMessage {
@@ -263,7 +263,7 @@ impl AssistantMessageAccumulator {
                 let Some(tool_call) = self.tool_call_mut(output_index, item_id.as_deref())? else {
                     return Ok(());
                 };
-                tool_call.set_arguments(normalize_tool_arguments(done.arguments));
+                tool_call.set_arguments(done.arguments);
             }
             ItemChunkKind::ReasoningSummaryPartAdded(part) => {
                 let Some(reasoning) = self.reasoning_mut(output_index, item_id.as_deref())? else {
@@ -350,11 +350,8 @@ impl AssistantMessageAccumulator {
                 }
             }
             output => {
-                let (message_id, content) = assistant_content_from_openai_output(output);
-                *slot = Some(PendingOutput::Complete {
-                    message_id,
-                    content,
-                });
+                let content = assistant_content_from_openai_output(output);
+                *slot = Some(PendingOutput::Complete { content });
             }
         }
         Ok(())
@@ -437,7 +434,6 @@ impl AssistantMessageAccumulator {
     pub fn assistant_message(&self) -> anyhow::Result<Message> {
         let outputs = &self.outputs;
 
-        let message_id = outputs.iter().flatten().find_map(PendingOutput::message_id);
         let mut content = Vec::new();
         for output in outputs.iter().flatten() {
             content.extend(output.assistant_content()?);
@@ -447,10 +443,7 @@ impl AssistantMessageAccumulator {
             anyhow::bail!("OpenAI response stream preview contained no assistant content");
         }
 
-        Ok(Message::Assistant {
-            id: message_id,
-            content,
-        })
+        Ok(Message::from(content))
     }
 }
 
@@ -489,22 +482,14 @@ impl PendingOutput {
             Output::FunctionCall(function) => Some(Self::ToolCall(PendingToolCall {
                 id: Some(function.id),
                 call_id: Some(function.call_id),
-                name: Some(function.name),
-                arguments: Some(normalize_tool_arguments(serde_json::Value::String(
+                name: Some(function.name.into()),
+                arguments: Some(serde_json::Value::String(
                     function.arguments.as_str().to_string(),
-                ))),
+                )),
                 argument_deltas: String::new(),
                 saw_argument_delta: false,
             })),
             Output::Unknown(_) => None,
-        }
-    }
-
-    pub(crate) fn message_id(&self) -> Option<String> {
-        match self {
-            Self::Message(message) => message.id.clone(),
-            Self::Complete { message_id, .. } => message_id.clone(),
-            Self::Reasoning(_) | Self::ToolCall(_) => None,
         }
     }
 
@@ -803,14 +788,24 @@ impl PendingToolCall {
                 "OpenAI response stream tool call {id} completed without a function name"
             )
         })?;
-        let arguments = match &self.arguments {
-            Some(arguments) => arguments.clone(),
-            None => parse_tool_arguments(&self.argument_deltas),
+        let (arguments, raw) = match &self.arguments {
+            Some(arguments) => (
+                normalize_tool_arguments(arguments.clone()),
+                arguments
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| arguments.to_string()),
+            ),
+            None => (
+                parse_tool_arguments(&self.argument_deltas),
+                self.argument_deltas.clone(),
+            ),
         };
-        let tool_call = ToolCall::from_dual_wire(
+        let tool_call = tool_call_from_wire_text(
             id,
             self.call_id.clone().unwrap_or_default(),
-            ToolFunction::new(name, arguments),
+            ToolFunction::new(ToolName::new(name)?, arguments),
+            raw,
         );
 
         Ok(AssistantContent::ToolCall(tool_call))
@@ -897,12 +892,9 @@ pub(crate) fn normalize_tool_arguments(arguments: serde_json::Value) -> serde_js
     }
 }
 
-pub(crate) fn assistant_content_from_openai_output(
-    output: Output,
-) -> (Option<String>, Vec<AssistantContent>) {
+pub(crate) fn assistant_content_from_openai_output(output: Output) -> Vec<AssistantContent> {
     match output {
         Output::Message(message) => {
-            let message_id = Some(message.id);
             let content = message
                 .content
                 .into_iter()
@@ -913,10 +905,10 @@ pub(crate) fn assistant_content_from_openai_output(
                     OpenAiAssistantContent::Refusal { refusal } => AssistantContent::text(refusal),
                 })
                 .collect();
-            (message_id, content)
+            content
         }
         Output::FunctionCall(function) => {
-            let tool_call = ToolCall::from_dual_wire(
+            let tool_call = tool_call_from_wire_text(
                 function.id,
                 function.call_id,
                 ToolFunction::new(
@@ -925,8 +917,9 @@ pub(crate) fn assistant_content_from_openai_output(
                         function.arguments.as_str().to_string(),
                     )),
                 ),
+                function.arguments.as_str().to_owned(),
             );
-            (None, vec![AssistantContent::ToolCall(tool_call)])
+            vec![AssistantContent::ToolCall(tool_call)]
         }
         Output::Reasoning {
             id,
@@ -937,9 +930,9 @@ pub(crate) fn assistant_content_from_openai_output(
         } => {
             let reasoning =
                 PendingReasoning::from_item(Some(id.as_str()), summary, content, encrypted_content);
-            (None, vec![reasoning.assistant_content()])
+            vec![reasoning.assistant_content()]
         }
-        Output::Unknown(_) => (None, Vec::new()),
+        Output::Unknown(_) => Vec::new(),
     }
 }
 
@@ -951,12 +944,7 @@ pub fn normalize_openai_text(text: OutputText) -> Text {
 }
 
 pub fn message_reasoning(id: Option<String>, content: Vec<ReasoningContent>) -> MessageReasoning {
-    let mut reasoning = MessageReasoning::summaries(Vec::new());
-    if let Some(id) = id {
-        reasoning = reasoning.with_id(id);
-    }
-    reasoning.content = content;
-    reasoning
+    reasoning::from_blocks(id, content)
 }
 
 /// Read GPT-5.6's cache-write counter from the lossless terminal event before
@@ -1013,9 +1001,6 @@ impl AssistantMessageAccumulator {
             !content.is_empty(),
             "no readable search answer or live reasoning yet"
         );
-        Ok(Message::Assistant {
-            id: None,
-            content: content.into_values().collect(),
-        })
+        Ok(Message::from(content.into_values().collect::<Vec<_>>()))
     }
 }

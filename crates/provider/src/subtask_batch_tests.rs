@@ -88,7 +88,9 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
                 .await
                 .unwrap();
                 let message = attempt_message(&state);
-                let Message::Assistant { content, .. } = message else {
+                let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) =
+                    message
+                else {
                     panic!("assistant call")
                 };
                 assert_eq!(content.len(), 1, "exactly one provider function call");
@@ -97,7 +99,7 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
                 };
                 assert_eq!(call.function.name, "launch_subtasks");
                 assert_eq!(
-                    call.function.arguments,
+                    call.function.arguments_value(),
                     serde_json::from_str::<Value>(native["arguments"].as_str().unwrap()).unwrap()
                 );
                 assert_eq!(
@@ -111,8 +113,9 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
                     vec![native.clone()]
                 );
                 state.history.push(Message::tool_result(
-                    format!("outer-{index}"),
-                    "launch_subtasks",
+                    rig_core::message::CallId::from_wire(format!("outer-{index}")),
+                    rig_core::message::ToolName::new("launch_subtasks")
+                        .expect("nonempty tool name"),
                     "all outcomes",
                 ));
                 state.history_replays.push(None);

@@ -47,12 +47,12 @@ libc = "0.2"
 pulldown-cmark = "0.13.4"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
-rig-agent = { git = "https://github.com/liukaizheng/rig", version = "0.42.0" }
-rig-core = { git = "https://github.com/liukaizheng/rig", version = "0.42.0" }
-rig-reqwest = { git = "https://github.com/liukaizheng/rig", version = "0.42.0", features = ["websocket"] }
+rig-agent = "0.46.0"
+rig-core = "0.46.0"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+# Preserve the JSON ordering and float fidelity previously enabled by Rig.
+serde_json = { version = "1.0.150", features = ["preserve_order", "float_roundtrip"] }
 # MIT; comment-preserving JSONC reads and in-place edits for models.jsonc.
 jsonc-parser = { version = "=0.33.2", default-features = false, features = ["cst", "serde"] }
 # MIT OR Apache-2.0; bounded pure-Rust YAML, with all include/I/O features disabled.

@@ -26,20 +26,17 @@ async fn skill_batch_stages_pins_and_keeps_earlier_acceptance_when_later_capacit
     let limit = engine.prospective_skill_overhead(&policy, &two);
     assert!(engine.prospective_skill_overhead(&policy, &one) < limit);
     engine.compaction = test_compaction_policy(limit, 100, 0);
-    let assistant = Message::Assistant {
-        id: None,
-        content: vec![
-            named_tool_call("first", "skill", json!({"skill":"commit"})),
-            named_tool_call("again", "skill", json!({"skill":"commit"})),
-            named_tool_call("oversized", "skill", json!({"skill":"review"})),
-            named_tool_call("missing", "skill", json!({"skill":"not-installed"})),
-            named_tool_call(
-                "malformed",
-                "skill",
-                json!({"skill":"commit", "unexpected":true}),
-            ),
-        ],
-    };
+    let assistant = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call("first", "skill", json!({"skill":"commit"})),
+        named_tool_call("again", "skill", json!({"skill":"commit"})),
+        named_tool_call("oversized", "skill", json!({"skill":"review"})),
+        named_tool_call("missing", "skill", json!({"skill":"not-installed"})),
+        named_tool_call(
+            "malformed",
+            "skill",
+            json!({"skill":"commit", "unexpected":true}),
+        ),
+    ]));
     let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new());
     let gate = PlanSubmissionGate::inert(None);
     let scope = ToolExecutionScope::new(&engine, SessionMode::Build, &policy, &turn, &gate);
@@ -116,14 +113,9 @@ async fn skill_cancelled_before_execution_neither_submits_nor_pins() {
         &turn,
         &gate,
     );
-    let assistant = Message::Assistant {
-        id: None,
-        content: vec![named_tool_call(
-            "cancelled",
-            "skill",
-            json!({"skill":"commit"}),
-        )],
-    };
+    let assistant = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call("cancelled", "skill", json!({"skill":"commit"})),
+    ]));
     let batch = execute_tool_calls(
         &scope,
         &assistant_tool_calls(&assistant),
@@ -179,10 +171,9 @@ async fn skill_engine_never_dispatches_or_trusts_tool_success_prose() {
             &turn,
             &gate,
         );
-        let assistant = Message::Assistant {
-            id: None,
-            content: vec![named_tool_call("call", "skill", json!({"skill":"commit"}))],
-        };
+        let assistant = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            named_tool_call("call", "skill", json!({"skill":"commit"})),
+        ]));
         let batch = execute_tool_calls(
             &scope,
             &assistant_tool_calls(&assistant),

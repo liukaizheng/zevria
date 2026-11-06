@@ -4,6 +4,7 @@ pub mod protocol;
 pub mod replay;
 pub mod search;
 pub mod web_search_config;
+pub mod wire;
 pub use web_search_config::{
     SearchContextSize, SearchReturnTokenBudget, WebSearchConfig, WebSearchFilters,
     WebSearchLocation,

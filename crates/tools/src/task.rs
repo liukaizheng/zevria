@@ -105,9 +105,11 @@ mod tests {
     async fn invalid_snapshot_is_a_model_fixable_argument_error() {
         let server = ToolServer::new().tool(TaskTool).run();
         let result = server
+            .snapshot()
+            .get(TASK_TOOL_NAME)
+            .unwrap()
             .execute(
-                TASK_TOOL_NAME,
-                &serde_json::json!({
+                serde_json::json!({
                     "tasks": [
                         {"step": "One", "status": "in_progress"},
                         {"step": "Two", "status": "in_progress"}

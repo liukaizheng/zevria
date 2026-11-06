@@ -548,12 +548,14 @@ impl Tool for MetadataTool {
         context: &mut ToolContext,
         _args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        context.insert_result(ToolResultDetail::FileChanges(vec![FileChangeOutput {
-            path: "secret/path.rs".into(),
-            change: FileChange::Add {
-                content: "metadata-only content".to_string(),
-            },
-        }]));
+        context
+            .insert_result(ToolResultDetail::FileChanges(vec![FileChangeOutput {
+                path: "secret/path.rs".into(),
+                change: FileChange::Add {
+                    content: "metadata-only content".to_string(),
+                },
+            }]))
+            .expect("test metadata serializes");
         Ok("plain model output".to_string())
     }
 }
@@ -755,7 +757,9 @@ impl Tool for SubmitPlanStubTool {
     ) -> Result<Self::Output, Self::Error> {
         let candidate = PlanCandidate::validate(args.title, args.markdown, 128 * 1024)
             .expect("test candidate must be valid");
-        context.insert_result(candidate);
+        context
+            .insert_result(candidate)
+            .expect("test metadata serializes");
         Ok("accepted".to_string())
     }
 }
@@ -780,11 +784,13 @@ impl Tool for ReconcileReportsStubTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let catalog = context
-            .get::<ReportReconciliationCatalog>()
+            .scope::<ReportReconciliationCatalog>()
             .expect("engine supplies the ReportsReady decision catalog");
-        let accepted = args.validate(catalog).expect("valid test reconciliation");
+        let accepted = args.validate(&catalog).expect("valid test reconciliation");
         let next_step = accepted.next_step;
-        context.insert_result(accepted);
+        context
+            .insert_result(accepted)
+            .expect("test metadata serializes");
         Ok(format!("next: {next_step}"))
     }
 }
@@ -813,8 +819,8 @@ impl Tool for QuestionStubTool {
         _args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let turn = context
-            .get::<TurnContext>()
-            .cloned()
+            .scope::<TurnContext>()
+            .map(|value| value.as_ref().clone())
             .expect("engine supplies turn context");
         let response = self
             .requester
@@ -840,10 +846,12 @@ impl Tool for QuestionStubTool {
                 turn,
             )
             .await?;
-        context.insert_result(ToolResultDetail::QuestionDisposition(match &response {
-            QuestionResponse::Answered { .. } => QuestionTerminalDisposition::Answered,
-            QuestionResponse::Dismissed => QuestionTerminalDisposition::Dismissed,
-        }));
+        context
+            .insert_result(ToolResultDetail::QuestionDisposition(match &response {
+                QuestionResponse::Answered { .. } => QuestionTerminalDisposition::Answered,
+                QuestionResponse::Dismissed => QuestionTerminalDisposition::Dismissed,
+            }))
+            .expect("test metadata serializes");
         Ok(serde_json::to_string(&response).expect("serializable response"))
     }
 }
@@ -854,8 +862,11 @@ fn tool_call(id: &str, value: &str) -> AssistantContent {
 
 fn named_tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantContent {
     AssistantContent::ToolCall(ToolCall::new(
-        rig_core::message::ToolCallId::new_or_mint(id),
-        ToolFunction::new(name.to_string(), arguments),
+        rig_core::message::CallId::from_wire(id),
+        ToolFunction::new(
+            rig_core::message::ToolName::new(name.to_string()).expect("nonempty tool name"),
+            arguments,
+        ),
     ))
 }
 
@@ -932,21 +943,19 @@ fn valid_plan_markdown(title: &str, goal: &str) -> String {
 }
 
 fn submit_plan_call(title: &str, markdown: &str) -> Message {
-    Message::Assistant {
-        id: None,
-        content: vec![named_tool_call(
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call(
             "submit-plan",
             SUBMIT_PLAN_TOOL_NAME,
             json!({"title": title, "markdown": markdown}),
-        )],
-    }
+        ),
+    ]))
 }
 
 fn command_call(id: &str, command: &str) -> Message {
-    Message::Assistant {
-        id: None,
-        content: vec![named_tool_call(id, "command", json!({"value": command}))],
-    }
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call(id, "command", json!({"value": command})),
+    ]))
 }
 
 fn successful_tool_result(id: &str, tool_name: &str, output: &str) -> TranscriptItem {
@@ -954,8 +963,8 @@ fn successful_tool_result(id: &str, tool_name: &str, output: &str) -> Transcript
         skill_applications: Vec::new(),
         message: Message::User {
             content: vec![UserContent::tool_result(
-                id,
-                tool_name,
+                rig_core::message::CallId::from_wire(id),
+                rig_core::message::ToolName::new(tool_name).expect("nonempty tool name"),
                 vec![ToolResultContent::text(output)],
             )],
         },
@@ -971,14 +980,13 @@ fn successful_tool_result(id: &str, tool_name: &str, output: &str) -> Transcript
 }
 
 fn reconciliation_call(id: &str, declaration: ReportReconciliation) -> Message {
-    Message::Assistant {
-        id: None,
-        content: vec![named_tool_call(
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call(
             id,
             RECONCILE_REPORTS_TOOL_NAME,
             serde_json::to_value(declaration).expect("reconciliation arguments"),
-        )],
-    }
+        ),
+    ]))
 }
 
 fn no_disagreement_reconciliation() -> ReportReconciliation {
@@ -1331,9 +1339,13 @@ impl Tool for LaunchTestTool {
     ) -> Result<Self::Output, Self::Error> {
         let call_id = context
             .get::<ToolCallId>()
+            .expect("call IDs decode")
             .map(|id| id.0.clone())
             .unwrap_or_default();
-        let turn = context.get::<TurnContext>().cloned().expect("turn context");
+        let turn = context
+            .scope::<TurnContext>()
+            .map(|value| value.as_ref().clone())
+            .expect("turn context");
         let launches = futures_util::future::join_all(args.tasks.into_iter().enumerate().map(
             |(index, task)| {
                 let call_id = call_id.clone();
@@ -1402,7 +1414,9 @@ impl Tool for LaunchTestTool {
             .iter()
             .any(|(entry, _)| entry.status != SubtaskStatus::Completed);
         let (metadata, output): (Vec<_>, Vec<_>) = outcomes.into_iter().unzip();
-        context.insert_result(ToolResultDetail::Subtasks(metadata));
+        context
+            .insert_result(ToolResultDetail::Subtasks(metadata))
+            .expect("test metadata serializes");
         if failed {
             Err(LaunchTestFailure(output.join("\n")))
         } else {

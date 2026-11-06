@@ -190,9 +190,11 @@ async fn configured_session_header_fixes_missing_session_id_and_survives_tool_fo
             session_turn(&mut provider, &mut state, "diagnostic request")
                 .await
                 .unwrap();
-            state
-                .history
-                .push(Message::tool_result("call_tool", "count_once", "counted"));
+            state.history.push(Message::tool_result(
+                rig_core::message::CallId::from_wire("call_tool"),
+                rig_core::message::ToolName::new("count_once").expect("nonempty tool name"),
+                "counted",
+            ));
             state.history_replays.push(None);
             session_turn(&mut provider, &mut state, "finish")
                 .await

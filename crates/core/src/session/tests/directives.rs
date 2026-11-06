@@ -502,13 +502,12 @@ async fn multiple_tool_activations_share_the_complete_durable_batch() {
         })
         .run();
     let provider = ScriptedProvider::new([
-        Ok(Message::Assistant {
-            id: None,
-            content: vec![
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
                 named_tool_call("one", "skill", json!({"skill":"review"})),
                 named_tool_call("two", "skill", json!({"skill":"commit"})),
-            ],
-        }),
+            ]),
+        )),
         Ok(Message::assistant("activated")),
     ]);
     let (_directory, transcript) = test_transcript();
@@ -650,14 +649,9 @@ async fn failed_completed_activation_persistence_keeps_truthful_result_pin_and_b
     .unwrap();
     let policy = engine.policies.policy(SessionMode::Build).clone();
     engine.reconcile_before_dispatch(&policy).unwrap();
-    let assistant = Message::Assistant {
-        id: None,
-        content: vec![named_tool_call(
-            "activate",
-            "skill",
-            json!({"skill":"review"}),
-        )],
-    };
+    let assistant = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call("activate", "skill", json!({"skill":"review"})),
+    ]));
     engine
         .record_required_items(vec![
             TranscriptItem::Message(Message::user("activate")),
