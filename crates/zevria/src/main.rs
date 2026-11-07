@@ -273,7 +273,8 @@ async fn main() -> anyhow::Result<()> {
             mode = role.name(),
             provider = %assignment.provider,
             model = %assignment.model,
-            base_url = %profile.endpoint.redacted_base_url(),
+            base_url = %profile.redacted_base_url(),
+            protocol = profile.protocol.as_str(),
             "configured model assignment"
         );
     }

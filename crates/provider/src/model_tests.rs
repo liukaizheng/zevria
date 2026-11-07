@@ -34,7 +34,7 @@ fn profile(name: &str, url: &str) -> ResolvedModelProfile {
         RemoteCompactionConfig::default(),
         100_000,
     );
-    profile.endpoint.input_token_count.enabled = false;
+    profile.responses_endpoint_mut().input_token_count.enabled = false;
     profile
 }
 
@@ -273,7 +273,7 @@ fn omitted_unsupported_calls_are_not_confused_with_missing_function_results() {
 #[tokio::test]
 async fn malformed_and_opaque_input_reject_before_lazy_connection() {
     let a = profile("A", "http://127.0.0.1:1/v1/responses");
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [(
             ModelRole::Build,
             a.clone(),
@@ -358,7 +358,7 @@ fn engine(
     b: ResolvedModelProfile,
     history: Vec<TranscriptItem>,
     settings: Arc<Settings>,
-) -> (tempfile::TempDir, SessionEngine<ResponsesRouter>) {
+) -> (tempfile::TempDir, SessionEngine<ProviderRouter>) {
     engine_with_access(a, b, history, settings, false)
 }
 
@@ -368,7 +368,7 @@ fn engine_with_access(
     mut history: Vec<TranscriptItem>,
     settings: Arc<Settings>,
     read_only: bool,
-) -> (tempfile::TempDir, SessionEngine<ResponsesRouter>) {
+) -> (tempfile::TempDir, SessionEngine<ProviderRouter>) {
     history.insert(
         0,
         TranscriptItem::SessionModels(
@@ -396,7 +396,7 @@ fn engine_with_access(
         writer = TranscriptWriter::read_only(path).unwrap();
     }
     let tools = ToolServer::new().run();
-    let router = ResponsesRouter::from_routes(
+    let router = ProviderRouter::from_routes(
         [
             (
                 ModelRole::Build,
@@ -449,7 +449,7 @@ fn engine_with_access(
     (directory, engine)
 }
 
-async fn manage(engine: &mut SessionEngine<ResponsesRouter>, request: Request) -> Result {
+async fn manage(engine: &mut SessionEngine<ProviderRouter>, request: Request) -> Result {
     let (events, mut receiver) = session_event_channel(32);
     engine
         .handle_command(
@@ -474,7 +474,7 @@ async fn manage(engine: &mut SessionEngine<ResponsesRouter>, request: Request) -
 #[tokio::test]
 async fn idle_selection_is_no_inference_only_chosen_route_and_unknown_noop_are_safe() {
     let a = profile("A", "http://127.0.0.1:1/v1/responses");
-    let b = profile("B", &a.endpoint.base_url);
+    let b = profile("B", &a.responses_endpoint().unwrap().base_url);
     let (_directory, mut engine) =
         engine(a.clone(), b.clone(), vec![], Arc::new(Settings::default()));
     assert!(matches!(
@@ -546,7 +546,7 @@ async fn idle_selection_is_no_inference_only_chosen_route_and_unknown_noop_are_s
 async fn session_only_switches_are_role_local_noops_do_not_write_and_global_can_promote() {
     for mode in [SessionMode::Build, SessionMode::Plan] {
         let a = profile("A", "http://127.0.0.1:1/v1/responses");
-        let b = profile("B", &a.endpoint.base_url);
+        let b = profile("B", &a.responses_endpoint().unwrap().base_url);
         let target = if mode == SessionMode::Build {
             b.profile.clone()
         } else {
@@ -639,7 +639,7 @@ async fn session_only_switches_are_role_local_noops_do_not_write_and_global_can_
 #[tokio::test]
 async fn session_only_header_failure_without_conversion_preserves_selections_and_retries() {
     let a = profile("A", "http://127.0.0.1:1/v1/responses");
-    let b = profile("B", &a.endpoint.base_url);
+    let b = profile("B", &a.responses_endpoint().unwrap().base_url);
     let settings = Arc::new(Settings::default());
     settings.fail.store(true, Ordering::Relaxed);
     let (_directory, mut engine) = engine(a.clone(), b.clone(), vec![], settings.clone());
@@ -913,7 +913,7 @@ async fn header_failure_after_checkpoint_preserves_route_and_retries_each_scope(
 async fn stale_confirmation_and_cancel_do_not_mutate_or_call_models() {
     for scope in [Scope::SessionOnly, Scope::SessionAndDefault] {
         let a = profile("A", "http://127.0.0.1:1/v1/responses");
-        let b = profile("B", &a.endpoint.base_url);
+        let b = profile("B", &a.responses_endpoint().unwrap().base_url);
         let settings = Arc::new(Settings::default());
         let original = opaque_history(&a);
         let (_directory, mut engine) = engine(a, b.clone(), original.clone(), settings.clone());

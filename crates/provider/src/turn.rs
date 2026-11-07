@@ -1,5 +1,6 @@
 //! One OpenAI model request, response chaining, and bounded recovery.
 
+use crate::http::{HttpAttemptError, bounded_http_error_body, diagnostic_detail};
 use crate::recovery::{
     AttemptBudget, AttemptProgress, ProgressClock, RecoveryPolicy, ResponseIdleTimeout,
 };
@@ -1370,89 +1371,6 @@ async fn run_model_request_inner(
     }
 }
 
-const HTTP_ERROR_BODY_LIMIT: usize = 4 * 1024;
-
-enum HttpAttemptError {
-    Retryable {
-        category: &'static str,
-        error: anyhow::Error,
-        upstream_request_id: Option<String>,
-    },
-    Terminal {
-        error: anyhow::Error,
-        upstream_request_id: Option<String>,
-    },
-}
-
-impl HttpAttemptError {
-    fn retryable(category: &'static str, error: impl Into<anyhow::Error>) -> Self {
-        Self::Retryable {
-            category,
-            error: error.into(),
-            upstream_request_id: None,
-        }
-    }
-
-    fn terminal(error: impl Into<anyhow::Error>) -> Self {
-        Self::Terminal {
-            error: error.into(),
-            upstream_request_id: None,
-        }
-    }
-
-    fn retryable_response(
-        category: &'static str,
-        error: impl Into<anyhow::Error>,
-        upstream_request_id: &Option<String>,
-    ) -> Self {
-        Self::Retryable {
-            category,
-            error: with_http_response_request_id(error.into(), upstream_request_id),
-            upstream_request_id: upstream_request_id.clone(),
-        }
-    }
-
-    fn terminal_response(
-        error: impl Into<anyhow::Error>,
-        upstream_request_id: &Option<String>,
-    ) -> Self {
-        Self::Terminal {
-            error: with_http_response_request_id(error.into(), upstream_request_id),
-            upstream_request_id: upstream_request_id.clone(),
-        }
-    }
-
-    fn from_http_status(
-        category: Option<&'static str>,
-        error: CompletionError,
-        upstream_request_id: Option<String>,
-    ) -> Self {
-        match category {
-            Some(category) => Self::Retryable {
-                category,
-                error: error.into(),
-                upstream_request_id,
-            },
-            None => Self::Terminal {
-                error: error.into(),
-                upstream_request_id,
-            },
-        }
-    }
-}
-
-fn with_http_response_request_id(
-    error: anyhow::Error,
-    upstream_request_id: &Option<String>,
-) -> anyhow::Error {
-    match upstream_request_id {
-        Some(request_id) => error.context(format!(
-            "OpenAI HTTP response carried x-request-id {request_id}"
-        )),
-        None => error,
-    }
-}
-
 fn http_request_body(prepared: &PreparedRequest) -> anyhow::Result<serde_json::Value> {
     let mut body = prepared
         .request_properties
@@ -1469,42 +1387,6 @@ fn http_request_body(prepared: &PreparedRequest) -> anyhow::Result<serde_json::V
     );
     body.insert("stream".to_string(), serde_json::Value::Bool(true));
     Ok(serde_json::Value::Object(body))
-}
-
-fn diagnostic_detail(text: &str) -> String {
-    zevria_content::image_diagnostics::text_copy(text)
-        .chars()
-        .take(HTTP_ERROR_BODY_LIMIT)
-        .collect()
-}
-
-async fn bounded_http_error_body(response: reqwest::Response) -> String {
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while bytes.len() < HTTP_ERROR_BODY_LIMIT {
-        match stream.next().await {
-            Some(Ok(chunk)) => {
-                let remaining = HTTP_ERROR_BODY_LIMIT - bytes.len();
-                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            }
-            Some(Err(error)) => {
-                if bytes.is_empty() {
-                    return format!("<failed to read error body: {error}>");
-                }
-                break;
-            }
-            None => break,
-        }
-    }
-    let mut detail = String::from_utf8_lossy(&bytes).into_owned();
-    if detail.len() > HTTP_ERROR_BODY_LIMIT {
-        let mut end = HTTP_ERROR_BODY_LIMIT;
-        while !detail.is_char_boundary(end) {
-            end -= 1;
-        }
-        detail.truncate(end);
-    }
-    diagnostic_detail(&detail)
 }
 
 fn successful_http_model_response(

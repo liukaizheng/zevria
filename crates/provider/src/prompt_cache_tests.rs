@@ -59,8 +59,8 @@ async fn inactivity_replay_preserves_wire_prefix_controls_headers_and_cache_iden
         RemoteCompactionConfig::default(),
         128_000,
     );
-    profile.endpoint.session_id_header = Some("x-session".into());
-    profile.endpoint.network = NetworkConfig {
+    profile.responses_endpoint_mut().session_id_header = Some("x-session".into());
+    profile.responses_endpoint_mut().network = NetworkConfig {
         connect_timeout_seconds: 11,
         request_start_timeout_seconds: 7,
         stall_warning_seconds: 3,

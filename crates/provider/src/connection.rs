@@ -47,7 +47,7 @@ pub(crate) fn session_routing_headers(
     let mut headers = HeaderMap::new();
     if let Some(name) = crate::config::parse_session_id_header(
         &profile.profile.provider,
-        profile.endpoint.session_id_header.as_deref(),
+        profile.session_id_header(),
     )? {
         anyhow::ensure!(
             !session_id.trim().is_empty(),
@@ -129,6 +129,14 @@ pub(crate) fn resolve_input_token_count_url(
     responses_url: &reqwest::Url,
     config: &InputTokenCountConfig,
 ) -> anyhow::Result<Option<reqwest::Url>> {
+    resolve_input_token_count_url_with_suffix(responses_url, config, "/input_tokens")
+}
+
+pub(crate) fn resolve_input_token_count_url_with_suffix(
+    responses_url: &reqwest::Url,
+    config: &InputTokenCountConfig,
+    suffix: &str,
+) -> anyhow::Result<Option<reqwest::Url>> {
     if !config.enabled {
         return Ok(None);
     }
@@ -141,7 +149,7 @@ pub(crate) fn resolve_input_token_count_url(
         return Ok(None);
     }
     let mut url = responses_url.clone();
-    let path = format!("{}/input_tokens", url.path().trim_end_matches('/'));
+    let path = format!("{}{suffix}", url.path().trim_end_matches('/'));
     url.set_path(&path);
     Ok(Some(url))
 }
@@ -356,7 +364,7 @@ impl OpenAiProvider {
             "reasoning level {reasoning_level} is not configured for {}",
             profile.profile
         );
-        let endpoint = &profile.endpoint;
+        let endpoint = profile.responses_endpoint()?;
         endpoint.network.validate(&profile.profile.provider)?;
         endpoint.web_search.validate(&profile.profile.provider)?;
         validate_prompt_cache_key(endpoint.compatibility.send_prompt_cache_key, cache_key)?;
@@ -439,7 +447,7 @@ impl OpenAiProvider {
     ) -> anyhow::Result<Self> {
         let session_headers =
             Self::validate_profile_settings(profile, reasoning_level, session_id, cache_key)?;
-        let endpoint = &profile.endpoint;
+        let endpoint = profile.responses_endpoint()?;
         let endpoints = OpenAiResponseEndpoints::parse(&endpoint.base_url)?;
         let maintenance_http = reqwest::Client::builder()
             .default_headers(session_headers.clone())
@@ -545,7 +553,13 @@ impl OpenAiProvider {
             preamble: preamble.to_string(),
             responses_parameters: Some(responses_parameters),
             reasoning_level,
-            reasoning_summary_level: profile.reasoning_summary_level.clone(),
+            reasoning_summary_level: match &profile.protocol {
+                crate::config::ProfileProtocol::Responses {
+                    reasoning_summary_level,
+                    ..
+                } => *reasoning_summary_level,
+                _ => unreachable!("validated Responses profile"),
+            },
             compatibility: endpoint.compatibility.clone(),
             web_search: endpoint.web_search.clone(),
             additional_params: endpoint.additional_params.clone(),

@@ -1,9 +1,12 @@
 # Responses-Compatible Providers
 
-Zevria can use OpenAI, DeepSeek, GLM, or any other model family **only when the
-configured endpoint implements the OpenAI Responses wire protocol**. A provider
-key names one endpoint/capability catalog; it does not select a vendor-specific
-adapter.
+This guide covers providers whose `protocol` is `openai.responses` (also the
+default when omitted). OpenAI, DeepSeek, GLM, or any other model family can use
+this adapter **when the endpoint implements the OpenAI Responses wire protocol**.
+A provider key names an endpoint/capability catalog; its `protocol` selects the
+compiled adapter, not the model's vendor name. Native Claude is supported through
+[`anthropic.messages`](anthropic-messages.md), with its own strict schema;
+both protocols can coexist in one catalog and session router.
 
 Zevria does not implement Chat Completions and does not translate
 `/chat/completions`, `choices[].delta`, `reasoning_content`, or Chat tool-call

@@ -1,4 +1,4 @@
-//! Lazy role-to-profile routing over independent Responses runtimes.
+//! Lazy role-to-profile routing over independent protocol-specific runtimes.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +14,10 @@ use zevria_session_api::ModelProvider;
 use zevria_session_api::ProgressReporter;
 use zevria_session_api::ProviderFuture;
 
-use crate::{ModelRouting, ResolvedModelProfile, connection::OpenAiProvider};
+use crate::{
+    ModelRouting, ProfileProtocol, ResolvedModelProfile, anthropic::AnthropicProvider,
+    connection::OpenAiProvider,
+};
 
 #[derive(Clone, Copy)]
 struct Route {
@@ -24,13 +27,63 @@ struct Route {
 
 struct ProfileSlot {
     profile: ResolvedModelProfile,
-    runtime: Option<OpenAiProvider>,
+    runtime: Option<ProfileRuntime>,
+}
+
+enum ProfileRuntime {
+    Responses(Box<OpenAiProvider>),
+    Anthropic(Box<AnthropicProvider>),
+}
+impl ProfileRuntime {
+    fn set_reasoning_level(&mut self, level: ReasoningLevel) {
+        match self {
+            Self::Responses(runtime) => runtime.set_reasoning_level(level),
+            Self::Anthropic(runtime) => runtime.set_reasoning_level(level),
+        }
+    }
+    fn complete<'a>(
+        &'a mut self,
+        request: ModelRequest<'a>,
+        progress: ProgressReporter,
+    ) -> ProviderFuture<'a> {
+        match self {
+            Self::Responses(runtime) => runtime.complete(request, progress),
+            Self::Anthropic(runtime) => runtime.complete(request, progress),
+        }
+    }
+    fn count_input_tokens<'a>(
+        &'a mut self,
+        request: ModelRequest<'a>,
+    ) -> InputTokenCountFuture<'a> {
+        match self {
+            Self::Responses(runtime) => runtime.count_input_tokens(request),
+            Self::Anthropic(runtime) => runtime.count_input_tokens(request),
+        }
+    }
+    fn compact<'a>(&'a mut self, request: ModelRequest<'a>) -> CompactFuture<'a> {
+        match self {
+            Self::Responses(runtime) => runtime.compact(request),
+            Self::Anthropic(runtime) => runtime.compact(request),
+        }
+    }
+    fn reset(&mut self) {
+        match self {
+            Self::Responses(runtime) => runtime.reset(),
+            Self::Anthropic(runtime) => runtime.reset(),
+        }
+    }
+    fn cancel(&mut self) {
+        match self {
+            Self::Responses(runtime) => runtime.cancel(),
+            Self::Anthropic(runtime) => runtime.cancel(),
+        }
+    }
 }
 
 /// One session's role router. Exact provider/model matches share a slot;
 /// different profiles retain independent transport, retry, fallback, and
 /// continuation state.
-pub struct ResponsesRouter {
+pub struct ProviderRouter {
     #[cfg(feature = "cache-diagnostics")]
     diagnostic_context: Option<crate::CacheDiagnosticContext>,
     #[cfg(feature = "cache-diagnostics")]
@@ -44,7 +97,7 @@ pub struct ResponsesRouter {
     requires_portable_compaction: bool,
 }
 
-impl ResponsesRouter {
+impl ProviderRouter {
     /// Root sessions route Build, Plan, and Review. Explore is deliberately
     /// absent because every child receives a fresh single-profile router.
     pub fn root(
@@ -121,7 +174,7 @@ impl ResponsesRouter {
             });
         }
         if slots.is_empty() {
-            anyhow::bail!("a Responses router must contain at least one model profile");
+            anyhow::bail!("a provider router must contain at least one model profile");
         }
         let requires_portable_compaction = slots.len() > 1;
         Ok(Self {
@@ -166,7 +219,10 @@ impl ResponsesRouter {
             .iter()
             .find(|slot| &slot.profile.profile == profile)
             .and_then(|slot| slot.runtime.as_ref())
-            .and_then(|runtime| runtime.ws.continuation.as_ref())
+            .and_then(|runtime| match runtime {
+                ProfileRuntime::Responses(runtime) => runtime.ws.continuation.as_ref(),
+                ProfileRuntime::Anthropic(_) => None,
+            })
             .map(|continuation| continuation.response_id.as_str())
     }
 
@@ -185,15 +241,23 @@ impl ResponsesRouter {
     }
 
     fn validate_input(&self, index: usize, request: &ModelRequest<'_>) -> anyhow::Result<()> {
-        zevria_responses::replay::project_with_compatibility(
-            &request.input,
-            &self.slots[index].profile.profile,
-            self.slots[index]
-                .profile
-                .endpoint
-                .compatibility
-                .developer_messages,
-        )?;
+        let profile = &self.slots[index].profile;
+        match &profile.protocol {
+            ProfileProtocol::Responses { endpoint, .. } => {
+                zevria_responses::replay::project_with_compatibility(
+                    &request.input,
+                    &profile.profile,
+                    endpoint.compatibility.developer_messages,
+                )?;
+            }
+            ProfileProtocol::Anthropic { endpoint, .. } => {
+                zevria_anthropic::project::preflight(
+                    &request.input,
+                    &profile.profile,
+                    endpoint.compatibility.system_messages,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -201,34 +265,46 @@ impl ResponsesRouter {
         &mut self,
         index: usize,
         level: ReasoningLevel,
-    ) -> anyhow::Result<&mut OpenAiProvider> {
+    ) -> anyhow::Result<&mut ProfileRuntime> {
         let slot = self
             .slots
             .get_mut(index)
-            .ok_or_else(|| anyhow::anyhow!("invalid Responses router slot {index}"))?;
+            .ok_or_else(|| anyhow::anyhow!("invalid provider router slot {index}"))?;
         if slot.runtime.is_none() {
             let cache_key = profile_cache_key(&self.session_id, &slot.profile);
-            let runtime = OpenAiProvider::unconnected(
-                &slot.profile,
-                level,
-                &self.preamble,
-                self.tools.clone(),
-                &self.session_id,
-                &cache_key,
-            )
-            .await?;
-            #[cfg(feature = "cache-diagnostics")]
-            let runtime = {
-                let mut runtime = runtime;
-                if let Some(context) = &self.diagnostic_context {
-                    crate::cache_diagnostics::configure(&mut runtime, context);
-                    // Do not resurrect disk state after a reset before lazy initialization,
-                    // including when writing the reset tombstone failed.
-                    if self.diagnostics_reset {
-                        crate::cache_diagnostics::reset(&mut runtime, "engine_reset");
-                    }
+            let runtime = match &slot.profile.protocol {
+                ProfileProtocol::Responses { .. } => {
+                    let runtime = OpenAiProvider::unconnected(
+                        &slot.profile,
+                        level,
+                        &self.preamble,
+                        self.tools.clone(),
+                        &self.session_id,
+                        &cache_key,
+                    )
+                    .await?;
+                    #[cfg(feature = "cache-diagnostics")]
+                    let runtime = {
+                        let mut runtime = runtime;
+                        if let Some(context) = &self.diagnostic_context {
+                            crate::cache_diagnostics::configure(&mut runtime, context);
+                            if self.diagnostics_reset {
+                                crate::cache_diagnostics::reset(&mut runtime, "engine_reset");
+                            }
+                        }
+                        runtime
+                    };
+                    ProfileRuntime::Responses(Box::new(runtime))
                 }
-                runtime
+                ProfileProtocol::Anthropic { .. } => {
+                    ProfileRuntime::Anthropic(Box::new(AnthropicProvider::unconnected(
+                        &slot.profile,
+                        level,
+                        &self.preamble,
+                        self.tools.clone(),
+                        &self.session_id,
+                    )?))
+                }
             };
             slot.runtime = Some(runtime);
         }
@@ -239,7 +315,7 @@ impl ResponsesRouter {
     }
 }
 
-impl ModelProvider for ResponsesRouter {
+impl ModelProvider for ProviderRouter {
     fn application_prompt(&self) -> &str {
         &self.preamble
     }
@@ -264,12 +340,23 @@ impl ModelProvider for ResponsesRouter {
         );
         self.route(role)?;
         let profile = &self.slots[self.profile_slot(&target.profile)?].profile;
-        OpenAiProvider::validate_profile_settings(
-            profile,
-            target.reasoning_level,
-            &self.session_id,
-            &profile_cache_key(&self.session_id, profile),
-        )?;
+        match &profile.protocol {
+            ProfileProtocol::Responses { .. } => {
+                OpenAiProvider::validate_profile_settings(
+                    profile,
+                    target.reasoning_level,
+                    &self.session_id,
+                    &profile_cache_key(&self.session_id, profile),
+                )?;
+            }
+            ProfileProtocol::Anthropic { .. } => {
+                AnthropicProvider::validate_profile_settings(
+                    profile,
+                    target.reasoning_level,
+                    &self.session_id,
+                )?;
+            }
+        }
         Ok(profile.context_policy())
     }
 
@@ -303,15 +390,20 @@ impl ModelProvider for ResponsesRouter {
         input: &[zevria_model::ModelRequestItem<'_>],
     ) -> anyhow::Result<zevria_model::models::ReplayPreflight> {
         let index = self.profile_slot(target)?;
-        zevria_responses::replay::preflight_with_compatibility(
-            input,
-            target,
-            self.slots[index]
-                .profile
-                .endpoint
-                .compatibility
-                .developer_messages,
-        )
+        match &self.slots[index].profile.protocol {
+            ProfileProtocol::Responses { endpoint, .. } => {
+                zevria_responses::replay::preflight_with_compatibility(
+                    input,
+                    target,
+                    endpoint.compatibility.developer_messages,
+                )
+            }
+            ProfileProtocol::Anthropic { endpoint, .. } => zevria_anthropic::project::preflight(
+                input,
+                target,
+                endpoint.compatibility.system_messages,
+            ),
+        }
     }
 
     fn complete_profile<'a>(
@@ -390,6 +482,15 @@ impl ModelProvider for ResponsesRouter {
         self.last_dispatched = route.as_ref().ok().map(|route| route.slot);
         Box::pin(async move {
             let route = route?;
+            // Native compaction receives a completed history, which may end
+            // in an assistant. Messages completion-shape validation belongs
+            // to the subsequent local summary request, not this capability check.
+            if matches!(
+                self.slots[route.slot].profile.protocol,
+                ProfileProtocol::Anthropic { .. }
+            ) {
+                return Ok(CompactResult::Unsupported);
+            }
             self.validate_input(route.slot, &request)?;
             let runtime = self
                 .initialize_slot(route.slot, route.reasoning_level)
@@ -423,6 +524,7 @@ impl ModelProvider for ResponsesRouter {
         for slot in &mut self.slots {
             #[cfg(feature = "cache-diagnostics")]
             if slot.runtime.is_none()
+                && matches!(slot.profile.protocol, ProfileProtocol::Responses { .. })
                 && let Some(context) = &self.diagnostic_context
             {
                 crate::cache_diagnostics::invalidate_uninitialized(context, &slot.profile.profile);
@@ -451,14 +553,14 @@ impl ModelProvider for ResponsesRouter {
 /// Cloneable recipe for a fresh independent single-profile router, used by
 /// Explore and Builder child subsessions, with a registry supplied per child.
 #[derive(Clone)]
-pub struct ResponsesRouterFactory {
+pub struct ProviderRouterFactory {
     role: ModelRole,
     profile: ResolvedModelProfile,
     reasoning_level: ReasoningLevel,
     preamble: String,
 }
 
-impl ResponsesRouterFactory {
+impl ProviderRouterFactory {
     pub fn new(
         role: ModelRole,
         profile: ResolvedModelProfile,
@@ -477,8 +579,8 @@ impl ResponsesRouterFactory {
         &self,
         session_id: &str,
         tools: ToolServerHandle,
-    ) -> anyhow::Result<ResponsesRouter> {
-        ResponsesRouter::from_routes(
+    ) -> anyhow::Result<ProviderRouter> {
+        ProviderRouter::from_routes(
             [(self.role, self.profile.clone(), self.reasoning_level)],
             self.preamble.clone(),
             tools,

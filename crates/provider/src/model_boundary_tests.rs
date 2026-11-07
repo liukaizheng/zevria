@@ -35,11 +35,11 @@ async fn target_counting_uses_portable_input_and_exact_or_conservative_admission
                 .await;
             });
             let a = profile("A", "http://127.0.0.1:1/v1/responses");
-            let mut b = profile("B", &a.endpoint.base_url);
+            let mut b = profile("B", &a.responses_endpoint().unwrap().base_url);
             b.context_window_tokens = 300;
             b.input_token_limit = 300;
             b.retained_user_tokens = 10;
-            b.endpoint.input_token_count = InputTokenCountConfig {
+            b.responses_endpoint_mut().input_token_count = InputTokenCountConfig {
                 enabled: true,
                 derive_url: false,
                 url: Some(url),
@@ -93,7 +93,7 @@ async fn pending_plan_and_readonly_history_reject_model_management() {
         use zevria_workflow::PlanRecord;
         use zevria_workflow::PlanVersion;
         let a = profile("A", "http://127.0.0.1:1/v1/responses");
-        let b = profile("B", &a.endpoint.base_url);
+        let b = profile("B", &a.responses_endpoint().unwrap().base_url);
         let id = PlanId::new();
         let history=vec![TranscriptItem::Plan(PlanRecord::Started {id}),TranscriptItem::Plan(PlanRecord::Ready {artifact:PlanArtifact {version:PlanVersion {id,revision:1},title:"Pending Model Selection".into(),markdown:"# Pending Model Selection\n\n## Goal\nDone\n\n## Decisions\nDone\n\n## Implementation\nDone\n\n## Validation\nDone\n\n## Risks\nNone".into(),source_turn_id:TurnId::new(1)}})];
         let settings = Arc::new(Settings::default());
@@ -116,7 +116,7 @@ async fn pending_plan_and_readonly_history_reject_model_management() {
 async fn unavailable_or_multiple_opaque_sources_fail_without_inference() {
     for scope in [Scope::SessionOnly, Scope::SessionAndDefault] {
         let a = profile("A", "http://127.0.0.1:1/v1/responses");
-        let b = profile("B", &a.endpoint.base_url);
+        let b = profile("B", &a.responses_endpoint().unwrap().base_url);
         for multiple in [false, true] {
             let mut history = opaque_history(&a);
             let TranscriptItem::Compaction(checkpoint) = history.last_mut().unwrap() else {
@@ -162,7 +162,7 @@ async fn unavailable_or_multiple_opaque_sources_fail_without_inference() {
 async fn resumed_current_destination_can_request_conversion_without_a_temporary_route_change() {
     for scope in [Scope::SessionOnly, Scope::SessionAndDefault] {
         let a = profile("A", "http://127.0.0.1:1/v1/responses");
-        let b = profile("B", &a.endpoint.base_url);
+        let b = profile("B", &a.responses_endpoint().unwrap().base_url);
         let history = opaque_history(&a);
         let (_directory, mut engine) =
             engine(a.clone(), b.clone(), history, Arc::new(Settings::default()));
@@ -201,7 +201,7 @@ async fn session_only_revalidates_configuration_after_async_counting_and_convers
             b.context_window_tokens = 300;
             b.input_token_limit = 300;
             b.retained_user_tokens = 10;
-            b.endpoint.input_token_count = InputTokenCountConfig {
+            b.responses_endpoint_mut().input_token_count = InputTokenCountConfig {
                 enabled: true,
                 derive_url: false,
                 url: Some(url.clone()),

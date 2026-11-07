@@ -57,7 +57,7 @@ pub(crate) fn resolve_selections(
         let model = global
             .providers
             .get(&profile.provider)
-            .and_then(|provider| provider.models.get(&profile.model));
+            .and_then(|provider| provider.reasoning_levels(&profile.model));
         anyhow::ensure!(
             model.is_some(),
             "session {session_id:?} {mode:?} {origin} selection is unavailable: provider {:?}, model {:?}. Restore this exact case-sensitive provider/model catalog entry in models.jsonc or launch an independent new session with valid defaults (not an inheriting /new); no fallback is applied",
@@ -67,7 +67,6 @@ pub(crate) fn resolve_selections(
         anyhow::ensure!(
             model
                 .expect("checked model")
-                .reasoning_levels
                 .contains(&selection.reasoning_level),
             "session {session_id:?} {mode:?} {origin} reasoning level {} is unavailable for {profile}. Restore this supported level in models.jsonc or launch an independent new session with valid defaults (not an inheriting /new); no fallback is applied",
             selection.reasoning_level
@@ -104,7 +103,12 @@ mod tests {
     #[test]
     fn fresh_inheritance_and_resume_use_complete_pairs_with_current_policies() {
         let mut config = crate::config::test_config();
-        let provider = config.providers.get_mut("test").unwrap();
+        let provider = config
+            .providers
+            .get_mut("test")
+            .unwrap()
+            .as_responses_mut()
+            .unwrap();
         let mut alternate = provider.models["test-model"].clone();
         alternate.context_window_tokens = 50000;
         alternate.input_token_limit = Some(40000);

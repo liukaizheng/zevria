@@ -162,15 +162,15 @@ pub(super) async fn flow() -> Vec<String> {
         RemoteCompactionConfig::default(),
         100_000,
     );
-    profile.endpoint.input_token_count.enabled = false;
-    profile.endpoint.session_id_header = Some("X-Session-ID".into());
+    profile.responses_endpoint_mut().input_token_count.enabled = false;
+    profile.responses_endpoint_mut().session_id_header = Some("X-Session-ID".into());
     let compaction = zevria_model::CompactionPolicy::new(
         Default::default(),
         std::array::from_fn(|_| profile.context_policy()),
     )
     .unwrap();
     let router = || {
-        let router = ResponsesRouter::from_routes(
+        let router = ProviderRouter::from_routes(
             [(
                 ModelRole::Build,
                 profile.clone(),
@@ -243,7 +243,7 @@ pub(super) async fn flow() -> Vec<String> {
     }
     server.await.unwrap()
 }
-async fn submit(engine: &mut SessionEngine<ResponsesRouter>, text: &str) {
+async fn submit(engine: &mut SessionEngine<ProviderRouter>, text: &str) {
     let (events, mut receiver) = session_event_channel(256);
     tokio::time::timeout(
         std::time::Duration::from_secs(5),

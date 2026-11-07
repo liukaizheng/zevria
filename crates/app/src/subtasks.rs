@@ -33,7 +33,7 @@ use zevria_instructions::SkillCatalog;
 use zevria_instructions::prompts::BUILD_SUBTASK_INSTRUCTIONS;
 use zevria_instructions::prompts::EXPLORE_AGENT_INSTRUCTIONS;
 use zevria_model::config::CompactionPolicy;
-use zevria_provider::ResponsesRouterFactory;
+use zevria_provider::ProviderRouterFactory;
 use zevria_session_api::SessionEvent;
 use zevria_session_api::SessionEventSender;
 use zevria_session_api::SessionUpdate;
@@ -49,8 +49,8 @@ use zevria_foundation::ModelRole;
 #[derive(Clone)]
 pub(crate) struct SubtaskSupervisorConfig {
     /// Session-opening assignments, independent of root model switching.
-    pub explore_factory: ResponsesRouterFactory,
-    pub builder_factory: ResponsesRouterFactory,
+    pub explore_factory: ProviderRouterFactory,
+    pub builder_factory: ProviderRouterFactory,
     pub explore_tools: ToolServerHandle,
     pub startup_workspace: PathBuf,
     pub command_config: crate::config::CommandConfig,
@@ -495,7 +495,7 @@ mod tests {
         events: SessionEventSender,
         subsessions_dir: PathBuf,
     ) -> SubtaskSupervisorConfig {
-        let provider = ProviderConfig {
+        let provider = ProviderConfig::Responses(zevria_provider::ResponsesProviderConfig {
             base_url,
             api_key: LiteralApiKey::new("test-key"),
             supports_websockets: true,
@@ -516,7 +516,7 @@ mod tests {
             compaction: RemoteCompactionConfig::default(),
             input_token_count: zevria_provider::InputTokenCountConfig::default(),
             web_search: zevria_responses::WebSearchConfig::default(),
-        };
+        });
         let modes = zevria_provider::ModeAssignments {
             build: zevria_provider::ModelAssignment {
                 provider: "test".to_string(),
@@ -562,7 +562,7 @@ mod tests {
             retained_user_tokens,
         };
         SubtaskSupervisorConfig {
-            explore_factory: ResponsesRouterFactory::new(
+            explore_factory: ProviderRouterFactory::new(
                 ModelRole::Explore,
                 profile.clone(),
                 routing
@@ -570,7 +570,7 @@ mod tests {
                     .reasoning_level,
                 "Test preamble",
             ),
-            builder_factory: ResponsesRouterFactory::new(
+            builder_factory: ProviderRouterFactory::new(
                 ModelRole::Builder,
                 profile,
                 routing

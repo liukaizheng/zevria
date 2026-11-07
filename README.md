@@ -92,8 +92,9 @@ ARM64/musl and Windows ARM64 are not packaged.
   To roll back, rerun with the desired version. Other roots and provider files are
   left alone. Linux installs also record the root for Windows-to-WSL discovery.
 
-Configure a model endpoint implementing the **OpenAI Responses wire protocol**
-(not Chat Completions alone).
+Configure a model endpoint implementing **OpenAI Responses** or native
+**Anthropic Messages** (not Chat Completions alone). The provider's `protocol`
+selects the wire adapter; protocols can coexist in one model catalog.
 The installer does not install the tools listed in [Preparation](#preparation),
 WSL, Rust, or provider credentials. See [command conventions](docs/instructions/command-conventions.md).
 
@@ -171,6 +172,7 @@ from an endpoint.
 {
   "providers": {
     "primary": {
+      "protocol": "openai.responses",
       "base_url": "https://provider.example/v1/responses",
       "api_key": "replace-with-api-key",
       "supports_websockets": false,
@@ -203,7 +205,10 @@ orchestration uses `build`; there is no orchestration mode or sixth model role.
 
 Important configuration details:
 
-- `base_url` is the **full Responses endpoint**, not a host root.
+- `protocol` is `openai.responses` (the default when omitted) or
+  `anthropic.messages`. Schemas and compatibility flags are protocol-specific.
+- `base_url` is the **full endpoint**, such as `/v1/responses` or `/v1/messages`,
+  not a host root.
 - A model's object key is its exact upstream model ID, not a local alias.
 - API keys are literal values in `models.jsonc`; there is no environment-variable
   interpolation or API-key environment override. Keep this file private.
@@ -217,8 +222,11 @@ Important configuration details:
   completion, cancellation, or another failure; transport retries and context
   capacity remain independently bounded.
 
-See [Responses-compatible providers](docs/responses-compatible.md) for the full
-configuration contract and gateway compatibility settings. After configuration,
+See [Responses-compatible providers](docs/responses-compatible.md) or
+[native Claude / Anthropic Messages](docs/anthropic-messages.md) for protocol
+configuration, gateway compatibility, thinking and caching. The generated
+Claude example enables refusal fallbacks; it is separate from the Claude Code
+ensemble agent. After configuration,
 run `zevria` again from your project workspace.
 
 ## Vim-style transcript navigation
@@ -597,7 +605,7 @@ The main areas of the workspace are:
 | `crates/zevria` | CLI entry point and terminal startup. |
 | `crates/app` | Configuration, runtime composition, and application services. |
 | `crates/core`, `crates/session-api` | Session engine and frontend/provider contracts. |
-| `crates/provider`, `crates/responses` | Model routing and Responses transport/replay. |
+| `crates/provider`, `crates/responses`, `crates/anthropic` | Model routing, transports, and protocol-specific codecs/replay. |
 | `crates/acp`, `crates/ensemble` | ACP frontend and multi-agent workflows. |
 | `crates/tui`, `crates/tui-input`, `crates/tui-widgets`, `crates/theme` | Terminal interface, input, and presentation. |
 | Other workspace crates | Shared values, instructions, models, workflows, tools, and transcripts. |

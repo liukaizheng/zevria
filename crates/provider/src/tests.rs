@@ -349,6 +349,9 @@ impl Default for TestReasoningConfig {
     }
 }
 
+#[path = "anthropic/tests.rs"]
+mod anthropic_tests;
+
 #[derive(Clone)]
 struct TestProviderConfig {
     base_url: String,
@@ -376,23 +379,25 @@ fn resolved_profile(
 ) -> ResolvedModelProfile {
     ResolvedModelProfile {
         profile: zevria_foundation::ModelProfileRef::new(provider, model),
-        endpoint: ProviderEndpoint {
-            base_url,
-            api_key: LiteralApiKey::new(api_key),
-            supports_websockets,
-            network: NetworkConfig::default(),
-            session_id_header: None,
-            compatibility,
-            additional_params,
-            compaction,
-            input_token_count: InputTokenCountConfig::default(),
-            web_search: WebSearchConfig::default(),
+        protocol: ProfileProtocol::Responses {
+            endpoint: ProviderEndpoint {
+                base_url,
+                api_key: LiteralApiKey::new(api_key),
+                supports_websockets,
+                network: NetworkConfig::default(),
+                session_id_header: None,
+                compatibility,
+                additional_params,
+                compaction,
+                input_token_count: InputTokenCountConfig::default(),
+                web_search: WebSearchConfig::default(),
+            },
+            reasoning_summary_level,
         },
         context_window_tokens,
         input_token_limit: context_window_tokens,
         retained_user_tokens: context_window_tokens / 10,
         reasoning_levels: ReasoningEffort::ALL.to_vec(),
-        reasoning_summary_level,
     }
 }
 
@@ -411,7 +416,7 @@ impl TestProviderConfig {
             self.base_url.clone(),
             &self.api_key,
             self.supports_websockets,
-            self.reasoning.summary_level.clone(),
+            self.reasoning.summary_level,
             self.compatibility.clone(),
             self.additional_params.clone(),
             self.compaction.clone(),
@@ -1066,7 +1071,7 @@ async fn websocket_router_transmits_its_hashed_profile_cache_key_and_encrypted_r
         .await;
     });
 
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [(
             ModelRole::Build,
             profile,
@@ -7408,7 +7413,7 @@ async fn router_lazily_dispatches_role_specific_profiles_and_reuses_exact_matche
     );
     let profile_a_cache_key = crate::router::profile_cache_key("root-session", &profile_a);
     let tools = policy_tools();
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [
             (
                 ModelRole::Build,
@@ -7547,7 +7552,7 @@ async fn multi_profile_router_rejects_remote_compaction_without_connection() {
         RemoteCompactionConfig::default(),
         100_000,
     );
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [
             (
                 ModelRole::Build,
@@ -7618,7 +7623,7 @@ async fn single_profile_router_forwards_configured_remote_compaction() {
         },
         100_000,
     );
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [
             (
                 ModelRole::Build,
@@ -7724,7 +7729,7 @@ async fn failed_profile_does_not_poison_another_router_slot() {
             100_000,
         )
     };
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [
             (
                 ModelRole::Plan,
@@ -7851,7 +7856,7 @@ async fn router_keeps_profile_local_continuations_across_switches_and_active_can
             100_000,
         )
     };
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [
             (
                 ModelRole::Build,
@@ -7972,7 +7977,7 @@ fn explore_factory_creates_fresh_uninitialized_router_state() {
         RemoteCompactionConfig::default(),
         100_000,
     );
-    let factory = ResponsesRouterFactory::new(
+    let factory = ProviderRouterFactory::new(
         ModelRole::Explore,
         profile,
         zevria_foundation::ReasoningLevel::Medium,

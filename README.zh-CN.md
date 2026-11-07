@@ -56,7 +56,7 @@ irm https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 | iex
 - 打开新的 shell，或按安装程序打印的说明刷新环境。管道或子进程中的安装程序无法修改父 shell；Windows 的机器级 PATH 仍可能优先于用户级 PATH。
 - 再次运行安装程序会替换选定安装根目录中的内容，包括修复同版本安装或降级。要回退到其他版本，请用该版本重新运行安装程序。其他安装根目录和 provider 文件不会改动。Linux 安装还会记录安装根目录，供 Windows 发现 WSL 中的安装。
 
-请配置一个实现 **OpenAI Responses wire protocol** 的模型端点（仅支持 Chat Completions 并不够）。安装程序不会安装[准备工作](#preparation)中列出的工具、WSL 或 Rust，也不会配置 provider 凭据。另请参阅[命令约定](docs/instructions/command-conventions.md)。
+请配置一个实现 **OpenAI Responses** 或原生 **Anthropic Messages** 的模型端点（仅支持 Chat Completions 并不够）。每个 provider 的 `protocol` 选择 wire adapter，两种协议可以在同一模型目录中共存。安装程序不会安装[准备工作](#preparation)中列出的工具、WSL 或 Rust，也不会配置 provider 凭据。另请参阅[命令约定](docs/instructions/command-conventions.md)。
 
 **从源码构建：** 如果已有 Rust/Cargo（支持 Rust 2024）、Git、网络访问和本机编译工具，可在代码检出目录中运行：
 
@@ -104,6 +104,7 @@ Windows 和 Linux 安装程序应使用相同的固定二进制版本。新版 W
 {
   "providers": {
     "primary": {
+      "protocol": "openai.responses",
       "base_url": "https://provider.example/v1/responses",
       "api_key": "replace-with-api-key",
       "supports_websockets": false,
@@ -135,14 +136,15 @@ builder = { provider = "primary", model = "your-model-id", reasoning_level = "hi
 
 重要配置说明：
 
-- `base_url` 必须是**完整的 Responses 端点**，而不是主机根地址。
+- `protocol` 可以是 `openai.responses`（省略时的默认值）或 `anthropic.messages`；配置结构和兼容性标志按协议严格验证。
+- `base_url` 必须是**完整的端点**（如 `/v1/responses` 或 `/v1/messages`），而不是主机根地址。
 - 模型对象的键必须是上游的确切模型 ID，不是本地别名。
 - API 密钥以字面值保存在 `models.jsonc` 中；不支持环境变量插值或通过 API 密钥环境变量覆盖。请妥善保护此文件。
 - JSONC 支持注释和尾随逗号。Provider 兼容性标志、WebSocket 支持、令牌计数和托管搜索均取决于具体端点。
 - `ZEVRIA_CONFIG=/path/to/config.toml` 会选择该 TOML 文件**以及同目录下的 `/path/to/models.jsonc`**，不会更改工作区或技能目录。
 - `session.max_model_calls` 已移除。请从现有配置中删除；严格解析会将它视为未知字段并拒绝加载。没有替代的调用次数上限。在任务完成、取消或发生其他错误之前，反复调用工具可能增加运行时间和费用；传输重试与上下文容量仍分别受限。
 
-完整配置约定和网关兼容性设置，请参阅 [Responses 兼容 Provider](docs/responses-compatible.md)。配置完成后，请在项目工作区中再次运行 `zevria`。
+完整配置约定、网关兼容性、thinking 和缓存设置，请参阅 [Responses 兼容 Provider](docs/responses-compatible.md) 或[原生 Claude / Anthropic Messages](docs/anthropic-messages.md)。生成的 Claude 示例启用了拒绝回退；此 provider 与通过 ACP 运行 Claude Code 的 `claude` ensemble agent 相互独立。配置完成后，请在项目工作区中再次运行 `zevria`。
 
 <a id="vim-style-transcript-navigation"></a>
 ## Vim 风格的对话导航

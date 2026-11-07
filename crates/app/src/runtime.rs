@@ -26,7 +26,7 @@ use zevria_instructions::prompts::{
     ENSEMBLE_WORKER_PLAN_INSTRUCTIONS, ENSEMBLE_WORKER_REVIEW_INSTRUCTIONS,
 };
 use zevria_instructions::skill::discover_skills;
-use zevria_provider::{ResponsesRouter, ResponsesRouterFactory};
+use zevria_provider::{ProviderRouter, ProviderRouterFactory};
 use zevria_session_api::QuestionRequester;
 use zevria_session_api::SessionCommand;
 use zevria_session_api::SessionEventReceiver;
@@ -380,7 +380,7 @@ async fn start_worker_session(
     let (event_tx, event_rx) = session_event_channel(config.session.event_queue_capacity);
     let questions = question_channels(event_tx.clone());
     let tools = worker_tools(&workspace, questions.requester, config)?;
-    let provider = ResponsesRouter::root(
+    let provider = ProviderRouter::root(
         &models.routing,
         &model_config.session.preamble,
         tools.clone(),
@@ -759,7 +759,7 @@ pub async fn start_session(
         app_config.command,
         app_config.session.plan.max_artifact_bytes,
     )?;
-    let provider = ResponsesRouter::root(
+    let provider = ProviderRouter::root(
         &session_models.routing,
         &model_config.session.preamble,
         tools.clone(),
@@ -858,7 +858,7 @@ pub async fn start_session(
     let supervisor = spawn_supervisor(
         channels.requests,
         SubtaskSupervisorConfig {
-            explore_factory: ResponsesRouterFactory::new(
+            explore_factory: ProviderRouterFactory::new(
                 ModelRole::Explore,
                 model_config.routing().for_role(ModelRole::Explore).clone(),
                 model_config
@@ -867,7 +867,7 @@ pub async fn start_session(
                     .reasoning_level,
                 &model_config.session.preamble,
             ),
-            builder_factory: ResponsesRouterFactory::new(
+            builder_factory: ProviderRouterFactory::new(
                 ModelRole::Builder,
                 model_config.routing().for_role(ModelRole::Builder).clone(),
                 model_config

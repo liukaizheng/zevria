@@ -143,7 +143,7 @@ async fn reasoning_switch_changes_only_properties_with_exact_prefix_extension() 
             RemoteCompactionConfig::default(),
             100_000,
         );
-        let mut router = ResponsesRouter::from_routes(
+        let mut router = ProviderRouter::from_routes(
             [(
                 ModelRole::Build,
                 profile,
@@ -737,7 +737,7 @@ async fn http_wire_privacy_and_diagnostic_write_failures_do_not_change_completio
             bodies
         });
         let mut profile = resolved_profile("test-provider", "gpt-test", format!("http://PRIVATE_USER:PRIVATE_PASSWORD@{address}/responses?token=PRIVATE_URL_TOKEN#PRIVATE_FRAGMENT"), "PRIVATE_CREDENTIAL", false, ReasoningSummaryLevel::Detailed, ResponsesCompatibilityConfig::default(), BTreeMap::new(), RemoteCompactionConfig::default(), 100_000);
-        profile.endpoint.session_id_header = Some("X-Session-ID".into());
+        profile.responses_endpoint_mut().session_id_header = Some("X-Session-ID".into());
         let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", ToolServer::new().run(), "PRIVATE_SESSION_VALUE", "PRIVATE_CACHE_KEY").await.unwrap();
         let directory = tempfile::tempdir().unwrap();
         let context = crate::CacheDiagnosticContext::new(&directory.path().join("session.jsonl"), "PRIVATE_SESSION_VALUE");
@@ -789,8 +789,8 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         let directory = tempfile::tempdir().unwrap();
         let context = crate::CacheDiagnosticContext::new(&directory.path().join("session.jsonl"), "test-session");
         let mut profile = resolved_profile("test-provider", "gpt-test", "http://127.0.0.1:9/responses".into(), "test-key", false, ReasoningSummaryLevel::Detailed, ResponsesCompatibilityConfig::default(), BTreeMap::new(), RemoteCompactionConfig::default(), 100_000);
-        profile.endpoint.session_id_header = Some("X-Session-ID".into());
-        profile.endpoint.input_token_count.enabled = false;
+        profile.responses_endpoint_mut().session_id_header = Some("X-Session-ID".into());
+        profile.responses_endpoint_mut().input_token_count.enabled = false;
         let tools = ToolServer::new().run();
         let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", tools.clone(), "test-session", "cache-key").await.unwrap();
         crate::cache_diagnostics::configure(&mut provider, &context);
@@ -832,7 +832,7 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         crate::cache_diagnostics::observe_raw(&mut provider, &event.to_string(), None, None);
         let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(provider.profile.clone(), event["response"]["output"].as_array().unwrap().clone())).unwrap();
         crate::cache_diagnostics::finish(&prepared, &mut provider, Some(&response));
-        let mut router = ResponsesRouter::from_routes([(ModelRole::Build, profile, zevria_foundation::ReasoningLevel::Medium)], "", tools, "test-session").unwrap().with_cache_diagnostics(context.clone());
+        let mut router = ProviderRouter::from_routes([(ModelRole::Build, profile, zevria_foundation::ReasoningLevel::Medium)], "", tools, "test-session").unwrap().with_cache_diagnostics(context.clone());
         assert_eq!(router.initialized_profile_count(), 0);
         router.reset();
         assert_eq!(router.initialized_profile_count(), 0);

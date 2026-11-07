@@ -1,23 +1,24 @@
 # Per-Profile Responses WebSocket and HTTP/SSE Transport
 
-`zevria-provider` implements one wire protocol: OpenAI Responses and
-Responses-compatible HTTP/SSE or WebSocket. Configured provider keys identify
-endpoints, not protocol adapters. Chat Completions and vendor-specific socket
-dialects are outside this boundary.
+This guide covers the OpenAI Responses HTTP/SSE and WebSocket runtime in
+`zevria-provider`. Per-provider `protocol` selects `openai.responses` (default)
+or [native `anthropic.messages`](anthropic-messages.md), which uses stateless
+HTTP/SSE only. Chat Completions and vendor-specific socket dialects are outside
+this boundary.
 
 ## Router and single-profile runtimes
 
-A session owns a `ResponsesRouter`. Its route table maps `ModelRole` to slots
+A session owns a `ProviderRouter`. Its route table maps `ModelRole` to slots
 that are deduplicated by exact `(provider key, model ID)` identity:
 
 ```text
-SessionEngine<ResponsesRouter>
+SessionEngine<ProviderRouter>
     │ ModelRequest { model_role, complete projected history, policy }
     ▼
-ResponsesRouter
+ProviderRouter
     ├── slot provider-a/model-a -> OpenAiProvider (lazy)
     ├── slot provider-a/model-b -> OpenAiProvider (lazy)
-    └── slot provider-b/model-a -> OpenAiProvider (lazy)
+    └── slot provider-b/model-a -> AnthropicProvider (lazy, HTTP only)
 ```
 
 Each `OpenAiProvider` is a fixed single-profile runtime containing:
@@ -49,7 +50,7 @@ cache identity, transport, compaction lifetime, and continuation state. Both chi
 kinds run nominal Build turns with their dedicated roles and restricted tools.
 Only an explicitly orchestrated root Build request permits native Builders;
 Standard Build retains optional Explore, and Plan retains configurable Explore only. Native worker
-Plan/Review is unchanged. `ResponsesRouterFactory::new(role, profile, preamble)` captures the opening
+Plan/Review is unchanged. `ProviderRouterFactory::new(role, profile, reasoning_level, preamble)` captures the opening
 assignment; `create(session_id, tools)` receives the same child registry handle
 as its engine. Root model switches never repoint either child factory.
 All configurations must explicitly assign both `modes.explore` and the required

@@ -4,6 +4,9 @@ use zevria_content::{PromptBlock, PromptImage};
 use zevria_content::{UserPrompt, citations, prompt, web_search};
 use zevria_foundation::{ModelContextPolicy, ModelProfileRef, ModelRole, SessionMode};
 pub use zevria_instructions::{DirectiveContent, InstructionSet};
+pub mod anthropic;
+#[cfg(test)]
+mod anthropic_tests;
 pub mod compaction;
 pub mod config;
 pub mod estimates;

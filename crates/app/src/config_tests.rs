@@ -1,4 +1,6 @@
 use super::*;
+#[path = "anthropic_config_tests.rs"]
+mod anthropic;
 use std::sync::{Mutex, OnceLock};
 
 const REQUIRED_CONFIG: &str = r#"[modes]
@@ -114,11 +116,15 @@ fn required_provider_catalog_and_independent_modes_resolve() {
     assert_eq!(config.command.timeout_seconds, 300);
     assert!(
         config.providers["openai"]
+            .as_responses()
+            .unwrap()
             .compatibility
             .send_reasoning_encrypted_content
     );
     assert!(
         !config.providers["gateway"]
+            .as_responses()
+            .unwrap()
             .compatibility
             .send_reasoning_encrypted_content
     );
@@ -145,21 +151,19 @@ fn session_id_header_is_optional_provider_scoped_and_strict() {
             .unwrap()
             .providers
             .values()
-            .all(|p| p.session_id_header.is_none())
+            .all(|p| p.session_id_header().is_none())
     );
     for name in ["x-opencode-session", "X-Conversation-ID", "session-id"] {
         let mut models = models_value();
         models["providers"]["gateway"]["session_id_header"] = name.into();
         let config = parse_value(&models).unwrap();
-        assert_eq!(
-            config.providers["gateway"].session_id_header.as_deref(),
-            Some(name)
-        );
+        assert_eq!(config.providers["gateway"].session_id_header(), Some(name));
         assert_eq!(
             config
                 .routing()
                 .for_role(zevria_foundation::ModelRole::Plan)
-                .endpoint
+                .responses_endpoint()
+                .unwrap()
                 .session_id_header
                 .as_deref(),
             Some(name)
@@ -168,12 +172,15 @@ fn session_id_header_is_optional_provider_scoped_and_strict() {
             config
                 .routing()
                 .for_role(zevria_foundation::ModelRole::Build)
-                .endpoint
+                .responses_endpoint()
+                .unwrap()
                 .session_id_header
                 .is_none()
         );
         assert!(
             !config.providers["gateway"]
+                .as_responses()
+                .unwrap()
                 .compatibility
                 .send_prompt_cache_key
         );
@@ -436,7 +443,7 @@ fn default_templates_use_requested_modes_models_and_search_setting() {
 
     assert!(DEFAULT_MODELS.contains(r#""enabled": true, "external_web_access": true"#));
     let reasoning_levels = r#""reasoning_levels": ["low", "medium", "high", "xhigh", "max"]"#;
-    assert_eq!(DEFAULT_MODELS.matches(reasoning_levels).count(), 3);
+    assert_eq!(DEFAULT_MODELS.matches(reasoning_levels).count(), 4);
     for model in ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"] {
         assert!(
             DEFAULT_MODELS.contains(&format!(r#"//       "{model}": {{"#)),
@@ -449,7 +456,15 @@ fn default_templates_use_requested_modes_models_and_search_setting() {
         r#""retained_user_tokens": 20000"#,
         r#""reasoning_summary_level": "detailed""#,
     ] {
-        assert_eq!(DEFAULT_MODELS.matches(metadata).count(), 3, "{metadata}");
+        assert_eq!(
+            DEFAULT_MODELS.matches(metadata).count(),
+            if metadata.contains("retained_user_tokens") {
+                4
+            } else {
+                3
+            },
+            "{metadata}"
+        );
     }
 }
 

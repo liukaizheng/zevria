@@ -7,9 +7,9 @@ use rig_core::message::{AssistantContent, CallId, Message, Text, UserContent};
 use std::collections::{BTreeSet, HashSet};
 use zevria_foundation::ModelProfileRef;
 use zevria_model::ModelRequestItem;
-use zevria_model::ProviderReplay;
 use zevria_model::compaction::replay::ToolCorrelations;
 use zevria_model::models::ReplayPreflight;
+use zevria_model::{ProviderReplay, ReplayProtocol};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ReplaySource {
@@ -91,8 +91,29 @@ impl Projection {
     fn replay(&mut self, replay: &ProviderReplay, target: &ModelProfileRef) -> anyhow::Result<()> {
         // Decode known shapes even for native replay; equality is not permission
         // to transmit malformed known records. Unknown fields remain raw.
-        replay.portable_projection()?;
-        let native = replay.native_items_for(target)?.is_some();
+        let portable = replay.portable_projection()?;
+        if replay.protocol() != Some(ReplayProtocol::Responses) {
+            self.used_portable = true;
+            let mut handles = replay.tool_call_handles().into_iter();
+            if let Some(mut message) = portable.message {
+                if let Message::Assistant(assistant) = &mut message {
+                    for block in &mut assistant.content {
+                        if let AssistantContent::ToolCall(call) = block {
+                            let (aliases, _) = handles.next().expect("decoded native call");
+                            call.id = CallId::from_wire(
+                                self.call(aliases, None, false)?.expect("portable call"),
+                            );
+                            call.native = None;
+                        }
+                    }
+                }
+                self.input.extend(message_to_openai_input(message)?);
+            }
+            return Ok(());
+        }
+        let native = replay
+            .native_items_for(target, ReplayProtocol::Responses)?
+            .is_some();
         self.used_native |= native;
         self.used_portable |= !native;
         for item in &replay.items {
@@ -261,7 +282,10 @@ pub fn preflight_with_compatibility(
     let sources = input
         .iter()
         .filter_map(|item| match item {
-            ModelRequestItem::ReplayOnly(replay) if &replay.source_profile != target => {
+            ModelRequestItem::ReplayOnly(replay)
+                if &replay.source_profile != target
+                    || replay.protocol() != Some(ReplayProtocol::Responses) =>
+            {
                 Some(replay.source_profile.clone())
             }
             _ => None,
@@ -294,7 +318,7 @@ pub fn project_with_compatibility(
     // Reserve future native wire handles before minting neutral ones. A
     // configured provider may itself emit IDs using Zevria's neutral prefix.
     for replay in input.iter().filter_map(|item| item.replay_ref()) {
-        if let Some(items) = replay.native_items_for(target)? {
+        if let Some(items) = replay.native_items_for(target, ReplayProtocol::Responses)? {
             projection.reserved_native_ids.extend(
                 items
                     .iter()
@@ -314,7 +338,9 @@ pub fn project_with_compatibility(
             }
             ModelRequestItem::ReplayOnly(replay) => {
                 anyhow::ensure!(
-                    replay.native_items_for(target)?.is_some(),
+                    replay
+                        .native_items_for(target, ReplayProtocol::Responses)?
+                        .is_some(),
                     "cannot send replay-only openai.responses history from source profile {} to foreign target profile {target}: conversion required; select its source with /model, confirm a portable summary, or start a fresh session",
                     replay.source_profile
                 );

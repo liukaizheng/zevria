@@ -1,11 +1,14 @@
-# Provider-Routed Responses Architecture
+# Provider-Routed Model Architecture
 
 ACP-backed planning and review orchestration is described in [ensemble.md](ensemble.md). The editor-facing ACP agent frontend is described in [acp-agent.md](acp-agent.md). Automatic supplemental file instructions are described in [guidance.md](guidance.md).
 
-Zevria is a provider-neutral session engine assembled with a Responses wire
-adapter at compile time and a validated provider/model catalog at startup. It
-deliberately does not perform dynamic plugin loading: every configured provider
-is one OpenAI Responses-compatible endpoint, not a protocol adapter choice.
+Zevria is a provider-neutral session engine assembled with pure Responses and
+Anthropic Messages codecs at compile time and a validated provider/model catalog
+at startup. It deliberately does not perform dynamic plugin loading. Each
+configured provider selects `openai.responses` (default) or `anthropic.messages`;
+`ProviderRouter` lazily owns independent heterogeneous runtimes per profile.
+Core, transcripts, TUI and ACP remain protocol-agnostic. See
+[native Messages](anthropic-messages.md) for its wire contract and thinking safety.
 
 ## Hosted search boundary
 
@@ -150,7 +153,7 @@ and [configuration and controls](responses-compatible.md#provider-hosted-web-sea
 
 ## Dependency direction
 
-The workspace has nineteen packages. Arrows below mean production dependencies;
+The workspace has twenty packages. Arrows below mean production dependencies;
 “lower values” means only the foundation/content/instructions/model/workflow
 owners a package actually uses. All consumers import the owner directly: core
 is an engine, not a shared-contract umbrella.
@@ -165,7 +168,8 @@ transcript    -> lower values
 session-api   -> lower values
 core          -> session-api + transcript + lower values
 responses     -> foundation + content + instructions + model
-provider      -> responses + session-api + lower values
+anthropic     -> foundation + content + instructions + model
+provider      -> responses + anthropic + session-api + lower values
 tools         -> session-api + lower values
 acp           -> session-api + transcript + lower values
 theme         -> external rendering/color dependencies only
@@ -186,7 +190,7 @@ zevria        -> app + selected frontends + directly used public domain APIs
 - **Transcript/session API/core:** storage, journals and shared replay validation;
   storage-independent commands/events/provider interfaces and execution channels;
   the private session state machine, admission, capacity and durable workflows.
-- **Responses/provider:** deterministic wire conversion, parsing and accumulation;
+- **Responses/Anthropic/provider:** pure wire conversion, parsing and accumulation;
   transport, routing, retries, attempt publication/acknowledgements and continuation.
 - **Theme/widgets/input/TUI:** one process-wide theme; reusable rendering primitives;
   composer/commands/questions; the coupled App reducer, frame policy and terminal loop.
@@ -195,7 +199,7 @@ zevria        -> app + selected frontends + directly used public domain APIs
   CLI dispatch, terminal setup and frontend selection.
 
 Only app depends directly on core in production. Adapters have no transitive
-engine dependency. Session API has no storage dependency, Responses has no
+engine dependency. Session API has no storage dependency, neither codec has a
 runtime/storage dependency, and app has no terminal frontend/widgets/input
 dependency. Integration tests may depend upward through explicit dev-dependencies.
 The binary's manifest-boundary tests enforce these rules without invoking Cargo.
@@ -1307,10 +1311,12 @@ comments and value decoration in both inline and ordinary TOML tables.
 
 Provider keys and model IDs are exact, case-sensitive durable identities. A
 provider owns endpoint, literal credential, transport capability,
-compatibility flags, exact-count policy, additional request parameters, remote
-compaction, and a model catalog. A model owns its physical context window,
-optional hard input-cost ceiling, retained-user budget, supported `reasoning_levels`,
-and `reasoning_summary_level`. Every mode requires an explicit supported
+compatibility flags, exact-count policy, additional request parameters, and a
+model catalog. Responses can configure remote compaction. A model owns its physical
+context window, optional hard input-cost ceiling, retained-user budget and supported
+`reasoning_levels`. Responses models configure `reasoning_summary_level`; Messages
+models configure required `max_output_tokens`, `thinking_display` and optional
+`refusal_fallback`. Every mode requires an explicit supported
 `reasoning_level`; there is no model-wide selected/default level. JSONC `modes`
 and model-level `reasoning_level` are obsolete and rejected, without migration.
 There is no built-in provider catalog, field-wise provider merge, model alias,
@@ -1319,11 +1325,12 @@ environment credential override, or legacy `[openai]` migration.
 `ModelRouting` resolves all five required assignments (including `builder`, with
 no Build/Explore fallback; existing configurations must migrate) and the complete selectable catalog
 at each new/resumed session's construction, using the configuration path captured
-at startup (including `ZEVRIA_CONFIG`). The root `ResponsesRouter`
+at startup (including `ZEVRIA_CONFIG`). The root `ProviderRouter`
 contains only Build, Plan, and Review routes, deduplicates exact
 `(provider key, model ID)` matches, and lazily constructs each profile's
-single-model runtime on first use. Every slot has independent WebSocket/HTTP
-transport, continuation, retry, sticky fallback, and failure state. Build and
+single-model runtime on first use. Every slot has independent retry and failure
+state; Responses slots also own WebSocket/HTTP transport, continuation and sticky
+HTTP fallback, while Messages slots use stateless HTTP/SSE. Build and
 Plan use their matching roles; Ensemble Plan uses Plan; Ensemble Review keeps a
 Build UI workflow mode but explicitly uses Review; Explore children use Explore
 and Build children use the distinct Builder role. Neither child role is installed
@@ -2089,7 +2096,7 @@ session-api registry + channels (SubtaskLauncher / SubtaskLaunchRequest)
 │
 ▼
 supervisor (zevria-app, subtasks.rs)
-├── fresh single-profile Explore or Builder router/transport per child (ResponsesRouterFactory)
+├── fresh single-profile Explore or Builder router/transport per child (ProviderRouterFactory)
 ├── independent SessionEngine/history and kind-specific instruction set
 ├── Explore: shared command-only registry
 ├── Build: private command/task/edit/write/delete registry rooted at its reserved directory
@@ -2198,7 +2205,7 @@ suffix without rewriting earlier native output or skill directives.
 
 Both child factories capture their configured Explore/Builder assignment at session
 opening, independent of root Build/Plan switching and durable selections. They use
-`ResponsesRouterFactory::new(role, profile, preamble)` and `create(session_id, tools)`;
+`ProviderRouterFactory::new(role, profile, reasoning_level, preamble)` and `create(session_id, tools)`;
 provider and child engine receive the same tool handle. Children inherit the root's
 opening/resume guidance, not active skills or child-local guidance. Like root
 sessions, children have no model-call count ceiling. Explore retains its
@@ -3021,9 +3028,15 @@ activity and lifecycle/terminal evidence are retained even when the final ledger
 omits a live observation. Ordinary assistant display links have no native ledger
 and do not elide presentation.
 
-`openai.responses` is the persisted wire-protocol identifier and is unrelated
-to a configured provider key such as `openai`, `deepseek`, or `glm`. Exact
-source-profile history uses native items losslessly. A foreign target receives
+`openai.responses` and `anthropic.messages` are persisted v1 wire-protocol
+identifiers, unrelated to a configured provider key such as `openai`, `deepseek`,
+`glm`, or `anthropic`. Native replay requires both protocol and exact source-profile
+equality. Messages ledgers store ordered raw content blocks and an optional
+`prefix_binding` (64 lowercase hex); this field is omitted on Responses records.
+Messages thinking/redacted-thinking replay additionally requires its canonical
+system/tools/earlier-message hash to match the binding. Prefix changes strip
+thinking from the projection, never from storage. Cache markers do not affect
+bindings. See [preserved thinking](anthropic-messages.md#preserved-thinking-and-binding). A foreign target receives
 a deterministic portable projection containing visible text/refusals and
 re-correlated function calls/results; reasoning, encrypted/opaque data,
 unknown native output, message/item IDs, and provider call IDs are omitted.
@@ -3055,14 +3068,19 @@ configured-profile fallbacks as live children.
 
 ## Add a wire adapter
 
-Configured provider keys already share the built-in Responses adapter. Adding a
-new key or model requires only TOML. A genuinely new wire protocol would need a
-compiled adapter:
+Adding a provider key or model for an existing protocol requires only a
+`models.jsonc` catalog entry and TOML role assignments. A genuinely new wire
+protocol needs a compiled adapter:
 
-1. Create a crate depending on `zevria-session-api`, `zevria-model`, the lower
-   value owners it uses, and `rig-core`; do not depend on the engine.
-2. Define only protocol-specific configuration/runtime types in that crate.
-3. Implement `ModelProvider` for an owned router or adapter. It must:
+1. Create a pure codec crate, like `zevria-responses` or `zevria-anthropic`,
+   depending only on foundation/content/instructions/model and external codecs.
+   Request projection, body construction, stream accumulation and classification
+   belong here, without HTTP, execution channels, storage or engine dependencies.
+2. Add strict protocol-specific configuration plus transport/runtime types in
+   `zevria-provider`; reuse HTTP diagnostics and recovery mechanics. Extend the
+   configuration discriminator and router runtime enum, not core or the frontends.
+3. Implement `ModelProvider` for the runtime and delegate through `ProviderRouter`.
+   It must:
    - resolve `ModelRequest.model_role` to an immutable profile before dispatch
      and keep that selection fixed for all native retries;
    - send `ModelRequest.instructions` as the sole top-level instructions and
@@ -3102,9 +3120,10 @@ impl ModelProvider for MyProvider {
 
 Inject the shared `ToolServerHandle` if the provider advertises tools. A
 provider must not execute tool calls, write transcripts, or emit terminal/UI
-events. Select it in app by constructing `SessionEngine<MyProvider>`;
-no core switch statement is required. Do not introduce a vendor enum merely to
-name another endpoint that already speaks Responses.
+events. App constructs `SessionEngine<ProviderRouter>`; no core switch statement
+is required. Do not introduce a vendor enum merely to name another endpoint that
+already speaks an implemented protocol. Native Messages is stateless and always
+returns `Unsupported` from compaction, selecting core's local-summary path.
 
 Tests should use a scripted local transport and pin protocol conversion,
 streaming, retry limits, reset behavior, and provider-native continuation.

@@ -20,7 +20,7 @@ fn session_profile(url: String, header: Option<&str>, websocket: bool) -> Resolv
         RemoteCompactionConfig::default(),
         128_000,
     );
-    profile.endpoint.session_id_header = header.map(ToOwned::to_owned);
+    profile.responses_endpoint_mut().session_id_header = header.map(ToOwned::to_owned);
     profile
 }
 
@@ -166,7 +166,10 @@ async fn configured_session_header_fixes_missing_session_id_and_survives_tool_fo
 
         let mut profile = session_profile(url, None, false);
         // Routing is independent of prompt-cache transmission, including for Go.
-        profile.endpoint.compatibility.send_prompt_cache_key = false;
+        profile
+            .responses_endpoint_mut()
+            .compatibility
+            .send_prompt_cache_key = false;
         let mut disabled = connect_profile(&profile, SESSION_ID).await;
         let mut failed_state = AttemptState::default();
         let error = session_turn(&mut disabled, &mut failed_state, "diagnostic request")
@@ -182,7 +185,7 @@ async fn configured_session_header_fixes_missing_session_id_and_survives_tool_fo
         assert!(failed_state.history.is_empty());
         assert!(!error.to_string().contains(SESSION_ID));
 
-        profile.endpoint.session_id_header = Some(header.to_string());
+        profile.responses_endpoint_mut().session_id_header = Some(header.to_string());
         let mut provider = connect_profile(&profile, SESSION_ID).await;
         let logs = CapturedLogs::default();
         let mut state = AttemptState::default();
@@ -267,7 +270,7 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
         assert!(!error.to_string().contains("private-session"));
     }
     for name in ["", "x\r\ninjected", "Authorization", "SEC-WEBSOCKET-KEY"] {
-        profile.endpoint.session_id_header = Some(name.to_string());
+        profile.responses_endpoint_mut().session_id_header = Some(name.to_string());
         let error = OpenAiProvider::connect(
             &profile,
             zevria_foundation::ReasoningLevel::Medium,
@@ -286,9 +289,9 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
         );
         assert!(!error.to_string().contains("endpoint URL"));
     }
-    profile.endpoint.base_url = "http://127.0.0.1:1/v1/responses".to_string();
-    profile.endpoint.supports_websockets = false;
-    profile.endpoint.session_id_header = None;
+    profile.responses_endpoint_mut().base_url = "http://127.0.0.1:1/v1/responses".to_string();
+    profile.responses_endpoint_mut().supports_websockets = false;
+    profile.responses_endpoint_mut().session_id_header = None;
     for ignored in ["", " \t ", "unused\r\nID"] {
         let provider = connect_profile(&profile, ignored).await;
         assert!(
@@ -301,7 +304,7 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
         );
     }
 
-    profile.endpoint.session_id_header = Some("X-Conversation-ID".to_string());
+    profile.responses_endpoint_mut().session_id_header = Some("X-Conversation-ID".to_string());
     let headers = session_routing_headers(&profile, SESSION_ID).unwrap();
     assert_eq!(headers.len(), 1);
     assert!(headers["x-conversation-id"].is_sensitive());
@@ -312,7 +315,7 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
     assert!(!format!("{:?}", provider.ws.config.headers).contains(SESSION_ID));
     assert!(!format!("{:?}", provider.http).contains(SESSION_ID));
 
-    let router = ResponsesRouter::from_routes(
+    let router = ProviderRouter::from_routes(
         [(
             ModelRole::Build,
             profile.clone(),
@@ -350,13 +353,16 @@ async fn configured_session_headers_cover_completion_count_and_remote_compaction
                 false,
             );
             let auxiliary_url = format!("http://{}", auxiliary.local_addr().unwrap());
-            profile.endpoint.compaction.url =
+            profile.responses_endpoint_mut().compaction.url =
                 Some(format!("{auxiliary_url}/custom/compact?route=1"));
             if !derive_count_url {
-                profile.endpoint.input_token_count.url =
+                profile.responses_endpoint_mut().input_token_count.url =
                     Some(format!("{auxiliary_url}/custom/count?route=1"));
             }
-            profile.endpoint.compatibility.send_prompt_cache_key = false;
+            profile
+                .responses_endpoint_mut()
+                .compatibility
+                .send_prompt_cache_key = false;
             let responses = tokio::spawn(async move {
                 let mut requests = Vec::new();
                 if derive_count_url {
@@ -690,7 +696,7 @@ async fn router_session_headers_are_provider_scoped_and_children_are_independent
         (ModelRole::Review, a2.clone()),
         (ModelRole::Explore, unconfigured.clone()),
     ];
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         routes
             .clone()
             .map(|(role, profile)| (role, profile, zevria_foundation::ReasoningLevel::Medium)),
@@ -726,7 +732,7 @@ async fn router_session_headers_are_provider_scoped_and_children_are_independent
         .unwrap();
     assert_eq!(router.initialized_profile_count(), 4);
 
-    let factory = ResponsesRouterFactory::new(
+    let factory = ProviderRouterFactory::new(
         ModelRole::Explore,
         a.clone(),
         zevria_foundation::ReasoningLevel::Medium,
@@ -756,7 +762,11 @@ async fn router_session_headers_are_provider_scoped_and_children_are_independent
     for (request, (profile, id)) in requests.iter().zip(expected) {
         assert_routing_headers(
             &request.headers,
-            profile.endpoint.session_id_header.as_deref(),
+            profile
+                .responses_endpoint()
+                .unwrap()
+                .session_id_header
+                .as_deref(),
             id,
         );
         assert_eq!(request.body["model"], profile.profile.model);

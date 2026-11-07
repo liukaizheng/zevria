@@ -6,7 +6,7 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/v1/responses", listener.local_addr().unwrap());
     let mut a = profile("A", &url);
-    a.endpoint.supports_websockets = true;
+    a.responses_endpoint_mut().supports_websockets = true;
     let cache_key = crate::router::profile_cache_key("reasoning-root", &a);
     let server = tokio::spawn(async move {
         // All three requests must arrive on this one socket, with no reconnect.
@@ -41,7 +41,7 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
         assert_eq!(first["tools"], third["tools"]);
         send_json(&mut socket, completed_event("reason-3", "msg-3", "third")).await;
     });
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [(
             ModelRole::Build,
             a.clone(),
@@ -109,8 +109,8 @@ async fn shared_slot_uses_role_levels_and_explicit_maintenance_uses_requested_le
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1/responses", listener.local_addr().unwrap());
     let mut a = profile("A", &url);
-    a.endpoint.input_token_count.enabled = true;
-    a.endpoint.compaction.url = Some(format!("{url}/compact"));
+    a.responses_endpoint_mut().input_token_count.enabled = true;
+    a.responses_endpoint_mut().compaction.url = Some(format!("{url}/compact"));
     let server = tokio::spawn(async move {
         let mut bodies = Vec::new();
         for index in 0..7 {
@@ -156,7 +156,7 @@ async fn shared_slot_uses_role_levels_and_explicit_maintenance_uses_requested_le
         }
         bodies
     });
-    let mut router = ResponsesRouter::from_routes(
+    let mut router = ProviderRouter::from_routes(
         [
             (
                 ModelRole::Build,
@@ -346,7 +346,7 @@ async fn converting_history_for_the_same_selected_model_uses_captured_explicit_r
 async fn reasoning_validation_is_local_and_respects_capabilities_and_roles() {
     let mut a = profile("A", "http://127.0.0.1:1/v1/responses");
     a.reasoning_levels = vec![Level::Low, Level::Medium];
-    let router = ResponsesRouter::from_routes(
+    let router = ProviderRouter::from_routes(
         [
             (
                 ModelRole::Build,
@@ -396,7 +396,7 @@ async fn reasoning_validation_is_local_and_respects_capabilities_and_roles() {
 async fn opaque_source_must_support_the_captured_pre_switch_level_without_fallback() {
     let mut a = profile("A", "http://127.0.0.1:1/v1/responses");
     a.reasoning_levels = vec![Level::Medium];
-    let b = profile("B", &a.endpoint.base_url);
+    let b = profile("B", &a.responses_endpoint().unwrap().base_url);
     let settings = Arc::new(Settings::default());
     let (_directory, mut engine) =
         engine(a.clone(), b.clone(), opaque_history(&a), settings.clone());
@@ -473,9 +473,9 @@ async fn all_five_roles_use_explicit_levels_on_one_profile_and_children_remain_i
     let routing =
         ModelRouting::resolve(&BTreeMap::from([("p".into(), provider)]), &modes, 90).unwrap();
     let tools = ToolServer::new().run();
-    let mut root = ResponsesRouter::root(&routing, "stable", tools.clone(), "root").unwrap();
+    let mut root = ProviderRouter::root(&routing, "stable", tools.clone(), "root").unwrap();
     let children = [ModelRole::Explore, ModelRole::Builder].map(|role| {
-        ResponsesRouterFactory::new(
+        ProviderRouterFactory::new(
             role,
             routing.for_role(role).clone(),
             routing.selection_for_role(role).reasoning_level,

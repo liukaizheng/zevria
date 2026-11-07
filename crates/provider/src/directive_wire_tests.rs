@@ -584,7 +584,7 @@ async fn directive_only_preflight_count_and_http_use_identical_input_without_rig
             10_000,
         );
         let target = profile.profile.clone();
-        let mut router = ResponsesRouter::from_routes(
+        let mut router = ProviderRouter::from_routes(
             [(
                 ModelRole::Build,
                 profile,

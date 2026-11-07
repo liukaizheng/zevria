@@ -96,7 +96,10 @@ fn assert_models(
             restoration.reasoning_levels[role.index()],
             selected.reasoning_level
         );
-        let model = &config.providers()[&selected.profile.provider].models[&selected.profile.model];
+        let model = &config.providers()[&selected.profile.provider]
+            .as_responses()
+            .unwrap()
+            .models[&selected.profile.model];
         assert_eq!(context.context_window_tokens, model.context_window_tokens);
         assert_eq!(
             context.input_token_limit,

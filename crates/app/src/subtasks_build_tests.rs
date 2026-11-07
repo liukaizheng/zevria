@@ -15,7 +15,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use zevria_foundation::ToolResultDetail;
 use zevria_foundation::TurnId;
-use zevria_provider::ResponsesRouter;
+use zevria_provider::ProviderRouter;
 use zevria_session_api::TurnContext;
 
 async fn execute(
@@ -314,7 +314,7 @@ fn supervisor_config(
 ) -> SubtaskSupervisorConfig {
     let models = &config;
     SubtaskSupervisorConfig {
-        explore_factory: ResponsesRouterFactory::new(
+        explore_factory: ProviderRouterFactory::new(
             ModelRole::Explore,
             models.routing().for_role(ModelRole::Explore).clone(),
             models
@@ -323,7 +323,7 @@ fn supervisor_config(
                 .reasoning_level,
             "fixture preamble",
         ),
-        builder_factory: ResponsesRouterFactory::new(
+        builder_factory: ProviderRouterFactory::new(
             ModelRole::Builder,
             models.routing().for_role(ModelRole::Builder).clone(),
             models
@@ -370,7 +370,7 @@ async fn production_build_rejects_builder_launch_before_workspace_or_child_provi
     )
     .unwrap();
     let provider =
-        ResponsesRouter::root(config.routing(), "fixture", tools.clone(), "root").unwrap();
+        ProviderRouter::root(config.routing(), "fixture", tools.clone(), "root").unwrap();
     let transcript = TranscriptWriter::create_with_id(root.path(), "root").unwrap();
     let path = transcript.path().to_path_buf();
     let mut engine = SessionEngine::new(
@@ -497,7 +497,7 @@ async fn ten_real_response_launches_share_limits_and_return_original_slots() {
         .unwrap();
         let models = &config;
         let provider =
-            ResponsesRouter::root(models.routing(), "fixture", tools.clone(), "root").unwrap();
+            ProviderRouter::root(models.routing(), "fixture", tools.clone(), "root").unwrap();
         let transcript = TranscriptWriter::create_with_id(root.path(), "root").unwrap();
         let path = transcript.path().to_path_buf();
         let mut engine = SessionEngine::new(

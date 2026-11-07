@@ -1,4 +1,4 @@
-//! Provider-centric OpenAI Responses and Responses-compatible configuration.
+//! Strict provider-owned Responses and Anthropic Messages configuration.
 
 use std::{collections::BTreeMap, fmt};
 
@@ -38,7 +38,7 @@ impl fmt::Debug for LiteralApiKey {
 /// One Responses-compatible endpoint and its complete model catalog.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderConfig {
+pub struct ResponsesProviderConfig {
     /// Exact full Responses endpoint. HTTP and WebSocket pairing changes only
     /// this URL's scheme.
     pub base_url: String,
@@ -68,7 +68,7 @@ pub struct ProviderConfig {
     pub web_search: WebSearchConfig,
 }
 
-impl fmt::Debug for ProviderConfig {
+impl fmt::Debug for ResponsesProviderConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProviderConfig")
@@ -90,7 +90,7 @@ impl fmt::Debug for ProviderConfig {
     }
 }
 
-impl ProviderConfig {
+impl ResponsesProviderConfig {
     fn validate(&self, provider: &str, auto_trigger_percent: u64) -> anyhow::Result<()> {
         validate_responses_url(&self.base_url, &format!("providers.{provider}.base_url"))?;
         validate_nonblank(
@@ -130,6 +130,191 @@ impl ProviderConfig {
             compaction: self.compaction.clone(),
             input_token_count: self.input_token_count.clone(),
             web_search: self.web_search.clone(),
+        }
+    }
+}
+
+#[path = "anthropic_config.rs"]
+mod anthropic_config;
+pub use anthropic_config::{
+    AnthropicAuth, AnthropicEndpoint, AnthropicModelConfig, AnthropicProviderConfig,
+};
+
+/// Protocol is provider-owned, and defaults only for old Responses catalogs.
+/// Each branch has its own strict schema; fields never leak across protocols.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "protocol")]
+pub enum ProviderConfig {
+    #[serde(rename = "openai.responses")]
+    Responses(ResponsesProviderConfig),
+    #[serde(rename = "anthropic.messages")]
+    Anthropic(AnthropicProviderConfig),
+}
+impl<'de> Deserialize<'de> for ProviderConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let mut object = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+        let protocol = object
+            .remove("protocol")
+            .unwrap_or_else(|| "openai.responses".into());
+        let value = serde_json::to_value(object).map_err(D::Error::custom)?;
+        match protocol.as_str() {
+            Some("openai.responses") => serde_json::from_value(value)
+                .map(Self::Responses)
+                .map_err(D::Error::custom),
+            Some("anthropic.messages") => serde_json::from_value(value)
+                .map(Self::Anthropic)
+                .map_err(D::Error::custom),
+            _ => Err(D::Error::custom(
+                "protocol must be openai.responses or anthropic.messages",
+            )),
+        }
+    }
+}
+impl From<ResponsesProviderConfig> for ProviderConfig {
+    fn from(value: ResponsesProviderConfig) -> Self {
+        Self::Responses(value)
+    }
+}
+impl ProviderConfig {
+    fn validate(&self, provider: &str, percent: u64) -> anyhow::Result<()> {
+        match self {
+            Self::Responses(config) => config.validate(provider, percent),
+            Self::Anthropic(config) => config.validate(provider, percent),
+        }
+    }
+    pub fn redacted_base_url(&self) -> String {
+        match self {
+            Self::Responses(config) => config.redacted_base_url(),
+            Self::Anthropic(config) => {
+                crate::connection::redacted_url_for_logging(&config.base_url)
+            }
+        }
+    }
+    pub fn as_responses(&self) -> Option<&ResponsesProviderConfig> {
+        match self {
+            Self::Responses(config) => Some(config),
+            _ => None,
+        }
+    }
+    pub fn as_responses_mut(&mut self) -> Option<&mut ResponsesProviderConfig> {
+        match self {
+            Self::Responses(config) => Some(config),
+            _ => None,
+        }
+    }
+    pub fn session_id_header(&self) -> Option<&str> {
+        match self {
+            Self::Responses(config) => config.session_id_header.as_deref(),
+            Self::Anthropic(config) => config.session_id_header.as_deref(),
+        }
+    }
+    pub fn reasoning_levels(&self, model: &str) -> Option<&[ReasoningLevel]> {
+        match self {
+            Self::Responses(config) => config
+                .models
+                .get(model)
+                .map(|m| m.reasoning_levels.as_slice()),
+            Self::Anthropic(config) => config
+                .models
+                .get(model)
+                .map(|m| m.reasoning_levels.as_slice()),
+        }
+    }
+    fn model_names(&self) -> Vec<String> {
+        match self {
+            Self::Responses(config) => config.models.keys().cloned().collect(),
+            Self::Anthropic(config) => config.models.keys().cloned().collect(),
+        }
+    }
+    fn resolved_profiles(&self, provider: &str) -> Vec<ResolvedModelProfile> {
+        match self {
+            Self::Responses(config) => config
+                .models
+                .iter()
+                .map(|(key, model)| ResolvedModelProfile {
+                    profile: ModelProfileRef::new(provider, key),
+                    protocol: ProfileProtocol::Responses {
+                        endpoint: config.resolved_endpoint(),
+                        reasoning_summary_level: model.reasoning_summary_level,
+                    },
+                    context_window_tokens: model.context_window_tokens,
+                    input_token_limit: model
+                        .input_token_limit
+                        .unwrap_or(model.context_window_tokens),
+                    retained_user_tokens: model.retained_user_tokens,
+                    reasoning_levels: model.reasoning_levels.clone(),
+                })
+                .collect(),
+            Self::Anthropic(config) => config.resolved_profiles(provider),
+        }
+    }
+}
+
+/// Shared catalog deserialization keeps strict-schema errors at their provider
+/// location even though the protocol discriminator is decoded manually.
+pub fn deserialize_provider_catalog<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, ProviderConfig>, D::Error> {
+    use serde::de::Error as _;
+    BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(key, value)| {
+            serde_json::from_value(value)
+                .map(|config| (key.clone(), config))
+                .map_err(|error| D::Error::custom(format!("providers.{key}: {error}")))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+pub enum ProfileProtocol {
+    Responses {
+        endpoint: ProviderEndpoint,
+        reasoning_summary_level: ReasoningSummaryLevel,
+    },
+    Anthropic {
+        endpoint: AnthropicEndpoint,
+        model: AnthropicModelConfig,
+    },
+}
+impl ProfileProtocol {
+    pub fn replay_protocol(&self) -> zevria_model::ReplayProtocol {
+        match self {
+            Self::Responses { .. } => zevria_model::ReplayProtocol::Responses,
+            Self::Anthropic { .. } => zevria_model::ReplayProtocol::Anthropic,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        self.replay_protocol().as_str()
+    }
+}
+impl ResolvedModelProfile {
+    pub fn responses_endpoint(&self) -> anyhow::Result<&ProviderEndpoint> {
+        match &self.protocol {
+            ProfileProtocol::Responses { endpoint, .. } => Ok(endpoint),
+            _ => anyhow::bail!(
+                "profile {} is not an openai.responses profile",
+                self.profile
+            ),
+        }
+    }
+    pub fn responses_endpoint_mut(&mut self) -> &mut ProviderEndpoint {
+        match &mut self.protocol {
+            ProfileProtocol::Responses { endpoint, .. } => endpoint,
+            _ => panic!("expected a Responses profile"),
+        }
+    }
+    pub fn session_id_header(&self) -> Option<&str> {
+        match &self.protocol {
+            ProfileProtocol::Responses { endpoint, .. } => endpoint.session_id_header.as_deref(),
+            ProfileProtocol::Anthropic { endpoint, .. } => endpoint.session_id_header.as_deref(),
+        }
+    }
+    pub fn redacted_base_url(&self) -> String {
+        match &self.protocol {
+            ProfileProtocol::Responses { endpoint, .. } => endpoint.redacted_base_url(),
+            ProfileProtocol::Anthropic { endpoint, .. } => endpoint.redacted_base_url(),
         }
     }
 }
@@ -438,6 +623,9 @@ pub(crate) fn parse_session_id_header(
     if matches!(
         name.as_str(),
         "authorization"
+            | "x-api-key"
+            | "anthropic-version"
+            | "anthropic-beta"
             | "proxy-authorization"
             | "host"
             | "accept"
@@ -505,12 +693,11 @@ impl fmt::Debug for ProviderEndpoint {
 #[derive(Debug, Clone)]
 pub struct ResolvedModelProfile {
     pub profile: ModelProfileRef,
-    pub endpoint: ProviderEndpoint,
+    pub protocol: ProfileProtocol,
     pub context_window_tokens: u64,
     pub input_token_limit: u64,
     pub retained_user_tokens: u64,
     pub reasoning_levels: Vec<ReasoningLevel>,
-    pub reasoning_summary_level: ReasoningSummaryLevel,
 }
 
 impl ResolvedModelProfile {
@@ -567,13 +754,8 @@ impl ModelRouting {
                     display_candidates(&available)
                 );
             };
-            let Some(model) = provider.models.get(&assignment.model) else {
-                let available = provider
-                    .models
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
+            let Some(reasoning_levels) = provider.reasoning_levels(&assignment.model) else {
+                let available = provider.model_names().join(", ");
                 anyhow::bail!(
                     "modes.{} references unknown model {:?} for provider {:?}; available models: {}",
                     role.name(),
@@ -583,13 +765,12 @@ impl ModelRouting {
                 );
             };
             anyhow::ensure!(
-                model.reasoning_levels.contains(&assignment.reasoning_level),
+                reasoning_levels.contains(&assignment.reasoning_level),
                 "modes.{}.reasoning_level {} is unsupported for {}; supported reasoning_levels: {}",
                 role.name(),
                 assignment.reasoning_level,
                 assignment.profile_ref(),
-                model
-                    .reasoning_levels
+                reasoning_levels
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
@@ -602,22 +783,8 @@ impl ModelRouting {
         })?;
         let mut catalog = BTreeMap::new();
         for (provider_key, provider) in providers {
-            for (model_key, model) in &provider.models {
-                let profile = ModelProfileRef::new(provider_key, model_key);
-                catalog.insert(
-                    profile.clone(),
-                    ResolvedModelProfile {
-                        profile,
-                        endpoint: provider.resolved_endpoint(),
-                        context_window_tokens: model.context_window_tokens,
-                        input_token_limit: model
-                            .input_token_limit
-                            .unwrap_or(model.context_window_tokens),
-                        retained_user_tokens: model.retained_user_tokens,
-                        reasoning_levels: model.reasoning_levels.clone(),
-                        reasoning_summary_level: model.reasoning_summary_level.clone(),
-                    },
-                );
+            for profile in provider.resolved_profiles(provider_key) {
+                catalog.insert(profile.profile.clone(), profile);
             }
         }
         Ok(Self { routes, catalog })
@@ -695,6 +862,17 @@ fn display_candidates(candidates: &str) -> &str {
 mod tests {
     use super::*;
     use serde_json::json;
+    fn resolve(
+        providers: &BTreeMap<String, ResponsesProviderConfig>,
+        modes: &ModeAssignments,
+        percent: u64,
+    ) -> anyhow::Result<ModelRouting> {
+        let providers = providers
+            .iter()
+            .map(|(key, value)| (key.clone(), ProviderConfig::Responses(value.clone())))
+            .collect();
+        ModelRouting::resolve(&providers, modes, percent)
+    }
 
     fn model(window: u64) -> ModelConfig {
         ModelConfig {
@@ -710,8 +888,8 @@ mod tests {
         }
     }
 
-    fn provider(base_url: &str, key: &str) -> ProviderConfig {
-        ProviderConfig {
+    fn provider(base_url: &str, key: &str) -> ResponsesProviderConfig {
+        ResponsesProviderConfig {
             base_url: base_url.to_string(),
             api_key: LiteralApiKey::new(key),
             supports_websockets: true,
@@ -775,7 +953,7 @@ mod tests {
             ("gateway".to_string(), gateway),
         ]);
 
-        let routing = ModelRouting::resolve(&providers, &modes(), 90).expect("valid routing");
+        let routing = resolve(&providers, &modes(), 90).expect("valid routing");
         assert_eq!(
             routing.for_role(ModelRole::Build).profile.model,
             "gpt-5.6-sol"
@@ -791,7 +969,8 @@ mod tests {
         assert!(
             !routing
                 .for_role(ModelRole::Plan)
-                .endpoint
+                .responses_endpoint()
+                .unwrap()
                 .supports_websockets
         );
     }
@@ -801,10 +980,10 @@ mod tests {
         let mut config = provider("https://example.test/responses", "key");
         let mut value = serde_json::to_value(&config).unwrap();
         value.as_object_mut().unwrap().remove("network");
-        let omitted: ProviderConfig = serde_json::from_value(value.clone()).unwrap();
+        let omitted: ResponsesProviderConfig = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(omitted.network, NetworkConfig::default());
         value["network"] = json!({"response_idle_timeout_seconds":600});
-        let partial: ProviderConfig = serde_json::from_value(value).unwrap();
+        let partial: ResponsesProviderConfig = serde_json::from_value(value).unwrap();
         assert_eq!(partial.network.stall_warning_seconds, 30);
         assert_eq!(partial.network.response_idle_timeout_seconds, 600);
         for field in [
@@ -843,7 +1022,7 @@ mod tests {
             assert!(serde_json::from_value::<NetworkConfig>(invalid).is_err());
         }
         config.network = partial.network;
-        let routing = ModelRouting::resolve(
+        let routing = resolve(
             &BTreeMap::from([
                 ("openai".into(), config.clone()),
                 ("gateway".into(), config.clone()),
@@ -853,11 +1032,15 @@ mod tests {
         )
         .unwrap();
         for role in ModelRole::ALL {
-            assert_eq!(routing.for_role(role).endpoint.network, config.network);
+            assert_eq!(
+                routing.for_role(role).responses_endpoint().unwrap().network,
+                config.network
+            );
         }
         for profile in routing.catalog.values() {
             assert_eq!(
-                profile.endpoint.network, config.network,
+                profile.responses_endpoint().unwrap().network,
+                config.network,
                 "model switches select the same provider-owned policy"
             );
         }
@@ -873,10 +1056,14 @@ mod tests {
             ("openai".to_string(), enabled.clone()),
             ("gateway".to_string(), enabled.clone()),
         ]);
-        let routing = ModelRouting::resolve(&providers, &modes(), 90).unwrap();
+        let routing = resolve(&providers, &modes(), 90).unwrap();
         for role in ModelRole::ALL {
             assert_eq!(
-                routing.for_role(role).endpoint.web_search,
+                routing
+                    .for_role(role)
+                    .responses_endpoint()
+                    .unwrap()
+                    .web_search,
                 enabled.web_search
             );
         }
@@ -906,7 +1093,7 @@ mod tests {
             explore: assignment("b"),
             builder: assignment("a"),
         };
-        ModelRouting::resolve(&providers, &modes, 90).expect("same model ID is provider-scoped");
+        resolve(&providers, &modes, 90).expect("same model ID is provider-scoped");
     }
 
     #[test]
@@ -957,7 +1144,7 @@ mod tests {
 
     #[test]
     fn optional_provider_tables_keep_behavioral_defaults() {
-        let parsed: ProviderConfig = toml::from_str(
+        let parsed: ResponsesProviderConfig = toml::from_str(
             r#"
 base_url = "https://example.test/v1/responses"
 api_key = "secret"
@@ -992,28 +1179,37 @@ reasoning_summary_level = "detailed"
             ),
             ("gateway".to_string(), gateway.clone()),
         ]);
-        let routing = ModelRouting::resolve(&providers, &modes(), 90).expect("custom header");
+        let routing = resolve(&providers, &modes(), 90).expect("custom header");
         assert_eq!(
             routing
                 .for_role(ModelRole::Build)
-                .endpoint
+                .responses_endpoint()
+                .unwrap()
                 .session_id_header,
             None
         );
         assert_eq!(
             routing
                 .for_role(ModelRole::Plan)
-                .endpoint
+                .responses_endpoint()
+                .unwrap()
                 .session_id_header
                 .as_deref(),
             Some("X-Conversation-ID")
         );
-        let restored: ProviderConfig = toml::from_str(&toml::to_string(&gateway).unwrap()).unwrap();
+        let restored: ResponsesProviderConfig =
+            toml::from_str(&toml::to_string(&gateway).unwrap()).unwrap();
         assert_eq!(restored.session_id_header, gateway.session_id_header);
         assert!(format!("{gateway:?}").contains("X-Conversation-ID"));
         assert!(
-            format!("{:?}", routing.for_role(ModelRole::Plan).endpoint)
-                .contains("X-Conversation-ID")
+            format!(
+                "{:?}",
+                routing
+                    .for_role(ModelRole::Plan)
+                    .responses_endpoint()
+                    .unwrap()
+            )
+            .contains("X-Conversation-ID")
         );
         for name in [
             "x-opencode-session",
@@ -1092,7 +1288,7 @@ reasoning_summary_level = "detailed"
             ),
             ("unused".to_string(), invalid),
         ]);
-        let error = ModelRouting::resolve(&providers, &modes(), 90).unwrap_err();
+        let error = resolve(&providers, &modes(), 90).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1103,14 +1299,13 @@ reasoning_summary_level = "detailed"
     #[test]
     fn validation_rejects_catalog_and_assignment_errors() {
         let empty = BTreeMap::new();
-        assert!(ModelRouting::resolve(&empty, &modes(), 90).is_err());
+        assert!(resolve(&empty, &modes(), 90).is_err());
 
         let mut providers = BTreeMap::from([(
             "openai".to_string(),
             provider("https://example.test/responses", "key"),
         )]);
-        let error = ModelRouting::resolve(&providers, &modes(), 90)
-            .expect_err("dangling provider must fail");
+        let error = resolve(&providers, &modes(), 90).expect_err("dangling provider must fail");
         assert!(error.to_string().contains("modes.plan"));
         assert!(error.to_string().contains("openai"));
 
@@ -1119,8 +1314,7 @@ reasoning_summary_level = "detailed"
             .expect("provider")
             .models
             .clear();
-        let error = ModelRouting::resolve(&providers, &modes(), 90)
-            .expect_err("empty model catalog must fail");
+        let error = resolve(&providers, &modes(), 90).expect_err("empty model catalog must fail");
         assert!(error.to_string().contains("providers.openai.models"));
     }
 
@@ -1136,7 +1330,7 @@ reasoning_summary_level = "detailed"
                 provider("https://gateway.test/responses", "key"),
             ),
         ]);
-        assert!(ModelRouting::resolve(&providers, &modes(), 90).is_err());
+        assert!(resolve(&providers, &modes(), 90).is_err());
 
         let openai = providers.get_mut("openai").expect("provider");
         openai.base_url = "https://example.test/responses".to_string();
@@ -1145,7 +1339,7 @@ reasoning_summary_level = "detailed"
             .get_mut("gpt-5.6-sol")
             .expect("model")
             .context_window_tokens = 0;
-        assert!(ModelRouting::resolve(&providers, &modes(), 90).is_err());
+        assert!(resolve(&providers, &modes(), 90).is_err());
 
         let openai = providers.get_mut("openai").expect("provider");
         openai
@@ -1158,7 +1352,7 @@ reasoning_summary_level = "detailed"
             .get_mut("gpt-5.6-sol")
             .expect("model")
             .input_token_limit = Some(0);
-        assert!(ModelRouting::resolve(&providers, &modes(), 90).is_err());
+        assert!(resolve(&providers, &modes(), 90).is_err());
 
         let openai = providers.get_mut("openai").expect("provider");
         openai
@@ -1166,7 +1360,7 @@ reasoning_summary_level = "detailed"
             .get_mut("gpt-5.6-sol")
             .expect("model")
             .input_token_limit = Some(101);
-        assert!(ModelRouting::resolve(&providers, &modes(), 90).is_err());
+        assert!(resolve(&providers, &modes(), 90).is_err());
 
         let openai = providers.get_mut("openai").expect("provider");
         openai
@@ -1179,7 +1373,7 @@ reasoning_summary_level = "detailed"
             .get_mut("gpt-5.6-sol")
             .expect("model")
             .retained_user_tokens = 91;
-        assert!(ModelRouting::resolve(&providers, &modes(), 90).is_err());
+        assert!(resolve(&providers, &modes(), 90).is_err());
 
         let openai = providers.get_mut("openai").expect("provider");
         openai
@@ -1195,8 +1389,7 @@ reasoning_summary_level = "detailed"
         openai
             .additional_params
             .insert("model".to_string(), json!("override"));
-        let error =
-            ModelRouting::resolve(&providers, &modes(), 90).expect_err("reserved field must fail");
+        let error = resolve(&providers, &modes(), 90).expect_err("reserved field must fail");
         assert!(
             error
                 .to_string()
@@ -1209,8 +1402,7 @@ reasoning_summary_level = "detailed"
             "include".to_string(),
             json!(["reasoning.encrypted_content"]),
         );
-        let error = ModelRouting::resolve(&providers, &modes(), 90)
-            .expect_err("Zevria-owned include must fail");
+        let error = resolve(&providers, &modes(), 90).expect_err("Zevria-owned include must fail");
         assert!(
             error
                 .to_string()
@@ -1220,7 +1412,7 @@ reasoning_summary_level = "detailed"
 
     #[test]
     fn strict_model_and_provider_shapes_reject_missing_or_unknown_fields() {
-        let missing = toml::from_str::<ProviderConfig>(
+        let missing = toml::from_str::<ResponsesProviderConfig>(
             "base_url = \"https://example.test/responses\"\napi_key = \"key\"\nsupports_websockets = true",
         )
         .expect_err("models is required");

@@ -28,6 +28,9 @@ build = { provider = "openai", model = "gpt-6-astra", reasoning_level = "max" }
 review = { provider = "openai", model = "gpt-6-sol", reasoning_level = "max" }
 explore = { provider = "openai", model = "gpt-6-luna", reasoning_level = "max" }
 builder = { provider = "openai", model = "gpt-6-luna", reasoning_level = "max" }
+# Native Claude alternative (configure the anthropic catalog in models.jsonc):
+# build = { provider = "anthropic", model = "claude-opus-5-5", reasoning_level = "high" }
+# plan = { provider = "anthropic", model = "claude-opus-5-5", reasoning_level = "high" }
 
 [session]
 # Override only product identity and engineering practice (docs/instructions/system-prompt.md).
@@ -113,6 +116,7 @@ pub(crate) const DEFAULT_MODELS: &str = r#"// Zevria model configuration. JSON w
 {
   // "providers": {
   //   "openai": {
+  //     "protocol": "openai.responses", // optional; this is the default
   //     // Exact full Responses endpoint; HTTP/WebSocket pairing changes only scheme.
   //     "base_url": "https://api.openai.com/v1/responses",
   //     // Literal credential only; no environment interpolation.
@@ -167,6 +171,23 @@ pub(crate) const DEFAULT_MODELS: &str = r#"// Zevria model configuration. JSON w
   //         "retained_user_tokens": 20000,
   //         "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
   //         "reasoning_summary_level": "detailed"
+  //       }
+  //     }
+  //   },
+  //   "anthropic": {
+  //     "protocol": "anthropic.messages",
+  //     "base_url": "https://api.anthropic.com/v1/messages",
+  //     "api_key": "replace-with-api-key",
+  //     // "auth": "bearer", // optional gateway/OAuth alternative to x-api-key
+  //     // "compatibility": { "strict_thinking_binding": true },
+  //     "models": {
+  //       "claude-opus-5-5": {
+  //         "context_window_tokens": 1000000,
+  //         "max_output_tokens": 64000,
+  //         "retained_user_tokens": 20000,
+  //         "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
+  //         "thinking_display": "summarized",
+  //         "refusal_fallback": "default"
   //       }
   //     }
   //   }
@@ -349,6 +370,7 @@ impl Config {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModelsFile {
+    #[serde(deserialize_with = "zevria_provider::deserialize_provider_catalog")]
     providers: BTreeMap<String, ProviderConfig>,
 }
 

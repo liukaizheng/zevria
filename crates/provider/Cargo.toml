@@ -9,6 +9,7 @@ cache-diagnostics = ["dep:libc"]
 
 [dependencies]
 zevria-responses = { workspace = true }
+zevria-anthropic = { workspace = true }
 zevria-content = { workspace = true }
 zevria-foundation = { workspace = true }
 zevria-instructions = { workspace = true }

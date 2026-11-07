@@ -11,4 +11,6 @@ pub use web_search_config::{
 };
 
 #[cfg(test)]
+mod anthropic_tests;
+#[cfg(test)]
 mod tests;

@@ -23,6 +23,22 @@ use crate::{
 
 /// Provider tag used by OpenAI Responses transcript records.
 pub const OPENAI_RESPONSES_PROVIDER: &str = "openai.responses";
+pub const ANTHROPIC_MESSAGES_PROVIDER: &str = "anthropic.messages";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayProtocol {
+    Responses,
+    Anthropic,
+}
+
+impl ReplayProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Responses => OPENAI_RESPONSES_PROVIDER,
+            Self::Anthropic => ANTHROPIC_MESSAGES_PROVIDER,
+        }
+    }
+}
 /// Current schema version for [`ProviderReplay`].
 pub const PROVIDER_REPLAY_VERSION: u32 = 1;
 
@@ -38,6 +54,8 @@ pub struct ProviderReplay {
     pub version: u32,
     pub source_profile: ModelProfileRef,
     pub items: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_binding: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -112,13 +130,71 @@ impl ProviderReplay {
             version: PROVIDER_REPLAY_VERSION,
             source_profile,
             items,
+            prefix_binding: None,
         }
+    }
+
+    pub fn anthropic_messages(
+        source_profile: ModelProfileRef,
+        blocks: Vec<serde_json::Value>,
+        prefix_binding: Option<String>,
+    ) -> Self {
+        Self {
+            provider: ANTHROPIC_MESSAGES_PROVIDER.into(),
+            version: PROVIDER_REPLAY_VERSION,
+            source_profile,
+            items: blocks,
+            prefix_binding,
+        }
+    }
+
+    pub fn protocol(&self) -> Option<ReplayProtocol> {
+        match self.provider.as_str() {
+            OPENAI_RESPONSES_PROVIDER => Some(ReplayProtocol::Responses),
+            ANTHROPIC_MESSAGES_PROVIDER => Some(ReplayProtocol::Anthropic),
+            _ => None,
+        }
+    }
+
+    /// Ordered native calls and their aliases, including self-contained server
+    /// calls (external=false). Compaction and adapters share these correlations.
+    pub fn tool_call_handles(&self) -> Vec<(std::collections::BTreeSet<String>, bool)> {
+        self.items
+            .iter()
+            .filter_map(|item| {
+                let kind = item["type"].as_str()?;
+                let (keys, external): (&[&str], bool) = match self.protocol()? {
+                    ReplayProtocol::Responses if kind.ends_with("_call") => (
+                        &["id", "call_id"],
+                        matches!(kind, "function_call" | "custom_tool_call"),
+                    ),
+                    ReplayProtocol::Anthropic if kind == "tool_use" => (&["id"], true),
+                    _ => return None,
+                };
+                let handles = keys
+                    .iter()
+                    .filter_map(|key| item[*key].as_str())
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .collect::<std::collections::BTreeSet<_>>();
+                (!handles.is_empty() || external).then_some((handles, external))
+            })
+            .collect()
     }
 
     /// Validate the envelope before it is trusted as provider input.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.provider != OPENAI_RESPONSES_PROVIDER {
+        if self.protocol().is_none() {
             return Err("unknown_provider");
+        }
+        if let Some(binding) = &self.prefix_binding
+            && (self.protocol() != Some(ReplayProtocol::Anthropic)
+                || binding.len() != 64
+                || !binding
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        {
+            return Err("invalid_prefix_binding");
         }
         if self.version != PROVIDER_REPLAY_VERSION {
             return Err("unsupported_version");
@@ -139,17 +215,24 @@ impl ProviderReplay {
 
     /// Native OpenAI items, when this is a valid current envelope.
     pub fn openai_responses_items(&self) -> Option<&[serde_json::Value]> {
-        self.validate().ok().map(|()| self.items.as_slice())
+        self.validate()
+            .ok()
+            .filter(|()| self.protocol() == Some(ReplayProtocol::Responses))
+            .map(|()| self.items.as_slice())
     }
 
     /// Native items are safe only for the exact configured source profile.
     pub fn native_items_for(
         &self,
         target_profile: &ModelProfileRef,
+        protocol: ReplayProtocol,
     ) -> anyhow::Result<Option<&[serde_json::Value]>> {
         self.validate()
             .map_err(|reason| anyhow::anyhow!("invalid provider replay envelope: {reason}"))?;
-        Ok((&self.source_profile == target_profile).then_some(self.items.as_slice()))
+        Ok(
+            (&self.source_profile == target_profile && self.protocol() == Some(protocol))
+                .then_some(self.items.as_slice()),
+        )
     }
 
     /// Derive a deterministic provider-neutral projection for a foreign
@@ -160,6 +243,9 @@ impl ProviderReplay {
         self.validate()
             .map_err(|reason| anyhow::anyhow!("invalid provider replay envelope: {reason}"))?;
 
+        if self.protocol() == Some(ReplayProtocol::Anthropic) {
+            return self.anthropic_portable_projection();
+        }
         let mut content = Vec::new();
         let mut tool_correlations = BTreeMap::new();
         for (index, item) in self.items.iter().cloned().enumerate() {
@@ -234,6 +320,19 @@ impl ProviderReplay {
         self.validate()
             .map_err(|reason| anyhow::anyhow!("invalid provider replay envelope: {reason}"))?;
 
+        if self.protocol() == Some(ReplayProtocol::Anthropic) {
+            let mut content = Vec::new();
+            for (index, item) in self.items.iter().enumerate() {
+                let block: crate::anthropic::ContentBlock = serde_json::from_value(item.clone())
+                    .with_context(|| format!("invalid Anthropic content block at index {index}"))?;
+                content.extend(block.canonical(item.clone()));
+            }
+            anyhow::ensure!(
+                !content.is_empty(),
+                "provider replay contained no assistant content"
+            );
+            return Ok(Message::from(content));
+        }
         let mut content = Vec::new();
         for (index, item) in self.items.iter().cloned().enumerate() {
             let output: Output = serde_json::from_value(item).with_context(|| {
@@ -298,6 +397,37 @@ impl ProviderReplay {
         Ok(Message::from(content))
     }
 
+    fn anthropic_portable_projection(&self) -> anyhow::Result<PortableReplayProjection> {
+        use crate::anthropic::ContentBlock;
+        let mut content = Vec::new();
+        let mut tool_correlations = BTreeMap::new();
+        for (index, item) in self.items.iter().enumerate() {
+            let block: ContentBlock = serde_json::from_value(item.clone())
+                .with_context(|| format!("invalid Anthropic content block at index {index}"))?;
+            match block {
+                ContentBlock::Text { text, .. } => content.push(AssistantContent::text(text)),
+                ContentBlock::ToolUse { id, name, input } => {
+                    let portable = portable_tool_call_id(
+                        &self.source_profile,
+                        &id,
+                        name.as_ref(),
+                        &serde_json::to_string(&input)?,
+                    );
+                    tool_correlations.insert(id, portable.clone());
+                    content.push(AssistantContent::ToolCall(ToolCall::new(
+                        CallId::from_wire(portable),
+                        ToolFunction::new(name, serde_json::Value::Object(input)),
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(PortableReplayProjection {
+            message: (!content.is_empty()).then(|| Message::from(content)),
+            tool_correlations,
+        })
+    }
+
     /// Estimate a replay-only ledger. Known Responses output shapes are
     /// reduced to visible payload; unknown future shapes fall back to their
     /// opaque-safe serialized representation so capacity remains
@@ -309,7 +439,11 @@ impl ProviderReplay {
             0,
         );
         let payload_tokens = self.items.iter().fold(0_u64, |total, item| {
-            let tokens = replay_item_payload_bytes(item).map_or_else(
+            let payload = match self.protocol() {
+                Some(ReplayProtocol::Anthropic) => anthropic_replay_item_payload_bytes(item),
+                _ => replay_item_payload_bytes(item),
+            };
+            let tokens = payload.map_or_else(
                 || {
                     let sanitized = opaque_safe_provider_json(item);
                     crate::compaction::estimate_responses_input_tokens(
@@ -345,6 +479,22 @@ fn visible_text_bytes(value: Option<&serde_json::Value>) -> usize {
     value
         .and_then(serde_json::Value::as_str)
         .map_or(0, str::len)
+}
+
+fn anthropic_replay_item_payload_bytes(item: &serde_json::Value) -> Option<usize> {
+    let object = item.as_object()?;
+    match object.get("type")?.as_str()? {
+        "text" => Some(visible_text_bytes(object.get("text"))),
+        "thinking" => {
+            Some(visible_text_bytes(object.get("thinking")).saturating_add("[signature]".len()))
+        }
+        "redacted_thinking" => Some("[encrypted reasoning]".len()),
+        "tool_use" => Some(
+            visible_text_bytes(object.get("name"))
+                .saturating_add(object.get("input").map_or(0, semantic_argument_bytes)),
+        ),
+        _ => None,
+    }
 }
 
 fn replay_item_payload_bytes(item: &serde_json::Value) -> Option<usize> {

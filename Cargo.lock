@@ -5321,6 +5321,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zevria-anthropic"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "rig-core",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "zevria-content",
+ "zevria-foundation",
+ "zevria-instructions",
+ "zevria-model",
+]
+
+[[package]]
 name = "zevria-app"
 version = "0.1.1"
 dependencies = [
@@ -5499,6 +5514,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zevria-anthropic",
  "zevria-content",
  "zevria-core",
  "zevria-foundation",

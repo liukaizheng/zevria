@@ -13,6 +13,7 @@ zevria-tui-input = { path = "crates/tui-input" }
 zevria-tui-widgets = { path = "crates/tui-widgets" }
 zevria-theme = { path = "crates/theme" }
 zevria-responses = { path = "crates/responses" }
+zevria-anthropic = { path = "crates/anthropic" }
 zevria-session-api = { path = "crates/session-api" }
 zevria-transcript = { path = "crates/transcript" }
 zevria-model = { path = "crates/model" }

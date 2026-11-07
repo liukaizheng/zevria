@@ -96,7 +96,7 @@ fn production_domain_graph_has_only_approved_edges() {
         }
     }
     let lower = ["foundation", "content", "instructions", "model", "workflow"];
-    let allowed: [(&str, Vec<&str>); 19] = [
+    let allowed: [(&str, Vec<&str>); 20] = [
         ("foundation", vec![]),
         ("content", vec!["foundation"]),
         ("instructions", vec!["foundation", "content"]),
@@ -113,8 +113,12 @@ fn production_domain_graph_has_only_approved_edges() {
             vec!["foundation", "content", "instructions", "model"],
         ),
         (
+            "anthropic",
+            vec!["foundation", "content", "instructions", "model"],
+        ),
+        (
             "provider",
-            [lower.as_slice(), &["responses", "session-api"]].concat(),
+            [lower.as_slice(), &["responses", "anthropic", "session-api"]].concat(),
         ),
         ("tools", [lower.as_slice(), &["session-api"]].concat()),
         (
@@ -226,6 +230,7 @@ fn production_domain_graph_has_only_approved_edges() {
     assert!(!reaches(&graph, "zevria-session-api", "zevria-transcript"));
     for forbidden in ["core", "session-api", "transcript", "provider", "app"] {
         assert!(!reaches(&graph, "zevria-responses", &package(forbidden)));
+        assert!(!reaches(&graph, "zevria-anthropic", &package(forbidden)));
     }
     for frontend in ["tui", "tui-input", "tui-widgets"] {
         assert!(!reaches(&graph, "zevria-app", &package(frontend)));

@@ -1,13 +1,16 @@
 //! Model provider adapters for Zevria.
 //!
-//! The crate includes an OpenAI Responses and Responses-compatible gateway
-//! adapter over WebSocket and HTTP/SSE.
+//! Heterogeneous profile routing over OpenAI Responses (WebSocket/HTTP/SSE)
+//! and native Anthropic Messages (HTTP/SSE), including compatible gateways.
 
 mod accumulator;
+mod anthropic;
+pub use anthropic::AnthropicProvider;
 #[cfg(feature = "cache-diagnostics")]
 mod cache_diagnostics;
 mod config;
 mod connection;
+mod http;
 mod prompt_cache;
 mod protocol;
 use zevria_responses::replay;
@@ -35,12 +38,14 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 #[cfg(feature = "cache-diagnostics")]
 pub use cache_diagnostics::CacheDiagnosticContext;
 pub use config::{
+    AnthropicAuth, AnthropicEndpoint, AnthropicModelConfig, AnthropicProviderConfig,
     InputTokenCountConfig, LiteralApiKey, ModeAssignments, ModelAssignment, ModelConfig,
-    ModelRouting, NetworkConfig, ProviderConfig, ProviderEndpoint, RemoteCompactionConfig,
-    ResolvedModelProfile, ResponsesCompatibilityConfig,
+    ModelRouting, NetworkConfig, ProfileProtocol, ProviderConfig, ProviderEndpoint,
+    RemoteCompactionConfig, ResolvedModelProfile, ResponsesCompatibilityConfig,
+    ResponsesProviderConfig, deserialize_provider_catalog,
 };
 pub use connection::OpenAiProvider;
-pub use router::{ResponsesRouter, ResponsesRouterFactory};
+pub use router::{ProviderRouter, ProviderRouterFactory};
 
 #[cfg(test)]
 use accumulator::*;

@@ -98,6 +98,13 @@ pub fn replay_safe_prefixes(input: &[ModelRequestItem<'_>]) -> anyhow::Result<Ve
     for (index, item) in input.iter().enumerate() {
         if let Some(replay) = item.replay_ref() {
             replay.portable_projection()?;
+            if replay.protocol() == Some(crate::ReplayProtocol::Anthropic) {
+                for (handles, external) in replay.tool_call_handles() {
+                    calls.call(handles, (index, external))?;
+                }
+                continue;
+            }
+            let mut native_calls = replay.tool_call_handles().into_iter();
             for native in &replay.items {
                 let kind = native
                     .get("type")
@@ -120,10 +127,8 @@ pub fn replay_safe_prefixes(input: &[ModelRequestItem<'_>]) -> anyhow::Result<Ve
                     );
                     result(&mut calls, handles, index)?;
                 } else if kind.ends_with("_call") && !handles.is_empty() {
-                    calls.call(
-                        handles,
-                        (index, matches!(kind, "function_call" | "custom_tool_call")),
-                    )?;
+                    let (handles, external) = native_calls.next().expect("native call handles");
+                    calls.call(handles, (index, external))?;
                 }
             }
         } else if let Some(message) = item.message_ref() {

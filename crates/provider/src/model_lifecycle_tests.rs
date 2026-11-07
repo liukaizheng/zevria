@@ -5,9 +5,9 @@ async fn explicit_a_b_a_switches_send_full_websocket_input_and_clear_all_continu
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/v1/responses", listener.local_addr().unwrap());
     let mut a = profile("A", &url);
-    a.endpoint.supports_websockets = true;
+    a.responses_endpoint_mut().supports_websockets = true;
     let mut b = profile("B", &url);
-    b.endpoint.supports_websockets = true;
+    b.responses_endpoint_mut().supports_websockets = true;
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut a = accept_async(stream).await.unwrap();
@@ -259,7 +259,7 @@ async fn cancellation_racing_model_publication_is_terminal_without_hiding_commit
     for scope in [Scope::SessionOnly, Scope::SessionAndDefault] {
         for kind in ["catalog", "preview", "changed"] {
             let a = profile("A", "http://127.0.0.1:1/v1/responses");
-            let b = profile("B", &a.endpoint.base_url);
+            let b = profile("B", &a.responses_endpoint().unwrap().base_url);
             let settings = Arc::new(Settings::default());
             let history = if kind == "preview" {
                 opaque_history(&a)
@@ -538,7 +538,7 @@ reasoning_summary_level = "detailed"
     let routing =
         ModelRouting::resolve(&BTreeMap::from([("p".into(), provider)]), &modes, 90).unwrap();
     let tools = ToolServer::new().run();
-    let mut root = ResponsesRouter::root(&routing, "", tools.clone(), "root").unwrap();
+    let mut root = ProviderRouter::root(&routing, "", tools.clone(), "root").unwrap();
     assert_eq!(root.model_catalog().len(), 2);
     assert!(root.requires_portable_compaction());
     assert_eq!(root.initialized_profile_count(), 0);
@@ -561,7 +561,7 @@ reasoning_summary_level = "detailed"
                 .contains("not available in this session router")
         );
         assert_eq!(root.initialized_profile_count(), 0);
-        let child = ResponsesRouterFactory::new(
+        let child = ProviderRouterFactory::new(
             role,
             routing.for_role(role).clone(),
             routing.selection_for_role(role).reasoning_level,
