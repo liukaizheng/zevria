@@ -54,8 +54,7 @@ const SESSION_MODE_KEY: &str = "zevria_session_mode";
 // Retired envelopes: recognized only to reject unsupported complete or torn records.
 const INSTRUCTION_PREFIX_KEY: &str = "zevria_instruction_prefix";
 const DIRECTIVE_KEY: &str = "zevria_directive";
-const WEB_SEARCH_KEY: &str = "zevria_web_search_attempt";
-const DISPLAY_ATTEMPT_KEY: &str = "zevria_display_attempt";
+const INCOMPLETE_RESPONSE_KEY: &str = "zevria_incomplete_response";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,8 +131,8 @@ impl<'de> Deserialize<'de> for UniqueEnvelope {
 /// Removed reserved sidecars are rejected before ordinary message decoding.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
-    /// Versioned display-only activity, flushed at model-call exit.
-    WebSearchAttempt(crate::WebSearchAttemptRecord),
+    /// Immutable display-only evidence of an abandoned response.
+    IncompleteResponse(crate::IncompleteResponse),
     /// Canonical current Build/Plan selections, only at the start of a root log.
     /// Never conversation content, model input, or response provenance.
     SessionModels(SessionModels),
@@ -148,10 +147,6 @@ pub enum TranscriptItem {
         request: zevria_foundation::RequestMetadata,
     },
     Message(Message),
-    AssistantMessage {
-        message: Message,
-        display_attempt_id: String,
-    },
     /// A provider-native replay plus its internally cached canonical message.
     /// The private cache prevents callers from constructing mismatched halves.
     ProviderMessage(ReplayBackedMessage),
@@ -185,7 +180,6 @@ pub enum TranscriptItem {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayBackedMessage {
     content: crate::ReplayMessage,
-    display_attempt_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -219,9 +213,9 @@ impl Serialize for TranscriptItem {
         }
 
         match self {
-            Self::WebSearchAttempt(attempt) => {
+            Self::IncompleteResponse(attempt) => {
                 attempt.validate().map_err(serde::ser::Error::custom)?;
-                serde_json::json!({WEB_SEARCH_KEY: attempt}).serialize(serializer)
+                serde_json::json!({INCOMPLETE_RESPONSE_KEY: attempt}).serialize(serializer)
             }
             Self::SessionMode(mode) => {
                 serde_json::json!({SESSION_MODE_KEY: {"version": 1, "selected": mode}})
@@ -267,23 +261,6 @@ impl Serialize for TranscriptItem {
                 }
                 message.serialize(serializer)
             }
-            Self::AssistantMessage {
-                message,
-                display_attempt_id,
-            } => {
-                if !matches!(message, Message::Assistant { .. }) {
-                    return Err(serde::ser::Error::custom(
-                        "display binding requires an assistant record",
-                    ));
-                }
-                crate::web_search::validate_display_id(display_attempt_id)
-                    .map_err(serde::ser::Error::custom)?;
-                message_with_sidecars(
-                    message,
-                    &[(DISPLAY_ATTEMPT_KEY, serde_json::json!(display_attempt_id))],
-                    serializer,
-                )
-            }
             Self::ProviderMessage(provider_message) => {
                 let mut record = serde_json::Map::new();
                 record.insert(
@@ -291,9 +268,6 @@ impl Serialize for TranscriptItem {
                     serde_json::to_value(provider_message.content.replay())
                         .map_err(serde::ser::Error::custom)?,
                 );
-                if let Some(id) = &provider_message.display_attempt_id {
-                    record.insert(DISPLAY_ATTEMPT_KEY.into(), serde_json::json!(id));
-                }
                 record.serialize(serializer)
             }
             Self::ToolResults {
@@ -385,8 +359,8 @@ impl<'de> Deserialize<'de> for TranscriptItem {
                             map.next_value::<zevria_instructions::RequestDirective>()?;
                         directive.validate().map_err(A::Error::custom)?;
                         serde_json::to_value(directive).map_err(A::Error::custom)?
-                    } else if key == WEB_SEARCH_KEY {
-                        let attempt = map.next_value::<crate::WebSearchAttemptRecord>()?;
+                    } else if key == INCOMPLETE_RESPONSE_KEY {
+                        let attempt = map.next_value::<crate::IncompleteResponse>()?;
                         attempt.validate().map_err(A::Error::custom)?;
                         serde_json::to_value(attempt).map_err(A::Error::custom)?
                     } else if matches!(
@@ -438,32 +412,16 @@ impl<'de> Deserialize<'de> for TranscriptItem {
             crate::UserPrompt::from_message(&message).map_err(D::Error::custom)?;
             return Ok(Self::RequestPrompt { message, request });
         }
-        let display_attempt_id = value
-            .as_object_mut()
-            .and_then(|object| object.remove(DISPLAY_ATTEMPT_KEY))
-            .map(|id| serde_json::from_value::<String>(id).map_err(D::Error::custom))
-            .transpose()?;
-        if let Some(id) = &display_attempt_id {
-            crate::web_search::validate_display_id(id).map_err(D::Error::custom)?;
-            if !value.get(PROVIDER_REPLAY_KEY).is_some()
-                && value.get("role").and_then(serde_json::Value::as_str) != Some("assistant")
-            {
-                return Err(D::Error::custom(
-                    "display binding requires an assistant record",
-                ));
-            }
-        }
-        if let Some(attempt) = value.get(WEB_SEARCH_KEY) {
+        if let Some(attempt) = value.get(INCOMPLETE_RESPONSE_KEY) {
             if value.as_object().is_none_or(|object| object.len() != 1) {
                 return Err(D::Error::custom(
-                    "web search attempt must be a standalone record",
+                    "incomplete response must be a standalone record",
                 ));
             }
-            let mut attempt: crate::WebSearchAttemptRecord =
+            let attempt: crate::IncompleteResponse =
                 serde_json::from_value(attempt.clone()).map_err(D::Error::custom)?;
             attempt.validate().map_err(D::Error::custom)?;
-            attempt.finish(crate::WebSearchAttemptOutcome::Interrupted);
-            return Ok(Self::WebSearchAttempt(attempt));
+            return Ok(Self::IncompleteResponse(attempt));
         }
         if value
             .as_object()
@@ -584,9 +542,7 @@ impl<'de> Deserialize<'de> for TranscriptItem {
                 .expect("checked provider replay key");
             let replay =
                 serde_json::from_value::<ProviderReplay>(envelope).map_err(D::Error::custom)?;
-            return Self::provider_message(replay)
-                .and_then(|item| item.with_display_attempt(display_attempt_id))
-                .map_err(D::Error::custom);
+            return Self::provider_message(replay).map_err(D::Error::custom);
         }
         if let Some(metadata) = value
             .as_object_mut()
@@ -629,9 +585,7 @@ impl<'de> Deserialize<'de> for TranscriptItem {
             if crate::prompt::message_has_images(&message) {
                 crate::UserPrompt::from_message(&message).map_err(D::Error::custom)?;
             }
-            return Self::Message(message)
-                .with_display_attempt(display_attempt_id)
-                .map_err(D::Error::custom);
+            return Ok(Self::Message(message));
         }
         serde_json::from_value::<ErrorRecord>(value)
             .map(|record| Self::Error {
@@ -643,21 +597,9 @@ impl<'de> Deserialize<'de> for TranscriptItem {
 
 impl From<MessageRecord> for TranscriptItem {
     fn from(record: MessageRecord) -> Self {
-        record.into_parts(
-            |message, display_attempt_id| match display_attempt_id {
-                Some(display_attempt_id) => Self::AssistantMessage {
-                    message,
-                    display_attempt_id,
-                },
-                None => Self::Message(message),
-            },
-            |content, display_attempt_id| {
-                Self::ProviderMessage(ReplayBackedMessage {
-                    content,
-                    display_attempt_id,
-                })
-            },
-        )
+        record.into_parts(Self::Message, |content| {
+            Self::ProviderMessage(ReplayBackedMessage { content })
+        })
     }
 }
 
@@ -666,40 +608,7 @@ impl TranscriptItem {
     pub fn provider_message(replay: ProviderReplay) -> anyhow::Result<Self> {
         Ok(Self::ProviderMessage(ReplayBackedMessage {
             content: crate::ReplayMessage::new(replay)?,
-            display_attempt_id: None,
         }))
-    }
-
-    pub fn display_attempt_id(&self) -> Option<&str> {
-        match self {
-            Self::ProviderMessage(item) => item.display_attempt_id.as_deref(),
-            Self::AssistantMessage {
-                display_attempt_id, ..
-            } => Some(display_attempt_id),
-            _ => None,
-        }
-    }
-
-    pub fn with_display_attempt(self, id: Option<String>) -> anyhow::Result<Self> {
-        let Some(id) = id else {
-            return Ok(self);
-        };
-        crate::web_search::validate_display_id(&id)?;
-        match self {
-            Self::ProviderMessage(mut item) => {
-                item.display_attempt_id = Some(id);
-                Ok(Self::ProviderMessage(item))
-            }
-            Self::Message(message @ Message::Assistant { .. })
-            | Self::AssistantMessage {
-                message: message @ Message::Assistant { .. },
-                ..
-            } => Ok(Self::AssistantMessage {
-                message,
-                display_attempt_id: id,
-            }),
-            _ => anyhow::bail!("display binding requires an assistant record"),
-        }
     }
 
     /// The ordinary Rig message represented by this item, if any.
@@ -707,7 +616,6 @@ impl TranscriptItem {
         match self {
             Self::Message(message)
             | Self::RequestPrompt { message, .. }
-            | Self::AssistantMessage { message, .. }
             | Self::ToolResults { message, .. } => Some(message),
             Self::SkillInvocation(invocation) => Some(invocation.model_message()),
             Self::ProviderMessage(provider_message) => Some(provider_message.content.message()),
@@ -718,7 +626,7 @@ impl TranscriptItem {
             | Self::Directive(_)
             | Self::RequestDirective(_)
             | Self::Compaction(_)
-            | Self::WebSearchAttempt(_)
+            | Self::IncompleteResponse(_)
             | Self::Error { .. } => None,
         }
     }
@@ -746,7 +654,6 @@ impl TranscriptItem {
             Self::ProviderMessage(provider_message) => Some(provider_message.content.replay()),
             Self::Message(_)
             | Self::RequestPrompt { .. }
-            | Self::AssistantMessage { .. }
             | Self::ToolResults { .. }
             | Self::SessionModels(_)
             | Self::SessionMode(_)
@@ -756,7 +663,7 @@ impl TranscriptItem {
             | Self::Plan(_)
             | Self::Ensemble(_)
             | Self::Compaction(_)
-            | Self::WebSearchAttempt(_)
+            | Self::IncompleteResponse(_)
             | Self::Error { .. } => None,
         }
     }
@@ -774,7 +681,6 @@ impl TranscriptItem {
             }
             Self::Message(message)
             | Self::RequestPrompt { message, .. }
-            | Self::AssistantMessage { message, .. }
             | Self::ToolResults { message, .. } => Some(ModelRequestItem::message(message)),
             Self::SkillInvocation(invocation) => {
                 Some(ModelRequestItem::message(invocation.model_message()))
@@ -784,7 +690,7 @@ impl TranscriptItem {
             Self::SessionModels(_)
             | Self::SessionMode(_)
             | Self::Compaction(_)
-            | Self::WebSearchAttempt(_)
+            | Self::IncompleteResponse(_)
             | Self::Error { .. } => None,
         }
     }
@@ -1421,27 +1327,6 @@ pub fn is_compaction_prompt_item(item: &TranscriptItem) -> bool {
         )
 }
 
-/// Elide only completed v1 presentations recoverable from a later exact-ID
-/// native replay. Plain assistant bindings have no native ledger to rebuild
-/// from, and unlinked checkpoints/retries must retain their readable evidence.
-/// Call only as part of the atomic commit of both records.
-pub fn compact_linked_attempts(items: &mut [TranscriptItem]) {
-    let mut linked = std::collections::HashSet::new();
-    for item in items.iter_mut().rev() {
-        if item.provider_replay().is_some()
-            && let Some(id) = item.display_attempt_id()
-        {
-            linked.insert(id.to_owned());
-        } else if let TranscriptItem::WebSearchAttempt(attempt) = item
-            && attempt.version == zevria_content::web_search::WEB_SEARCH_ATTEMPT_VERSION
-            && attempt.outcome == crate::WebSearchAttemptOutcome::Completed
-            && linked.contains(attempt.id.as_str())
-        {
-            attempt.compact_presentation();
-        }
-    }
-}
-
 /// One live conversation and the writer for its complete persisted sequence.
 ///
 /// The item list is the *single* in-memory representation of a session's
@@ -1680,7 +1565,10 @@ impl Conversation {
     /// any further pre-effect work starts.
     pub fn push_completed(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
         self.writer.ensure_writable()?;
-        match self.writer.append(&item) {
+        let result = self
+            .ensure_durable()
+            .and_then(|_| self.writer.append(&item));
+        match result {
             Ok(()) => {
                 self.items.push(item);
                 Ok(())
@@ -1691,16 +1579,6 @@ impl Conversation {
                 self.persistence_error = Some(format!("{error:#}"));
                 Err(error)
             }
-        }
-    }
-
-    /// Commit a display-linked response and compact its checkpoint in the same
-    /// rewrite. Ordinary completed records keep the cheaper append path.
-    pub fn push_completed_linked(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
-        if item.display_attempt_id().is_some() {
-            self.push_completed_batch(vec![item])
-        } else {
-            self.push_completed(item)
         }
     }
 
@@ -1716,7 +1594,6 @@ impl Conversation {
         }
         let mut replacement = self.items.clone();
         replacement.extend(new_items);
-        compact_linked_attempts(&mut replacement);
         let result = self
             .ensure_durable()
             .and_then(|_| self.writer.rewrite(&replacement));
@@ -1943,6 +1820,7 @@ pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {
     let mut lines = bounded_record_lines(std::io::BufReader::new(file))
         .enumerate()
         .peekable();
+    let mut incomplete_attempts = std::collections::HashSet::new();
     while let Some((index, line)) = lines.next() {
         let line = line?;
         let line = line.as_slice();
@@ -2032,10 +1910,21 @@ pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {
                     || key == DIRECTIVE_KEY
                     || key == REQUEST_METADATA_KEY
                     || key == REQUEST_DIRECTIVE_KEY
+                    || key == INCOMPLETE_RESPONSE_KEY
             })
         });
         match serde_json::from_slice::<TranscriptItem>(line) {
             Ok(item) => {
+                if let TranscriptItem::IncompleteResponse(record) = &item
+                    && !incomplete_attempts.insert(record.attempt_id.clone())
+                {
+                    outcome.diagnose(
+                        Some(index + 1),
+                        TranscriptDamage::IncompatibleLifecycle,
+                        "duplicate incomplete response attempt_id",
+                    );
+                    continue;
+                }
                 outcome.items.push(item);
                 outcome.source_lines.push(index + 1);
             }
@@ -2079,25 +1968,26 @@ pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {
     {
         outcome.diagnose(None, TranscriptDamage::IncompatibleLifecycle, error);
     }
-    if !outcome.blocked {
-        crate::replay::validate_web_search_replay(&outcome.items).map_err(|error| {
-            UnsupportedHistory::new(
-                path,
-                None,
-                "compacted web search attempts with a later exact-ID linked provider replay",
-            )
-            .with_failure(HistoryFailure::Validation {
-                detail: error.to_string(),
-            })
-        })?;
-    }
     if outcome.blocked {
         let diagnostic = outcome
             .diagnostics
             .iter()
             .find(|diagnostic| diagnostic.kind != TranscriptDamage::IncompleteTail);
+        if diagnostic.is_some_and(|diagnostic| {
+            diagnostic.message == "duplicate incomplete response attempt_id"
+        }) {
+            return Err(UnsupportedHistory::new(
+                path,
+                diagnostic.and_then(|diagnostic| diagnostic.line),
+                "unique incomplete response attempt identities",
+            )
+            .with_failure(HistoryFailure::Validation {
+                detail: "duplicate incomplete response attempt_id".into(),
+            })
+            .into());
+        }
         return Err(UnsupportedHistory::new(path, diagnostic.and_then(|diagnostic| diagnostic.line),
-            "current transcript records, dedicated name-based skill invocation and application records, skill directive v1 records with version and payload only, compaction v1 without instruction state, no retired instruction prefix or directive records, optional leading session models followed immediately by optional session mode v1 with an exact ID (mode first without models), provider replay v1 with nonblank source_profile, display-only web search attempt v1 with optional assistant display bindings, ensemble review v1 with explicit confirmations, and valid lifecycle linkage").into());
+            "current transcript records, dedicated name-based skill invocation and application records, skill directive v1 records with version and payload only, compaction v1 without instruction state, no retired instruction prefix or directive records, optional leading session models followed immediately by optional session mode v1 with an exact ID (mode first without models), provider replay v1 with nonblank source_profile, immutable incomplete response v1 without native tool bindings, ensemble review v1 with explicit confirmations, and valid lifecycle linkage").into());
     }
     Ok(outcome)
 }
@@ -2149,11 +2039,7 @@ impl UnsupportedHistory {
 
     pub fn decoding(path: &Path, line: usize, error: &serde_json::Error) -> Self {
         let message = error.to_string();
-        let detail = if message.starts_with("invalid web action terminal index") {
-            "terminal index must be canonical unsigned decimal u64"
-        } else if message.starts_with("duplicate web action terminal index") {
-            "duplicate terminal index"
-        } else if message.starts_with("invalid type:") {
+        let detail = if message.starts_with("invalid type:") {
             "invalid value type"
         } else if message.starts_with("unknown variant") {
             "unknown record, event, or enum variant"
@@ -2199,7 +2085,7 @@ impl std::fmt::Display for UnsupportedHistory {
             Some(HistoryFailure::Validation { detail }) => {
                 // Validation explanations are authored by the local validators.
                 // Bound and sanitize them even if a future constraint is longer.
-                let detail = zevria_content::web_search::sanitize_readable(detail)
+                let detail = zevria_content::readable::sanitize_readable(detail)
                     .chars()
                     .take(256)
                     .collect::<String>();
@@ -2562,7 +2448,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
     if keys.iter().any(|key| {
         matches!(
             key.as_str(),
-            WEB_SEARCH_KEY
+            INCOMPLETE_RESPONSE_KEY
                 | COMPACTION_RECORD_KEY
                 | PROVIDER_REPLAY_KEY
                 | SKILL_DIRECTIVE_KEY
@@ -2616,10 +2502,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
             ENSEMBLE_RECORD_KEY,
             zevria_workflow::ENSEMBLE_REVIEW_VERSION,
         ),
-        (
-            WEB_SEARCH_KEY,
-            zevria_content::web_search::WEB_SEARCH_ATTEMPT_VERSION,
-        ),
+        (INCOMPLETE_RESPONSE_KEY, crate::INCOMPLETE_RESPONSE_VERSION),
         (
             SKILL_DIRECTIVE_KEY,
             zevria_instructions::directive::INSTRUCTION_VERSION,
@@ -2642,7 +2525,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
                 | PLAN_RECORD_KEY
                 | ENSEMBLE_RECORD_KEY
                 | SKILL_DIRECTIVE_KEY
-                | WEB_SEARCH_KEY
+                | INCOMPLETE_RESPONSE_KEY
         ) && let Some(value) = partial_json_field(line, &[key])
             && serde_json::from_value::<TranscriptItem>(serde_json::json!({(key): value})).is_err()
         {
@@ -2666,8 +2549,7 @@ fn current_reserved_key(key: &str) -> bool {
             | ENSEMBLE_RECORD_KEY
             | SESSION_MODELS_KEY
             | SESSION_MODE_KEY
-            | WEB_SEARCH_KEY
-            | DISPLAY_ATTEMPT_KEY
+            | INCOMPLETE_RESPONSE_KEY
             | REQUEST_METADATA_KEY
             | REQUEST_DIRECTIVE_KEY
     )
@@ -4129,6 +4011,44 @@ mod tests {
             .push_required(TranscriptItem::Message(Message::user("next question")))
             .expect("new work may proceed after repair");
         assert_eq!(load(&path).expect("extended transcript").len(), 4);
+    }
+
+    #[test]
+    fn completed_append_repairs_degraded_writer_before_appending_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let writer = TranscriptWriter::create(directory.path()).unwrap();
+        let path = writer.path().to_path_buf();
+        let mut conversation = Conversation::new(writer);
+        conversation
+            .push_required(TranscriptItem::Message(Message::user("prompt")))
+            .unwrap();
+        conversation.writer.file = std::fs::File::open(&path).unwrap();
+        assert!(
+            conversation
+                .push_completed(TranscriptItem::Message(Message::assistant(
+                    "retained after failed append"
+                )))
+                .is_err()
+        );
+        assert!(conversation.persistence_error().is_some());
+        let mut attempt = crate::ResponseAttempt::new(crate::ModelProfileRef::new("p", "m"));
+        attempt.hosted_activity.push(crate::HostedActivity {
+            kind: crate::HostedActivityKind::WebSearch,
+            output_index: 0,
+            item_id: None,
+            status: crate::HostedActivityStatus::Searching,
+            action: None,
+        });
+        attempt.close(crate::ResponseAttemptOutcome::Interrupted);
+        let recovery = TranscriptItem::IncompleteResponse(
+            crate::IncompleteResponse::from_attempt(&attempt)
+                .unwrap()
+                .unwrap(),
+        );
+        conversation.push_completed(recovery).unwrap();
+        assert!(conversation.persistence_error().is_none());
+        assert_eq!(load(&path).unwrap(), conversation.items());
+        assert_eq!(conversation.items().len(), 3);
     }
 
     #[test]

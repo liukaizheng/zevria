@@ -32,7 +32,7 @@ fn late_build_descriptor_reconciles_activity_compaction_and_keeps_telemetry_sepa
             mode: SessionMode::Build,
         });
         views.apply(SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: build_assistant(),
         });

@@ -10,10 +10,9 @@ pub(super) fn normalize_notification(notification: SessionNotification) -> Vec<A
     let display = notification
         .meta
         .as_ref()
-        .and_then(|meta| meta.get(zevria_content::web_search::RESPONSE_DISPLAY_META_KEY))
+        .and_then(|meta| meta.get(zevria_content::response::RESPONSE_DISPLAY_META_KEY))
         .and_then(|value| {
-            serde_json::from_value::<zevria_content::web_search::ResponseDisplay>(value.clone())
-                .ok()
+            serde_json::from_value::<zevria_content::response::ResponseDisplay>(value.clone()).ok()
         })
         .filter(|display| display.validate().is_ok());
     let mut events = normalize_update(notification.update);

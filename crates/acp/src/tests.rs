@@ -688,7 +688,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                 if let Some(turn_id) = active {
                                     events_tx
                                         .try_send(SessionEvent::TurnCompleted {
-                                            display_attempt_id: None,
+                                            attempt_id: None,
                                             turn_id,
                                             message: Message::assistant("contradictory success"),
                                         })
@@ -852,7 +852,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                 );
                                 let _ = events_tx
                                     .send(SessionEvent::Intermediate {
-                                        display_attempt_id: None,
+                                        attempt_id: None,
                                         turn_id,
                                         message: Message::Assistant(
                                             rig_core::message::AssistantMessage::new(vec![
@@ -891,7 +891,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                     .await;
                                 let _ = events_tx
                                     .send(SessionEvent::TurnCompleted {
-                                        display_attempt_id: None,
+                                        attempt_id: None,
                                         turn_id,
                                         message: Message::assistant("Plan submitted"),
                                     })
@@ -942,7 +942,7 @@ impl SessionRuntimeFactory for FakeFactory {
                             );
                             let _ = events_tx
                                 .send(SessionEvent::Intermediate {
-                                    display_attempt_id: None,
+                                    attempt_id: None,
                                     turn_id,
                                     message: Message::Assistant(
                                         rig_core::message::AssistantMessage::new(vec![
@@ -972,7 +972,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                 .await;
                             let _ = events_tx
                                 .send(SessionEvent::TurnCompleted {
-                                    display_attempt_id: None,
+                                    attempt_id: None,
                                     turn_id,
                                     message: Message::assistant("hello world"),
                                 })
@@ -989,7 +989,7 @@ impl SessionRuntimeFactory for FakeFactory {
                             if let Some(turn_id) = active.take() {
                                 let _ = events_tx
                                     .send(SessionEvent::TurnCompleted {
-                                        display_attempt_id: None,
+                                        attempt_id: None,
                                         turn_id,
                                         message: Message::assistant("question answered"),
                                     })
@@ -1066,7 +1066,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                         .await;
                                     let _ = events_tx
                                         .send(SessionEvent::TurnCompleted {
-                                            display_attempt_id: None,
+                                            attempt_id: None,
                                             turn_id,
                                             message: Message::assistant("implemented plan"),
                                         })

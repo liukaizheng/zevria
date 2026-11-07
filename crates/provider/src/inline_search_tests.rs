@@ -1,8 +1,8 @@
 use super::*;
 use zevria_content::AssistantPartIdentity;
 use zevria_content::AssistantPresentationContent;
-use zevria_content::WebSearchAttemptOutcome as Outcome;
-use zevria_content::WebSearchStatus as Status;
+use zevria_content::HostedActivityStatus as Status;
+use zevria_content::ResponseAttemptOutcome as Outcome;
 
 #[tokio::test]
 async fn websocket_answers_stream_before_completion_with_search_disabled_unused_and_used() {
@@ -15,7 +15,7 @@ async fn websocket_answers_stream_before_completion_with_search_disabled_unused_
 async fn indexed_readable_evidence_survives_reset_without_opaque_payloads() {
     let progress = discard_updates();
     let mut state = AttemptState {
-        search: Some(crate::search::SearchStream::new(
+        attempt: Some(crate::attempt::AttemptStream::new(
             test_profile_ref(),
             &progress,
         )),
@@ -30,9 +30,9 @@ async fn indexed_readable_evidence_survives_reset_without_opaque_payloads() {
         json!({"type":"response.web_search_call.searching","sequence_number":6,"output_index":3,"item_id":"w3","action":{"type":"open_page","url":"https://example.org"}}),
         json!({"type":"response.output_text.done","sequence_number":7,"output_index":4,"content_index":0,"text":"not citation ready"}),
     ] {
-        state.observe_search(&event.to_string(), &progress).await;
+        state.observe_attempt(&event.to_string(), &progress).await;
     }
-    let search = state.search.as_ref().unwrap();
+    let search = state.attempt.as_ref().unwrap();
     assert_eq!(search.attempt().presentation.len(), 4);
     assert_eq!(
         search.attempt().presentation[0].source.part,
@@ -42,21 +42,36 @@ async fn indexed_readable_evidence_survives_reset_without_opaque_payloads() {
         search.attempt().presentation[2].source.part,
         AssistantPartIdentity::Content(0)
     );
-    assert_eq!(search.attempt().activity[0].status, Status::Completed);
-    assert_eq!(search.attempt().activity[0].details(), vec!["one", "two"]);
+    assert_eq!(
+        search.attempt().hosted_activity[0].status,
+        Status::Completed
+    );
+    assert_eq!(
+        search.attempt().hosted_activity[0].details(),
+        vec!["one", "two"]
+    );
     let serialized = serde_json::to_string(search.attempt()).unwrap();
     assert!(!serialized.contains("PRIVATE_OPAQUE"));
     assert!(serialized.contains("not citation ready"));
     assert!(serialized.contains("first\\nthought"));
     state.reset_result();
-    state.finish_search(false, &progress).await.unwrap();
-    let saved = progress.drain_web_search(Outcome::Interrupted);
+    state
+        .attempt
+        .as_mut()
+        .unwrap()
+        .close_failed(&progress)
+        .await
+        .unwrap();
+    let saved = progress.drain_attempts();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].presentation.len(), 4);
     assert_eq!(saved[0].outcome, Outcome::Failed);
-    assert_eq!(saved[0].status_label(&saved[0].activity[0]), "completed");
     assert_eq!(
-        saved[0].status_label(&saved[0].activity[1]),
+        saved[0].action_display_status(&saved[0].hosted_activity[0]),
+        "completed"
+    );
+    assert_eq!(
+        saved[0].action_display_status(&saved[0].hosted_activity[1]),
         "completion unconfirmed"
     );
 }
@@ -64,7 +79,7 @@ async fn indexed_readable_evidence_survives_reset_without_opaque_payloads() {
 #[tokio::test]
 async fn duplicate_sequences_and_late_part_events_do_not_regress_native_answers() {
     let progress = discard_updates();
-    let mut search = crate::search::SearchStream::new(test_profile_ref(), &progress);
+    let mut search = crate::attempt::AttemptStream::new(test_profile_ref(), &progress);
     let reasoning = json!({"type":"response.reasoning_summary_text.delta","sequence_number":10,"output_index":0,"summary_index":0,"item_id":"r","delta":"once"});
     search.observe(&reasoning, &progress).await;
     let revision = search.attempt().revision;
@@ -80,15 +95,12 @@ async fn duplicate_sequences_and_late_part_events_do_not_regress_native_answers(
 #[tokio::test]
 async fn search_advertisement_does_not_require_an_action_to_retain_readable_content() {
     let progress = discard_updates();
-    let mut search = crate::search::SearchStream::new(test_profile_ref(), &progress);
+    let mut search = crate::attempt::AttemptStream::new(test_profile_ref(), &progress);
     assert!(!search.attempt().has_display());
     search.observe(&json!({"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"readable failed response"}), &progress).await;
-    search.finish(Outcome::Failed, &progress).await.unwrap();
-    let attempt = progress
-        .drain_web_search(Outcome::Interrupted)
-        .pop()
-        .unwrap();
-    assert!(attempt.activity.is_empty());
+    search.close_failed(&progress).await.unwrap();
+    let attempt = progress.drain_attempts().pop().unwrap();
+    assert!(attempt.hosted_activity.is_empty());
     assert_eq!(attempt.presentation.len(), 1);
     assert_eq!(attempt.outcome, Outcome::Failed);
 }
@@ -96,7 +108,7 @@ async fn search_advertisement_does_not_require_an_action_to_retain_readable_cont
 #[tokio::test]
 async fn answers_stream_before_final_annotations_and_only_display_copies_are_sanitized() {
     let progress = discard_updates();
-    let mut search = crate::search::SearchStream::new(test_profile_ref(), &progress);
+    let mut search = crate::attempt::AttemptStream::new(test_profile_ref(), &progress);
     let text = "\u{1b}[31mClaim\u{1b}[0m\u{202e}";
     let annotation = json!({"type":"url_citation","start_index":0,"end_index":text.chars().count(),"title":"Source","url":"https://example.org"});
     for event in [

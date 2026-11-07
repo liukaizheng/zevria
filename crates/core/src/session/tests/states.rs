@@ -265,7 +265,7 @@ fn invalid_uncommitted_edit_does_not_poison_or_mutate_current_history() {
 }
 
 /// Repeated provider skill-call IDs are invalid committed replay. Cancelling
-/// inside the second ready response tests fatal precedence over cancellation.
+/// inside the second ready response discards that uncommitted response.
 struct RepeatedSkillProvider {
     calls: usize,
     cancel_on_failure: bool,
@@ -301,7 +301,7 @@ impl ModelProvider for RepeatedSkillProvider {
 }
 
 #[tokio::test]
-async fn live_committed_failure_wins_cancellation_without_synthetic_terminal_evidence() {
+async fn invalid_committed_replay_is_fatal_but_a_cancelled_response_never_commits() {
     for cancel_on_failure in [false, true] {
         let (_directory, transcript) = test_transcript();
         let mut engine = SessionEngine::new(
@@ -316,7 +316,7 @@ async fn live_committed_failure_wins_cancellation_without_synthetic_terminal_evi
         )
         .unwrap();
         let (events, mut receiver) = session_event_channel(32);
-        let error = engine
+        let result = engine
             .handle_command(
                 SessionCommand::Turn(crate::session::TurnCommand::Submit {
                     behavior: zevria_foundation::RequestBehavior::Standard,
@@ -325,8 +325,20 @@ async fn live_committed_failure_wins_cancellation_without_synthetic_terminal_evi
                 }),
                 &events,
             )
-            .await
-            .unwrap_err();
+            .await;
+        if cancel_on_failure {
+            result.unwrap();
+            assert!(matches!(engine.phase, EnginePhase::Idle));
+            assert!(SessionReplayError::validate(engine.conversation.items()).is_ok());
+            let events = collect_events(&mut receiver).await;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, SessionEvent::TurnCancelled { .. }))
+            );
+            continue;
+        }
+        let error = result.unwrap_err();
         assert!(matches!(error, SessionReplayError::Directives(_)));
         assert!(
             error

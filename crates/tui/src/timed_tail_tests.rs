@@ -405,7 +405,7 @@ fn child_network_warning_is_isolated_from_root_preview_and_cleared_on_completion
         event: Box::new(SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
             message: Message::assistant("child complete"),
-            display_attempt_id: None,
+            attempt_id: None,
         }),
     });
     assert!(!rendered_views_text(&mut views, 160, 25).contains("No response progress"));
@@ -652,11 +652,10 @@ fn terminals_freeze_uncommitted_clocks_without_retaining_transient_headers_or_bo
         SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
             message: opaque_reasoning_message(),
-            display_attempt_id: None,
+            attempt_id: None,
         },
         SessionEvent::TurnRecovered {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: None,
         },
         SessionEvent::TurnFailed {
             turn_id: TEST_TURN_ID,
@@ -751,7 +750,7 @@ fn tools_keep_waiting_and_retry_tails_and_progress_replaces_the_notice() {
     reduce_at(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "call-slow",
@@ -1112,12 +1111,11 @@ fn compaction_animates_without_a_header_and_keeps_whole_operation_time() {
 fn accepted_terminals_and_restoration_remove_timers_and_retry_notices() {
     for terminal in [
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
         },
         SessionEvent::TurnRecovered {
-            display_attempt_id: None,
             turn_id: TEST_TURN_ID,
         },
         SessionEvent::TurnRejected {
@@ -1333,7 +1331,7 @@ fn child_call_clocks_are_independent_across_switches_and_hidden_completion() {
         event: Box::new(SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
             message: Message::assistant("child done"),
-            display_attempt_id: None,
+            attempt_id: None,
         }),
     });
     assert_eq!(views.visible_child_id(), None, "completion stayed hidden");

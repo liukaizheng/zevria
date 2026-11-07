@@ -1822,7 +1822,7 @@ fn layout_cache_reuses_unchanged_entries() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "fc_1",
@@ -1849,7 +1849,7 @@ fn layout_cache_reuses_unchanged_entries() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("fc_1", Some("call_1"), "command", "done"),
         },

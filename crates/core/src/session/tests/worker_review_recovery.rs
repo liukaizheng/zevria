@@ -294,21 +294,21 @@ fn recovery_fixture(
                 .unwrap();
         }
     }
-    let mut attempt = zevria_content::WebSearchAttemptRecord::new(test_profile());
-    attempt.activity.push(zevria_content::WebSearchActivity {
-        item_id: None,
-        output_index: 1,
-        status: zevria_content::WebSearchStatus::Completed,
-        action: None,
-    });
+    let mut attempt = zevria_content::ResponseAttempt::new(test_profile());
     attempt
-        .terminal
-        .insert(1, zevria_content::WebSearchStatus::Completed);
+        .hosted_activity
+        .push(zevria_content::HostedActivity {
+            kind: zevria_content::HostedActivityKind::WebSearch,
+            item_id: None,
+            output_index: 1,
+            status: zevria_content::HostedActivityStatus::Completed,
+            action: None,
+        });
     writer
         .append(&AgentRunTranscriptRecord::Event {
             event: AgentRunEvent::ResponseDisplay {
-                display: Box::new(zevria_content::web_search::ResponseDisplay {
-                    version: 1,
+                display: Box::new(zevria_content::response::ResponseDisplay {
+                    version: 2,
                     attempt,
                     bindings: vec![],
                 }),
@@ -331,10 +331,9 @@ fn launcher(path: PathBuf) -> Arc<RecoveryLauncher> {
 async fn blocked_worker_preflight_preserves_root_and_starts_no_actors_or_recovery_transitions() {
     let (_directory, mut engine, start, path) = recovery_fixture(2);
     let root_path = engine.conversation.path().to_path_buf();
-    let original = std::fs::read_to_string(&path).unwrap().replace(
-        r#""terminal":{"1":"completed"}"#,
-        r#""terminal":{"PRIVATE_KEY":"completed"}"#,
-    );
+    let original = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(r#""kind":"web_search""#, r#""kind":"PRIVATE_KEY""#);
     std::fs::write(&path, &original).unwrap();
     let root_before = std::fs::read(&root_path).unwrap();
     let items_before = engine.conversation.items().to_vec();

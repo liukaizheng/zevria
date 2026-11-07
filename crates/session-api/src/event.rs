@@ -22,10 +22,10 @@ impl ModeSelectionResult {
 /// Provider-neutral events consumed by frontends.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
-    /// Independent hosted activity; never a local function call or text fence.
-    WebSearchUpdated {
+    /// Independent response presentation; never an executable call or text fence.
+    ResponseAttemptUpdated {
         turn_id: TurnId,
-        attempt: crate::WebSearchAttemptRecord,
+        attempt: crate::ResponseAttempt,
     },
     ModeResult {
         request_id: String,
@@ -123,7 +123,7 @@ pub enum SessionEvent {
     Intermediate {
         turn_id: TurnId,
         message: Message,
-        display_attempt_id: Option<String>,
+        attempt_id: Option<String>,
     },
     /// A correlated tool-result batch plus display-only metadata.
     ToolResults {
@@ -135,14 +135,13 @@ pub enum SessionEvent {
     TurnCompleted {
         turn_id: TurnId,
         message: Message,
-        display_attempt_id: Option<String>,
+        attempt_id: Option<String>,
     },
     /// Recovery repaired terminal workflow records for an assistant response
     /// that was already present in the restored transcript. Frontends should
     /// unlock the turn without appending another message.
     TurnRecovered {
         turn_id: TurnId,
-        display_attempt_id: Option<String>,
     },
     /// A semantic Build prompt backed by a typed handoff record rather than a
     /// user-authored message.
@@ -273,7 +272,7 @@ pub struct SessionStreamState {
     pub revision: u64,
     pub turn_id: TurnId,
     pub message: Option<Message>,
-    pub attempt: Option<crate::WebSearchAttemptRecord>,
+    pub attempt: Option<crate::ResponseAttempt>,
 }
 
 /// One lossy delivery of changed root and child streaming states.
@@ -729,7 +728,7 @@ impl SessionEventReceiver {
     pub(super) fn lifecycle_update(&mut self, event: SequencedSessionEvent) -> SessionUpdate {
         let existing = hosted_activity_update(&event.event, &mut self.hosted_actions);
         match &event.event {
-            SessionEvent::WebSearchUpdated { .. } | SessionEvent::NetworkStatus { .. } => {}
+            SessionEvent::ResponseAttemptUpdated { .. } | SessionEvent::NetworkStatus { .. } => {}
             SessionEvent::AgentRunUpdated {
                 event: AgentRunEvent::ResponseDisplay { .. },
                 ..
@@ -738,7 +737,8 @@ impl SessionEventReceiver {
             SessionEvent::SubtaskSession { event, .. }
                 if matches!(
                     event.as_ref(),
-                    SessionEvent::WebSearchUpdated { .. } | SessionEvent::NetworkStatus { .. }
+                    SessionEvent::ResponseAttemptUpdated { .. }
+                        | SessionEvent::NetworkStatus { .. }
                 ) => {}
             SessionEvent::SubtaskSession { id, .. } | SessionEvent::SubtaskStatus { id, .. } => {
                 let fence = self.subtask_fences.entry(id.clone()).or_default();
@@ -976,10 +976,10 @@ pub enum NetworkStatus {
     ProgressResumed,
 }
 
-/// Core-owned reliable checkpoint handoff, not a frontend event. The provider
-/// cannot clear a finalized attempt or retry until persistence acknowledges it.
+/// Core-owned reliable handoff of a closed failed attempt, not a frontend event.
+/// The provider cannot retry until persistence acknowledges its recovery record.
 pub struct AttemptCheckpoint {
-    pub attempt: crate::WebSearchAttemptRecord,
+    pub attempt: crate::ResponseAttempt,
     pub ack: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
@@ -994,7 +994,7 @@ pub struct ProgressReporter {
     pub(super) context_window_tokens: u64,
     pub(super) suppressed: bool,
     call: usize,
-    web_search: Arc<Mutex<Vec<crate::WebSearchAttemptRecord>>>,
+    attempts: Arc<Mutex<Vec<crate::ResponseAttempt>>>,
     checkpoints: Option<mpsc::UnboundedSender<AttemptCheckpoint>>,
 }
 
@@ -1025,7 +1025,7 @@ impl ProgressReporter {
             input_token_limit: context.input_token_limit,
             context_window_tokens: context.context_window_tokens,
             suppressed: false,
-            web_search: Arc::new(Mutex::new(Vec::new())),
+            attempts: Arc::new(Mutex::new(Vec::new())),
             checkpoints: None,
             call: 1,
         }
@@ -1047,7 +1047,7 @@ impl ProgressReporter {
             input_token_limit: context.input_token_limit,
             context_window_tokens: context.context_window_tokens,
             suppressed: true,
-            web_search: Arc::new(Mutex::new(Vec::new())),
+            attempts: Arc::new(Mutex::new(Vec::new())),
             checkpoints: None,
             call: 1,
         }
@@ -1080,11 +1080,18 @@ impl ProgressReporter {
 
     /// Collect before delivery, so cancellation during channel backpressure
     /// cannot erase an already observed update. No lock crosses an await.
-    pub fn collect_web_search(&self, attempt: crate::WebSearchAttemptRecord) {
+    pub fn records_attempts(&self) -> bool {
+        !self.suppressed
+    }
+
+    pub fn collect_attempt(&self, attempt: crate::ResponseAttempt) {
+        if self.suppressed {
+            return;
+        }
         let mut collected = self
-            .web_search
+            .attempts
             .lock()
-            .expect("web search collector poisoned");
+            .expect("response attempt collector poisoned");
         if let Some(existing) = collected
             .iter_mut()
             .find(|existing| existing.id == attempt.id)
@@ -1102,11 +1109,11 @@ impl ProgressReporter {
         self
     }
 
-    pub async fn checkpoint_web_search(
+    pub async fn checkpoint_failed_attempt(
         &self,
-        attempt: crate::WebSearchAttemptRecord,
+        attempt: crate::ResponseAttempt,
     ) -> anyhow::Result<()> {
-        self.collect_web_search(attempt.clone());
+        self.collect_attempt(attempt.clone());
         if self.suppressed || !attempt.has_display() {
             return Ok(());
         }
@@ -1125,19 +1132,19 @@ impl ProgressReporter {
 
     pub fn stream_snapshot(&self, snapshot: crate::AssistantStreamSnapshot) {
         if let Some(attempt) = &snapshot.attempt {
-            self.collect_web_search(attempt.clone());
+            self.collect_attempt(attempt.clone());
         }
         if !self.suppressed {
             self.events.stream_snapshot(self.turn.id, snapshot);
         }
     }
 
-    pub async fn web_search_updated(&self, attempt: crate::WebSearchAttemptRecord) {
-        self.collect_web_search(attempt.clone());
+    pub async fn attempt_updated(&self, attempt: crate::ResponseAttempt) {
+        self.collect_attempt(attempt.clone());
         if !self.suppressed {
             let _ = self
                 .events
-                .send(SessionEvent::WebSearchUpdated {
+                .send(SessionEvent::ResponseAttemptUpdated {
                     turn_id: self.turn.id,
                     attempt,
                 })
@@ -1146,20 +1153,13 @@ impl ProgressReporter {
     }
 
     /// Called by core only after releasing the provider future and its request.
-    pub fn drain_web_search(
-        &self,
-        outcome: crate::WebSearchAttemptOutcome,
-    ) -> Vec<crate::WebSearchAttemptRecord> {
-        let mut attempts = std::mem::take(
+    pub fn drain_attempts(&self) -> Vec<crate::ResponseAttempt> {
+        std::mem::take(
             &mut *self
-                .web_search
+                .attempts
                 .lock()
-                .expect("web search collector poisoned"),
-        );
-        for attempt in &mut attempts {
-            attempt.finish(outcome);
-        }
-        attempts
+                .expect("response attempt collector poisoned"),
+        )
     }
 
     pub fn events(&self) -> &SessionEventSender {

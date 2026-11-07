@@ -14,9 +14,9 @@ mod http;
 mod prompt_cache;
 mod protocol;
 use zevria_responses::replay;
+mod attempt;
 mod recovery;
 mod router;
-mod search;
 mod turn;
 
 mod websocket_session;

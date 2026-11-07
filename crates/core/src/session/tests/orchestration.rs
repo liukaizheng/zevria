@@ -472,14 +472,7 @@ async fn premature_native_completion_keeps_replay_usage_and_display_identity() {
             json!({"type":"message","id":"native-answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":"premature native completion","annotations":[]}]}),
         ],
     );
-    let mut attempt = zevria_content::WebSearchAttemptRecord::new(test_profile());
-    attempt.reconcile_native_presentation(&native.items);
-    attempt.finish(zevria_content::WebSearchAttemptOutcome::Completed);
-    let attempt_id = attempt.id.clone();
-    // Provider display checkpoints are independent from request activation.
-    engine
-        .record_completed_items(vec![TranscriptItem::WebSearchAttempt(attempt)])
-        .unwrap();
+    let attempt_id = "premature-transmission".to_owned();
     let usage = TokenUsage {
         input_tokens: 80,
         cached_tokens: 30,
@@ -488,7 +481,7 @@ async fn premature_native_completion_keeps_replay_usage_and_display_identity() {
     };
     let response = ModelResponse::from_replay(native.clone())
         .unwrap()
-        .with_display_attempt(Some(attempt_id.clone()))
+        .with_attempt_id(Some(attempt_id.clone()))
         .unwrap()
         .with_usage(Some(usage));
     let expected = response.record().clone();
@@ -496,14 +489,14 @@ async fn premature_native_completion_keeps_replay_usage_and_display_identity() {
     let events = submit_request(&mut engine, RequestBehavior::Orchestrate).await;
     assert!(!success(&events));
     assert_eq!(reminders(&engine), 1);
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::Intermediate { display_attempt_id: Some(id), .. } if id == &attempt_id)));
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::Intermediate { attempt_id: Some(id), .. } if id == &attempt_id)));
     assert!(events.iter().any(|event| matches!(event, SessionEvent::UsageUpdated { usage: actual, .. } if *actual == usage)));
     let items = zevria_transcript::load(engine.conversation.path()).unwrap();
     assert!(
         items
             .iter()
             .any(|item| item.message() == Some(expected.message())
-                && item.display_attempt_id() == Some(attempt_id.as_str()))
+                && item.provider_replay() == Some(&native))
     );
     let requests = engine.provider.requests.lock().unwrap();
     assert!(

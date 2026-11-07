@@ -1,6 +1,6 @@
 use super::*;
-use zevria_content::WebSearchAttemptOutcome as Outcome;
-use zevria_content::WebSearchStatus as Status;
+use zevria_content::HostedActivityStatus as Status;
+use zevria_content::ResponseAttemptOutcome as Outcome;
 
 fn search_item(id: &str, action: Value) -> Value {
     json!({"type":"web_search_call","id":id,"status":"completed","action":action})
@@ -122,7 +122,8 @@ pub(super) async fn held_answer_stream(websocket: bool, advertised: bool, search
     }
     openai.input_token_count_url = None;
     let (sender, mut receiver) = session_event_channel(32);
-    let progress = ProgressReporter::new(sender);
+    let (checkpoints, mut checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress = ProgressReporter::new(sender).with_checkpoints(checkpoints);
     let task = tokio::spawn(async move { openai.complete(parts().request(), progress).await });
     for expected in [first, expected_full.as_str()] {
         let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -143,14 +144,10 @@ pub(super) async fn held_answer_stream(websocket: bool, advertised: bool, search
         .await
         .expect("readable answer must arrive while completion is held");
         assert!(!task.is_finished(), "provider must still be pending");
-        if advertised {
-            let attempt = snapshot.attempt.unwrap();
-            assert_eq!(attempt.outcome, Outcome::InProgress);
-            assert_eq!(attempt.activity.is_empty(), !searched);
-            assert!(attempt.presentation.iter().any(|part| matches!(&part.content, zevria_content::AssistantPresentationContent::Answer { text } if text == expected)));
-        } else {
-            assert!(snapshot.attempt.is_none());
-        }
+        let attempt = snapshot.attempt.unwrap();
+        assert_eq!(attempt.outcome, Outcome::InProgress);
+        assert_eq!(attempt.hosted_activity.is_empty(), !searched);
+        assert!(attempt.presentation.iter().any(|part| matches!(&part.content, zevria_content::AssistantPresentationContent::Answer { text } if text == expected)));
         release.send(()).await.unwrap();
     }
     let response = tokio::time::timeout(std::time::Duration::from_secs(5), task)
@@ -158,6 +155,11 @@ pub(super) async fn held_answer_stream(websocket: bool, advertised: bool, search
         .expect("released completion")
         .unwrap()
         .unwrap();
+    assert!(response.attempt_id.is_some());
+    assert!(
+        checkpoint_rx.try_recv().is_err(),
+        "success never checkpoints"
+    );
     let native = server.await.unwrap();
     assert_eq!(response.record().provider_replay().unwrap().items, native);
     let final_text = zevria_content::assistant_plain_text(response.message());
@@ -245,7 +247,7 @@ async fn hosted_request_controls_policy_choice_and_function_strictness() {
 async fn raw_activity_and_completed_blocks_reconcile_late_and_terminal_events() {
     let progress = discard_updates();
     let mut state = AttemptState {
-        search: Some(crate::search::SearchStream::new(
+        attempt: Some(crate::attempt::AttemptStream::new(
             test_profile_ref(),
             &progress,
         )),
@@ -261,21 +263,21 @@ async fn raw_activity_and_completed_blocks_reconcile_late_and_terminal_events() 
         json!({"type":"response.output_text.done","output_index":4,"content_index":0,"text":"🦀 Rust is fast."}),
         json!({"type":"response.output_text.annotation.added","output_index":4,"content_index":0,"annotation_index":0,"annotation":cited_item()["content"][0]["annotations"][0]}),
     ] {
-        state.observe_search(&event.to_string(), &progress).await;
+        state.observe_attempt(&event.to_string(), &progress).await;
     }
     assert_eq!(
         zevria_content::assistant_plain_text(&state.streaming_message().unwrap()),
         "🦀 Rust is fast. [Rust guide](https://www.rust-lang.org/learn)"
     );
     assert_eq!(
-        state.search.as_ref().unwrap().attempt().activity[0].status,
+        state.attempt.as_ref().unwrap().attempt().hosted_activity[0].status,
         Status::Completed
     );
     let part = json!({"type":"response.content_part.done","output_index":4,"content_index":0,"part":cited_item()["content"][0]});
-    state.observe_search(&part.to_string(), &progress).await;
+    state.observe_attempt(&part.to_string(), &progress).await;
     let before = zevria_content::assistant_plain_text(&state.streaming_message().unwrap());
     assert_eq!(before.matches("[Rust guide]").count(), 1);
-    state.observe_search(&part.to_string(), &progress).await;
+    state.observe_attempt(&part.to_string(), &progress).await;
     let terminal = completed_output_event(
         "r",
         vec![
@@ -295,25 +297,26 @@ async fn raw_activity_and_completed_blocks_reconcile_late_and_terminal_events() 
             cited_item(),
         ],
     );
-    state.observe_search(&terminal.to_string(), &progress).await;
+    state
+        .observe_attempt(&terminal.to_string(), &progress)
+        .await;
     assert_eq!(
         zevria_content::assistant_plain_text(&state.streaming_message().unwrap()),
         before
     );
-    state.finish_search(true, &progress).await.unwrap();
-    let attempts = progress.drain_web_search(Outcome::Interrupted);
+    let attempts = progress.drain_attempts();
     assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].outcome, Outcome::Completed);
-    assert_eq!(attempts[0].activity.len(), 4);
+    assert_eq!(attempts[0].outcome, Outcome::InProgress);
+    assert_eq!(attempts[0].hosted_activity.len(), 4);
     assert_eq!(
-        attempts[0].activity[1].action.as_ref().unwrap()["url"],
+        attempts[0].hosted_activity[1].action.as_ref().unwrap()["url"],
         "https://example.org/final"
     );
     assert_eq!(
-        attempts[0].activity[3].action.as_ref().unwrap()["opaque"],
+        attempts[0].hosted_activity[3].action.as_ref().unwrap()["opaque"],
         json!([3])
     );
-    assert!(progress.drain_web_search(Outcome::Failed).is_empty());
+    assert!(progress.drain_attempts().is_empty());
 }
 
 #[tokio::test]
@@ -369,32 +372,21 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
         .unwrap();
     server.await.unwrap();
     let items = transcript::load(&path).unwrap();
-    let attempt_index = items
-        .iter()
-        .position(|item| matches!(item, TranscriptItem::WebSearchAttempt(_)))
-        .unwrap();
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::IncompleteResponse(_)))
+    );
     let response_index = items
         .iter()
         .position(|item| matches!(item, TranscriptItem::ProviderMessage(_)))
         .unwrap();
-    assert!(attempt_index < response_index);
-    let TranscriptItem::WebSearchAttempt(attempt) = &items[attempt_index] else {
-        unreachable!()
-    };
-    assert_eq!(attempt.outcome, Outcome::Completed);
-    assert!(attempt.presentation_elided);
-    assert!(attempt.presentation.is_empty());
-    assert_eq!(attempt.activity.len(), 1);
     let replay = items[response_index].provider_replay().unwrap();
     assert_eq!(replay.items, native);
-    let reconstructed = zevria_transcript::reconstruct_transcript(&items);
-    let TranscriptItem::WebSearchAttempt(restored) = &reconstructed[attempt_index] else {
-        unreachable!()
-    };
-    let mut expected = attempt.clone();
-    expected.reconcile_native_presentation(&native);
-    assert_eq!(restored, &expected);
-    assert!(!restored.presentation_elided);
+    let restored =
+        zevria_transcript::restored_attempt(&items[response_index], response_index).unwrap();
+    assert_eq!(restored.outcome, Outcome::Completed);
+    assert_eq!(restored.hosted_activity.len(), 1);
     assert!(!restored.presentation.is_empty());
     restored.validate().unwrap();
     let portable = replay.portable_projection().unwrap().message.unwrap();
@@ -409,7 +401,7 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
     assert!(
         input
             .iter()
-            .all(|item| !format!("{item:?}").contains("zevria_web_search_attempt"))
+            .all(|item| !format!("{item:?}").contains("zevria_incomplete_response"))
     );
     let updates = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
     let progress_index = updates
@@ -417,7 +409,7 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
         .position(|update| {
             matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::WebSearchUpdated { .. })
+                SessionUpdate::Lifecycle(SessionEvent::ResponseAttemptUpdated { .. })
             )
         })
         .unwrap();
@@ -441,12 +433,15 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
 async fn http_idle_retry_keeps_distinct_observed_attempts_and_identical_controls() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/responses", listener.local_addr().unwrap());
+    let request_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server_count = request_count.clone();
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
         let mut stalled = Vec::new();
         for index in 0..2 {
             let (mut socket, _) = listener.accept().await.unwrap();
             requests.push(receive_http_json(&mut socket).await.body);
+            server_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let progress = json!({"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":search_item("same-provider-id",json!({"type":"search"}))});
             let mut body = sse_data(progress.to_string());
             body.push_str(&sse_data(
@@ -485,27 +480,44 @@ async fn http_idle_retry_keeps_distinct_observed_attempts_and_identical_controls
     });
     let mut openai = connect_http_test_provider(url, ToolServer::new().run()).await;
     openai.web_search = search_config();
-    let progress = discard_updates();
+    let (checkpoints, mut checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress = discard_updates().with_checkpoints(checkpoints);
     let mut state = AttemptState::default();
-    run_turn_request_with_recovery(
-        parts().request(),
-        &mut openai,
-        &mut state,
-        &progress,
-        &RecoveryPolicy {
-            response_idle_timeout: std::time::Duration::from_millis(100),
-            ..fast_recovery_policy(2)
-        },
-    )
-    .await
-    .unwrap();
+    let parts = parts();
+    let policy = RecoveryPolicy {
+        response_idle_timeout: std::time::Duration::from_millis(100),
+        ..fast_recovery_policy(2)
+    };
+    {
+        let completion = run_turn_request_with_recovery(
+            parts.request(),
+            &mut openai,
+            &mut state,
+            &progress,
+            &policy,
+        );
+        tokio::pin!(completion);
+        let checkpoint = tokio::select! {
+            checkpoint = checkpoint_rx.recv() => checkpoint.unwrap(),
+            result = &mut completion => panic!("retried without checkpoint acknowledgement: {result:?}"),
+        };
+        assert_eq!(checkpoint.attempt.outcome, Outcome::Failed);
+        assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        checkpoint.ack.send(Ok(())).unwrap();
+        completion.await.unwrap();
+    }
+    assert!(state.attempt.is_some());
+    assert!(
+        checkpoint_rx.try_recv().is_err(),
+        "successful retry is not checkpointed"
+    );
     server.await.unwrap();
-    let attempts = progress.drain_web_search(Outcome::Completed);
+    let attempts = progress.drain_attempts();
     assert_eq!(attempts.len(), 2);
     assert_ne!(attempts[0].id, attempts[1].id);
     assert_eq!(attempts[0].outcome, Outcome::Failed);
-    assert_eq!(attempts[0].activity[0].status, Status::Completed);
-    assert_eq!(attempts[1].outcome, Outcome::Completed);
+    assert_eq!(attempts[0].hosted_activity[0].status, Status::Completed);
+    assert_eq!(attempts[1].outcome, Outcome::InProgress);
     assert!(
         serde_json::to_string(&attempts[0])
             .unwrap()
@@ -514,8 +526,8 @@ async fn http_idle_retry_keeps_distinct_observed_attempts_and_identical_controls
     let completed = serde_json::to_string(&attempts[1]).unwrap();
     assert!(!completed.contains("failed draft"));
     assert!(
-        !completed.contains("fresh retry"),
-        "canonical replay replaces the preview"
+        completed.contains("fresh retry"),
+        "core, not the provider, reconciles the successful preview"
     );
 }
 
@@ -586,15 +598,15 @@ async fn websocket_to_http_fallback_retains_activity_and_search_definition() {
     .await
     .unwrap();
     server.await.unwrap();
-    let attempts = progress.drain_web_search(Outcome::Completed);
+    let attempts = progress.drain_attempts();
     assert_eq!(attempts.len(), 2);
     assert_ne!(attempts[0].id, attempts[1].id);
-    assert_eq!(attempts[0].activity[0].status, Status::Searching);
+    assert_eq!(attempts[0].hosted_activity[0].status, Status::Searching);
     assert_eq!(
-        attempts[0].status_label(&attempts[0].activity[0]),
+        attempts[0].action_display_status(&attempts[0].hosted_activity[0]),
         "completion unconfirmed"
     );
-    assert_eq!(attempts[1].activity[0].status, Status::Completed);
+    assert_eq!(attempts[1].hosted_activity[0].status, Status::Completed);
     assert!(
         serde_json::to_string(&attempts[0])
             .unwrap()
@@ -701,23 +713,23 @@ async fn stale_continuation_keeps_native_search_replay_and_attempt_identity() {
         .await
         .unwrap();
     server.await.unwrap();
-    let attempts = progress.drain_web_search(Outcome::Completed);
+    let attempts = progress.drain_attempts();
     assert_eq!(attempts.len(), 3);
     assert!(attempts.windows(2).all(|pair| pair[0].id != pair[1].id));
     assert_eq!(attempts[1].outcome, Outcome::Failed);
-    assert_eq!(attempts[1].activity[0].status, Status::Searching);
+    assert_eq!(attempts[1].hosted_activity[0].status, Status::Searching);
     assert_eq!(
-        attempts[1].status_label(&attempts[1].activity[0]),
+        attempts[1].action_display_status(&attempts[1].hosted_activity[0]),
         "completion unconfirmed"
     );
-    assert_eq!(attempts[2].outcome, Outcome::Completed);
+    assert_eq!(attempts[2].outcome, Outcome::InProgress);
 }
 
 #[tokio::test]
 async fn completed_text_parts_publish_in_content_order_and_without_duplicate_citations() {
     let progress = discard_updates();
     let mut state = AttemptState {
-        search: Some(crate::search::SearchStream::new(
+        attempt: Some(crate::attempt::AttemptStream::new(
             test_profile_ref(),
             &progress,
         )),
@@ -725,14 +737,141 @@ async fn completed_text_parts_publish_in_content_order_and_without_duplicate_cit
     };
     let part = |index, text| json!({"type":"response.content_part.done","output_index":0,"content_index":index,"part":{"type":"output_text","text":text,"annotations":[]}});
     state
-        .observe_search(&part(1, "second").to_string(), &progress)
+        .observe_attempt(&part(1, "second").to_string(), &progress)
         .await;
     assert!(state.streaming_message().is_err());
     state
-        .observe_search(&part(0, "first").to_string(), &progress)
+        .observe_attempt(&part(0, "first").to_string(), &progress)
         .await;
     assert_eq!(
         zevria_content::assistant_plain_text(&state.streaming_message().unwrap()),
         "first\nsecond"
     );
+}
+
+#[tokio::test]
+async fn recovery_records_leave_prepared_full_input_and_wire_body_identical() {
+    use zevria_transcript::{IncompleteResponse, TranscriptItem};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/responses", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            bodies.push(receive_http_json(&mut socket).await.body);
+            send_http_response(
+                &mut socket,
+                "200 OK",
+                "text/event-stream",
+                sse_data(completed_output_event("same", vec![cited_item()]).to_string()),
+            )
+            .await;
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        bodies
+    });
+    let mut openai = connect_http_test_provider(url, ToolServer::new().run()).await;
+    openai.web_search = search_config();
+    let ordinary = vec![
+        TranscriptItem::Message(Message::user("earlier prompt")),
+        TranscriptItem::provider_message(ProviderReplay::openai_responses(
+            test_profile_ref(),
+            vec![cited_item()],
+        ))
+        .unwrap(),
+        TranscriptItem::Message(Message::user("continue")),
+    ];
+    let mut abandoned = zevria_content::ResponseAttempt::new(test_profile_ref());
+    abandoned
+        .hosted_activity
+        .push(zevria_content::HostedActivity {
+            kind: zevria_content::HostedActivityKind::WebSearch,
+            output_index: 0,
+            item_id: None,
+            status: Status::Searching,
+            action: Some(json!({"type":"search","query":"must not become input"})),
+        });
+    abandoned.close(Outcome::Interrupted);
+    let recovery = TranscriptItem::IncompleteResponse(
+        IncompleteResponse::from_attempt(&abandoned)
+            .unwrap()
+            .unwrap(),
+    );
+    let with_recovery = vec![
+        ordinary[0].clone(),
+        recovery,
+        ordinary[1].clone(),
+        ordinary[2].clone(),
+    ];
+    let mut prepared = Vec::new();
+    let mut state = AttemptState::default();
+    for history in [&ordinary, &with_recovery] {
+        let instructions = rendered_test_instructions("byte-identical instructions");
+        let request = || ModelRequest {
+            instructions,
+            input: zevria_transcript::model_input(history),
+            model_role: ModelRole::Build,
+            allowed_tool_names: None,
+        };
+        prepared.push(
+            crate::turn::prepare_turn_request(&request(), &mut openai)
+                .await
+                .unwrap(),
+        );
+        run_turn_request_with_recovery(
+            request(),
+            &mut openai,
+            &mut state,
+            &discard_updates(),
+            &fast_recovery_policy(1),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(prepared[0].full_input, prepared[1].full_input);
+    assert_eq!(
+        prepared[0].request_properties,
+        prepared[1].request_properties
+    );
+    let bodies = server.await.unwrap();
+    assert_eq!(bodies[0]["input"], json!(prepared[0].full_input));
+    assert!(!bodies[0].to_string().contains("must not become input"));
+}
+
+#[tokio::test]
+async fn silent_responses_reporters_produce_no_attempts_or_checkpoints() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/responses", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = receive_http_json(&mut socket).await;
+        send_http_response(
+            &mut socket,
+            "200 OK",
+            "text/event-stream",
+            sse_data(completed_output_event("silent", vec![cited_item()]).to_string()),
+        )
+        .await;
+    });
+    let mut openai = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let (events, mut receiver) = session_event_channel(32);
+    let policy = zevria_model::CompactionPolicy::default();
+    let turn = ProgressReporter::new(events.clone()).turn().clone();
+    let (checkpoints, mut checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress = ProgressReporter::silent_for_turn(
+        events,
+        turn,
+        ModelRole::Build,
+        policy.for_role(ModelRole::Build),
+    )
+    .with_checkpoints(checkpoints);
+    let response = openai
+        .complete(parts().maintenance_request(), progress.clone())
+        .await
+        .unwrap();
+    assert!(response.attempt_id.is_none());
+    assert!(progress.drain_attempts().is_empty());
+    assert!(checkpoint_rx.try_recv().is_err());
+    assert!(receiver.try_recv().is_err());
+    server.await.unwrap();
 }

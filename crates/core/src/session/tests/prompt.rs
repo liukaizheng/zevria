@@ -320,7 +320,7 @@ async fn finalized_provider_work_is_retained_when_failure_races_cancellation() {
     let final_message = Message::assistant("completed without the required inspection");
     let final_item = TranscriptItem::Message(final_message.clone());
     let output = ModelTurnOutput {
-        display_attempt_id: None,
+        attempt_id: None,
         message: Some(final_message),
         final_item: Some(final_item.clone()),
         usage: Some(TokenUsage {

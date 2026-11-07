@@ -29,7 +29,7 @@ async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences
     let child_commit = SessionEvent::SubtaskSession {
         id: first_child.clone(),
         event: Box::new(SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id,
             message: Message::assistant("first child commit"),
         }),
@@ -65,7 +65,7 @@ async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences
     );
 
     let root_commit = SessionEvent::Intermediate {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id,
         message: Message::assistant("root commit"),
     };

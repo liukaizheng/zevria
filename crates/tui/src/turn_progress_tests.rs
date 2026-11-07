@@ -21,7 +21,7 @@ fn complete(app: &mut App, id: u64, text: &str) {
     app.reduce_without_effects(SessionEvent::TurnCompleted {
         turn_id: TurnId::new(id),
         message: Message::assistant(text),
-        display_attempt_id: None,
+        attempt_id: None,
     });
 }
 
@@ -102,7 +102,7 @@ fn call_durations_exclude_dispatch_delay_and_freeze_independently_after_tools() 
         &mut app,
         SessionEvent::Intermediate {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: None,
+            attempt_id: None,
             message: assistant_message(vec![
                 AssistantContent::text("first response"),
                 tool_call("slow", None, "command", json!({"command":"slow tool"})),
@@ -143,7 +143,7 @@ fn call_durations_exclude_dispatch_delay_and_freeze_independently_after_tools() 
         SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
             message: Message::assistant("second response"),
-            display_attempt_id: None,
+            attempt_id: None,
         },
         now + Duration::from_secs(145),
     );
@@ -183,7 +183,7 @@ fn long_command_headers_tick_without_events_until_all_their_tools_finish() {
             &mut app,
             SessionEvent::Intermediate {
                 turn_id: TEST_TURN_ID,
-                display_attempt_id: None,
+                attempt_id: None,
                 message: assistant_message(vec![
                     tool_call(
                         "slow-a",
@@ -284,7 +284,7 @@ fn late_tool_results_only_finish_their_own_header_not_a_new_model_call() {
         &mut app,
         SessionEvent::Intermediate {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: None,
+            attempt_id: None,
             message: assistant_message(vec![tool_call(
                 "slow",
                 None,
@@ -332,11 +332,10 @@ fn terminal_events_stop_headers_with_pending_commands() {
         SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
-            display_attempt_id: None,
+            attempt_id: None,
         },
         SessionEvent::TurnRecovered {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: None,
         },
         SessionEvent::TurnFailed {
             turn_id: TEST_TURN_ID,
@@ -369,7 +368,7 @@ fn terminal_events_stop_headers_with_pending_commands() {
             &mut app,
             SessionEvent::Intermediate {
                 turn_id: TEST_TURN_ID,
-                display_attempt_id: None,
+                attempt_id: None,
                 message: assistant_message(vec![tool_call(
                     "slow",
                     None,
@@ -446,7 +445,7 @@ fn retries_backward_clocks_and_rejected_events_cannot_restart_or_rewind_a_call()
         SessionEvent::TurnCompleted {
             turn_id: TurnId::new(99),
             message: Message::assistant("stale"),
-            display_attempt_id: None,
+            attempt_id: None,
         },
         SessionEvent::TurnCancelled {
             turn_id: TurnId::new(99),
@@ -454,7 +453,7 @@ fn retries_backward_clocks_and_rejected_events_cannot_restart_or_rewind_a_call()
         SessionEvent::Intermediate {
             turn_id: TurnId::new(99),
             message: Message::assistant("stale"),
-            display_attempt_id: None,
+            attempt_id: None,
         },
     ] {
         event_at(&mut app, stale, now + Duration::from_secs(18));
@@ -499,7 +498,7 @@ fn retries_backward_clocks_and_rejected_events_cannot_restart_or_rewind_a_call()
         SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
-            display_attempt_id: None,
+            attempt_id: None,
         },
         now + Duration::from_secs(35),
     );
@@ -546,7 +545,7 @@ fn accepted_edits_prune_timing_before_ordinal_reuse_and_restore_discards_it() {
                 SessionEvent::TurnCompleted {
                     turn_id,
                     message: Message::assistant(format!("answer {id}")),
-                    display_attempt_id: None,
+                    attempt_id: None,
                 },
                 at + Duration::from_secs(seconds),
             );
@@ -587,7 +586,7 @@ fn accepted_edits_prune_timing_before_ordinal_reuse_and_restore_discards_it() {
                 SessionEvent::TurnCompleted {
                     turn_id: TurnId::new(3),
                     message: Message::assistant("new answer"),
-                    display_attempt_id: None,
+                    attempt_id: None,
                 },
                 now + Duration::from_secs(42),
             );
@@ -648,7 +647,7 @@ fn call_start_stream_tools_and_completion_share_headers_not_status_indices() {
     assert_eq!(app.status_for_test().primary, "Build · Streaming");
     app.reduce_without_effects(SessionEvent::Intermediate {
         turn_id: TEST_TURN_ID,
-        display_attempt_id: None,
+        attempt_id: None,
         message: assistant_message(vec![
             AssistantContent::text("preview"),
             tool_call("a", None, "command", json!({"command":"first"})),
@@ -771,11 +770,10 @@ fn stale_duplicate_pending_and_terminal_call_markers_are_inert() {
         SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
-            display_attempt_id: None,
+            attempt_id: None,
         },
         SessionEvent::TurnRecovered {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: None,
         },
         SessionEvent::TurnFailed {
             turn_id: TEST_TURN_ID,
@@ -1162,7 +1160,7 @@ fn runtime_only_calls_survive_live_resume_but_are_not_invented_on_restore() {
     live.reduce_without_effects(SessionEvent::Intermediate {
         turn_id: TEST_TURN_ID,
         message: Message::assistant("saved response"),
-        display_attempt_id: None,
+        attempt_id: None,
     });
     call(&mut live, TEST_TURN_ID, 2);
     live.reduce_without_effects(SessionEvent::TurnFailed {

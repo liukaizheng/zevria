@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn native_answer_frames_grow_and_reconcile_citations_in_the_same_selected_block() {
     let mut attempt = ordered_attempt();
-    attempt.activity.clear();
+    attempt.hosted_activity.clear();
     attempt.presentation = vec![part(
         0,
         AssistantPartIdentity::Content(0),
@@ -34,14 +34,14 @@ fn native_answer_frames_grow_and_reconcile_citations_in_the_same_selected_block(
     attempt.presentation[0].content = AssistantPresentationContent::Answer {
         text: final_text.into(),
     };
-    attempt.finish(Outcome::Completed);
+    attempt.close(Outcome::Completed);
     publish(&mut app, attempt.clone());
     apply_turn_event(
         &mut app,
         SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
             message: Message::assistant(final_text),
-            display_attempt_id: Some(attempt.id),
+            attempt_id: Some(attempt.id),
         },
     );
     assert_eq!(visible(app.conversation_projection_mut()), [final_text]);
@@ -98,7 +98,7 @@ fn reports_do_not_promote_or_flatten_verified_incomplete_answers() {
     for outcome in [Outcome::InProgress, Outcome::Failed, Outcome::Interrupted] {
         let mut attempt = ordered_attempt();
         if outcome != Outcome::InProgress {
-            attempt.finish(outcome);
+            attempt.close(outcome);
         }
         let mut reducer = AgentTranscriptReducer::default();
         let mut conversation = ConversationState::default();
@@ -124,7 +124,7 @@ fn reports_do_not_promote_or_flatten_verified_incomplete_answers() {
 fn acp_citation_replacements_cover_prior_segments_even_when_previews_are_skipped() {
     for delayed in [false, true] {
         let mut attempt = ordered_attempt();
-        attempt.activity.clear();
+        attempt.hosted_activity.clear();
         attempt.presentation = vec![part(
             0,
             AssistantPartIdentity::Content(0),
@@ -132,13 +132,13 @@ fn acp_citation_replacements_cover_prior_segments_even_when_previews_are_skipped
                 text: "Claim.".into(),
             },
         )];
-        let bound = |attempt: WebSearchAttemptRecord, id: &str| {
+        let bound = |attempt: ResponseAttempt, id: &str| {
             let AssistantPresentationContent::Answer { text } = &attempt.presentation[0].content
             else {
                 panic!("answer")
             };
             ResponseDisplay {
-                version: 1,
+                version: 2,
                 bindings: vec![Binding::Text {
                     kind: Kind::Message,
                     message_id: id.into(),
@@ -199,7 +199,7 @@ fn acp_citation_replacements_cover_prior_segments_even_when_previews_are_skipped
         // Unbound text is not collateral damage of retiring the old segment.
         reducer.apply_event(&mut conversation, preview(" unrelated suffix", "draft"));
         assert_eq!(visible(&conversation), [corrected, " unrelated suffix"]);
-        attempt.finish(Outcome::Completed);
+        attempt.close(Outcome::Completed);
         reducer.apply_event(
             &mut conversation,
             AgentRunEvent::ResponseDisplay {
@@ -260,7 +260,7 @@ fn immutable_revisions_reject_conflicts_but_allow_acp_binding_enrichment() {
 #[test]
 fn completed_acp_displays_do_not_disable_later_prompt_report_repair() {
     let mut attempt = ordered_attempt();
-    attempt.finish(Outcome::Completed);
+    attempt.close(Outcome::Completed);
     let mut reducer = AgentTranscriptReducer::default();
     let mut conversation = ConversationState::default();
     for event in standard_events(&attempt) {
@@ -298,7 +298,7 @@ fn completed_acp_displays_do_not_disable_later_prompt_report_repair() {
 #[test]
 fn native_result_and_selection_follow_call_identity_after_earlier_parts_arrive() {
     let mut attempt = ordered_attempt();
-    attempt.activity.truncate(1);
+    attempt.hosted_activity.truncate(1);
     attempt.presentation = vec![part(
         3,
         AssistantPartIdentity::Tool,
@@ -312,7 +312,7 @@ fn native_result_and_selection_follow_call_identity_after_earlier_parts_arrive()
         &mut app,
         SessionEvent::Intermediate {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: Some(attempt.id.clone()),
+            attempt_id: Some(attempt.id.clone()),
             message: assistant_message(vec![tool_call(
                 "native-item",
                 Some("native-call"),
@@ -346,7 +346,7 @@ fn native_result_and_selection_follow_call_identity_after_earlier_parts_arrive()
         },
     );
     assert_eq!(tool_status(&app, 0, 3), ToolCallStatus::Finished);
-    attempt.finish(Outcome::Completed);
+    attempt.close(Outcome::Completed);
     publish(&mut app, attempt);
     assert_eq!(app.selection(), cursor(0, 3));
     assert_eq!(tool_status(&app, 0, 3), ToolCallStatus::Finished);
@@ -367,7 +367,7 @@ fn native_result_and_selection_follow_call_identity_after_earlier_parts_arrive()
 #[test]
 fn nonfollowing_viewport_tracks_semantic_block_through_growth_and_group_split() {
     let mut attempt = ordered_attempt();
-    attempt.activity = vec![action(1, None), action(2, None)];
+    attempt.hosted_activity = vec![action(1, None), action(2, None)];
     attempt
         .presentation
         .retain(|part| part.source.output_index != 2);
@@ -390,7 +390,8 @@ fn nonfollowing_viewport_tracks_semantic_block_through_growth_and_group_split() 
         Some(anchor)
     );
     attempt.presentation[0] = reasoning(0, &"longer preceding thought\n".repeat(12));
-    attempt.activity[0].action = Some(json!({"type":"search", "query":"a late readable query"}));
+    attempt.hosted_activity[0].action =
+        Some(json!({"type":"search", "query":"a late readable query"}));
     attempt.touch();
     publish(&mut app, attempt);
     rendered_text(&mut app, 28, 10);
@@ -412,7 +413,7 @@ fn narrow_native_child_panes_keep_inline_order_through_hidden_updates_and_switch
     });
     views.apply(SessionEvent::Intermediate {
         turn_id: TEST_TURN_ID,
-        display_attempt_id: None,
+        attempt_id: None,
         message: launch_assistant("launch", "inspect web order", "child task"),
     });
     views.apply(SessionEvent::SubtaskLaunched {
@@ -463,10 +464,10 @@ fn narrow_native_child_panes_keep_inline_order_through_hidden_updates_and_switch
     assert!(views.root().is_busy());
     assert_eq!(views.handle_event(ctrl('o')), None);
     assert_eq!(views.visible_child_id(), None);
-    attempt.finish(Outcome::Completed);
+    attempt.close(Outcome::Completed);
     views.apply(SessionEvent::SubtaskSession {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::WebSearchUpdated {
+        event: Box::new(SessionEvent::ResponseAttemptUpdated {
             turn_id: TEST_TURN_ID,
             attempt: attempt.clone(),
         }),
@@ -475,7 +476,7 @@ fn narrow_native_child_panes_keep_inline_order_through_hidden_updates_and_switch
         id: child_id.clone(),
         event: Box::new(SessionEvent::TurnCompleted {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: Some(attempt.id),
+            attempt_id: Some(attempt.id),
             message: Message::assistant("cited answer [source](https://example.com)"),
         }),
     });
@@ -491,7 +492,7 @@ fn narrow_native_child_panes_keep_inline_order_through_hidden_updates_and_switch
 #[test]
 fn child_rows_keep_disjoint_stable_ids_and_parent_order_when_hosted_parts_arrive_late() {
     let mut attempt = ordered_attempt();
-    attempt.activity.clear();
+    attempt.hosted_activity.clear();
     attempt.presentation = vec![part(
         3,
         AssistantPartIdentity::Tool,
@@ -505,7 +506,7 @@ fn child_rows_keep_disjoint_stable_ids_and_parent_order_when_hosted_parts_arrive
         &mut app,
         SessionEvent::Intermediate {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: Some(attempt.id.clone()),
+            attempt_id: Some(attempt.id.clone()),
             message: assistant_message(vec![tool_call(
                 "native-item",
                 Some("batch"),

@@ -101,7 +101,7 @@ fn one_batch_rows_keep_stable_selection_and_independent_panes_with_duplicate_tit
     views.apply(SessionEvent::Intermediate {
         turn_id: TEST_TURN_ID,
         message: assistant(),
-        display_attempt_id: None,
+        attempt_id: None,
     });
     views.apply(SessionEvent::SubtaskStatus {
         turn_id: TEST_TURN_ID,
@@ -207,7 +207,7 @@ fn plural_terminal_fallback_and_restore_create_both_rows_and_panes_without_launc
             views.apply(SessionEvent::Intermediate {
                 turn_id: TEST_TURN_ID,
                 message: assistant(),
-                display_attempt_id: None,
+                attempt_id: None,
             });
             views.apply(SessionEvent::ToolResults {
                 turn_id: TEST_TURN_ID,

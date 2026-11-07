@@ -4,13 +4,12 @@
 use rig_core::message::Text;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
-use zevria_content::WebSearchActivity;
-use zevria_content::WebSearchAttemptOutcome;
-use zevria_content::WebSearchAttemptRecord;
-use zevria_content::WebSearchStatus;
+use zevria_content::HostedActivity;
+use zevria_content::HostedActivityStatus;
+use zevria_content::ResponseAttempt;
 
 #[cfg(test)]
-#[path = "search_tests.rs"]
+#[path = "attempt_tests.rs"]
 mod tests;
 
 #[derive(Default)]
@@ -25,8 +24,8 @@ struct LiveText {
     sequence: Option<u64>,
 }
 
-pub struct SearchState {
-    attempt: WebSearchAttemptRecord,
+pub struct AttemptReducer {
+    attempt: ResponseAttempt,
     // Raw native completed parts are never sanitized or used as model input.
     completed_text: BTreeMap<(u64, u64), Text>,
     live_text: BTreeMap<(u64, u64), LiveText>,
@@ -38,21 +37,20 @@ pub struct SearchState {
     finalized_parts: HashMap<(u64, zevria_content::AssistantPartIdentity), u8>,
     sequences: std::collections::HashSet<u64>,
     item_ids: HashMap<u64, (String, u8)>,
-    reconciled: bool,
 }
-impl SearchState {
-    pub fn attempt(&self) -> &WebSearchAttemptRecord {
+impl AttemptReducer {
+    pub fn attempt(&self) -> &ResponseAttempt {
         &self.attempt
     }
     pub fn completed_text(&self) -> &BTreeMap<(u64, u64), Text> {
         &self.completed_text
     }
-    pub fn finish(&mut self, outcome: WebSearchAttemptOutcome) {
-        self.attempt.finish(outcome);
+    pub fn attempt_mut(&mut self) -> &mut ResponseAttempt {
+        &mut self.attempt
     }
 
     pub fn new(profile: zevria_foundation::ModelProfileRef) -> Self {
-        let attempt = WebSearchAttemptRecord::new(profile);
+        let attempt = ResponseAttempt::new(profile);
         Self {
             attempt,
             completed_text: BTreeMap::new(),
@@ -61,7 +59,6 @@ impl SearchState {
             finalized_parts: Default::default(),
             sequences: Default::default(),
             item_ids: Default::default(),
-            reconciled: false,
             live_text: Default::default(),
             display_text: Default::default(),
             dirty_text: Default::default(),
@@ -72,23 +69,27 @@ impl SearchState {
         &mut self,
         index: u64,
         id: Option<&str>,
-        status: WebSearchStatus,
+        status: HostedActivityStatus,
         action: Option<&Value>,
         authority: u8,
     ) {
-        let position = self.attempt.activity.iter().position(|activity| {
+        let position = self.attempt.hosted_activity.iter().position(|activity| {
             activity.output_index == index || (id.is_some() && activity.item_id.as_deref() == id)
         });
         let activity = match position {
-            Some(position) => &mut self.attempt.activity[position],
+            Some(position) => &mut self.attempt.hosted_activity[position],
             None => {
-                self.attempt.activity.push(WebSearchActivity {
+                self.attempt.hosted_activity.push(HostedActivity {
+                    kind: zevria_content::HostedActivityKind::WebSearch,
                     item_id: id.map(str::to_string),
                     output_index: index,
                     status,
                     action: action.cloned(),
                 });
-                self.attempt.activity.last_mut().expect("just inserted")
+                self.attempt
+                    .hosted_activity
+                    .last_mut()
+                    .expect("just inserted")
             }
         };
         let prior = self.authority.entry(activity.output_index).or_default();
@@ -101,8 +102,8 @@ impl SearchState {
         if status.is_terminal() || !activity.status.is_terminal() {
             // Out-of-order in_progress must not regress searching/completed.
             if authority > *prior
-                || status != WebSearchStatus::InProgress
-                || activity.status == WebSearchStatus::InProgress
+                || status != HostedActivityStatus::InProgress
+                || activity.status == HostedActivityStatus::InProgress
             {
                 activity.status = status;
             }
@@ -117,9 +118,6 @@ impl SearchState {
             }
         }
         *prior = authority;
-        if status.is_terminal() {
-            self.attempt.terminal.insert(index, status);
-        }
     }
 
     /// Sanitized, citation-rendered display copies, never canonical model input.
@@ -269,13 +267,9 @@ impl SearchState {
         }
         match item.get("type").and_then(Value::as_str) {
             Some("web_search_call") => {
-                let status = match item.get("status").and_then(Value::as_str) {
-                    Some("completed") => WebSearchStatus::Completed,
-                    Some("failed") => WebSearchStatus::Failed,
-                    Some("incomplete") => WebSearchStatus::Interrupted,
-                    Some("searching") => WebSearchStatus::Searching,
-                    _ => WebSearchStatus::InProgress,
-                };
+                let status = HostedActivityStatus::from_native_item_status(
+                    item.get("status").and_then(Value::as_str),
+                );
                 self.activity(
                     index,
                     item.get("id").and_then(Value::as_str),
@@ -306,7 +300,7 @@ impl SearchState {
                                 zevria_content::AssistantPartIdentity::Content(part_index as u64)
                             };
                             if let Some(text) =
-                                zevria_content::web_search::readable_reasoning_value(part)
+                                zevria_content::readable::readable_reasoning_value(part)
                             {
                                 self.reasoning(
                                     index,
@@ -412,7 +406,7 @@ impl SearchState {
         {
             return;
         }
-        let text = zevria_content::web_search::sanitize_readable(text);
+        let text = zevria_content::readable::sanitize_readable(text);
         let text = if append {
             self.attempt
                 .presentation
@@ -441,23 +435,6 @@ impl SearchState {
         }
     }
 
-    pub fn reconcile(&mut self, items: &[Value]) {
-        self.reconciled = true;
-        self.attempt.presentation.clear();
-        self.completed_text.clear();
-        self.live_text.clear();
-        self.display_text.clear();
-        self.dirty_text.clear();
-        self.text_outputs.clear();
-        self.item_ids.clear();
-        self.finalized_parts.clear();
-        for (index, item) in items.iter().enumerate() {
-            self.item(index as u64, item, 2);
-        }
-        self.refresh_answers();
-        self.attempt.touch();
-    }
-
     fn refresh_answers(&mut self) {
         use zevria_content::{
             AssistantPartIdentity::Content, AssistantPresentationContent::Answer,
@@ -478,7 +455,7 @@ impl SearchState {
             };
             self.display_text.insert(
                 key,
-                Text::new(zevria_content::web_search::sanitize_readable(&text)),
+                Text::new(zevria_content::readable::sanitize_readable(&text)),
             );
         }
         let visible = self.visible_text();
@@ -513,9 +490,6 @@ impl SearchState {
 
     /// Ingest all readable evidence synchronously, before any cancellable await.
     pub fn ingest(&mut self, event: &Value) {
-        if self.reconciled {
-            return;
-        }
         if let Some(sequence) = event.get("sequence_number").and_then(Value::as_u64)
             && !self.sequences.insert(sequence)
         {
@@ -589,9 +563,9 @@ impl SearchState {
             | "response.web_search_call.completed" => {
                 if let Some(output) = output {
                     let status = match kind {
-                        "response.web_search_call.completed" => WebSearchStatus::Completed,
-                        "response.web_search_call.searching" => WebSearchStatus::Searching,
-                        _ => WebSearchStatus::InProgress,
+                        "response.web_search_call.completed" => HostedActivityStatus::Completed,
+                        "response.web_search_call.searching" => HostedActivityStatus::Searching,
+                        _ => HostedActivityStatus::InProgress,
                     };
                     self.activity(
                         output,
@@ -656,16 +630,12 @@ impl SearchState {
             if matches!(
                 kind,
                 "response.completed" | "response.done" | "response.failed" | "response.incomplete"
-            ) {
-                if let Some(items) = response.get("output").and_then(Value::as_array) {
-                    for (index, item) in items.iter().enumerate() {
-                        self.item(index as u64, item, 2);
-                    }
+            ) && let Some(items) = response.get("output").and_then(Value::as_array)
+            {
+                for (index, item) in items.iter().enumerate() {
+                    self.item(index as u64, item, 2);
                 }
-                if response.get("status").and_then(Value::as_str) == Some("cancelled") {
-                    self.attempt.finish(WebSearchAttemptOutcome::Interrupted);
-                }
-                // Attempt success is decided only after validating native replay.
+                // Success is decided only after native validation and core commit.
                 // A terminal event with an unusable ledger is still a failed attempt.
             }
         }

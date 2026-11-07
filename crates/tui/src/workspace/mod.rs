@@ -360,12 +360,11 @@ impl SessionViews {
                 | TranscriptItem::RequestPrompt { .. }
                 | TranscriptItem::Message(_)
                 | TranscriptItem::ProviderMessage(_)
-                | TranscriptItem::AssistantMessage { .. }
                 | TranscriptItem::SkillInvocation(_)
                 | TranscriptItem::Plan(_)
                 | TranscriptItem::Ensemble(_)
                 | TranscriptItem::Compaction(_)
-                | TranscriptItem::WebSearchAttempt(_)
+                | TranscriptItem::IncompleteResponse(_)
                 | TranscriptItem::Error { .. } => {}
             }
         }

@@ -978,9 +978,9 @@ impl App {
     fn reduce_event(&mut self, event: SessionEvent) -> Vec<AppEffect> {
         let mut effects = Vec::new();
         match event {
-            SessionEvent::WebSearchUpdated { turn_id, attempt } => {
+            SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
                 if !self.session.accepts_active(turn_id) { return effects; }
-                self.conversation.update_native_web_search(attempt, self.session.call_header());
+                self.conversation.update_native_attempt(attempt, self.session.call_header());
             }
             SessionEvent::ModeResult { request_id, result } => {
                 self.accept_mode_selection(&request_id, result);
@@ -1126,7 +1126,7 @@ impl App {
             SessionEvent::AssistantStreamUpdated { turn_id, snapshot } => {
                 if !self.session.preview_progress(turn_id) { return effects; }
                 if let Some(attempt) = snapshot.attempt {
-                    self.conversation.update_native_web_search(attempt, self.session.call_header());
+                    self.conversation.update_native_attempt(attempt, self.session.call_header());
                 } else if let Some(message) = snapshot.message.and_then(conversation::without_tool_calls) {
                     self.session.stream(turn_id, message);
                 }
@@ -1134,7 +1134,7 @@ impl App {
             SessionEvent::StreamCleared { turn_id } => {
                 let _ = self.session.clear_stream(turn_id);
             }
-            SessionEvent::Intermediate { turn_id, message, display_attempt_id } => {
+            SessionEvent::Intermediate { turn_id, message, attempt_id } => {
                 if !self.session.progress(turn_id) {
                     return effects;
                 }
@@ -1144,7 +1144,7 @@ impl App {
                 for finished in self.conversation.finish_tool_results(&message, &[]) {
                     self.conversation.finish_header(Some(finished), now);
                 }
-                self.conversation.commit_response(message, display_attempt_id.as_deref(), ToolCallStatus::Executing, header);
+                self.conversation.commit_response(message, attempt_id.as_deref(), ToolCallStatus::Executing, header);
                 // Keep the message's clock live while its commands/tools execute.
                 if !header.is_some_and(|header| self.conversation.header_has_executing_tool_calls(header)) {
                     self.conversation.finish_header(header, now);
@@ -1213,14 +1213,14 @@ impl App {
             SessionEvent::SubtaskSession { .. }
             | SessionEvent::QuestionAsked { .. }
             | SessionEvent::QuestionClosed { .. } => {}
-            SessionEvent::TurnCompleted { turn_id, message, display_attempt_id } => {
+            SessionEvent::TurnCompleted { turn_id, message, attempt_id } => {
                 let Some((_kind, header)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
                 self.edit.reject();
                 self.conversation.interrupt_executing_tool_calls();
                 self.conversation
-                    .commit_response(message, display_attempt_id.as_deref(), ToolCallStatus::Finished, header);
+                    .commit_response(message, attempt_id.as_deref(), ToolCallStatus::Finished, header);
             }
             SessionEvent::TurnRecovered { turn_id, .. } => {
                 let Some((_kind, _)) = self.finish_turn(turn_id) else {

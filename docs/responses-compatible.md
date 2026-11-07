@@ -76,8 +76,8 @@ input-token counting share the same prepared definition. Count-endpoint fallback
 does not change the real completion's capabilities. Command confinement and
 workflow/inspection/confirmation gates are unchanged.
 
-When search is advertised, **received answer text streams progressively**, even
-if the model never searches or the answer is one long content part. Refusals,
+For every non-silent Responses call, **received answer text streams progressively**,
+whether search is disabled, unused or used, including one long content part. Refusals,
 reasoning and search/open-page/find-in-page progress also remain live. Previews
 are provisional: completed native parts/items and the validated final output
 reconcile the same source-addressed answer in place. Delivery uses coalesced
@@ -99,18 +99,22 @@ and activation gestures (there is no in-app opener or universal click shortcut).
 Completed native output and unknown annotations are preserved for exact-profile
 replay. Switching profiles carries readable titles and URLs, but not hosted items,
 provider IDs, or opaque state. Portable links contribute to destination token
-estimates. Separate versioned search-attempt records retain retry/failure/cancel
-trails for reopening, and are never model input or compaction/token-estimate
-content. Observed partial answers remain attached to their failed/interrupted
-attempt, with an incomplete-response marker; a retry starts a fresh attempt.
-They never become canonical assistant history. Display evidence is collected
-before cancellable delivery. Finalized attempts are checkpointed with durable
-acknowledgement before retry/clear, and core drains remaining observations after
-each model call exits, before local tools or terminal publication. Ordinary
-cancellation retains observed partial text; a process crash can lose previews
-not yet checkpointed. Reopening retains the saved incomplete presentation, while
-successful explicitly linked attempts are reconstructed from exact native replay.
-A disk failure retains evidence in memory and reports persistence degradation.
+estimates. Every transmission has a provider-neutral live response attempt,
+independent of search advertisement. Successful responses persist only native
+replay; live commit and restore derive their display from that same ledger.
+Hosted actions absent from final output are dropped at commit.
+
+An abandoned attempt with readable output or hosted activity persists once as
+an immutable `zevria_incomplete_response` v1 record. Its failed/interrupted text
+remains headerless display evidence, not model input, compaction source or
+capacity accounting. Tool bindings are dropped. The provider waits for durable
+failed-attempt acknowledgement before retry/clear. Core releases the provider
+future, drains the collector, closes uncommitted attempts, and appends recovery
+then the response before awaiting frontend publication or running local tools.
+A response discarded because cancellation wins becomes interrupted recovery,
+not a committed assistant message. Ordinary cancellation preserves observed text;
+a process crash still loses an in-flight, uncheckpointed attempt. There are no
+in-progress checkpoints. Failed writes retain memory and report degradation.
 
 ## First-run setup
 
@@ -560,7 +564,8 @@ detail. Recovery never restarts the entire turn.
 Healthy first attempts keep the ordinary running/streaming display, without
 connection-phase details or ACP network diagnostics. Those details appear only
 for quiet warnings and recovery. Quiet warnings preserve the preview and state
-uncertainty rather than claiming a disconnection. Actual retries replace incomplete previews, not resume tokens.
+uncertainty rather than claiming a disconnection. Actual retries start a new live attempt rather than resuming tokens; readable
+abandoned output remains as an incomplete-response row.
 Incomplete answers and partial function calls are never committed or executed;
 completed local tool work is not rerun. Upstream generation or hosted searches
 may nevertheless repeat and incur charges because disconnecting cannot prove

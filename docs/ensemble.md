@@ -243,7 +243,16 @@ Root-review and worker-journal v1 carry complete validated image prompts, negoti
 
 Unsupported worker formats and proof-only ensemble histories are deliberately incompatible. Readers reject complete corrupt/unsupported records without changing bytes or inventing confirmation. Only an incomplete tail of the current format is recoverable crash debris, including an interrupted `response_display` append. A complete invalid payload is still an error when only its outer record delimiter is missing. Referenced worker identities and formats are preflighted before writable restoration.
 
-Response-display v1 metadata contains attempt v1 terminal evidence with canonical unsigned decimal JSON object keys (for example, `"terminal":{"1":"completed"}`). This evidence round-trips through the tagged worker v1 record without a format migration. Invalid, noncanonical, overflowing, and duplicate indexes are rejected, not merged or discarded. Display metadata remains presentation-only: it changes neither review authority, reports and decisions, nor model input or the provider's cacheable prompt prefix.
+Response-display v2 metadata carries a provider-neutral response attempt with
+one hosted-action `status` field, no nested version or terminal map. Worker logs
+retain normalized display events only when hosted activity, failed/interrupted
+output or previously emitted metadata requires them; ordinary successful text
+adds no display snapshot. Version 1 display events are rejected, not migrated.
+Root/child transcripts instead persist only native replay for committed responses
+and immutable incomplete-response v1 for abandoned attempts. Metadata and
+recovery never affect review authority, reports, decisions, model input or the
+provider's cacheable prompt prefix. Deferred synthesis publishes its finalized
+attempt before `TurnCompleted`, with the existing atomic response/workflow commit.
 
 Worker-history errors identify the file and line and distinguish decoding, version, and journal-order/identity validation failures. Explanations are bounded and do not include raw prompt or protocol payloads. A blocked preflight is not a runtime interruption that restarting the unchanged binary will repair: preserve the existing root and worker logs and resolve the reported decoding, validation, or access issue before resuming. Do not delete records, truncate complete evidence, start replacement work merely to hide the error, or manually resend dispatched feedback. Failed preflight starts no actors and commits no recovery transitions or terminal ensemble failure. After successful preflight, dispatched-but-unsettled input is interrupted rather than resent; accepted-but-undispatched input remains queued exactly once. Resuming with a corrected binary does not fabricate settlement, proposal eligibility, or approval: explicit retry and confirmation rules still apply.
 

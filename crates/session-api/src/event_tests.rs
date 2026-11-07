@@ -94,6 +94,20 @@ async fn retry_reporter_forwards_delay_and_silent_reporters_suppress_progress() 
     silent.stream_updated(Message::assistant("hidden summary"));
     silent.stream_cleared();
     silent.usage_updated(TokenUsage::default()).await;
+    let attempt =
+        zevria_content::ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("p", "m"));
+    assert!(!silent.records_attempts());
+    silent.collect_attempt(attempt.clone());
+    silent.stream_snapshot(zevria_content::AssistantStreamSnapshot {
+        message: None,
+        attempt: Some(attempt.clone()),
+    });
+    silent
+        .checkpoint_failed_attempt(attempt.clone())
+        .await
+        .unwrap();
+    silent.attempt_updated(attempt).await;
+    assert!(silent.drain_attempts().is_empty());
     assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 }
 
@@ -120,7 +134,7 @@ fn streaming_updates_coalesce_while_lifecycle_events_stay_bounded() {
 
     assert!(matches!(
         events.try_send(SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id,
             message: Message::assistant("done"),
         }),
@@ -153,7 +167,7 @@ fn streaming_updates_coalesce_while_lifecycle_events_stay_bounded() {
 fn slow_consumers_receive_only_the_latest_large_indexed_answer_and_collector_revision() {
     let (events, mut receiver) = session_event_channel(1);
     let progress = ProgressReporter::new(events);
-    let mut attempt = zevria_content::WebSearchAttemptRecord::new(
+    let mut attempt = zevria_content::ResponseAttempt::new(
         zevria_foundation::ModelProfileRef::new("test", "test"),
     );
     attempt
@@ -193,11 +207,7 @@ fn slow_consumers_receive_only_the_latest_large_indexed_answer_and_collector_rev
         matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
         "no queued token frames"
     );
-    attempt.finish(zevria_content::WebSearchAttemptOutcome::Interrupted);
-    assert_eq!(
-        progress.drain_web_search(zevria_content::WebSearchAttemptOutcome::Interrupted),
-        [attempt]
-    );
+    assert_eq!(progress.drain_attempts(), [attempt]);
 }
 
 #[tokio::test]
@@ -466,7 +476,7 @@ async fn unread_root_lifecycle_events_fence_older_streams() {
     let turn_id = TurnId::new(12);
     let fencing_events = [
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id,
             message: Message::assistant("committed tool call"),
         },
@@ -476,7 +486,7 @@ async fn unread_root_lifecycle_events_fence_older_streams() {
             metadata: Vec::new(),
         },
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id,
             message: Message::assistant("done"),
         },
@@ -527,7 +537,7 @@ async fn a_consumed_preview_precedes_and_is_then_cleared_by_lifecycle() {
     ));
 
     let committed = SessionEvent::Intermediate {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id,
         message: Message::assistant("committed"),
     };
@@ -547,7 +557,7 @@ async fn a_post_lifecycle_preview_survives_while_the_older_preview_is_discarded(
     let turn_id = TurnId::new(14);
     sender.stream_updated(turn_id, Message::assistant("old preview"));
     let committed = SessionEvent::Intermediate {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id,
         message: Message::assistant("tool call"),
     };
@@ -584,7 +594,7 @@ async fn child_forwarding_through_the_parent_fences_an_unread_child_preview() {
     parent_sender.set_subtask_stream(child_id.clone(), child_stream);
 
     let child_commit = SessionEvent::Intermediate {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id,
         message: Message::assistant("child commit"),
     };

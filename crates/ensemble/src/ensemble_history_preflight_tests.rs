@@ -56,7 +56,7 @@ fn existing_root_history_passes_read_only_replay_and_preflight() -> anyhow::Resu
                     let record = record?;
                     if matches!(&record, AgentRunTranscriptRecord::Event {
                         event: AgentRunEvent::ResponseDisplay { display },
-                    } if !display.attempt.terminal.is_empty())
+                    } if display.attempt.hosted_activity.iter().any(|activity| activity.status.is_terminal()))
                     {
                         worker_displays += 1;
                     }

@@ -362,7 +362,7 @@ pub fn parse_server_event(
         "error" => serde_json::from_str(payload)
             .map(|e| Some(ResponsesWebSocketEvent::Error(e)))
             .map_err(CompletionError::from),
-        // SearchStream owns these events and has already observed their raw
+        // AttemptReducer owns these events and has already observed their raw
         // payloads. They must not enter Rig's function-tool stream conversion.
         kind if is_hosted_progress_event(kind) => Ok(None),
         "response.done" => serde_json::from_str(payload)

@@ -469,7 +469,7 @@ fn stable_digest_id<'a>(prefix: &str, components: impl IntoIterator<Item = &'a s
 pub enum AgentRunEvent {
     /// Validated display-only ordering; inert for reports, choices and workflow.
     ResponseDisplay {
-        display: Box<crate::web_search::ResponseDisplay>,
+        display: Box<crate::response::ResponseDisplay>,
     },
     Review {
         event: Box<WorkerReviewEvent>,
@@ -602,7 +602,7 @@ impl AgentRunEvent {
     pub fn is_hosted_search_activity(&self) -> bool {
         match self {
             Self::ToolCall { id, raw_input, .. } | Self::ToolCallUpdate { id, raw_input, .. } => {
-                crate::web_search::is_hosted_search_input(id, raw_input.as_ref())
+                crate::response::is_hosted_search_input(id, raw_input.as_ref())
             }
             _ => false,
         }

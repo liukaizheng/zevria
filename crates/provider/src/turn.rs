@@ -258,7 +258,6 @@ pub(crate) struct PreparedRequest {
     pub(crate) full_input: Vec<serde_json::Value>,
     history_message_count: usize,
     replay_source: ReplaySource,
-    search_advertised: bool,
 }
 
 struct Transmission {
@@ -379,7 +378,6 @@ pub(crate) async fn prepare_turn_request(
         full_input,
         history_message_count: model_request.input.len().saturating_sub(1),
         replay_source,
-        search_advertised,
     })
 }
 
@@ -843,19 +841,7 @@ fn successful_model_response(
             );
         }
     };
-    if let Some(search) = &mut state.search {
-        search.reconcile(&response_output);
-    }
-    let response = response
-        .with_usage(usage)
-        .with_display_attempt(
-            state
-                .search
-                .as_ref()
-                .filter(|search| search.attempt().has_display())
-                .map(|search| search.attempt().id.clone()),
-        )
-        .inspect_err(|_| openai.ws.invalidate_continuation("invalid_native_output"))?;
+    let response = response.with_usage(usage);
     openai.ws.continuation = Some(ContinuationState {
         socket_generation: openai.ws.socket_generation,
         response_id,
@@ -1009,12 +995,25 @@ async fn run_model_request(
     policy: &RecoveryPolicy,
     attempt_progress: AttemptProgress<'_>,
 ) -> anyhow::Result<ModelResponse> {
-    state.search = prepared
-        .search_advertised
-        .then(|| crate::search::SearchStream::new(openai.profile.clone(), progress));
+    state.attempt = progress
+        .records_attempts()
+        .then(|| crate::attempt::AttemptStream::new(openai.profile.clone(), progress));
     let result =
         run_model_request_inner(prepared, openai, state, progress, policy, attempt_progress).await;
-    state.finish_search(result.is_ok(), progress).await?;
+    let result = match result {
+        Ok(response) => response.with_attempt_id(
+            state
+                .attempt
+                .as_ref()
+                .map(|attempt| attempt.id().to_owned()),
+        ),
+        Err(error) => {
+            if let Some(attempt) = &mut state.attempt {
+                attempt.close_failed(progress).await?;
+            }
+            Err(error)
+        }
+    };
     #[cfg(feature = "cache-diagnostics")]
     crate::cache_diagnostics::finish(prepared, openai, result.as_ref().ok());
     result
@@ -1183,7 +1182,7 @@ async fn run_model_request_inner(
             Some("response.completed") => state.record_native_terminal_output(&message),
             _ => {}
         }
-        state.observe_search(&message, progress).await;
+        state.observe_attempt(&message, progress).await;
 
         let Some(event) = event else {
             continue;
@@ -1460,22 +1459,7 @@ fn successful_http_model_response(
     let response = ModelResponse::from_replay(replay).map_err(|error| {
         error.context("failed to convert captured OpenAI HTTP output into an assistant message")
     })?;
-    if let Some(search) = &mut state.search {
-        search.reconcile(
-            &response
-                .record()
-                .provider_replay()
-                .expect("native completion")
-                .items,
-        );
-    }
-    response.with_usage(usage).with_display_attempt(
-        state
-            .search
-            .as_ref()
-            .filter(|search| search.attempt().has_display())
-            .map(|search| search.attempt().id.clone()),
-    )
+    Ok(response.with_usage(usage))
 }
 
 async fn run_http_model_request(
@@ -1487,9 +1471,9 @@ async fn run_http_model_request(
     attempt_progress: AttemptProgress<'_>,
     request_start_deadline: std::time::Duration,
 ) -> Result<ModelResponse, HttpAttemptError> {
-    state.search = prepared
-        .search_advertised
-        .then(|| crate::search::SearchStream::new(openai.profile.clone(), progress));
+    state.attempt = progress
+        .records_attempts()
+        .then(|| crate::attempt::AttemptStream::new(openai.profile.clone(), progress));
     let result = run_http_model_request_inner(
         prepared,
         openai,
@@ -1500,10 +1484,25 @@ async fn run_http_model_request(
         request_start_deadline,
     )
     .await;
-    state
-        .finish_search(result.is_ok(), progress)
-        .await
-        .map_err(HttpAttemptError::terminal)?;
+    let result = match result {
+        Ok(response) => response
+            .with_attempt_id(
+                state
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.id().to_owned()),
+            )
+            .map_err(HttpAttemptError::terminal),
+        Err(error) => {
+            if let Some(attempt) = &mut state.attempt {
+                attempt
+                    .close_failed(progress)
+                    .await
+                    .map_err(HttpAttemptError::terminal)?;
+            }
+            Err(error)
+        }
+    };
     #[cfg(feature = "cache-diagnostics")]
     crate::cache_diagnostics::finish(prepared, openai, result.as_ref().ok());
     result
@@ -1712,7 +1711,7 @@ async fn run_http_model_request_inner(
             Some("response.completed") => state.record_native_terminal_output(payload),
             _ => {}
         }
-        state.observe_search(payload, progress).await;
+        state.observe_attempt(payload, progress).await;
         let Some(event) = event else {
             continue;
         };

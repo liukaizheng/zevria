@@ -254,7 +254,7 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
                     app.reduce_without_effects(SessionEvent::TurnCompleted {
                         turn_id,
                         message: Message::assistant("answer"),
-                        display_attempt_id: None,
+                        attempt_id: None,
                     });
                 }
                 app.seed_history_entry(HistoryEntry::PlanArtifact(test_plan_artifact()));
@@ -267,7 +267,7 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
                 app.reduce_without_effects(SessionEvent::TurnCompleted {
                     turn_id: TurnId::new(4),
                     message: Message::assistant("implemented"),
-                    display_attempt_id: None,
+                    attempt_id: None,
                 });
                 app.reduce_without_effects(SessionEvent::EnsembleStarted {
                     turn_id: TurnId::new(5),
@@ -276,7 +276,6 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
                 });
                 app.reduce_without_effects(SessionEvent::TurnRecovered {
                     turn_id: TurnId::new(5),
-                    display_attempt_id: None,
                 });
                 app.reduce_without_effects(SessionEvent::TurnStarted {
                     turn_id: TurnId::new(6),

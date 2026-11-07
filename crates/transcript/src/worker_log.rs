@@ -620,12 +620,9 @@ fn unsupported_worker_tail(line: &[u8], validation: &AgentRunValidation) -> bool
             return true;
         }
         if value == "response_display"
-            && (partial_json_field(line, &["event", "display", "version"])
-                .is_some_and(|version| version != 1)
-                || partial_json_field(line, &["event", "display", "attempt", "version"])
-                    .is_some_and(|version| {
-                        version != zevria_content::web_search::WEB_SEARCH_ATTEMPT_VERSION
-                    }))
+            && partial_json_field(line, &["event", "display", "version"]).is_some_and(|version| {
+                version != zevria_content::response::RESPONSE_DISPLAY_VERSION
+            })
         {
             return true;
         }

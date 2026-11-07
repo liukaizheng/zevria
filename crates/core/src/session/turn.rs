@@ -302,7 +302,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                 }
             }
             Failure::Cancelled => {
-                self.record_recoverable_items(terminal, events).await?;
+                if let Some(error) = self.record_recoverable_items(terminal)? {
+                    self.persistence_failed(&error, events).await?;
+                }
                 SessionEvent::TurnCancelled { turn_id: turn.id }
             }
             Failure::Fatal(_) => unreachable!(),

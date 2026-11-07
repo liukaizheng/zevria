@@ -157,7 +157,7 @@ pub(crate) struct AgentTranscriptReducer {
     review_sealed: bool,
     review_abandoned: bool,
     projections: HashMap<(SegmentKind, String), (String, Vec<ProjectionPiece>)>,
-    displays: HashMap<String, zevria_content::web_search::ResponseDisplay>,
+    displays: HashMap<String, zevria_content::response::ResponseDisplay>,
     // Latest coverage per emitted segment/range, not a history of token
     // snapshots. A corrected segment may arrive before its predecessor's
     // coalesced preview; keep enough evidence to cover that predecessor later.
@@ -283,7 +283,7 @@ impl AgentTranscriptReducer {
                     })
                 {
                     for binding in &display.bindings {
-                        if let zevria_content::web_search::DisplayProjectionBinding::Text {
+                        if let zevria_content::response::DisplayProjectionBinding::Text {
                             kind,
                             message_id,
                             start,
@@ -293,10 +293,10 @@ impl AgentTranscriptReducer {
                             && let Some(text) = display.binding_text(binding)
                         {
                             let kind = match kind {
-                                zevria_content::web_search::DisplayProjectionKind::Message => {
+                                zevria_content::response::DisplayProjectionKind::Message => {
                                     SegmentKind::Agent
                                 }
-                                zevria_content::web_search::DisplayProjectionKind::Thought => {
+                                zevria_content::response::DisplayProjectionKind::Thought => {
                                     SegmentKind::Thought
                                 }
                             };
@@ -979,8 +979,8 @@ impl AgentTranscriptReducer {
     }
 
     fn refresh_displays(&mut self, conversation: &mut ConversationState) {
-        use zevria_content::web_search::DisplayProjectionBinding as Binding;
-        use zevria_content::web_search::DisplayProjectionKind as Kind;
+        use zevria_content::response::DisplayProjectionBinding as Binding;
+        use zevria_content::response::DisplayProjectionKind as Kind;
         let mut displays = self.displays.values().cloned().collect::<Vec<_>>();
         displays.sort_by(|a, b| a.attempt.id.cmp(&b.attempt.id));
         for display in displays {
@@ -1036,7 +1036,7 @@ impl AgentTranscriptReducer {
                             && let Some(block) = block_mut(conversation, location)
                         {
                             if !*native
-                                && !matches!(&block.kind, PresentationBlockKind::Tool(PresentedTool::Acp(tool)) if zevria_content::web_search::is_hosted_search_input(&tool.id, tool.raw_input.as_ref()))
+                                && !matches!(&block.kind, PresentationBlockKind::Tool(PresentedTool::Acp(tool)) if zevria_content::response::is_hosted_search_input(&tool.id, tool.raw_input.as_ref()))
                             {
                                 valid = false;
                                 break;
@@ -1137,7 +1137,7 @@ impl AgentTranscriptReducer {
             // No blanket suppression: text without explicit verified coverage
             // stays in the ordinary projection, rather than being shown twice.
             attempt.presentation.retain(|part| sources.contains(&part.source) || matches!(&part.content, zevria_content::AssistantPresentationContent::NativeTool { call_id } if tools.contains_key(call_id)));
-            conversation.update_projected_web_search(attempt);
+            conversation.update_projected_attempt(attempt);
             conversation.bind_attempt_tools(&display.attempt.id, tools);
             if let Some((history, _, block)) = first {
                 conversation.place_attempt(&display.attempt.id, history, block);

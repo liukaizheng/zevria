@@ -907,7 +907,7 @@ impl LiveSession {
 
     fn handle_event(self: &Arc<Self>, event: SessionEvent) -> Result<(), AcpError> {
         match event {
-            SessionEvent::WebSearchUpdated { turn_id, attempt } => {
+            SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
                 let updates = {
                     let mut state = self.state.lock().expect("ACP session state poisoned");
                     let mut updates = state.hosted_search.update(&attempt);
@@ -1016,14 +1016,14 @@ impl LiveSession {
             SessionEvent::Intermediate {
                 turn_id,
                 message,
-                display_attempt_id,
+                attempt_id,
             } => {
                 let (stream_updates, tool_updates) = {
                     let mut state = self.state.lock().expect("ACP session state poisoned");
                     let stream_updates = state.streams.entry(turn_id).or_default().terminal_bound(
                         turn_id,
                         &message,
-                        display_attempt_id.as_deref(),
+                        attempt_id.as_deref(),
                     );
                     state.streams.entry(turn_id).or_default().reset();
                     let tool_updates =
@@ -1105,14 +1105,14 @@ impl LiveSession {
             SessionEvent::TurnCompleted {
                 turn_id,
                 message,
-                display_attempt_id,
+                attempt_id,
             } => {
                 let updates = {
                     let mut state = self.state.lock().expect("ACP session state poisoned");
                     let updates = state.streams.entry(turn_id).or_default().terminal_bound(
                         turn_id,
                         &message,
-                        display_attempt_id.as_deref(),
+                        attempt_id.as_deref(),
                     );
                     state.streams.entry(turn_id).or_default().reset();
                     updates

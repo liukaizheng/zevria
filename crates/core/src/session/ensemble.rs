@@ -86,17 +86,6 @@ pub(super) fn recovered_ensemble_synthesis(
         return Ok(None);
     };
     let tail = &items[reports_index.saturating_add(1)..];
-    let display_attempt_id = tail
-        .iter()
-        .rev()
-        .find(|item| {
-            item.message().is_some_and(|message| {
-                matches!(message, Message::Assistant { .. })
-                    && assistant_tool_calls(message).is_empty()
-            })
-        })
-        .and_then(TranscriptItem::display_attempt_id)
-        .map(str::to_owned);
     if workflow == EnsembleWorkflow::Plan
         && let Some(artifact) = tail.iter().rev().find_map(|item| match item {
             TranscriptItem::Plan(PlanRecord::Published { artifact, .. }) => Some(artifact.clone()),
@@ -106,7 +95,6 @@ pub(super) fn recovered_ensemble_synthesis(
         return Ok(Some(RecoveredEnsembleSynthesis {
             candidate: None,
             ready: Some(artifact),
-            display_attempt_id,
         }));
     }
     if tail
@@ -134,16 +122,11 @@ pub(super) fn recovered_ensemble_synthesis(
     if workflow == EnsembleWorkflow::Plan && ready.is_none() && candidate.is_none() {
         return Ok(None);
     }
-    Ok(Some(RecoveredEnsembleSynthesis {
-        candidate,
-        ready,
-        display_attempt_id,
-    }))
+    Ok(Some(RecoveredEnsembleSynthesis { candidate, ready }))
 }
 
 #[derive(Debug)]
 pub(super) struct RecoveredEnsembleSynthesis {
-    pub(super) display_attempt_id: Option<String>,
     pub(super) candidate: Option<PlanCandidate>,
     pub(super) ready: Option<PlanArtifact>,
 }
@@ -648,10 +631,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 publication: None,
                 retained: Vec::new(),
                 usage: None,
-                terminal: SessionEvent::TurnRecovered {
-                    turn_id: turn.id,
-                    display_attempt_id: None,
-                },
+                terminal: SessionEvent::TurnRecovered { turn_id: turn.id },
                 defer_publication: true,
             }
         } else {
@@ -704,7 +684,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 usage: None,
                 terminal: SessionEvent::TurnCompleted {
                     turn_id: turn.id,
-                    display_attempt_id: None,
+                    attempt_id: None,
                     message,
                 },
                 defer_publication: true,
@@ -775,7 +755,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             completed.candidate
         };
         let output = ModelTurnOutput {
-            display_attempt_id: completed.display_attempt_id,
+            attempt_id: None,
             message: None,
             submission_gate: PlanSubmissionGate::inert(candidate),
             final_item: None,

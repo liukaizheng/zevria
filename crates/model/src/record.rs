@@ -15,7 +15,6 @@ enum MessageContent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageRecord {
     content: MessageContent,
-    display_attempt_id: Option<String>,
 }
 
 impl MessageRecord {
@@ -29,7 +28,6 @@ impl MessageRecord {
         }
         Ok(Self {
             content: MessageContent::Plain(message),
-            display_attempt_id: None,
         })
     }
 
@@ -40,24 +38,7 @@ impl MessageRecord {
     pub fn from_trusted_replay(content: ReplayMessage) -> Self {
         Self {
             content: MessageContent::Replay(content),
-            display_attempt_id: None,
         }
-    }
-
-    pub fn with_display_attempt(mut self, id: Option<String>) -> anyhow::Result<Self> {
-        if let Some(id) = id {
-            crate::web_search::validate_display_id(&id)?;
-            anyhow::ensure!(
-                matches!(self.message(), Message::Assistant { .. }),
-                "display binding requires an assistant record"
-            );
-            self.display_attempt_id = Some(id);
-        }
-        Ok(self)
-    }
-
-    pub fn display_attempt_id(&self) -> Option<&str> {
-        self.display_attempt_id.as_deref()
     }
 
     pub fn message(&self) -> &Message {
@@ -91,23 +72,23 @@ impl MessageRecord {
 
     /// Owned display restoration can take the message while dropping the native
     /// ledger. The boolean preserves response-commit semantics for native content.
-    pub fn into_display(self) -> (Message, Option<String>, bool) {
+    pub fn into_display(self) -> (Message, bool) {
         let (message, replay_backed) = match self.content {
             MessageContent::Plain(message) => (message, false),
             MessageContent::Replay(content) => (content.into_message(), true),
         };
-        (message, self.display_attempt_id, replay_backed)
+        (message, replay_backed)
     }
 
     /// Consume validated content without exposing independently mutable message/replay halves.
     pub fn into_parts<T>(
         self,
-        plain: impl FnOnce(Message, Option<String>) -> T,
-        replay: impl FnOnce(ReplayMessage, Option<String>) -> T,
+        plain: impl FnOnce(Message) -> T,
+        replay: impl FnOnce(ReplayMessage) -> T,
     ) -> T {
         match self.content {
-            MessageContent::Plain(message) => plain(message, self.display_attempt_id),
-            MessageContent::Replay(content) => replay(content, self.display_attempt_id),
+            MessageContent::Plain(message) => plain(message),
+            MessageContent::Replay(content) => replay(content),
         }
     }
 }

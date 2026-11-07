@@ -15,8 +15,9 @@ use zevria_foundation::TurnId;
 pub(crate) struct StreamSegments {
     message: Segment,
     thought: Segment,
-    pub(crate) attempt: Option<zevria_content::WebSearchAttemptRecord>,
-    seen_attempts: std::collections::HashMap<String, zevria_content::WebSearchAttemptRecord>,
+    pub(crate) attempt: Option<zevria_content::ResponseAttempt>,
+    emitted_attempts: std::collections::HashSet<String>,
+    seen_attempts: std::collections::HashMap<String, zevria_content::ResponseAttempt>,
 }
 
 #[derive(Debug, Default)]
@@ -147,7 +148,7 @@ impl StreamSegments {
         let display_message = self
             .attempt
             .as_ref()
-            .filter(|attempt| attempt.outcome == zevria_content::WebSearchAttemptOutcome::Completed)
+            .filter(|attempt| attempt.outcome == zevria_content::ResponseAttemptOutcome::Completed)
             .and_then(display_message);
         let mut updates = self.terminal(turn_id, display_message.as_ref().unwrap_or(message));
         if let Some(display) = self.display_update() {
@@ -156,16 +157,24 @@ impl StreamSegments {
         updates
     }
 
-    pub(crate) fn display_update(&self) -> Option<SessionUpdate> {
-        use zevria_content::web_search::DisplayProjectionBinding as Binding;
-        use zevria_content::web_search::DisplayProjectionKind as Kind;
-        use zevria_content::web_search::ResponseDisplay;
+    pub(crate) fn display_update(&mut self) -> Option<SessionUpdate> {
+        use zevria_content::response::DisplayProjectionBinding as Binding;
+        use zevria_content::response::DisplayProjectionKind as Kind;
+        use zevria_content::response::ResponseDisplay;
         let attempt = self.attempt.as_ref()?.clone();
-        if !attempt.has_display() {
+        if !attempt.has_display()
+            || (attempt.hosted_activity.is_empty()
+                && !matches!(
+                    attempt.outcome,
+                    zevria_content::ResponseAttemptOutcome::Failed
+                        | zevria_content::ResponseAttemptOutcome::Interrupted
+                )
+                && !self.emitted_attempts.contains(&attempt.id))
+        {
             return None;
         }
         let mut display = ResponseDisplay {
-            version: 1,
+            version: zevria_content::response::RESPONSE_DISPLAY_VERSION,
             attempt,
             bindings: Vec::new(),
         };
@@ -208,11 +217,17 @@ impl StreamSegments {
         }
         display
             .bindings
-            .extend(display.attempt.activity.iter().map(|action| Binding::Tool {
-                tool_call_id: action.client_id(&display.attempt.id),
-                output_index: action.output_index,
-                native: false,
-            }));
+            .extend(
+                display
+                    .attempt
+                    .hosted_activity
+                    .iter()
+                    .map(|action| Binding::Tool {
+                        tool_call_id: action.client_id(&display.attempt.id),
+                        output_index: action.output_index,
+                        native: false,
+                    }),
+            );
         display
             .bindings
             .extend(
@@ -231,7 +246,12 @@ impl StreamSegments {
                         _ => None,
                     }),
             );
-        display_carrier(display)
+        let id = display.attempt.id.clone();
+        let update = display_carrier(display);
+        if update.is_some() {
+            self.emitted_attempts.insert(id);
+        }
+        update
     }
 
     /// End the current stream boundary. The next non-empty snapshot receives a
@@ -311,7 +331,7 @@ fn project_complete(
     segment.emitted.push_str(suffix);
 }
 
-pub(crate) fn display_message(attempt: &zevria_content::WebSearchAttemptRecord) -> Option<Message> {
+pub(crate) fn display_message(attempt: &zevria_content::ResponseAttempt) -> Option<Message> {
     let content = attempt
         .presentation
         .iter()
@@ -339,7 +359,7 @@ pub(crate) fn session_notification(
     let meta = match &mut update {
         SessionUpdate::SessionInfoUpdate(info)
             if info.meta.as_ref().is_some_and(|meta| {
-                meta.contains_key(zevria_content::web_search::RESPONSE_DISPLAY_META_KEY)
+                meta.contains_key(zevria_content::response::RESPONSE_DISPLAY_META_KEY)
             }) =>
         {
             info.meta.take()
@@ -350,14 +370,14 @@ pub(crate) fn session_notification(
 }
 
 pub(crate) fn replay_display(
-    attempt: &zevria_content::WebSearchAttemptRecord,
+    attempt: &zevria_content::ResponseAttempt,
     updates: &[SessionUpdate],
 ) -> Option<SessionUpdate> {
-    use zevria_content::web_search::DisplayProjectionBinding as Binding;
-    use zevria_content::web_search::DisplayProjectionKind as Kind;
-    use zevria_content::web_search::ResponseDisplay;
+    use zevria_content::response::DisplayProjectionBinding as Binding;
+    use zevria_content::response::DisplayProjectionKind as Kind;
+    use zevria_content::response::ResponseDisplay;
     let mut display = ResponseDisplay {
-        version: 1,
+        version: zevria_content::response::RESPONSE_DISPLAY_VERSION,
         attempt: attempt.clone(),
         bindings: Vec::new(),
     };
@@ -407,7 +427,7 @@ pub(crate) fn replay_display(
     }
     display
         .bindings
-        .extend(attempt.activity.iter().map(|action| Binding::Tool {
+        .extend(attempt.hosted_activity.iter().map(|action| Binding::Tool {
             tool_call_id: action.client_id(&attempt.id),
             output_index: action.output_index,
             native: false,
@@ -420,12 +440,12 @@ pub(crate) fn replay_display(
 }
 
 pub(crate) fn display_carrier(
-    display: zevria_content::web_search::ResponseDisplay,
+    display: zevria_content::response::ResponseDisplay,
 ) -> Option<SessionUpdate> {
     display.validate().ok()?;
     let mut meta = serde_json::Map::new();
     meta.insert(
-        zevria_content::web_search::RESPONSE_DISPLAY_META_KEY.into(),
+        zevria_content::response::RESPONSE_DISPLAY_META_KEY.into(),
         serde_json::to_value(display).ok()?,
     );
     Some(SessionUpdate::SessionInfoUpdate(

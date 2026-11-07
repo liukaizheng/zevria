@@ -707,10 +707,7 @@ async fn every_batch_rejects_unsupported_existing_logs_before_starting_any_worke
         },
     })
     .unwrap()
-    .replace(
-        r#""terminal":{"1":"completed"}"#,
-        r#""terminal":{"01":"completed"}"#,
-    );
+    .replace(r#""version":2"#, r#""version":1"#);
     for invalid in [
         r#"{"record":"event","event":{"type":"status","status":"completed","detail":null}}"#
             .to_owned(),

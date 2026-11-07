@@ -72,9 +72,9 @@ fn in_memory(c: &mut Criterion) {
                 });
                 group.bench_function("restore", |b| {
                     b.iter(|| {
-                        black_box(zevria_transcript::reconstruct_transcript(black_box(
-                            &f.items,
-                        )))
+                        for (index, item) in black_box(&f.items).iter().enumerate() {
+                            black_box(zevria_transcript::restored_attempt(item, index));
+                        }
                     })
                 });
                 // File setup is outside the timed load; includes bounded reading,

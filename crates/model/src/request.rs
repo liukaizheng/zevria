@@ -248,6 +248,8 @@ impl<'de> serde::Deserialize<'de> for OwnedModelRequestItem {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelResponse {
     record: crate::MessageRecord,
+    /// In-memory provider transmission provenance. Never persisted or model input.
+    pub attempt_id: Option<String>,
     pub usage: Option<TokenUsage>,
 }
 
@@ -255,6 +257,7 @@ impl ModelResponse {
     pub fn from_record(record: crate::MessageRecord) -> Self {
         Self {
             record,
+            attempt_id: None,
             usage: None,
         }
     }
@@ -282,8 +285,11 @@ impl ModelResponse {
         self.record
     }
 
-    pub fn with_display_attempt(mut self, id: Option<String>) -> anyhow::Result<Self> {
-        self.record = self.record.with_display_attempt(id)?;
+    pub fn with_attempt_id(mut self, id: Option<String>) -> anyhow::Result<Self> {
+        if let Some(id) = &id {
+            zevria_content::response::validate_display_id(id)?;
+        }
+        self.attempt_id = id;
         Ok(self)
     }
 

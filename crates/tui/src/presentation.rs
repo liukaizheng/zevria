@@ -6,7 +6,7 @@
 //! and cache invalidation rules.
 
 use rig_core::message::{ProviderCallId, Reasoning, ToolCall, ToolResult};
-use zevria_content::WebSearchStatus;
+use zevria_content::HostedActivityStatus;
 use zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME;
 use zevria_foundation::ToolCallOutcome;
 use zevria_foundation::ToolResultMetadata;
@@ -422,14 +422,15 @@ impl AcpToolPresentation {
     }
 
     pub(crate) fn hosted_activity(&self) -> Option<WebActivityPresentation> {
-        if !zevria_content::web_search::is_hosted_search_input(&self.id, self.raw_input.as_ref()) {
+        if !zevria_content::response::is_hosted_search_input(&self.id, self.raw_input.as_ref()) {
             return None;
         }
-        let activity = zevria_content::WebSearchActivity {
-            output_index: zevria_content::web_search::HostedSearchAddress::parse(&self.id)?
+        let activity = zevria_content::HostedActivity {
+            kind: zevria_content::HostedActivityKind::WebSearch,
+            output_index: zevria_content::response::HostedSearchAddress::parse(&self.id)?
                 .output_index,
             item_id: None,
-            status: WebSearchStatus::InProgress,
+            status: HostedActivityStatus::InProgress,
             action: self
                 .raw_input
                 .as_ref()
@@ -687,24 +688,17 @@ pub(crate) struct WebActivityPresentation {
 }
 impl WebActivityPresentation {
     pub(crate) fn from_actions(
-        attempt: &zevria_content::WebSearchAttemptRecord,
-        actions: &[&zevria_content::WebSearchActivity],
+        attempt: &zevria_content::ResponseAttempt,
+        actions: &[&zevria_content::HostedActivity],
     ) -> Self {
         let mut outcomes: Vec<(StatusIcon, usize)> = Vec::new();
         for action in actions {
-            let status = match attempt.confirmed_status(action) {
-                Some(status) => Some(status),
-                None if attempt.outcome.is_terminal() => None,
-                None => Some(action.status),
-            };
-            let icon = match status {
-                Some(WebSearchStatus::InProgress | WebSearchStatus::Searching) => {
-                    StatusIcon::Running
-                }
-                Some(WebSearchStatus::Completed) => StatusIcon::Done,
-                Some(WebSearchStatus::Failed) => StatusIcon::Failed,
-                Some(WebSearchStatus::Interrupted) => StatusIcon::Interrupted,
-                None => StatusIcon::Updated,
+            let icon = match attempt.action_display_status(action) {
+                "in progress" | "searching" => StatusIcon::Running,
+                "completed" => StatusIcon::Done,
+                "failed" => StatusIcon::Failed,
+                "interrupted" => StatusIcon::Interrupted,
+                _ => StatusIcon::Updated,
             };
             if let Some((_, count)) = outcomes.iter_mut().find(|(status, _)| *status == icon) {
                 *count += 1;

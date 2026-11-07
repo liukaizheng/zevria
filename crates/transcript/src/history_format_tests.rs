@@ -458,20 +458,20 @@ fn worker_rejection_precedes_projection_append_and_tail_repair() {
 }
 
 fn display_record_json() -> String {
-    use zevria_content::web_search::*;
-    let mut attempt = WebSearchAttemptRecord::new(crate::ModelProfileRef::new("p", "m"));
-    attempt.activity.push(WebSearchActivity {
+    use zevria_content::response::*;
+    let mut attempt = ResponseAttempt::new(crate::ModelProfileRef::new("p", "m"));
+    attempt.hosted_activity.push(HostedActivity {
+        kind: HostedActivityKind::WebSearch,
         item_id: Some("search".into()),
         output_index: 1,
-        status: WebSearchStatus::Completed,
+        status: HostedActivityStatus::Completed,
         action: Some(json!({"query":"PRIVATE_QUERY"})),
     });
-    attempt.terminal.insert(1, WebSearchStatus::Completed);
-    let tool_call_id = attempt.activity[0].client_id(&attempt.id);
+    let tool_call_id = attempt.hosted_activity[0].client_id(&attempt.id);
     serde_json::to_string(&AgentRunTranscriptRecord::Event {
         event: AgentRunEvent::ResponseDisplay {
             display: Box::new(ResponseDisplay {
-                version: 1,
+                version: RESPONSE_DISPLAY_VERSION,
                 attempt,
                 bindings: vec![DisplayProjectionBinding::Tool {
                     tool_call_id,
@@ -491,13 +491,12 @@ fn incomplete_current_display_tails_are_read_only_until_writable_repair() {
     })
     .unwrap();
     let display = display_record_json();
-    let terminal_value =
-        display.find(r#""terminal":{"1":"completed"}"#).unwrap() + r#""terminal":{"1":"com"#.len();
+    let status_value = display.find(r#""status":"completed""#).unwrap() + r#""status":"com"#.len();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("display.jsonl");
     for tail in [
         r#"{"record":"event","event":{"type":"response_display","display":"#,
-        &display[..terminal_value],
+        &display[..status_value],
         &display[..display.len() - 1],
     ] {
         let original = format!("{header}\n{tail}");
@@ -538,16 +537,14 @@ fn corrupt_display_payloads_and_unsupported_tails_never_repair_away_evidence() {
         value.to_string()
     };
     let mut invalid = vec![
-        display.replace(r#""terminal":{"1":"completed"}"#, r#""terminal":{"01":"completed"}"#),
-        display.replace(r#""terminal":{"1":"completed"}"#, r#""terminal":{"1":"completed","1":"failed"}"#),
-        display.replace(r#""terminal":{"1":"completed"}"#, r#""terminal":{"1":"searching"}"#),
-        display.replace(r#""terminal":{"1":"completed"}"#, r#""terminal":{"11":"completed"}"#),
+        display.replace(r#""status":"completed""#, r#""status":"unknown""#),
+        display.replace(r#""kind":"web_search""#, r#""kind":"future""#),
+        with_version("/event/display/version", 1),
         with_version("/event/display/version", 99),
-        with_version("/event/display/attempt/version", 2),
         display.replace(r#""type":"response_display""#, r#""type":"future_event""#),
         r#"{"record":"event","event":{"type":"status","status":"completed","detail":"PRIVATE_PROTOCOL"}}"#.into(),
     ];
-    for field in ["revision", "presentation", "terminal"] {
+    for field in ["revision", "presentation", "hosted_activity"] {
         let mut value: Value = serde_json::from_str(&display).unwrap();
         value["event"]["display"]["attempt"]
             .as_object_mut()
@@ -598,20 +595,14 @@ fn worker_diagnostics_distinguish_decoding_validation_and_versions_without_paylo
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("diagnostic.jsonl");
     for record in [
-        display.replace(
-            r#""terminal":{"1":"completed"}"#,
-            r#""terminal":{"PRIVATE_TERMINAL":"completed"}"#,
-        ),
-        display.replace(
-            r#""terminal":{"1":"completed"}"#,
-            r#""terminal":{"1":"PRIVATE_STATUS"}"#,
-        ),
+        display.replace(r#""kind":"web_search""#, r#""kind":"PRIVATE_KIND""#),
+        display.replace(r#""status":"completed""#, r#""status":"PRIVATE_STATUS""#),
         display.replace(
             r#""type":"response_display""#,
             r#""type":"PRIVATE_VARIANT""#,
         ),
         display.replace(
-            r#""version":1"#,
+            r#""version":2"#,
             &format!(r#""version":"{}""#, "PRIVATE_TYPE".repeat(1000)),
         ),
     ] {
@@ -635,7 +626,7 @@ fn worker_diagnostics_distinguish_decoding_validation_and_versions_without_paylo
     }
     for (record, detail) in [
         (r#"{"record":"event","event":{"type":"status","status":"completed","detail":"PRIVATE_PROTOCOL"}}"#.into(), "matching durable Outcome"),
-        (display.replace(r#""terminal":{"1":"completed"}"#, r#""terminal":{"11":"completed"}"#), "invalid web action terminal evidence"),
+        (display.replace(r#""output_index":1"#, r#""output_index":1000001"#), "invalid action output index"),
         ({ let mut outcome = worker_outcome(&header); outcome.descriptor.label = "PRIVATE_IDENTITY".into(); serde_json::to_string(&AgentRunTranscriptRecord::Outcome { outcome }).unwrap() }, "identity differs"),
     ] {
         std::fs::write(&path, format!("{header_json}\n{record}\n")).unwrap();

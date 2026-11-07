@@ -245,7 +245,13 @@ headers, idle timeout, connectivity/proxy, or provider unavailability. Shared WA
 logs record each failure and exhausted recovery. See `responses-compatible.md`
 for the policy and classification table.
 
-Failed-attempt previews are cleared; partial tool calls never execute. Transient
+**Adapter capability gap:** Messages does not yet produce provider-neutral
+`ResponseAttempt` values or incomplete-response recovery records. It keeps
+ordinary message previews and clears/discards partial output on retry; readable
+abandoned output is not restored. This is intentionally different from Responses,
+which tracks every non-silent transmission independently of search advertisement.
+Partial tool calls never execute. Committed Messages ledgers retain ordinary
+message rendering both live and after restore. Transient
 recovery reuses the immutable `PreparedRequest`, preserving byte-identical bodies,
 headers, instructions and cacheable prefix. Only the existing explicit
 thinking-binding semantic repair changes its prepared body; network metadata is

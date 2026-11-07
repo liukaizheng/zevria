@@ -980,9 +980,9 @@ pub fn response_token_usage(response: &OpenAiCompletionResponse) -> Option<Token
 }
 
 impl AssistantMessageAccumulator {
-    pub fn streaming_message_with_search(
+    pub fn streaming_message_with_attempt(
         &self,
-        search: &crate::search::SearchState,
+        attempt: &crate::attempt::AttemptReducer,
     ) -> anyhow::Result<Message> {
         let mut content = std::collections::BTreeMap::new();
         for (index, output) in self.outputs.iter().enumerate() {
@@ -994,12 +994,12 @@ impl AssistantMessageAccumulator {
                 }
             }
         }
-        for (key, text) in search.visible_text() {
+        for (key, text) in attempt.visible_text() {
             content.insert(key, AssistantContent::Text(text.clone()));
         }
         anyhow::ensure!(
             !content.is_empty(),
-            "no readable search answer or live reasoning yet"
+            "no readable answer or live reasoning yet"
         );
         Ok(Message::from(content.into_values().collect::<Vec<_>>()))
     }

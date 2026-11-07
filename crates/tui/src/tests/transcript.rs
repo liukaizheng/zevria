@@ -31,7 +31,7 @@ fn unread_intermediate_fences_reasoning_tool_preview_without_a_stale_tail() {
     sender.stream_updated(TEST_TURN_ID, tool_message.clone());
     sender
         .try_send(SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_message,
         })
@@ -84,7 +84,7 @@ fn a_preview_consumed_before_intermediate_is_cleared_by_the_commit() {
 
     sender
         .try_send(SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_message,
         })
@@ -116,7 +116,7 @@ fn a_new_preview_after_intermediate_remains_visible() {
     sender.stream_updated(TEST_TURN_ID, Message::assistant("old preview"));
     sender
         .try_send(SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("committed tool call"),
         })
@@ -151,7 +151,7 @@ fn stale_turn_events_cannot_mutate_an_idle_or_newer_turn() {
         mode: SessionMode::Build,
     });
     app.reduce_without_effects(SessionEvent::TurnCompleted {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id: old_turn,
         message: Message::assistant("old answer"),
     });
@@ -162,12 +162,12 @@ fn stale_turn_events_cannot_mutate_an_idle_or_newer_turn() {
         snapshot: (Message::assistant("late draft")).into(),
     });
     app.reduce_without_effects(SessionEvent::Intermediate {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id: old_turn,
         message: Message::assistant("late intermediate"),
     });
     app.reduce_without_effects(SessionEvent::TurnCompleted {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id: old_turn,
         message: Message::assistant("duplicate terminal"),
     });
@@ -214,10 +214,7 @@ fn recovered_turn_unlocks_without_duplicating_restored_assistant_message() {
         mode: SessionMode::Build,
     });
 
-    app.reduce_without_effects(SessionEvent::TurnRecovered {
-        turn_id,
-        display_attempt_id: None,
-    });
+    app.reduce_without_effects(SessionEvent::TurnRecovered { turn_id });
 
     assert_eq!(app.history().len(), history_len);
     assert!(!app.is_busy());
@@ -270,7 +267,7 @@ fn streamed_tool_calls_are_hidden_until_finalized_intermediate() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message,
         },
@@ -437,7 +434,7 @@ fn correlated_result_finishes_call_without_adding_visible_history() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "fc_1",
@@ -464,7 +461,7 @@ fn correlated_result_finishes_call_without_adding_visible_history() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("fc_1", Some("call_1"), "command", output),
         },
@@ -495,7 +492,7 @@ fn correlated_result_finishes_call_without_adding_visible_history() {
     apply_turn_event(
         &mut app,
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("final answer"),
         },
@@ -525,7 +522,7 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "file",
@@ -793,7 +790,7 @@ fn compact_write_and_delete_keep_hidden_arguments_and_plain_results_copyable() {
         apply_turn_event(
             &mut app,
             SessionEvent::Intermediate {
-                display_attempt_id: None,
+                attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![tool_call(
                     "copy-file",
@@ -1012,7 +1009,7 @@ fn denied_file_result_is_labeled_denied_and_keeps_copyable_output() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "denied-file",
@@ -1082,7 +1079,7 @@ fn failed_file_result_is_labeled_and_rendered_as_an_error() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "file",
@@ -1348,7 +1345,7 @@ fn duplicate_file_metadata_follows_result_order() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
                 tool_call(
@@ -1499,7 +1496,7 @@ fn missing_empty_or_mismatched_metadata_keeps_plain_write_and_delete_results() {
                     apply_turn_event(
                         &mut app,
                         SessionEvent::Intermediate {
-                            display_attempt_id: None,
+                            attempt_id: None,
                             turn_id: TEST_TURN_ID,
                             message: assistant.clone(),
                         },
@@ -1561,7 +1558,7 @@ fn write_and_delete_selection_styles_only_the_summary_and_scrolling_never_reveal
         apply_turn_event(
             &mut app,
             SessionEvent::Intermediate {
-                display_attempt_id: None,
+                attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![tool_call("file", None, tool_name, arguments)]),
             },
@@ -1661,7 +1658,7 @@ fn selected_edit_keeps_the_1000_wrapped_row_limit_and_notice() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "edit-file",
@@ -1768,7 +1765,7 @@ fn call_id_disambiguates_repeated_tool_ids() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
                 tool_call("shared", Some("provider_1"), "first", json!({})),
@@ -1780,7 +1777,7 @@ fn call_id_disambiguates_repeated_tool_ids() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("shared", Some("provider_1"), "first", "first output"),
         },
@@ -1805,7 +1802,7 @@ fn call_id_disambiguates_repeated_tool_ids() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("shared", Some("provider_2"), "second", "second output"),
         },
@@ -1835,7 +1832,7 @@ fn exact_call_id_match_beats_a_missing_call_id_fallback() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
                 tool_call("shared", None, "legacy", json!({ "slot": "legacy" })),
@@ -1852,7 +1849,7 @@ fn exact_call_id_match_beats_a_missing_call_id_fallback() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("shared", Some("provider_2"), "exact", "exact output"),
         },
@@ -1872,7 +1869,7 @@ fn exact_call_id_match_beats_a_missing_call_id_fallback() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("shared", None, "legacy", "legacy output"),
         },
@@ -1893,7 +1890,7 @@ fn duplicate_call_identifiers_keep_result_order() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
                 tool_call(
@@ -1914,7 +1911,7 @@ fn duplicate_call_identifiers_keep_result_order() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: vec![
@@ -1953,7 +1950,7 @@ fn tool_error_result_still_finishes_without_rendering_output() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "failed",
@@ -1966,7 +1963,7 @@ fn tool_error_result_still_finishes_without_rendering_output() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("failed", None, "command", output),
         },
@@ -2003,7 +2000,7 @@ fn mixed_user_intermediate_preserves_only_non_tool_content() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "fc_1",
@@ -2016,7 +2013,7 @@ fn mixed_user_intermediate_preserves_only_non_tool_content() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: vec![
@@ -2060,7 +2057,7 @@ fn terminal_events_interrupt_unmatched_executing_calls() {
     apply_turn_event(
         &mut completed,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
         },
@@ -2068,7 +2065,7 @@ fn terminal_events_interrupt_unmatched_executing_calls() {
     apply_turn_event(
         &mut completed,
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
         },
@@ -2079,7 +2076,7 @@ fn terminal_events_interrupt_unmatched_executing_calls() {
     apply_turn_event(
         &mut failed,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
         },
@@ -2101,7 +2098,7 @@ fn terminal_events_interrupt_unmatched_executing_calls() {
     apply_turn_event(
         &mut cancelled,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
         },
@@ -2121,7 +2118,7 @@ fn result_finishes_most_recent_executing_call_with_reused_id() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "reused",
@@ -2134,7 +2131,7 @@ fn result_finishes_most_recent_executing_call_with_reused_id() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "reused",
@@ -2147,7 +2144,7 @@ fn result_finishes_most_recent_executing_call_with_reused_id() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("reused", None, "command", "latest output"),
         },
@@ -2163,7 +2160,7 @@ fn orphan_tool_result_leaves_executing_calls_untouched() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "known",
@@ -2176,7 +2173,7 @@ fn orphan_tool_result_leaves_executing_calls_untouched() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("unknown", None, "unknown", "orphan output"),
         },
@@ -2194,7 +2191,7 @@ fn executing_call_tracking_clears_on_completion_and_restore() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "fc_1",
@@ -2208,7 +2205,7 @@ fn executing_call_tracking_clears_on_completion_and_restore() {
     apply_turn_event(
         &mut app,
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
         },
@@ -2565,7 +2562,7 @@ fn question_history_renders_and_restores_compact_answer_summaries() {
     apply_turn_event(
         &mut live,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant.clone(),
         },
@@ -2728,7 +2725,7 @@ fn task_history_renders_and_restores_a_compact_checklist() {
     apply_turn_event(
         &mut live,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant.clone(),
         },
@@ -2798,7 +2795,7 @@ fn uncorrelated_task_updates_render_as_interrupted_after_restore_failure_and_can
     apply_turn_event(
         &mut failed,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
         },
@@ -2815,7 +2812,7 @@ fn uncorrelated_task_updates_render_as_interrupted_after_restore_failure_and_can
     apply_turn_event(
         &mut cancelled,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
         },
@@ -2860,7 +2857,7 @@ fn launch_rows_render_compactly_with_lifecycle_without_leaking_private_details()
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant("call-launch", "fallback args title", "SECRET quick prompt"),
         },
@@ -2967,7 +2964,7 @@ fn partial_launch_notices_appear_only_after_execution_stops() {
             apply_turn_event(
                 &mut app,
                 SessionEvent::Intermediate {
-                    display_attempt_id: None,
+                    attempt_id: None,
                     turn_id: TEST_TURN_ID,
                     message: assistant_message(vec![tool_call(
                         "fc-partial",
@@ -3070,7 +3067,7 @@ fn successful_launch_batches_have_only_child_rows_and_skip_the_batch_in_navigati
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: message.clone(),
         },
@@ -3210,7 +3207,7 @@ fn live_prelaunch_failures_show_status_and_reason_without_opening_a_child() {
         apply_turn_event(
             &mut app,
             SessionEvent::Intermediate {
-                display_attempt_id: None,
+                attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: launch_assistant(
                     "call-rejected",
@@ -3286,7 +3283,7 @@ fn descriptorless_interrupted_launches_do_not_invent_a_failure_or_child() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant(
                 "call-interrupted",
@@ -3646,7 +3643,7 @@ fn concurrent_launch_rows_update_independently_before_the_result_batch() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
                 tool_call(
@@ -3979,7 +3976,7 @@ fn launch_result_metadata_reconciles_restore_outcomes_and_preserves_terminal_eve
     apply_turn_event(
         &mut live,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant("call-live", "live terminal child", "private prompt"),
         },
@@ -4039,7 +4036,7 @@ fn late_terminal_status_updates_an_interrupted_row_after_turn_teardown() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant("call-late", "late cancelled child", "private prompt"),
         },
@@ -4168,7 +4165,7 @@ fn session_views_route_child_events_navigate_and_never_cancel_or_submit() {
         mode: SessionMode::Build,
     });
     views.apply(SessionEvent::Intermediate {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id: TEST_TURN_ID,
         message: launch_assistant("call-launch", "map config loading", "prompt quick"),
     });
@@ -4196,7 +4193,7 @@ fn session_views_route_child_events_navigate_and_never_cancel_or_submit() {
     views.apply(SessionEvent::SubtaskSession {
         id: child_id.clone(),
         event: Box::new(SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant(child_findings),
         }),
@@ -4307,7 +4304,7 @@ fn status_before_launch_is_reconciled_into_running_and_terminal_root_rows() {
             mode: SessionMode::Build,
         });
         views.apply(SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant(&call_id, &title, "private race prompt"),
         });
@@ -4394,7 +4391,6 @@ fn prompt_to_ensemble_acceptance_creates_fresh_panes_and_prunes_discarded_runs()
         resumed: false,
     });
     views.apply(SessionEvent::TurnRecovered {
-        display_attempt_id: None,
         turn_id: TEST_TURN_ID,
     });
 
@@ -4457,7 +4453,6 @@ fn accepted_ensemble_edits_prune_removed_worker_panes_without_retargeting_naviga
         resumed: false,
     });
     views.apply(SessionEvent::TurnRecovered {
-        display_attempt_id: None,
         turn_id: TEST_TURN_ID,
     });
 
@@ -4611,7 +4606,7 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "skill-1",
@@ -4658,7 +4653,7 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "skill-2",
@@ -5091,7 +5086,7 @@ fn reconcile_reports_copy_and_restore_keep_full_artifact_access() {
         apply_turn_event(
             &mut live,
             SessionEvent::Intermediate {
-                display_attempt_id: None,
+                attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![tool_call(
                     id,
@@ -5116,7 +5111,7 @@ fn reconcile_reports_copy_and_restore_keep_full_artifact_access() {
             },
         );
         live.reduce_without_effects(SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::Assistant(rig_core::message::AssistantMessage::new(Vec::new())),
         });
@@ -5441,7 +5436,7 @@ fn submit_plan_rows_copy_markdown_and_keep_result_copy_behavior() {
         apply_turn_event(
             &mut app,
             SessionEvent::Intermediate {
-                display_attempt_id: None,
+                attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![tool_call(
                     &id,
@@ -5486,7 +5481,7 @@ fn submit_plan_rows_copy_markdown_and_keep_result_copy_behavior() {
     apply_turn_event(
         &mut malformed,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "submit-plan-copy-invalid",
@@ -5518,7 +5513,7 @@ fn successful_submit_plan_body_renders_once_live_and_after_restore() {
     apply_turn_event(
         &mut live,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "submit-plan-live",
@@ -5646,7 +5641,7 @@ fn retry_notice_is_replaced_by_accepted_progress() {
     assert!(rendered_text(&mut app, 100, 10).contains("reconnecting"));
 
     app.reduce_without_effects(SessionEvent::Intermediate {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id,
         message: Message::assistant("progress resumed"),
     });

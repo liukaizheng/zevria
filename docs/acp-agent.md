@@ -67,17 +67,18 @@ activity retains completed status if its attempt later fails. Raw input retains
 hosted origin/attempt/action data through native-worker normalization so these
 updates do not split or erase text previews.
 
-For search-advertising requests, provisional answer text streams before completion,
-including when no search action occurs. Usable annotations add inline source-title
+For every non-silent Responses request, provisional answer text streams before
+completion, whether search is disabled, unused or used. Usable annotations add inline source-title
 links while the answer grows; completed native output reconciles the final text.
 Ordinary growth emits suffixes, while a genuinely non-prefix citation correction
 starts a separate authoritative segment. Generic append-only clients cannot
 retract the earlier segment; Zevria's metadata-aware views reconcile the same
 indexed answer without duplicating it. Reasoning remains live. Usable links survive
 model switching, copying, child final reports and transcript replay; unknown
-annotations remain in native history. Separate display-attempt records retain
+annotations remain in native history. Immutable incomplete-response records retain
 observed partial answers at retry, failure and cancellation boundaries without
-becoming model input. Client/terminal URL activation is client-dependent, not an
+becoming model input. Successful responses persist only their native replay;
+live-only hosted observations absent from that ledger are dropped at commit. Client/terminal URL activation is client-dependent, not an
 in-app opener or promised shortcut.
 
 ## Security: tools execute directly
@@ -508,23 +509,28 @@ Provider retries, compaction, persistence degradation/recovery, Plan projection 
 ## Ordered response display metadata
 
 Zevria attaches an optional `zevria.response_display` object to **notification-level**
-`SessionNotification._meta`. Version 1 of this extension carries a version-1
-`WebSearchAttemptRecord` and explicit bindings to the ordinary ACP projections:
+`SessionNotification._meta`. Version 2 carries a provider-neutral
+`ResponseAttempt` (no nested version) and unchanged explicit bindings to ordinary
+ACP projections:
 
 ```json
 {
   "_meta": {
     "zevria.response_display": {
-      "version": 1,
+      "version": 2,
       "attempt": {
-        "version": 1,
         "id": "attempt-id",
         "profile": { "provider": "provider", "model": "model" },
         "response_id": "response-id",
         "outcome": "in_progress",
         "revision": 3,
-        "activity": [],
-        "terminal": {},
+        "hosted_activity": [{
+          "kind": "web_search",
+          "output_index": 1,
+          "item_id": "search-item",
+          "status": "searching",
+          "action": { "type": "search", "query": "query" }
+        }],
         "presentation": [{
           "source": {
             "output_index": 0,
@@ -562,8 +568,14 @@ or `"tool"`. Native-tool presentation stores only a `call_id`, never executable
 arguments. Tool bindings carry `tool_call_id`, `output_index`, and `native`;
 hosted IDs remain `hosted-search:<attempt-id>:<output-index>`.
 
-Metadata is emitted for live snapshots, status-only changes, attempt closure,
-authoritative final reconciliation and transcript replay. An otherwise empty
+Metadata is emitted only when an attempt has hosted activity, is failed or
+interrupted, or already emitted metadata that must keep reconciling. Ordinary
+successful Responses text without hosted activity adds **no metadata**, avoiding
+full-snapshot growth in native-worker logs. For eligible attempts, updates include
+live snapshots, status-only changes, closure and authoritative final reconciliation.
+Replay emits hosted tools first, then display text/native tools and metadata for
+incomplete responses or committed Responses with hosted activity. Other replay
+emits ordinary message/tool updates without metadata. An otherwise empty
 `session_info_update` can carry metadata when ordinary text has no new suffix.
 The host does not turn that empty carrier into a text boundary. Existing ACP
 visible text, tool IDs, titles, Search/Fetch kinds and standard statuses remain
@@ -572,7 +584,7 @@ not a redefinition of standard ACP tool status.
 
 The host normalizes valid metadata into persisted, display-only
 `AgentRunEvent::ResponseDisplay`. Validation checks schema versions, nonblank
-bounded identities, source addresses, unique outputs/parts, terminal evidence,
+bounded identities, source addresses, unique outputs/parts, hosted activity kinds/statuses,
 projection references and non-overlapping ranges. IDs are limited to 1 KiB,
 actions to 4,096, readable parts and bindings to 16,384, individual readable/action
 payloads to 4 MiB, and the complete extension to 16 MiB. The TUI additionally
@@ -594,22 +606,26 @@ All Zevria panes use the same inline action presentation: full readable queries,
 URLs and find patterns, counted adjacent detail-free actions, one incomplete
 marker per failed/interrupted attempt, and **completion unconfirmed** where no
 provider terminal evidence exists. Readable reasoning runs have one heading;
-opaque/empty reasoning is hidden. Search-enabled answer parts update in place as
-text and citations arrive, with completed native replay authoritative at success.
-Finality bookkeeping stays internal; the version-1 display contract is unchanged.
+opaque/empty reasoning is hidden. Responses answer parts update in place as text
+and citations arrive. One shared derivation from the committed ledger is
+authoritative at success, so live-only hosted actions missing from it disappear.
+An action's terminal `status` is provider evidence; attempt closure never changes
+it. A closed attempt with a non-terminal action shows completion unconfirmed.
 Metadata-free hosted activity uses received order:
 a new action separates surrounding text, but sparse updates to an existing
 action do not. Exact source ordering is not inferred from flattened channels.
 
-Native restoration and ACP replay share a display-copy reconstruction pass.
-Only current version-1 attempts with required `revision`, `presentation`, and
-`terminal` fields are accepted. Explicit `zevria_display_attempt` links authorize
-restoration from native replay; matching profile, item IDs, text or proximity do
-not. Unlinked attempts retain their saved presentation and terminal evidence,
-without a version-based ordering notice. Missing text and terminal outcomes are
-not invented, and action status alone is not provider terminal evidence. The extension and its normalized events are never provider replay,
-model input, native tool execution, permission evidence, report-extraction
-sources, captured answers/choices, or Plan/ensemble authority.
+Native restoration and ACP replay share pure native-output display derivation,
+not a linked-record reconstruction pass. A committed Responses record derives
+its complete display from replay; a failed/interrupted
+`zevria_incomplete_response` v1 record restores its immutable readable evidence
+with revision 1. Native tool-call bindings are absent from recovery records.
+Non-Responses and plain messages keep ordinary rendering. Retired root display
+envelopes and worker display v1 events are rejected, including unsupported torn
+tails; there is no upgrade path. Missing text or terminal outcomes are not invented.
+The extension and its normalized worker events are never provider replay, model
+input, native tool execution, permission evidence, report-extraction sources,
+captured answers/choices, or Plan/ensemble authority.
 
 ## Completed response and projected request usage
 

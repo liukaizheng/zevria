@@ -1,5 +1,5 @@
 //! Pure Plan and ensemble records, validation and deterministic reducers.
-use zevria_content::{PromptBlock, PromptError, PromptImage, UserPrompt, web_search};
+use zevria_content::{PromptBlock, PromptError, PromptImage, UserPrompt, response};
 use zevria_foundation::{QuestionRequestId, TurnId};
 pub mod config;
 pub mod ensemble;

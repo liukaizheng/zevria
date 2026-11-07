@@ -94,7 +94,9 @@ pub fn run() {
                 zevria_transcript::SessionReplayError::validate(&f.items).unwrap()
             });
             measure(&format!("{label}/restore"), || {
-                std::hint::black_box(zevria_transcript::reconstruct_transcript(&f.items));
+                for (index, item) in f.items.iter().enumerate() {
+                    std::hint::black_box(zevria_transcript::restored_attempt(item, index));
+                }
             });
         }
     }

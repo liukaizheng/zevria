@@ -92,7 +92,7 @@ fn executing_edit() -> App {
         &mut app,
         SessionEvent::Intermediate {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: None,
+            attempt_id: None,
             message: assistant_message(vec![tool_call(
                 "edit",
                 None,
@@ -130,13 +130,13 @@ fn span_call(app: &mut App, id: u64, call: usize, message: Message, complete: bo
         SessionEvent::TurnCompleted {
             turn_id,
             message,
-            display_attempt_id: None,
+            attempt_id: None,
         }
     } else {
         SessionEvent::Intermediate {
             turn_id,
             message,
-            display_attempt_id: None,
+            attempt_id: None,
         }
     });
 }
@@ -1477,7 +1477,7 @@ fn streamed_tail_is_never_folded() {
     app.reduce_without_effects(SessionEvent::TurnCompleted {
         turn_id: TEST_TURN_ID,
         message: Message::assistant("first\n\nsecond\n\nthird"),
-        display_attempt_id: None,
+        attempt_id: None,
     });
     rendered_text(&mut app, 80, 24);
     assert!(

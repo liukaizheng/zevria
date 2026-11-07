@@ -72,7 +72,7 @@ async fn blocked_lifecycle_is_sequenced_only_after_capacity_is_reserved() {
     let blocked = tokio::spawn(async move {
         blocked_sender
             .send(SessionEvent::Intermediate {
-                display_attempt_id: None,
+                attempt_id: None,
                 turn_id,
                 message: Message::assistant("commit"),
             })

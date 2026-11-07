@@ -227,7 +227,6 @@ fn live_and_restored_user_jumps_include_both_ensemble_prompts_but_not_workers() 
                 });
                 app.reduce_without_effects(SessionEvent::TurnRecovered {
                     turn_id: TEST_TURN_ID,
-                    display_attempt_id: None,
                 });
                 app.reduce_without_effects(SessionEvent::EnsembleStarted {
                     turn_id: TurnId::new(2),
@@ -237,7 +236,7 @@ fn live_and_restored_user_jumps_include_both_ensemble_prompts_but_not_workers() 
                 app.reduce_without_effects(SessionEvent::TurnCompleted {
                     turn_id: TurnId::new(2),
                     message: answer,
-                    display_attempt_id: None,
+                    attempt_id: None,
                 });
                 app.reduce_without_effects(SessionEvent::TurnStarted {
                     turn_id: TurnId::new(3),
@@ -669,7 +668,7 @@ fn boundary_user_jumps_clear_pending_tool_yank_chords() {
         &mut app,
         SessionEvent::Intermediate {
             turn_id: TEST_TURN_ID,
-            display_attempt_id: None,
+            attempt_id: None,
             message: assistant_message(vec![tool_call(
                 "yank-jump",
                 None,

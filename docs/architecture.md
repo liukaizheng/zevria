@@ -10,146 +10,122 @@ configured provider selects `openai.responses` (default) or `anthropic.messages`
 Core, transcripts, TUI and ACP remain protocol-agnostic. See
 [native Messages](anthropic-messages.md) for its wire contract and thinking safety.
 
-## Hosted search boundary
+## Response attempts, recovery and display
 
-The provider's typed, opt-in `web_search` settings and effective task allow-list
-meet at `prepare_turn_request`; every inference transport/replay and exact count
-uses that snapshot. Hosted calls never enter Rig function-tool dispatch. The
-adapter inspects raw search lifecycle, text/refusal deltas, added/done parts,
-annotations and terminal events independently of the native output ledger.
-Search-enabled answers stream as soon as readable text arrives, including when
-search is advertised but unused. The shared HTTP/WebSocket reducer separates raw
-provisional text from annotation-bearing completed text and sanitized display
-copies. Finality is internal reducer state, not a new transcript format. Text-done
-fences text deltas without fencing later annotations; completed parts/items and
-validated native output have higher authority. Duplicate sequences and stale
-lower-authority events cannot extend a finalized part. Usable annotation additions
-are rendered against original character offsets; future ranges wait for text.
-Only changed parts are re-rendered, and incomplete citation tokens never gate the
-surrounding answer.
+Conversation content, provider replay, abandoned-response recovery and live
+presentation have distinct owners. `zevria-content::ResponseAttempt` is a
+provider-neutral, in-memory display value; it is never a successful transcript
+record. Each Responses **transmission** gets a fresh ID for every non-silent
+reporter, whether search is disabled, advertised but unused, or used. Retries,
+stale-continuation resends and WebSocket-to-HTTP fallback start new attempts;
+handshakes do not. A model call is one `complete()` invocation, which can contain
+several transmissions. Silent summaries and maintenance collect no attempts.
+The Anthropic Messages adapter does not yet produce attempts: it keeps ordinary
+previews and discards partial output on retry (an explicit capability gap).
 
-`zevria-content` owns shared safe citation rendering and display-only version-1
-`WebSearchAttemptRecord` values; `zevria-transcript` owns their persisted history. Every actual search-enabled transmission has an
-independent attempt ID, including HTTP retries, stale continuation recovery and
-WebSocket-to-HTTP fallback, not socket handshakes. The monotonic attempt revision
-is independent of channel transport revisions. Indexed presentation retains the
-output index, summary/content-part identity, available item ID, and native-tool
-call binding. Readable reasoning and provisional answer/refusal text enter this
-trail; citations can revise a growing part without changing its source address.
-The revision advances when visible presentation changes. Completed native output
-reconciles successful answers authoritatively, including removal or correction of
-provisional parts. Encrypted/redacted reasoning remains exclusively in native
-replay.
+The Responses reducer inspects raw lifecycle, reasoning, text/refusal deltas,
+annotations, added/done parts and terminal items independently of the native
+ledger. Indexed presentation retains output index, summary/content-part identity,
+available item ID and native-tool call bindings. Readable parts stream before
+completion without waiting for a search action. Text-done fences text deltas,
+not later annotations; completed parts/items have higher authority. Duplicate
+sequences and lower-authority events cannot extend a finalized part. Citations
+render against original character offsets, with future ranges waiting for text.
+Only changed parts are rendered; incomplete citation tokens never withhold
+surrounding prose. Opaque/encrypted reasoning remains exclusively in replay.
 
-`AssistantStreamSnapshot` can contain an ordinary message, an ordered attempt,
-or both. An activity-only snapshot is not a stream clear. All root and child
-relays retain this distinction. Attempt-backed content is reconciled in place,
-not duplicated in a generic streaming tail. Committed assistant records carry
-`zevria_display_attempt`, an explicit display-only join independent of message
-IDs or text equality. Successful canonical messages still come from
-`ProviderReplay`, never from the display trail. Both ordinary and indexed answer
-projections use the same readable display text. The ordinary stream and attempt
-collector retain latest state, not a token-event history; slow consumers may skip
-unpainted intermediate previews without delaying text until response completion.
+`AssistantStreamSnapshot` holds an ordinary message, an attempt, or both. An
+activity-only snapshot is not a stream clear. All root and child relays preserve
+this distinction and reconcile indexed content in place instead of duplicating
+the generic tail. Attempt revisions are independent of transport revisions.
+`ResponseAttemptUpdated` is lossless and non-fencing, including in child events.
+`Intermediate` and `TurnCompleted` correlate their commit using an optional,
+event-only `attempt_id`; `TurnRecovered` needs only its turn ID. These identities
+never enter transcript content or model requests.
 
-Raw event ingestion and collection happen synchronously before cancellable
-publication. Core uses an immutable `OwnedModelRequestItem` request snapshot so
-it can persist display checkpoints while the provider future is borrowed. The
-finalized-attempt handoff has its own acknowledgement channel: acknowledgement
-follows the completed-record write and never waits for frontend capacity. A
-retry waits for this result before clearing content or transmitting again. Its
-finalized display publication also precedes the next lossy preview. On
-cancellation core releases the provider future, drains the remaining collector,
-and skips revisions already checkpointed. Failed writes retain memory and report
-degraded persistence, never durable success. These checkpoints do not commit a
-deferred canonical answer or workflow result. An uncheckpointed active attempt
-can still be lost on process termination; cancellation is not process recovery.
-This includes provisional answers: no per-token checkpoint is added. Saved
-in-progress attempts restore as interrupted display copies, retaining their
-partial answers without promoting them into canonical model history.
-The owned request adds one owned model-input snapshot per active completion;
-checkpoint rewriting uses the existing completed-batch persistence path.
+A committed Responses response is stored **only** as `zevria_provider_replay`.
+The shared pure `responses_native_display` derivation projects readable reasoning,
+text/refusals with sanitized citations, native-tool bindings and hosted search
+items from that authoritative ledger. Core uses it to finalize live attempts;
+TUI restore and ACP replay use the same derivation. Final output replaces the
+provisional presentation and hosted activity rather than merging it. In
+particular, hosted actions seen live but absent from final output disappear at
+commit. Anthropic ledgers and bare assistant messages keep ordinary message
+rendering live and after restore. No successful attempt, link, sidecar, elision
+flag or reconstruction-dependent transcript record is persisted.
 
-Checkpoints retain the full presentation until their successful native replay
-commits. At that exact-ID link commit, one atomic completed-batch rewrite stores
-both the replay and the compacted version-1 attempt: `presentation` becomes `[]`
-and `presentation_elided: true` records that its readable content lives in the
-replay. This storage-only change leaves the revision, identity/profile/response
-ID, outcome, ordering evidence, activity and terminal evidence unchanged,
-including activity observed live but absent from the final ledger. Failed,
-interrupted, retried and unlinked attempts stay full; plain assistant bindings
-without a native ledger also keep their presentation. Failed link rewrites leave
-the full checkpoint on disk and retain the completed pair in degraded memory.
+A transmission that never commits can instead leave exactly one immutable
+`zevria_incomplete_response` v1 record. It stores the attempt/profile/optional
+response identity, a **failed** or **interrupted** outcome, readable presentation
+and hosted activity. Native-tool bindings are dropped because there is no
+canonical call to bind to. Empty attempts leave no record. There is no revision,
+in-progress checkpoint or completed outcome in this format; duplicate attempt
+IDs are rejected. Recovery records are absent from every model-input, capacity,
+compaction, skill, request, Plan and ensemble projection. They cannot split a
+prompt from its required request boundary. Restore displays them headerless and
+without promoting partial text into canonical assistant history.
 
-TUI/ACP restoration re-derives the presentation from the linked native ledger
-on a display copy and clears `presentation_elided`. Loading rejects an elided
-attempt without its later exact-ID native replay before any writable tail repair.
-A torn later append remains recoverable while the complete pair is intact;
-truncating the linked replay itself is corruption, not recoverable append debris.
-Attempts remain excluded from model input, and neither the replay envelope nor
-the provider's cacheable prompt prefix changes.
+Raw ingestion and collection are synchronous before cancellable delivery. Core
+owns an immutable request snapshot while the provider runs. On failure, the
+provider closes its attempt, collects it, and waits on a dedicated checkpoint
+acknowledgement before publishing its reliable closure, clearing the stream or
+retrying. Acknowledgement follows the durable completed append and never waits
+for frontend capacity. On success the provider returns `ModelResponse` with
+in-memory provenance only: it does not reconcile, checkpoint or finalize display.
+After releasing the provider future, core drains the shared collector. It
+finalizes the committed attempt from the response record and closes every other
+attempt as interrupted on cancellation, otherwise failed. A completed response
+that loses the cancellation race is uncommitted and recoverable as interrupted.
+Already-checkpointed IDs are never appended twice, including after a failed write.
 
-Replay-backed request items borrow or own the same private-field `ReplayMessage`
-pair. Its constructor derives the canonical message from the native ledger once;
-trusted cloning never decodes that ledger again. A completed `ModelResponse`
-privately owns a validated `MessageRecord`, which moves into transcript admission
-without rebuilding the message. Display binding changes only metadata. Native
-output validation still precedes installing provider continuation state.
+Recovery records append individually; successful responses use plain append,
+not a whole-file display rewrite. A completed append repairs a degraded writer
+first. All writes for a model call (recovery, then immediate/tool-call/premature
+response commit) precede any awaited frontend publication, which in turn precedes
+`Intermediate`, `TurnCompleted`, cancellation or failure terminals. Completed
+writes that fail retain truthful memory and report degraded persistence. Deferred
+ensemble finals retain their existing small in-process window before the atomic
+response/workflow commit. An attempt still in flight when the process dies is
+lost: there are no per-token or unused in-progress checkpoints.
 
-The feature-gated Criterion harness measures these ownership boundaries,
-serialization, loading, validation and transactions independently. The opt-in
-`owned_request_snapshot_memory_probe` supplements it with isolated RSS
-observations; neither RSS nor cumulative allocation bytes are exact live-heap
-measurements. See [transcript-performance.md](transcript-performance.md) for the
-pre-refactor baseline, staged results, fixture dimensions, toolchain and exact
-RTK-routed reproduction commands. The owned snapshot, frontend event messages
-and provider continuation state remain real ownership costs.
+Hosted web search is one `HostedActivityKind`, not the reason an attempt exists.
+Its one `status` field changes only from provider events or native items; attempt
+closure never changes it. A terminal status is displayed as is. A live attempt
+shows a non-terminal action's live status; after closure that action shows `•`
+(**completion unconfirmed**), not a manufactured provider failure. Each failed or
+interrupted display has one **Incomplete response · failed/interrupted** marker.
+Detail-free adjacent actions form counted rows; late details split them. Queries
+keep supplied order with repeated details deduplicated, and full queries/URLs/
+patterns remain copyable. Terminal escapes and directional controls are removed
+from display copies only. Consecutive visible reasoning shares one heading;
+empty and opaque-only reasoning creates no selectable block.
 
-Main, native-subtask and ACP panes share inline web-action blocks. Queries keep
-the supplied array order and repeated fields are deduplicated within an action.
-URLs, patterns and queries wrap without copy truncation or raw JSON. Terminal
-escapes and directional controls are removed while readable line breaks remain.
-Adjacent detail-free actions within an attempt form a counted row; late details
-split that row and mixed terminal outcomes remain counted. Known action and
-part identities preserve block layouts, selection and viewport anchors. Native
-tool-result correlations use block/call identity rather than stale array indexes.
-Only consecutive visible reasoning shares one `reasoning` heading, including
-committed/streamed boundaries; empty, whitespace-only and opaque-only reasoning
-has no heading or selectable row.
+The opt-in search definition and task allow-list still meet at
+`prepare_turn_request`; completion transports and exact counts use the same
+snapshot. Hosted calls never enter local function dispatch. Request bodies,
+`full_input`, instructions, compaction, continuation and the provider's cacheable
+prompt prefix are unchanged. Native replay remains byte-faithful. Cross-profile
+projection keeps readable source links and re-correlated functions, removes
+hosted/opaque state, and estimates the expanded portable text.
 
-Attempt outcome and action terminal evidence are separate. An explicit completed
-action stays completed even when its response fails. An action without provider
-terminal evidence shows `•` (completion unconfirmed) after closure, rather than
-continuing to run or being labelled a provider-confirmed failure. Each retained
-failed/interrupted attempt has one **Incomplete response · failed/interrupted**
-marker. Advertising search without observing an action creates no action row;
-readable abandoned content can be retained without manufacturing an action.
+ACP retains standard text/tool projections and separate
+`hosted-search:<attempt>:<output-index>` IDs. Notification metadata uses
+`zevria.response_display` v2 only when hosted activity, failed/interrupted output,
+or previously emitted metadata requires reconciliation. Ordinary successful
+Responses previews add no metadata. Worker logs retain normalized display events
+as display-only evidence, never reports, decisions, permissions or workflow
+authority. Retired root display envelopes and display v1 worker events are
+unsupported; no legacy reader or automatic upgrade exists. See
+[ACP metadata](acp-agent.md#ordered-response-display-metadata) and
+[search configuration](responses-compatible.md#provider-hosted-web-search).
 
-Only current version-1 attempts are accepted, with required `revision`,
-`presentation`, and `terminal` fields. Shared native/ACP reconstruction operates
-on a display copy without rewriting the log and requires an explicit
-`zevria_display_attempt` link to restore from native replay. Item IDs, matching
-text and proximity do not authorize a join. Unlinked attempts retain their saved
-presentation and terminal evidence; action status alone never proves completion.
-Assistant records without bindings remain ordinary assistant records. There is
-no legacy upgrade or version-based ordering notice.
-
-These standalone records are absent from model input, compaction source and
-capacity accounting. The successful native Responses ledger remains exact;
-foreign-profile projection renders source-title/URL links and removes hosted or
-opaque items. Destination-aware estimates count that expanded portable text.
-ACP keeps separate hosted IDs and standard Search/Fetch/status projections;
-versioned notification metadata supplies richer ordering/evidence to the host.
-Ordinary answer growth emits ACP suffixes. A non-prefix citation correction starts
-a new authoritative segment because generic ACP clients cannot retract text.
-Zevria's metadata-aware reducer retains the latest verified coverage evidence per
-emitted segment/range, allowing delayed or coalesced previews of superseded
-segments to be covered without duplicating the indexed answer or hiding unbound
-suffixes. Native source identities preserve selection and viewport anchors while
-text and citations grow. A newly received metadata-free action separates text, while a sparse update of
-an existing action does not. Display events have no report, permission, captured
-choice or workflow authority. See [ACP metadata](acp-agent.md#ordered-response-display-metadata)
-and [configuration and controls](responses-compatible.md#provider-hosted-web-search).
+Replay-backed requests still own or borrow the private `ReplayMessage` pair:
+canonical conversion happens once, and trusted cloning never decodes the ledger
+again. `ModelResponse` moves its validated `MessageRecord` into transcript
+admission; its `attempt_id` is not part of that record. Native validation precedes
+continuation installation. The feature-gated benchmarks measure these ownership
+boundaries; see [transcript-performance.md](transcript-performance.md). Owned
+request snapshots, frontend messages and continuation ledgers remain real costs.
 
 ## Dependency direction
 
@@ -589,19 +565,19 @@ Assistant output unnumbered rather than inventing call zero. Retries and
 automatic compaction preserve the current identity and elapsed timer. Terminal
 settlement or restoration drops transient headers, not labels on existing content.
 
-Restore rebuilds numbering from the typed `reconstruct_transcript` display
-copy, never text parsing or model-input projection. Actual prompts, skills,
-ensemble starts, and Plan handoffs anchor turns. Each canonical assistant
-`Message`, `AssistantMessage`, or `ProviderMessage` consumes one call, including
-tool-only and opaque-reasoning responses with no readable body. Tool results,
-errors, directives, session metadata, compaction checkpoints (including their
-replacement histories), Plan artifacts, and worker reports/reviews consume
-neither number. Web activity and its revisions consume no call and receive a
-canonical response's label only through an explicit `display_attempt_id`
-binding. Orphan assistant content and ambiguous/unbound retry activity stay
-unnumbered. Failed runtime-only dispatches are not recoverable, so restored call
-numbers may differ from the previous live display; restore is not exact runtime
-replay. Subsequent live turns continue after the reconstructed display sequence.
+Restore processes transcript records individually, never parsing text or using
+the model-input projection. Actual prompts, skills, ensemble starts and Plan
+handoffs anchor turns. Each committed assistant `Message` or `ProviderMessage`
+consumes one call, including tool-only and opaque-reasoning responses with no
+readable body. Responses replay derives an indexed Completed attempt with a
+local `transcript-<index>` ID, then commits that same message to it. Tool results,
+errors, directives, session metadata, compaction replacement histories, Plan
+artifacts and worker reports/reviews consume neither number. Incomplete responses
+restore as headerless rows and consume no call. Live attempts inherit the current
+call; event-only commit correlation binds them once. Orphan assistant content
+stays unnumbered. Failed runtime-only dispatch counts are not recoverable, so
+restored numbers can differ from the previous live display; restore is not exact
+runtime replay. Subsequent turns continue after the reconstructed sequence.
 Accepted edits truncate the old tail and its numbering ledger before allocating
 a replacement; pending or rejected edits preserve all labels. Display numbers
 never replace `TranscriptEditTarget` prompt ordinals. None of this metadata is
@@ -2212,7 +2188,7 @@ parent cancellation, persistence failure, or replay failure still prevents succe
 Qualifying submission is not a guarantee of simultaneous wall-clock execution.
 
 A premature completed assistant response is preserved natively with usage and
-its display-attempt identity, but emitted as Intermediate rather than successful
+its event-only attempt identity, but emitted as Intermediate rather than successful
 completion. The engine may durably append one corrective directive. A second
 premature final fails the request; the one-correction rule is independent of call
 count. The parent must perform meaningful independent work, integrate
@@ -2989,6 +2965,23 @@ instructions rather than a shell sandbox.
 
 ## Model/UI metadata boundary
 
+Every root or child transcript line has one record class:
+
+| Class | Records | Model input |
+| --- | --- | --- |
+| Session metadata | `zevria_session_models`, `zevria_session_mode` | Never |
+| Conversation content | Bare user/assistant messages (optional `zevria_request`), `zevria_skill_invocation`, tool-result batches with atomic sidecars, Plan Handoff, ensemble ReportsReady, errors | Yes, except errors and hidden sidecars |
+| Provider replay | `zevria_provider_replay`, with no sidecars | Native or portable projection |
+| Model-input control | `zevria_skill_directive`, `zevria_request_directive`, `zevria_compaction` | Yes |
+| Workflow state | Other Plan / ensemble records | Never |
+| Response recovery | `zevria_incomplete_response` v1 | Never |
+| Display metadata | No root/child transcript records; events and ACP `_meta` only | Never |
+
+Normalized ACP `response_display` worker-log events are display-only evidence,
+not root/child conversation content. Tool-result sidecars remain a 1:1 atomic
+annotation used by task-snapshot replay and subtask correlation, never model
+content. The one-reserved-envelope-per-record convention stays in force.
+
 Tool execution produces two structurally separate outputs:
 
 ```text
@@ -3027,31 +3020,32 @@ Plan workflow records occupy a standalone `zevria_plan` object. `Ready` stores
 the complete artifact, so replay never consults assistant prose or a generated
 Markdown file; `Handoff` stores typed metadata and its engine-generated
 model-visible prompt. Provider assistant messages instead persist a versioned native item ledger
-under `zevria_provider_replay`, with an optional sibling `zevria_display_attempt`
-link (no duplicate canonical message fields):
+under `zevria_provider_replay` alone (no sidecars or duplicate canonical message fields):
 
 ```json
 {"zevria_provider_replay":{"provider":"openai.responses","version":1,"source_profile":{"provider":"openai","model":"gpt-5.6-sol"},"items":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Done."}]}]}}
 ```
 
-Hosted-search checkpoints use a separate `zevria_web_search_attempt` line. They
-are full during the crash window before link commit. Committing the replay and
-its `zevria_display_attempt` link atomically rewrites the checkpoint to elide only
-its derivable presentation, for example:
+Only an abandoned response with readable output or hosted activity leaves a
+recovery record. It never accompanies its own successful response and is never
+used to reconstruct model input:
 
 ```jsonl
-{"zevria_web_search_attempt":{"version":1,"id":"A","profile":{"provider":"openai","model":"m"},"response_id":"resp_1","outcome":"completed","activity":[{"item_id":"ws_1","output_index":0,"status":"completed","action":{"type":"search","query":"q"}}],"revision":5,"presentation":[],"presentation_elided":true,"terminal":{"0":"completed"}}}
-{"zevria_provider_replay":{"provider":"openai.responses","version":1,"source_profile":{"provider":"openai","model":"m"},"items":[{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"q"}},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Done."}]}]},"zevria_display_attempt":"A"}
+{"zevria_incomplete_response":{"version":1,"attempt_id":"A","profile":{"provider":"openai","model":"m"},"response_id":"resp_1","outcome":"interrupted","presentation":[{"source":{"output_index":0,"part":{"summary":0},"item_id":"r_1"},"content":{"type":"reasoning","text":"Partial thought"}}],"hosted_activity":[{"kind":"web_search","item_id":"ws_1","output_index":1,"status":"searching","action":{"type":"search","query":"q"}}]}}
 ```
 
-`presentation_elided` defaults to false and is omitted when false, so failed,
-interrupted and unlinked checkpoints keep their existing full wire shape. The
-flag requires a completed attempt with empty stored presentation and a later
-exact-ID linked native replay. Restore reconstructs readable reasoning, answers
-and native-tool bindings from that ledger, never by text or proximity. Attempt
-activity and lifecycle/terminal evidence are retained even when the final ledger
-omits a live observation. Ordinary assistant display links have no native ledger
-and do not elide presentation.
+Recovery is immutable and model-inert: no revision, no elision, no native-tool
+binding, and no completed/in-progress outcome. Loading rejects duplicate
+`attempt_id`s. `restored_attempt` maps recovery directly to a display attempt
+with revision 1, and independently derives committed Responses display from its
+native replay. No neighboring record or text equality establishes a join.
+
+Replay-only opaque data belongs to model-input control, for example a native
+compaction replacement rather than response-recovery or display metadata:
+
+```json
+{"zevria_compaction":{"version":1,"trigger":"manual","backend":"openai_responses_compact","replacement_history":[{"type":"replay_only","replay":{"provider":"openai.responses","version":1,"source_profile":{"provider":"openai","model":"m"},"items":[{"type":"compaction","encrypted_content":"opaque"}]}}],"retained_user_messages":[]}}
+```
 
 `openai.responses` and `anthropic.messages` are persisted v1 wire-protocol
 identifiers, unrelated to a configured provider key such as `openai`, `deepseek`,
@@ -3272,6 +3266,13 @@ Headless frontend tests can consume the event receiver directly; no terminal
 or provider-specific types are necessary.
 
 ## Compatibility boundaries
+
+Only the current response-recovery and display formats are accepted. Retired
+search-attempt and assistant display-link envelopes are unsupported reserved
+keys, including torn tails; worker `response_display` v1 is rejected. Start a
+fresh session rather than migrating these histories. Current incomplete-response
+v1 and ACP display v2 do not change provider replay v1 or any request bytes.
+
 
 Build/Plan selection is durable session-local engine state, distinct
 from the immutable in-flight request mode and from the Build/Plan model identities.

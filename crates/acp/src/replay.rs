@@ -21,22 +21,17 @@ pub(crate) fn replay_transcript(
     let mut hosted = crate::project::HostedSearchProjection::default();
     let mut subtasks = crate::project::SubtaskProjection::default();
 
-    let items = zevria_transcript::reconstruct_transcript(items);
     for (index, item) in items.iter().enumerate() {
         let prefix = format!("zevria-replay-{index}");
         match item {
-            TranscriptItem::WebSearchAttempt(attempt) => {
-                let mut projected = hosted.update(attempt);
-                if !items
-                    .iter()
-                    .any(|item| item.display_attempt_id() == Some(attempt.id.as_str()))
-                {
-                    if let Some(message) = crate::stream::display_message(attempt) {
-                        projected.extend(project_completed_message(&message, &prefix));
-                    }
-                    if let Some(display) = crate::stream::replay_display(attempt, &projected) {
-                        projected.push(display);
-                    }
+            TranscriptItem::IncompleteResponse(record) => {
+                let attempt = record.to_attempt();
+                let mut projected = hosted.update(&attempt);
+                if let Some(message) = crate::stream::display_message(&attempt) {
+                    projected.extend(project_completed_message(&message, &prefix));
+                }
+                if let Some(display) = crate::stream::replay_display(&attempt, &projected) {
+                    projected.push(display);
                 }
                 updates.extend(projected);
             }
@@ -49,20 +44,21 @@ pub(crate) fn replay_transcript(
                 updates.extend(project_completed_message(message, &prefix));
                 updates.extend(project_tool_calls(message, workspace, &mut tools));
             }
-            TranscriptItem::ProviderMessage(_) | TranscriptItem::AssistantMessage { .. } => {
+            TranscriptItem::ProviderMessage(_) => {
                 if let Some(message) = item.message() {
-                    let mut projected = project_completed_message(message, &prefix);
+                    let attempt = zevria_transcript::restored_attempt(item, index);
+                    let mut projected = attempt
+                        .as_ref()
+                        .map_or_else(Vec::new, |attempt| hosted.update(attempt));
+                    // Use the same sanitized/citation-rendered text as live commit.
+                    let display = attempt.as_ref().and_then(crate::stream::display_message);
+                    projected.extend(project_completed_message(
+                        display.as_ref().unwrap_or(message),
+                        &prefix,
+                    ));
                     projected.extend(project_tool_calls(message, workspace, &mut tools));
-                    if let Some(id) = item.display_attempt_id()
-                        && let Some(attempt) = items
-                            .iter()
-                            .filter_map(|item| match item {
-                                TranscriptItem::WebSearchAttempt(attempt) if attempt.id == id => {
-                                    Some(attempt)
-                                }
-                                _ => None,
-                            })
-                            .max_by_key(|attempt| attempt.revision)
+                    if let Some(attempt) = &attempt
+                        && !attempt.hosted_activity.is_empty()
                         && let Some(display) = crate::stream::replay_display(attempt, &projected)
                     {
                         projected.push(display);

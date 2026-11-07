@@ -1,25 +1,24 @@
 use super::*;
-use zevria_content::web_search::RESPONSE_DISPLAY_META_KEY;
-use zevria_content::web_search::ResponseDisplay;
+use zevria_content::response::RESPONSE_DISPLAY_META_KEY;
+use zevria_content::response::ResponseDisplay;
 
 pub(super) fn display_with_terminal_evidence() -> ResponseDisplay {
-    let mut attempt = zevria_content::WebSearchAttemptRecord::new(
-        zevria_foundation::ModelProfileRef::new("p", "m"),
-    );
-    attempt.activity.push(zevria_content::WebSearchActivity {
-        output_index: 1,
-        item_id: Some("search".into()),
-        status: zevria_content::WebSearchStatus::Completed,
-        action: None,
-    });
+    let mut attempt =
+        zevria_content::ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("p", "m"));
     attempt
-        .terminal
-        .insert(1, zevria_content::WebSearchStatus::Completed);
-    let tool_call_id = attempt.activity[0].client_id(&attempt.id);
+        .hosted_activity
+        .push(zevria_content::HostedActivity {
+            kind: zevria_content::HostedActivityKind::WebSearch,
+            output_index: 1,
+            item_id: Some("search".into()),
+            status: zevria_content::HostedActivityStatus::Completed,
+            action: None,
+        });
+    let tool_call_id = attempt.hosted_activity[0].client_id(&attempt.id);
     ResponseDisplay {
-        version: 1,
+        version: 2,
         attempt,
-        bindings: vec![zevria_content::web_search::DisplayProjectionBinding::Tool {
+        bindings: vec![zevria_content::response::DisplayProjectionBinding::Tool {
             tool_call_id,
             output_index: 1,
             native: false,
@@ -43,7 +42,7 @@ fn terminal_evidence_round_trips_through_display_and_event() {
     display.validate().unwrap();
     assert_eq!(
         display.attempt.outcome,
-        zevria_content::WebSearchAttemptOutcome::InProgress
+        zevria_content::ResponseAttemptOutcome::InProgress
     );
     let bytes = serde_json::to_vec(&display).unwrap();
     assert_eq!(
@@ -219,7 +218,11 @@ fn terminal_evidence_persists_through_streaming_projection_and_reopen_without_re
 
 #[test]
 fn malformed_and_unsupported_metadata_preserve_ordinary_updates() {
+    let mut v1 = display_with_terminal_evidence();
+    v1.version = 1;
+    assert!(v1.validate().is_err());
     for invalid in [
+        serde_json::to_value(v1).unwrap(),
         serde_json::json!({"version":999}),
         serde_json::Value::String("not metadata".into()),
     ] {

@@ -1048,7 +1048,7 @@ fn an_in_flight_turn_preserves_insert_focus_and_new_drafts() {
     assert!(local.interaction().is_insert());
     assert_eq!(local.input(), "x");
     local.reduce_without_effects(SessionEvent::TurnCompleted {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id: TEST_TURN_ID,
         message: Message::assistant("done"),
     });
@@ -1081,7 +1081,7 @@ fn an_in_flight_turn_preserves_insert_focus_and_new_drafts() {
     assert!(authoritative.interaction().is_insert());
 
     authoritative.reduce_without_effects(SessionEvent::TurnCompleted {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id: authoritative_turn_id,
         message: Message::assistant("done"),
     });
@@ -1924,7 +1924,7 @@ fn ctrl_e_requires_all_turns_finished_and_an_idle_pane() {
     apply_turn_event(
         &mut executing,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
                 "fc_1",
@@ -2321,7 +2321,7 @@ fn non_y_keys_cancel_a_pending_tool_output_yank() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
                 tool_call("call_1", None, "command", arguments.clone()),
@@ -2332,7 +2332,7 @@ fn non_y_keys_cancel_a_pending_tool_output_yank() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("call_1", None, "command", "tool output"),
         },

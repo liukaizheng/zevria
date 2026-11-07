@@ -1,7 +1,7 @@
 //! Trusted model replay, validated messages, requests, compaction and token accounting.
 #[cfg(test)]
 use zevria_content::{PromptBlock, PromptImage};
-use zevria_content::{UserPrompt, citations, prompt, web_search};
+use zevria_content::{UserPrompt, citations, prompt};
 use zevria_foundation::{ModelContextPolicy, ModelProfileRef, ModelRole, SessionMode};
 pub use zevria_instructions::{DirectiveContent, InstructionSet};
 pub mod anthropic;

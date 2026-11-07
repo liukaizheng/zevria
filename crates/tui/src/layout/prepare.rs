@@ -938,7 +938,7 @@ fn render_acp_tool(
             |metadata| metadata.diagnostic.clone(),
         );
         if let Some(output) = output {
-            let readable = zevria_content::web_search::sanitize_readable(&output);
+            let readable = zevria_content::readable::sanitize_readable(&output);
             push_plain_text(&readable, Style::default().fg(status.icon().color()), lines);
         }
     }
@@ -1433,7 +1433,7 @@ fn render_tool_diagnostic(state: &ToolCallState, lines: &mut Vec<Line<'static>>)
         && !metadata.outcome.is_success()
         && let Some(diagnostic) = &metadata.diagnostic
     {
-        let text = zevria_content::web_search::sanitize_readable(diagnostic);
+        let text = zevria_content::readable::sanitize_readable(diagnostic);
         push_plain_text(
             &text,
             Style::default().fg(crate::presentation::native_tool_status(state)

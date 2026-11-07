@@ -1,5 +1,5 @@
 use crate::*;
-use std::{collections::HashSet, fmt};
+use std::fmt;
 /// Invalid committed session replay. The engine cannot resume work after this error.
 /// Repair must happen outside the failed engine, preserving the original evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,7 +8,6 @@ pub enum SessionReplayError {
     Skills(String),
     Plan(String),
     Ensemble(String),
-    WebSearch(String),
     Both { skills: String, plan: String },
 }
 
@@ -22,7 +21,6 @@ impl fmt::Display for SessionReplayError {
             Self::Skills(error) => write!(f, "invalid skill replay: {error}"),
             Self::Plan(error) => write!(f, "invalid Plan replay: {error}"),
             Self::Ensemble(error) => write!(f, "invalid ensemble replay: {error}"),
-            Self::WebSearch(error) => write!(f, "invalid web search replay: {error}"),
             Self::Both { skills, plan } => {
                 write!(
                     f,
@@ -48,35 +46,11 @@ pub struct ValidatedSessionReplay {
     pub plan: PlanWorkflowState,
 }
 
-/// Elision is safe only while the exact later native ledger is still present.
-/// Check this on raw loads too, before tail repair can discard its only copy.
-pub(crate) fn validate_web_search_replay(
-    items: &[TranscriptItem],
-) -> Result<(), SessionReplayError> {
-    let mut linked = HashSet::new();
-    for item in items.iter().rev() {
-        if item.provider_replay().is_some()
-            && let Some(id) = item.display_attempt_id()
-        {
-            linked.insert(id);
-        } else if let TranscriptItem::WebSearchAttempt(attempt) = item
-            && attempt.presentation_elided
-            && !linked.contains(attempt.id.as_str())
-        {
-            return Err(SessionReplayError::WebSearch(
-                "compacted web search attempt without its linked provider replay".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub fn validate_session_replay(
     items: &[TranscriptItem],
 ) -> Result<ValidatedSessionReplay, SessionReplayError> {
     #[cfg(feature = "test-support")]
     crate::replay_probe::record(|counts| counts.validations += 1);
-    validate_web_search_replay(items)?;
     crate::validate_ensemble_review_history(items).map_err(SessionReplayError::Ensemble)?;
     let instructions = InstructionReplayState::replay(items);
     let plan = replay_plan_state(items.iter().filter_map(|item| match item {

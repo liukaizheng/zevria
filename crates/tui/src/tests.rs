@@ -904,7 +904,7 @@ fn streaming_handoff_app(with_compaction: bool) -> App {
     }
     app.reduce_without_effects(SessionEvent::Intermediate {
         turn_id: TEST_TURN_ID,
-        display_attempt_id: None,
+        attempt_id: None,
         message: assistant_message(vec![
             AssistantContent::text("Committed implementation row.\n".repeat(40)),
             tool_call(
@@ -968,7 +968,6 @@ fn idle_app_with_ensemble(start: EnsembleStart) -> App {
         resumed: false,
     });
     app.reduce_without_effects(SessionEvent::TurnRecovered {
-        display_attempt_id: None,
         turn_id: TEST_TURN_ID,
     });
     app

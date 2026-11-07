@@ -60,11 +60,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         let estimated = item.clone();
         let model_visible =
             item.model_request_item().is_some() && !matches!(item, TranscriptItem::Directive(_));
-        let result = if item.display_attempt_id().is_some() {
-            self.conversation.push_completed_linked(item)
-        } else {
-            self.conversation.push_completed(item)
-        };
+        let result = self.conversation.push_completed(item);
         self.refresh_replay()?;
         self.append_context_estimates(std::slice::from_ref(&estimated));
         if model_visible {
@@ -173,15 +169,18 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     /// Persistence degradation is recoverable; replay failure is never ignored.
-    pub(super) async fn record_recoverable_items(
+    pub(super) fn record_recoverable_items(
         &mut self,
         items: Vec<TranscriptItem>,
-        events: &SessionEventSender,
-    ) -> Result<(), SessionReplayError> {
-        if let Err(error) = self.record_completed_items(items) {
-            self.persistence_failed(&error, events).await?;
+    ) -> Result<Option<anyhow::Error>, SessionReplayError> {
+        let mut failure = None;
+        for item in items {
+            if let Err(error) = self.record_completed(item) {
+                failure = Some(error);
+            }
+            self.ensure_replay_valid()?;
         }
-        Ok(())
+        Ok(failure)
     }
 
     pub(super) async fn gate_persistence(

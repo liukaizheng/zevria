@@ -5,11 +5,12 @@ pub use message::assistant_plain_text;
 pub mod citations;
 pub mod image_diagnostics;
 pub mod prompt;
+pub mod readable;
 pub mod reasoning;
-pub mod web_search;
+pub mod response;
 pub use prompt::{PromptBlock, PromptError, PromptImage, UserPrompt};
-pub use web_search::{
+pub use response::{
     AssistantPartIdentity, AssistantPresentationContent, AssistantPresentationPart,
-    AssistantSourceAddress, AssistantStreamSnapshot, WebSearchActivity, WebSearchAttemptOutcome,
-    WebSearchAttemptRecord, WebSearchStatus,
+    AssistantSourceAddress, AssistantStreamSnapshot, HostedActivity, HostedActivityKind,
+    HostedActivityStatus, ResponseAttempt, ResponseAttemptOutcome,
 };

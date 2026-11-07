@@ -51,6 +51,9 @@ impl RequestReplayState {
                 "request boundary must immediately follow its owning prompt"
             );
         }
+        if matches!(item, TranscriptItem::IncompleteResponse(_)) {
+            return Ok(());
+        }
         match item {
             TranscriptItem::RequestDirective(directive) => {
                 directive.validate()?;

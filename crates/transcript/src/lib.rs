@@ -10,6 +10,8 @@ use zevria_model::{compaction, models};
 use zevria_workflow::*;
 use zevria_workflow::{ensemble, plan};
 mod display;
+mod incomplete_response;
+pub use incomplete_response::*;
 mod ensemble_review_history;
 mod ensemble_review_journal;
 mod instruction_replay;
@@ -23,7 +25,7 @@ mod request_replay;
 pub mod test_support;
 pub mod transcript;
 pub mod worker_log;
-pub use display::reconstruct_transcript;
+pub use display::{committed_display, restored_attempt};
 pub use ensemble_review_history::*;
 pub use ensemble_review_journal::WorkerReviewJournal;
 pub use instruction_replay::effective_directives;
@@ -36,13 +38,13 @@ mod directive_tests;
 #[cfg(test)]
 mod ensemble_review_tests;
 #[cfg(test)]
+mod incomplete_response_tests;
+#[cfg(test)]
 mod prompt_record_tests;
 #[cfg(test)]
 mod request_tests;
 #[cfg(test)]
 mod skill_replay_tests;
-#[cfg(test)]
-mod web_search_tests;
 
 mod launch_metadata;
 pub use launch_metadata::subtask_launch_metadata;

@@ -242,7 +242,7 @@ fn turn_completed_alone_never_opens_plan_approval() {
     apply_turn_event(
         &mut app,
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("the plan"),
         },
@@ -390,7 +390,7 @@ fn plan_revision_is_a_versioned_engine_decision_and_failures_do_not_open_approva
     apply_turn_event(
         &mut build,
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("built"),
         },
@@ -557,7 +557,7 @@ fn revision_state_reopens_input_and_partial_completion_stays_planning() {
     apply_turn_event(
         &mut app,
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("I need more information."),
         },
@@ -840,7 +840,7 @@ fn handoff_is_a_semantic_selectable_row_instead_of_user_prose() {
     apply_turn_event(
         &mut app,
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("Implemented."),
         },
@@ -925,7 +925,7 @@ fn streaming_handoff_preserves_top_after_home_and_gg() {
                     handoff_stream_update(14, assistant_snapshot),
                     SessionEvent::TurnCompleted {
                         turn_id: TEST_TURN_ID,
-                        display_attempt_id: None,
+                        attempt_id: None,
                         message: Message::assistant("Implementation complete."),
                     },
                 ] {
@@ -1223,7 +1223,7 @@ fn configured_profile_fallback_and_role_slots_are_independent() {
         context_window_tokens: 120_000,
     });
     app.reduce_without_effects(SessionEvent::TurnCompleted {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id: TEST_TURN_ID,
         message: Message::assistant("planned"),
     });
@@ -1265,7 +1265,7 @@ fn configured_profile_fallback_and_role_slots_are_independent() {
         context_window_tokens: 128_000,
     });
     app.reduce_without_effects(SessionEvent::TurnCompleted {
-        display_attempt_id: None,
+        attempt_id: None,
         turn_id: build_turn,
         message: Message::assistant("built"),
     });
@@ -1586,7 +1586,7 @@ fn updates_stream_then_commit_and_error_clear_busy() {
     apply_turn_event(
         &mut app,
         SessionEvent::Intermediate {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("tool call"),
         },
@@ -1602,7 +1602,7 @@ fn updates_stream_then_commit_and_error_clear_busy() {
     apply_turn_event(
         &mut app,
         SessionEvent::TurnCompleted {
-            display_attempt_id: None,
+            attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("final answer"),
         },
@@ -2692,10 +2692,7 @@ fn plan_fresh_snapshot_settles_pending_but_current_handoff_stays_active() {
         handoff: PlanHandoff::new(artifact, "source"),
     });
     assert_eq!(current.active_turn_id(), Some(turn_id));
-    current.reduce_without_effects(SessionEvent::TurnRecovered {
-        turn_id,
-        display_attempt_id: None,
-    });
+    current.reduce_without_effects(SessionEvent::TurnRecovered { turn_id });
     assert!(!current.is_busy());
     assert_eq!(expected, current.plan_state().version().unwrap());
 }

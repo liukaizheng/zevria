@@ -24,7 +24,7 @@ mod tests {
         let ((completed, snapshot), derivations) = count_canonical_derivations(|| {
             let response = ModelResponse::from_replay(native.clone())
                 .unwrap()
-                .with_display_attempt(Some("attempt-1".into()))
+                .with_attempt_id(Some("attempt-1".into()))
                 .unwrap();
             let snapshot = response
                 .record()
@@ -38,7 +38,11 @@ mod tests {
         assert_eq!(snapshot.replay_ref(), Some(&native));
         assert_eq!(completed.provider_replay(), Some(&native));
         assert_eq!(snapshot.message_ref(), completed.message());
-        assert_eq!(completed.display_attempt_id(), Some("attempt-1"));
+        assert!(
+            !serde_json::to_string(&completed)
+                .unwrap()
+                .contains("attempt-1")
+        );
 
         let bytes = serde_json::to_vec(&completed).unwrap();
         let (loaded, derivations) = count_canonical_derivations(|| {
@@ -69,23 +73,16 @@ mod tests {
     }
 
     #[test]
-    fn display_binding_and_owned_restoration_move_backing_allocations() {
+    fn owned_restoration_moves_backing_allocations() {
         let record = MessageRecord::plain(Message::assistant("plain assistant text")).unwrap();
         let pointer = text_ptr(record.message());
-        let record = record
-            .with_display_attempt(Some("first".into()))
-            .unwrap()
-            .with_display_attempt(Some("second".into()))
-            .unwrap();
         assert_eq!(text_ptr(record.message()), pointer);
-        let (message, display, replay_backed) = record.into_display();
+        let (message, replay_backed) = record.into_display();
         assert_eq!(text_ptr(&message), pointer);
-        assert_eq!(display.as_deref(), Some("second"));
         assert!(!replay_backed);
 
         let record = MessageRecord::from_replay(replay()).unwrap();
         let pointer = record.provider_replay().unwrap().items.as_ptr();
-        let record = record.with_display_attempt(Some("native".into())).unwrap();
         assert_eq!(record.provider_replay().unwrap().items.as_ptr(), pointer);
         let completed = TranscriptItem::from(record);
         assert_eq!(completed.provider_replay().unwrap().items.as_ptr(), pointer);
@@ -100,15 +97,9 @@ mod tests {
             .is_err()
         );
         assert!(
-            MessageRecord::plain(Message::user("prompt"))
+            ModelResponse::plain(Message::assistant("answer"))
                 .unwrap()
-                .with_display_attempt(Some("assistant-only".into()))
-                .is_err()
-        );
-        assert!(
-            MessageRecord::plain(Message::assistant("answer"))
-                .unwrap()
-                .with_display_attempt(Some("bad\nidentity".into()))
+                .with_attempt_id(Some("bad\nidentity".into()))
                 .is_err()
         );
         let mut invalid = replay();

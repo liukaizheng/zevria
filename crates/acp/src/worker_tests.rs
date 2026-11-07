@@ -113,7 +113,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                                 continue;
                             }
                             let terminal = SessionEvent::TurnCompleted {
-                                display_attempt_id: None,
+                                attempt_id: None,
                                 turn_id,
                                 message: Message::assistant("report complete"),
                             };
@@ -172,7 +172,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                             zevria_session_api::ControlCommand::AnswerQuestion { .. },
                         ) => {
                             tx.send(SessionEvent::TurnCompleted {
-                                display_attempt_id: None,
+                                attempt_id: None,
                                 turn_id: TurnId::new(turn),
                                 message: Message::assistant("question handled"),
                             })
@@ -203,7 +203,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                             .await
                             .unwrap();
                             tx.send(SessionEvent::TurnCompleted {
-                                display_attempt_id: None,
+                                attempt_id: None,
                                 turn_id: TurnId::new(turn),
                                 message: Message::assistant("revision opened"),
                             })

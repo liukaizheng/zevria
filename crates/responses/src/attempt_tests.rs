@@ -2,12 +2,12 @@ use super::*;
 use serde_json::json;
 use zevria_content::{AssistantPartIdentity as Part, AssistantPresentationContent as Content};
 
-fn state() -> SearchState {
-    SearchState::new(zevria_foundation::ModelProfileRef::new("test", "test"))
+fn state() -> AttemptReducer {
+    AttemptReducer::new(zevria_foundation::ModelProfileRef::new("test", "test"))
 }
-fn answer(state: &SearchState) -> String {
+fn answer(state: &AttemptReducer) -> String {
     let message = crate::accumulator::AssistantMessageAccumulator::default()
-        .streaming_message_with_search(state)
+        .streaming_message_with_attempt(state)
         .unwrap();
     let text = zevria_content::assistant_plain_text(&message);
     let indexed = state
@@ -72,7 +72,7 @@ fn growing_parts_reconcile_annotations_from_original_unicode_offsets() {
 }
 
 #[test]
-fn authoritative_items_remove_provisional_parts_and_validated_replay_removes_outputs() {
+fn authoritative_items_remove_provisional_parts() {
     let mut state = state();
     state.ingest(&delta("provisional", 1));
     state.ingest(&json!({"type":"response.output_text.delta","output_index":0,"content_index":1,"delta":"trailing draft"}));
@@ -90,14 +90,6 @@ fn authoritative_items_remove_provisional_parts_and_validated_replay_removes_out
         state.ingest(&event);
     }
     assert_eq!(state.attempt(), &completed);
-    state.ingest(&json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"not in replay"}));
-    state.reconcile(&[item]);
-    assert_eq!(answer(&state), "authoritative");
-    assert_eq!(state.attempt().presentation.len(), 1);
-    let final_attempt = state.attempt().clone();
-    state.ingest(&delta("late suffix", 100));
-    state.ingest(&json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"late omitted output"}));
-    assert_eq!(state.attempt(), &final_attempt);
 }
 
 #[test]
@@ -221,4 +213,33 @@ fn large_single_part_keeps_latest_text_not_a_delta_history() {
     assert_eq!(state.attempt().presentation.len(), 1);
     assert!(state.completed_text().is_empty());
     assert!(state.dirty_text.is_empty());
+}
+
+#[test]
+fn item_id_matching_cannot_confirm_a_different_output_index() {
+    let mut state = state();
+    for event in [
+        json!({"type":"response.web_search_call.searching","output_index":0,"item_id":"first"}),
+        json!({"type":"response.web_search_call.searching","output_index":1,"item_id":"second"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"web_search_call","id":"first","status":"cancelled"}}),
+    ] {
+        state.ingest(&event);
+    }
+    assert_eq!(
+        state.attempt().hosted_activity[0].status,
+        HostedActivityStatus::Interrupted
+    );
+    assert_eq!(
+        state.attempt().hosted_activity[1].status,
+        HostedActivityStatus::Searching
+    );
+    state
+        .attempt_mut()
+        .close(zevria_content::ResponseAttemptOutcome::Failed);
+    assert_eq!(
+        state
+            .attempt()
+            .action_display_status(&state.attempt().hosted_activity[1]),
+        "completion unconfirmed"
+    );
 }

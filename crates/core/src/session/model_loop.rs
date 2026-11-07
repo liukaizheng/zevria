@@ -5,7 +5,7 @@ use super::*;
 #[derive(Debug)]
 pub(super) struct ModelTurnOutput {
     pub(super) message: Option<Message>,
-    pub(super) display_attempt_id: Option<String>,
+    pub(super) attempt_id: Option<String>,
     pub(super) submission_gate: PlanSubmissionGate,
     pub(super) final_item: Option<TranscriptItem>,
     pub(super) usage: Option<TokenUsage>,
@@ -29,6 +29,30 @@ pub(super) enum FinalResponsePersistence {
 }
 
 impl<P: ModelProvider> SessionEngine<P> {
+    async fn publish_attempts(
+        &mut self,
+        progress: &ProgressReporter,
+        attempts: Vec<zevria_content::ResponseAttempt>,
+        persistence_failure: Option<&anyhow::Error>,
+    ) -> Result<(), SessionReplayError> {
+        if let Some(error) = persistence_failure {
+            self.persistence_failed(error, progress.events()).await?;
+        }
+        for attempt in attempts
+            .into_iter()
+            .filter(zevria_content::ResponseAttempt::has_display)
+        {
+            let _ = progress
+                .events()
+                .send(SessionEvent::ResponseAttemptUpdated {
+                    turn_id: progress.turn().id,
+                    attempt,
+                })
+                .await;
+        }
+        Ok(())
+    }
+
     async fn prepare_dispatch(
         &mut self,
         policy: &TurnPolicy,
@@ -147,8 +171,8 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .clone()
                 .with_model_call(call + 1)
                 .with_checkpoints(checkpoints);
-            let mut checkpointed = HashMap::<String, u64>::new();
-            let mut checkpoint_failure = None;
+            let mut checkpointed = std::collections::HashSet::<String>::new();
+            let mut checkpoint_failure: Option<String> = None;
             let completion_result = {
                 call += 1;
                 let _ = progress
@@ -166,17 +190,14 @@ impl<P: ModelProvider> SessionEngine<P> {
                         () = progress.turn().cancellation().cancelled() => break None,
                         Some(checkpoint) = checkpoint_rx.recv() => {
                             let attempt = checkpoint.attempt;
-                            let result = if checkpointed.get(&attempt.id).is_some_and(|revision| *revision >= attempt.revision) {
-                                Ok(())
+                            let result = if !checkpointed.insert(attempt.id.clone()) {
+                                checkpoint_failure.clone().map_or(Ok(()), |error| Err(anyhow::anyhow!(error)))
                             } else {
-                                attempt.validate().and_then(|()| {
-                                    let id = attempt.id.clone();
-                                    let revision = attempt.revision;
-                                    let result = self.conversation.push_completed_batch(vec![TranscriptItem::WebSearchAttempt(attempt)]);
-                                    // Completed writes retain memory even on failure. Never
-                                    // append that same revision again during the final drain.
-                                    checkpointed.insert(id, revision);
-                                    result
+                                zevria_transcript::IncompleteResponse::from_attempt(&attempt).and_then(|record| {
+                                    match record {
+                                        Some(record) => self.conversation.push_completed(TranscriptItem::IncompleteResponse(record)),
+                                        None => Ok(()),
+                                    }
                                 })
                             };
                             let result = result.map_err(|error| format!("attempt checkpoint persistence failed: {error:#}"));
@@ -188,54 +209,69 @@ impl<P: ModelProvider> SessionEngine<P> {
                     }
                 }
             };
-            if let Some(error) = checkpoint_failure {
-                self.persistence_failed(&anyhow::anyhow!(error), progress.events())
-                    .await?;
-            }
-            // The scope above has dropped both the future and borrowed request.
-            // Retain all observed retries before errors, cancellation, local
-            // dispatch, or publication of the turn's terminal outcome.
-            let outcome = match &completion_result {
-                None => zevria_content::WebSearchAttemptOutcome::Interrupted,
-                Some(Ok(_)) => zevria_content::WebSearchAttemptOutcome::Completed,
-                Some(Err(_)) => zevria_content::WebSearchAttemptOutcome::Failed,
+            // No provider future or request borrow survives this point. Cancellation
+            // also wins if it arrived just as the provider returned a completed response.
+            let completion_result = if progress.turn().is_cancelled() {
+                None
+            } else {
+                completion_result
             };
-            let attempts = progress
-                .drain_web_search(outcome)
-                .into_iter()
-                .filter(zevria_content::WebSearchAttemptRecord::has_display)
-                .collect::<Vec<_>>();
-            let retained = attempts
-                .iter()
-                .filter(|attempt| {
-                    !checkpointed
-                        .get(&attempt.id)
-                        .is_some_and(|revision| *revision >= attempt.revision)
+            let completion_result = completion_result.map(|response| {
+                response.map(|mut response| {
+                    let usage = response.usage;
+                    let attempt_id = response.attempt_id.take();
+                    (
+                        usage,
+                        attempt_id,
+                        TranscriptItem::from(response.into_record()),
+                    )
                 })
-                .cloned()
-                .map(TranscriptItem::WebSearchAttempt)
-                .collect();
-            if !attempts.is_empty() {
-                self.record_recoverable_items(retained, progress.events())
-                    .await?;
-                for attempt in attempts {
-                    let _ = progress
-                        .events()
-                        .send(SessionEvent::WebSearchUpdated {
-                            turn_id: progress.turn().id,
-                            attempt,
-                        })
-                        .await;
+            });
+            let committed = completion_result
+                .as_ref()
+                .and_then(|response| response.as_ref().ok());
+            let committed_id = committed.and_then(|(_, id, _)| id.as_deref());
+            let committed_item = committed.map(|(_, _, item)| item);
+            let mut attempts = progress.drain_attempts();
+            let mut retained = Vec::new();
+            for attempt in &mut attempts {
+                if Some(attempt.id.as_str()) == committed_id {
+                    let (presentation, hosted) = committed_item
+                        .and_then(zevria_transcript::committed_display)
+                        .unwrap_or_default();
+                    attempt.complete_with(presentation, hosted);
+                } else {
+                    attempt.close_uncommitted(if completion_result.is_none() {
+                        zevria_content::ResponseAttemptOutcome::Interrupted
+                    } else {
+                        zevria_content::ResponseAttemptOutcome::Failed
+                    });
+                    if !checkpointed.contains(&attempt.id)
+                        && let Some(record) =
+                            zevria_transcript::IncompleteResponse::from_attempt(attempt)?
+                    {
+                        retained.push(TranscriptItem::IncompleteResponse(record));
+                    }
                 }
             }
+            let recovery_failure = self.record_recoverable_items(retained)?;
+            let persistence_failure = checkpoint_failure
+                .map(anyhow::Error::msg)
+                .or(recovery_failure);
             let Some(response) = completion_result else {
+                self.publish_attempts(&progress, attempts, persistence_failure.as_ref())
+                    .await?;
                 self.provider.cancel();
-                return Err(anyhow::anyhow!("turn cancelled").into());
+                return Err(Failure::Cancelled);
             };
-            let response = response?;
-            let usage = response.usage;
-            let display_attempt_id = response.record().display_attempt_id().map(str::to_owned);
-            let completed = TranscriptItem::from(response.into_record());
+            let (usage, attempt_id, completed) = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    self.publish_attempts(&progress, attempts, persistence_failure.as_ref())
+                        .await?;
+                    return Err(error.into());
+                }
+            };
             // For replay-backed providers this clone comes from the replay's
             // cached canonical message, never an independently supplied model
             // response. It is therefore authoritative for display and tool
@@ -249,7 +285,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             if calls.is_empty() && !gate.satisfied() {
                 // A premature final is still completed provider work. Preserve
                 // its native replay, usage and display identity before correction.
-                self.record_completed(completed)?;
+                let persistence = self.record_completed(completed);
+                self.publish_attempts(&progress, attempts, persistence_failure.as_ref())
+                    .await?;
+                persistence?;
                 self.ensure_replay_valid()?;
                 if let Some(usage) = usage {
                     self.report_provider_usage(policy, usage.total_tokens)?;
@@ -259,7 +298,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     .send(SessionEvent::Intermediate {
                         turn_id: progress.turn().id,
                         message: assistant,
-                        display_attempt_id,
+                        attempt_id,
                     })
                     .await;
                 if progress.turn().is_cancelled() {
@@ -276,9 +315,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                 continue;
             }
             if calls.is_empty() {
+                let mut commit_failure = None;
                 let (final_item, deferred_usage) = match final_persistence {
                     FinalResponsePersistence::Immediate => {
-                        self.record_completed(completed)?;
+                        commit_failure = self.record_completed(completed).err();
                         if let Some(usage) = usage {
                             self.report_provider_usage(policy, usage.total_tokens)?;
                         }
@@ -289,9 +329,14 @@ impl<P: ModelProvider> SessionEngine<P> {
                         unreachable!("recovery does not call the provider")
                     }
                 };
+                self.publish_attempts(&progress, attempts, persistence_failure.as_ref())
+                    .await?;
+                if let Some(error) = commit_failure {
+                    return Err(error.into());
+                }
                 return Ok(ModelTurnOutput {
                     message: Some(assistant),
-                    display_attempt_id,
+                    attempt_id,
                     submission_gate,
                     final_item,
                     usage: deferred_usage,
@@ -300,7 +345,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             // Intermediate provider work must be durable before executing its
             // tools. Only the final no-tool response may be deferred so its
             // workflow terminal records can share one atomic boundary.
-            self.record_completed(completed)?;
+            let persistence = self.record_completed(completed);
+            self.publish_attempts(&progress, attempts, persistence_failure.as_ref())
+                .await?;
+            persistence?;
             if let Some(usage) = usage {
                 self.report_provider_usage(policy, usage.total_tokens)?;
             }
@@ -309,7 +357,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .send(SessionEvent::Intermediate {
                     turn_id: progress.turn().id,
                     message: assistant,
-                    display_attempt_id,
+                    attempt_id,
                 })
                 .await;
 
@@ -474,14 +522,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             None => None,
         };
         let terminal = if persistence == FinalResponsePersistence::Recovered {
-            SessionEvent::TurnRecovered {
-                turn_id: turn.id,
-                display_attempt_id: output.display_attempt_id,
-            }
+            SessionEvent::TurnRecovered { turn_id: turn.id }
         } else {
             SessionEvent::TurnCompleted {
                 turn_id: turn.id,
-                display_attempt_id: output.display_attempt_id,
+                attempt_id: output.attempt_id,
                 message: output
                     .message
                     .expect("live completion has a final response"),

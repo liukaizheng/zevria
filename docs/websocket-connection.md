@@ -207,8 +207,14 @@ non-streaming request deadlines. Local tools, approval waits, and external ACP
 agents are not subject to these completion timers. External-agent Review deadlines
 and the unbounded Plan-worker policy are unchanged.
 
-Timeout follows normal attempt finalization, including hosted-search checkpoint
-persistence. HTTP drops its old response stream; WebSocket terminates its pump and
+Timeout follows normal provider-neutral response-attempt failure handling,
+regardless of search advertisement. The provider waits for durable incomplete-
+response acknowledgement before retrying. Each transmission (including stale-ID
+resends and fallback) has a distinct display identity; handshakes consume recovery
+budget but are not response attempts. Successful attempts are finalized by core
+from committed native replay and are never checkpointed or linked in storage.
+Core flushes uncommitted evidence after dropping the provider future, before
+terminal publication; an in-flight attempt is still lost on process death. HTTP drops its old response stream; WebSocket terminates its pump and
 invalidates the ambiguous continuation before replay on a fresh generation.
 Cancellation interrupts every phase, including backoff. Exhaustion yields one
 actionable Display error with attempts, elapsed time, stop reason, last category

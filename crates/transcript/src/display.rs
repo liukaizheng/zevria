@@ -1,30 +1,35 @@
-use zevria_content::web_search::*;
-/// Shared native/ACP restoration. Operates on a display copy, never the saved
-/// log. Only explicit attempt links authorize reconstruction from native replay.
-/// Callers restore validated histories: an elided attempt without its later
-/// linked native replay is a hard load error, not displayable fallback text.
-pub fn reconstruct_transcript(
-    items: &[crate::transcript::TranscriptItem],
-) -> Vec<crate::transcript::TranscriptItem> {
-    use crate::transcript::TranscriptItem;
-    let mut result = items.to_vec();
-    for (index, item) in items.iter().enumerate() {
-        let TranscriptItem::WebSearchAttempt(saved) = item else {
-            continue;
-        };
-        let mut attempt = saved.clone();
-        attempt.finish(WebSearchAttemptOutcome::Interrupted);
-        if let Some(replay) = items
-            .iter()
-            .find(|item| item.display_attempt_id() == Some(saved.id.as_str()))
-            .and_then(TranscriptItem::provider_replay)
-        {
-            // Link commit elides the durable presentation. Rebuild it only on
-            // this display copy, leaving replay and saved lifecycle evidence
-            // untouched.
-            attempt.reconcile_native_presentation(&replay.items);
-        }
-        result[index] = TranscriptItem::WebSearchAttempt(attempt);
+use crate::TranscriptItem;
+use zevria_content::{
+    AssistantPresentationPart, HostedActivity, ResponseAttempt, ResponseAttemptOutcome,
+};
+use zevria_model::ReplayProtocol;
+
+/// Committed Responses display is solely a projection of its native ledger.
+/// Non-Responses and plain messages retain ordinary message rendering.
+pub fn committed_display(
+    item: &TranscriptItem,
+) -> Option<(Vec<AssistantPresentationPart>, Vec<HostedActivity>)> {
+    let replay = item.provider_replay()?;
+    if replay.protocol() != Some(ReplayProtocol::Responses) {
+        return None;
     }
-    result
+    let display = zevria_content::response::responses_native_display(&replay.items);
+    (!display.0.is_empty() || !display.1.is_empty()).then_some(display)
+}
+
+/// Derive the same display used at live commit, without mutating saved records.
+pub fn restored_attempt(item: &TranscriptItem, index: usize) -> Option<ResponseAttempt> {
+    if let TranscriptItem::IncompleteResponse(record) = item {
+        return Some(record.to_attempt());
+    }
+    let (presentation, hosted_activity) = committed_display(item)?;
+    Some(ResponseAttempt {
+        id: format!("transcript-{index}"),
+        profile: item.provider_replay()?.source_profile.clone(),
+        response_id: None,
+        outcome: ResponseAttemptOutcome::Completed,
+        revision: 1,
+        presentation,
+        hosted_activity,
+    })
 }

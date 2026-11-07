@@ -6,18 +6,18 @@ use zevria_content::AssistantPresentationContent;
 use zevria_content::AssistantPresentationPart;
 use zevria_content::AssistantSourceAddress;
 use zevria_content::AssistantStreamSnapshot;
-use zevria_content::WebSearchActivity;
-use zevria_content::WebSearchAttemptOutcome as Outcome;
-use zevria_content::WebSearchAttemptRecord;
-use zevria_content::WebSearchStatus;
-use zevria_content::web_search::DisplayProjectionBinding as Binding;
-use zevria_content::web_search::RESPONSE_DISPLAY_META_KEY;
-use zevria_content::web_search::ResponseDisplay;
+use zevria_content::HostedActivity;
+use zevria_content::HostedActivityStatus;
+use zevria_content::ResponseAttempt;
+use zevria_content::ResponseAttemptOutcome as Outcome;
+use zevria_content::response::DisplayProjectionBinding as Binding;
+use zevria_content::response::RESPONSE_DISPLAY_META_KEY;
+use zevria_content::response::ResponseDisplay;
 use zevria_foundation::ModelProfileRef;
 use zevria_foundation::TurnId;
 
-fn attempt() -> WebSearchAttemptRecord {
-    let mut attempt = WebSearchAttemptRecord::new(ModelProfileRef::new("p", "m"));
+fn attempt() -> ResponseAttempt {
+    let mut attempt = ResponseAttempt::new(ModelProfileRef::new("p", "m"));
     attempt.presentation = vec![
         AssistantPresentationPart {
             source: AssistantSourceAddress {
@@ -50,10 +50,11 @@ fn attempt() -> WebSearchAttemptRecord {
             },
         },
     ];
-    attempt.activity = vec![WebSearchActivity {
+    attempt.hosted_activity = vec![HostedActivity {
+        kind: zevria_content::HostedActivityKind::WebSearch,
         output_index: 1,
         item_id: Some("web".into()),
-        status: WebSearchStatus::Searching,
+        status: HostedActivityStatus::Searching,
         action: Some(json!({"type":"search", "query":"query"})),
     }];
     attempt.touch();
@@ -88,40 +89,38 @@ fn provisional_answers_emit_suffixes_then_authoritative_citation_segments() {
     let turn = TurnId::new(1);
     let mut streams = StreamSegments::default();
     let mut attempt = attempt();
-    attempt.activity.clear();
+    attempt.hosted_activity.clear();
     attempt
         .presentation
         .retain(|part| matches!(part.content, AssistantPresentationContent::Answer { .. }));
-    let update =
-        |streams: &mut StreamSegments, attempt: &mut WebSearchAttemptRecord, text: &str| {
-            attempt.presentation[0].content =
-                AssistantPresentationContent::Answer { text: text.into() };
-            attempt.touch();
-            streams.display_snapshot(
-                turn,
-                AssistantStreamSnapshot {
-                    message: None,
-                    attempt: Some(attempt.clone()),
-                },
-            )
-        };
+    let update = |streams: &mut StreamSegments, attempt: &mut ResponseAttempt, text: &str| {
+        attempt.presentation[0].content =
+            AssistantPresentationContent::Answer { text: text.into() };
+        attempt.touch();
+        streams.display_snapshot(
+            turn,
+            AssistantStreamSnapshot {
+                message: None,
+                attempt: Some(attempt.clone()),
+            },
+        )
+    };
     let first = update(&mut streams, &mut attempt, "Claim.");
     assert_eq!(attempt.outcome, Outcome::InProgress);
     assert_eq!(chunk_text(&first[0]), "Claim.");
     let first_id = chunk_id(&first[0]).to_string();
-    display(first);
+    assert_eq!(first.len(), 1);
     let grown = update(&mut streams, &mut attempt, "Claim. More prose.");
     assert_eq!(chunk_text(&grown[0]), " More prose.");
     assert_eq!(chunk_id(&grown[0]), first_id);
-    display(grown);
+    assert_eq!(grown.len(), 1);
     let corrected = "Claim. [Source](https://example.org/) More prose.";
     let correction = update(&mut streams, &mut attempt, corrected);
     assert_eq!(chunk_text(&correction[0]), corrected);
     let correction_id = chunk_id(&correction[0]).to_string();
     assert_ne!(correction_id, first_id);
-    let metadata = display(correction);
-    assert!(metadata.bindings.iter().any(|binding| matches!(binding, Binding::Text { message_id, end, .. } if message_id == &correction_id && *end == corrected.len())));
-    attempt.finish(Outcome::Completed);
+    assert_eq!(correction.len(), 1);
+    attempt.close(Outcome::Completed);
     let terminal = streams.display_snapshot(
         turn,
         AssistantStreamSnapshot {
@@ -131,21 +130,22 @@ fn provisional_answers_emit_suffixes_then_authoritative_citation_segments() {
     );
     assert_eq!(
         terminal.len(),
-        1,
-        "completion metadata does not repeat the answer"
+        0,
+        "ordinary completion adds no display metadata"
     );
     let canonical =
         rig_core::message::Message::assistant(format!("\u{1b}[31m{corrected}\u{1b}[0m"));
     let bound = streams.terminal_bound(turn, &canonical, Some(&attempt.id));
-    assert_eq!(bound.len(), 1, "terminal display stays sanitized and bound");
-    assert_eq!(display(bound).attempt, attempt);
+    assert!(
+        bound.is_empty(),
+        "ordinary terminal display stays sanitized without metadata"
+    );
 }
 
 #[test]
 fn repeated_attempt_revision_can_finish_an_ordinary_projection_and_its_binding() {
     let turn = TurnId::new(1);
     let mut attempt = attempt();
-    attempt.activity.clear();
     attempt
         .presentation
         .retain(|part| matches!(part.content, AssistantPresentationContent::Answer { .. }));
@@ -160,7 +160,12 @@ fn repeated_attempt_revision_can_finish_an_ordinary_projection_and_its_binding()
             attempt: Some(attempt.clone()),
         },
     );
-    assert!(display(incomplete).bindings.is_empty());
+    assert!(
+        display(incomplete)
+            .bindings
+            .iter()
+            .all(|b| matches!(b, Binding::Tool { .. }))
+    );
     let complete = streams.display_snapshot(
         turn,
         AssistantStreamSnapshot {
@@ -169,7 +174,7 @@ fn repeated_attempt_revision_can_finish_an_ordinary_projection_and_its_binding()
         },
     );
     assert_eq!(crate::tests::chunk_text(&complete[0]), " text");
-    assert_eq!(display(complete).bindings.len(), 1);
+    assert_eq!(display(complete).bindings.len(), 2);
     assert!(
         streams
             .display_snapshot(
@@ -186,8 +191,7 @@ fn repeated_attempt_revision_can_finish_an_ordinary_projection_and_its_binding()
 #[test]
 fn sdk_notification_round_trip_preserves_source_coverage_and_standard_text() {
     let mut attempt = attempt();
-    attempt.activity[0].status = WebSearchStatus::Completed;
-    attempt.terminal.insert(1, WebSearchStatus::Completed);
+    attempt.hosted_activity[0].status = HostedActivityStatus::Completed;
     attempt.touch();
     let message = display_message(&attempt).unwrap();
     let mut ordinary = StreamSegments::default();
@@ -235,7 +239,7 @@ fn status_and_terminal_metadata_publish_without_a_new_text_suffix() {
             attempt: Some(attempt.clone()),
         },
     );
-    attempt.finish(Outcome::Failed);
+    attempt.close(Outcome::Failed);
     let updates = streams.display_snapshot(
         TurnId::new(1),
         AssistantStreamSnapshot {
@@ -245,7 +249,9 @@ fn status_and_terminal_metadata_publish_without_a_new_text_suffix() {
     );
     assert_eq!(updates.len(), 1);
     assert_eq!(
-        display(updates).attempt.status_label(&attempt.activity[0]),
+        display(updates)
+            .attempt
+            .action_display_status(&attempt.hosted_activity[0]),
         "completion unconfirmed"
     );
     assert!(
@@ -273,21 +279,22 @@ fn status_and_terminal_metadata_publish_without_a_new_text_suffix() {
     );
 }
 
+fn replay_item() -> zevria_transcript::TranscriptItem {
+    zevria_transcript::TranscriptItem::provider_message(zevria_model::ProviderReplay::openai_responses(
+        ModelProfileRef::new("p", "m"), vec![
+            json!({"type":"reasoning", "id":"r0", "summary":[{"type":"summary_text", "text":"before"}]}),
+            json!({"type":"web_search_call", "id":"web", "status":"completed", "action":{"type":"search", "query":"query"}}),
+            json!({"type":"reasoning", "id":"r2", "summary":[{"type":"summary_text", "text":"after"}]}),
+            json!({"type":"message", "id":"answer", "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":"answer [source](https://example.com)", "annotations":[]}]}),
+        ],
+    )).unwrap()
+}
+
 #[test]
-fn replay_metadata_uses_the_same_reconstructed_attempt_without_duplicating_standard_answers() {
-    use zevria_transcript::transcript::TranscriptItem;
-    let mut attempt = attempt();
-    attempt.activity[0].status = WebSearchStatus::Completed;
-    attempt.terminal.insert(1, WebSearchStatus::Completed);
-    attempt.finish(Outcome::Completed);
-    let message = display_message(&attempt).unwrap();
-    let items = vec![
-        TranscriptItem::WebSearchAttempt(attempt.clone()),
-        TranscriptItem::Message(message)
-            .with_display_attempt(Some(attempt.id.clone()))
-            .unwrap(),
-    ];
-    let updates = crate::replay::replay_transcript(&items, std::path::Path::new("."));
+fn replay_only_commit_derives_the_same_display_without_duplicating_standard_answers() {
+    let item = replay_item();
+    let attempt = zevria_transcript::restored_attempt(&item, 0).unwrap();
+    let updates = crate::replay::replay_transcript(&[item], std::path::Path::new("."));
     assert_eq!(
         updates
             .iter()
@@ -297,6 +304,7 @@ fn replay_metadata_uses_the_same_reconstructed_attempt_without_duplicating_stand
     );
     let replay = display(updates);
     assert_eq!(replay.attempt, attempt);
+    assert_eq!(replay.version, 2);
     assert_eq!(
         replay
             .bindings
@@ -308,60 +316,53 @@ fn replay_metadata_uses_the_same_reconstructed_attempt_without_duplicating_stand
 }
 
 #[test]
-fn compacted_native_replay_restores_identical_acp_updates_and_display_bindings() {
-    use zevria_transcript::transcript::{TranscriptItem, compact_linked_attempts};
+fn incomplete_replay_and_live_display_have_identical_content_and_status() {
     let mut attempt = attempt();
-    let replay = zevria_model::ProviderReplay::openai_responses(
-        attempt.profile.clone(),
-        vec![
-            json!({"type":"reasoning", "id":"r0", "summary":[{"type":"summary_text", "text":"before"}]}),
-            json!({"type":"web_search_call", "id":"web", "status":"completed", "action":{"type":"search", "query":"query"}}),
-            json!({"type":"reasoning", "id":"r2", "summary":[{"type":"summary_text", "text":"after"}]}),
-            json!({"type":"message", "id":"answer", "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":"answer [source](https://example.com)", "annotations":[]}]}),
-        ],
-    );
-    attempt.reconcile_native_presentation(&replay.items);
-    attempt.finish(Outcome::Completed);
-    let mut items = vec![
-        TranscriptItem::WebSearchAttempt(attempt.clone()),
-        TranscriptItem::provider_message(replay)
-            .unwrap()
-            .with_display_attempt(Some(attempt.id.clone()))
-            .unwrap(),
-    ];
-    let full = crate::replay::replay_transcript(&items, std::path::Path::new("."));
-    compact_linked_attempts(&mut items);
-    assert!(
-        matches!(&items[0], TranscriptItem::WebSearchAttempt(saved) if saved.presentation_elided)
-    );
-    let compact = crate::replay::replay_transcript(&items, std::path::Path::new("."));
-    assert_eq!(compact, full);
-    let restored = display(compact);
-    assert_eq!(restored.attempt, attempt);
-    assert!(!restored.attempt.presentation_elided);
+    attempt.close(Outcome::Interrupted);
+    let record = zevria_transcript::IncompleteResponse::from_attempt(&attempt)
+        .unwrap()
+        .unwrap();
+    let items = [zevria_transcript::TranscriptItem::IncompleteResponse(
+        record.clone(),
+    )];
+    let replay = display(crate::replay::replay_transcript(
+        &items,
+        std::path::Path::new("."),
+    ));
+    assert_eq!(replay.attempt, record.to_attempt());
+    assert_eq!(replay.attempt.presentation, attempt.presentation);
     assert_eq!(
-        restored
-            .bindings
-            .iter()
-            .filter(|binding| matches!(binding, Binding::Text { .. }))
-            .count(),
-        3
+        replay
+            .attempt
+            .action_display_status(&replay.attempt.hosted_activity[0]),
+        "completion unconfirmed"
     );
 }
 
 #[test]
-fn current_v1_replay_requires_terminal_evidence_to_confirm_completion() {
-    use zevria_transcript::transcript::TranscriptItem;
-    let value = json!({"zevria_web_search_attempt":{"version":1,"id":"current","profile":{"provider":"p","model":"m"},"response_id":null,"outcome":"failed","activity":[{"item_id":"web","output_index":0,"status":"completed","action":null}],"revision":1,"presentation":[],"terminal":{}}});
-    let item: TranscriptItem = serde_json::from_value(value).unwrap();
-    let updates = crate::replay::replay_transcript(&[item], std::path::Path::new("."));
-    let display = display(updates);
-    assert_eq!(display.version, 1);
-    assert_eq!(display.attempt.version, 1);
-    assert!(display.attempt.terminal.is_empty());
-    assert!(display.attempt.presentation.is_empty());
-    assert_eq!(
-        display.attempt.status_label(&display.attempt.activity[0]),
-        "completion unconfirmed"
+fn metadata_once_emitted_keeps_reconciling_after_live_only_activity_is_dropped() {
+    let mut attempt = attempt();
+    let mut streams = StreamSegments::default();
+    display(streams.display_snapshot(
+        TurnId::new(1),
+        AssistantStreamSnapshot {
+            message: None,
+            attempt: Some(attempt.clone()),
+        },
+    ));
+    attempt.complete_with(attempt.presentation.clone(), Vec::new());
+    let updated = display(streams.display_snapshot(
+        TurnId::new(1),
+        AssistantStreamSnapshot {
+            message: None,
+            attempt: Some(attempt.clone()),
+        },
+    ));
+    assert_eq!(updated.attempt, attempt);
+    assert!(
+        updated
+            .bindings
+            .iter()
+            .all(|binding| !matches!(binding, Binding::Tool { native: false, .. }))
     );
 }

@@ -1,6 +1,5 @@
 mod adaptive_summary;
 mod directives;
-mod inline_web;
 #[cfg(unix)]
 mod instruction_persistence;
 mod mode;
@@ -9,12 +8,12 @@ mod prompt;
 mod prompt_admission;
 #[cfg(feature = "test-support")]
 mod prompt_pipeline;
+mod response_attempts;
 mod result_details;
 mod review_fixtures;
 mod runtime;
 mod skill_applications;
 mod skill_catalog;
-mod web_search;
 mod worker_review;
 use review_fixtures::*;
 mod states;

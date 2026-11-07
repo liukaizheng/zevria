@@ -507,7 +507,7 @@ enum AttemptBlockKey {
 #[derive(Debug)]
 struct HostedAttempt {
     history_index: usize,
-    attempt: zevria_content::WebSearchAttemptRecord,
+    attempt: zevria_content::ResponseAttempt,
     ids: HashMap<AttemptBlockKey, PresentationBlockId>,
     canonical: Option<Message>,
     acp_tools: HashMap<String, PresentationBlockKind>,
@@ -751,18 +751,18 @@ impl ConversationState {
         })
     }
 
-    pub(crate) fn update_web_search(&mut self, attempt: zevria_content::WebSearchAttemptRecord) {
+    pub(crate) fn update_response_attempt(&mut self, attempt: zevria_content::ResponseAttempt) {
         self.update_attempt(attempt, false);
     }
 
-    pub(crate) fn update_native_web_search(
+    pub(crate) fn update_native_attempt(
         &mut self,
-        attempt: zevria_content::WebSearchAttemptRecord,
+        attempt: zevria_content::ResponseAttempt,
         header: Option<NativeHeader>,
     ) {
         let id = attempt.id.clone();
         let existing = self.hosted_attempts.contains_key(&id);
-        self.update_web_search(attempt);
+        self.update_response_attempt(attempt);
         if !existing {
             self.bind_attempt_header(&id, header);
         }
@@ -780,14 +780,11 @@ impl ConversationState {
     /// The ACP reducer validates the immutable source revision before filtering
     /// its text to verified ordinary projections. Later binding coverage may
     /// enrich that filtered presentation without changing the source revision.
-    pub(crate) fn update_projected_web_search(
-        &mut self,
-        attempt: zevria_content::WebSearchAttemptRecord,
-    ) {
+    pub(crate) fn update_projected_attempt(&mut self, attempt: zevria_content::ResponseAttempt) {
         self.update_attempt(attempt, true);
     }
 
-    fn update_attempt(&mut self, attempt: zevria_content::WebSearchAttemptRecord, projected: bool) {
+    fn update_attempt(&mut self, attempt: zevria_content::ResponseAttempt, projected: bool) {
         if attempt.validate().is_err() || !attempt.has_display() {
             return;
         }
@@ -855,12 +852,11 @@ impl ConversationState {
                 Some(part),
             );
         }
-        for action in &attempt.activity {
+        for action in &attempt.hosted_activity {
             ordered.insert((action.output_index, None), None);
         }
         let mut pending = Vec::new();
-        let flush = |pending: &mut Vec<&zevria_content::WebSearchActivity>,
-                     desired: &mut Vec<_>| {
+        let flush = |pending: &mut Vec<&zevria_content::HostedActivity>, desired: &mut Vec<_>| {
             if let Some(first) = pending.first() {
                 desired.push((
                     AttemptBlockKey::Action(first.output_index),
@@ -874,7 +870,7 @@ impl ConversationState {
         for ((output, _), part) in ordered {
             let Some(part) = part else {
                 let action = attempt
-                    .activity
+                    .hosted_activity
                     .iter()
                     .find(|action| action.output_index == output)
                     .expect("indexed action");
@@ -895,12 +891,12 @@ impl ConversationState {
             let kind = match &part.content {
                 Content::Reasoning { text } if !text.trim().is_empty() => {
                     PresentationBlockKind::Reasoning {
-                        parts: vec![zevria_content::web_search::sanitize_readable(text)],
+                        parts: vec![zevria_content::readable::sanitize_readable(text)],
                     }
                 }
                 Content::Answer { text } if !text.trim().is_empty() => {
                     PresentationBlockKind::Text {
-                        text: zevria_content::web_search::sanitize_readable(text),
+                        text: zevria_content::readable::sanitize_readable(text),
                         flavor: TextFlavor::Markdown,
                         editable: false,
                     }
@@ -940,8 +936,8 @@ impl ConversationState {
         }
         flush(&mut pending, &mut desired);
         let incomplete = match attempt.outcome {
-            zevria_content::WebSearchAttemptOutcome::Failed => Some("failed"),
-            zevria_content::WebSearchAttemptOutcome::Interrupted => Some("interrupted"),
+            zevria_content::ResponseAttemptOutcome::Failed => Some("failed"),
+            zevria_content::ResponseAttemptOutcome::Interrupted => Some("interrupted"),
             _ => None,
         };
         if let Some(outcome) = incomplete {
@@ -2080,27 +2076,16 @@ impl ConversationState {
             })
             .collect();
         *self = Self::default();
-        let reconstructed = zevria_transcript::reconstruct_transcript(&items);
-        // A binding is authoritative even if its activity was flushed after
-        // the canonical response. Seed that entry at the response boundary,
-        // rather than guessing an association from neighboring records.
-        let mut saved_attempts = HashMap::new();
-        for item in &reconstructed {
-            if let TranscriptItem::WebSearchAttempt(attempt) = item {
-                let saved = saved_attempts.entry(attempt.id.clone()).or_insert(attempt);
-                if attempt.revision > saved.revision {
-                    *saved = attempt;
-                }
-            }
-        }
         let mut current_turn = None;
-        for item in reconstructed.iter().cloned() {
+        for (index, item) in items.into_iter().enumerate() {
+            let restored = zevria_transcript::restored_attempt(&item, index);
             match item {
-                TranscriptItem::WebSearchAttempt(attempt) => self.update_web_search(attempt),
+                TranscriptItem::IncompleteResponse(record) => {
+                    self.update_attempt(record.to_attempt(), false)
+                }
                 provider @ (TranscriptItem::Message(_)
                 | TranscriptItem::RequestPrompt { .. }
-                | TranscriptItem::ProviderMessage(_)
-                | TranscriptItem::AssistantMessage { .. }) => {
+                | TranscriptItem::ProviderMessage(_)) => {
                     let message = provider
                         .display_message()
                         .expect("a provider transcript item must contain a message");
@@ -2122,16 +2107,14 @@ impl ConversationState {
                         }
                         _ => None,
                     };
-                    if let Some(id) = provider.display_attempt_id()
-                        && !self.hosted_attempts.contains_key(id)
-                        && let Some(attempt) = saved_attempts.get(id)
-                    {
-                        self.update_web_search((**attempt).clone());
+                    let attempt_id = restored.as_ref().map(|attempt| attempt.id.clone());
+                    if let Some(attempt) = restored {
+                        self.update_attempt(attempt, false);
                     }
                     let _ = self.finish_tool_results(&message, &[]);
                     self.commit_response(
                         message,
-                        provider.display_attempt_id(),
+                        attempt_id.as_deref(),
                         ToolCallStatus::Executing,
                         header,
                     );
@@ -2395,7 +2378,7 @@ mod tests {
     #[test]
     fn native_acp_and_hosted_blocks_share_one_projection_allocator() {
         use zevria_content::{
-            WebSearchActivity, WebSearchAttemptOutcome, WebSearchAttemptRecord, WebSearchStatus,
+            HostedActivity, HostedActivityStatus, ResponseAttempt, ResponseAttemptOutcome,
         };
         let mut conversation = ConversationState::default();
         conversation.push_message(Message::user("native prompt"), ToolCallStatus::Finished);
@@ -2407,15 +2390,15 @@ mod tests {
                 message_id: Some("message".into()),
             },
         );
-        let mut attempt =
-            WebSearchAttemptRecord::new(zevria_foundation::ModelProfileRef::new("p", "m"));
-        attempt.activity.push(WebSearchActivity {
+        let mut attempt = ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("p", "m"));
+        attempt.hosted_activity.push(HostedActivity {
+            kind: zevria_content::HostedActivityKind::WebSearch,
             item_id: Some("action".into()),
             output_index: 0,
-            status: WebSearchStatus::Searching,
+            status: HostedActivityStatus::Searching,
             action: Some(serde_json::json!({"type":"search", "query":"Rust"})),
         });
-        conversation.update_web_search(attempt.clone());
+        conversation.update_response_attempt(attempt.clone());
         let before = (0..3)
             .map(|history_index| {
                 conversation
@@ -2430,8 +2413,8 @@ mod tests {
             Message::assistant("native answer"),
             ToolCallStatus::Finished,
         );
-        attempt.finish(WebSearchAttemptOutcome::Interrupted);
-        conversation.update_web_search(attempt);
+        attempt.close(ResponseAttemptOutcome::Interrupted);
+        conversation.update_response_attempt(attempt);
         acp.apply_event(
             &mut conversation,
             zevria_workflow::AgentRunEvent::AgentMessage {
@@ -2492,29 +2475,34 @@ mod tests {
 
     #[test]
     fn hosted_rows_update_restore_and_citations_are_copyable() {
-        use zevria_content::WebSearchActivity;
-        use zevria_content::WebSearchAttemptOutcome;
-        use zevria_content::WebSearchAttemptRecord;
-        use zevria_content::WebSearchStatus;
+        use zevria_content::HostedActivity;
+        use zevria_content::HostedActivityStatus;
+        use zevria_content::ResponseAttempt;
+        use zevria_content::ResponseAttemptOutcome;
         use zevria_foundation::ModelProfileRef;
-        let mut attempt = WebSearchAttemptRecord::new(ModelProfileRef::new("p", "m"));
-        attempt.activity.push(WebSearchActivity {
+        let mut attempt = ResponseAttempt::new(ModelProfileRef::new("p", "m"));
+        attempt.hosted_activity.push(HostedActivity {
+            kind: zevria_content::HostedActivityKind::WebSearch,
             item_id: Some("ws".into()),
             output_index: 0,
-            status: WebSearchStatus::Searching,
+            status: HostedActivityStatus::Searching,
             action: Some(serde_json::json!({"type":"search","query":"Rust"})),
         });
         let mut conversation = ConversationState::default();
-        conversation.update_web_search(attempt.clone());
-        attempt.finish(WebSearchAttemptOutcome::Interrupted);
-        conversation.update_web_search(attempt.clone());
+        conversation.update_response_attempt(attempt.clone());
+        attempt.close(ResponseAttemptOutcome::Interrupted);
+        conversation.update_response_attempt(attempt.clone());
         assert_eq!(conversation.history().len(), 1);
         assert!(
             selected_plain_text(&conversation.history()[0], 1)
                 .unwrap()
                 .contains("interrupted")
         );
-        conversation.restore(vec![TranscriptItem::WebSearchAttempt(attempt)]);
+        conversation.restore(vec![TranscriptItem::IncompleteResponse(
+            zevria_transcript::IncompleteResponse::from_attempt(&attempt)
+                .unwrap()
+                .unwrap(),
+        )]);
         assert_eq!(conversation.history().len(), 1);
         let replay = zevria_model::ProviderReplay::openai_responses(
             ModelProfileRef::new("p", "m"),

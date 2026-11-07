@@ -1,6 +1,22 @@
 # Transcript performance refactor
 
-## Current ownership after the domain-crate split
+## Current response-attempt ownership
+
+The response-attempt migration removes successful display checkpoints, links and
+whole-file display compaction. Committed responses use plain append; immutable
+incomplete-response records append once per abandoned attempt, repairing degraded
+writes first. Successful Responses display is derived solely from native replay.
+The `restore` timing/allocation boundary now iterates `restored_attempt` over all
+items rather than cloning an entire reconstructed transcript. Mixed fixtures use
+one valid interrupted recovery record with readable reasoning and deterministic
+identity; their model-input hashes and instruction/wire fixtures are unchanged.
+The layout probe reports both `ResponseAttempt` and `IncompleteResponse`.
+
+No new timing or allocation measurements are claimed here. All numeric tables
+below are **historical**, including layouts of retired types; they do not measure
+the current response-attempt format or restore boundary.
+
+## Ownership after the domain-crate split (historical stage)
 
 The historical transcript-refactor measurements below and their CSV files are
 unchanged. The subsequent structural crate split is measured separately in the
@@ -14,7 +30,7 @@ replace the historical format/ownership measurements below.
 
 The end-to-end `transcript` benchmark remains in **zevria-core**, alongside its
 feature-gated synthetic fixture builders and opaque engine-admission helpers.
-`zevria-transcript` now owns `Conversation`, records, persistence, reconstruction,
+`zevria-transcript` owns `Conversation`, records, persistence, display projection,
 shared replay validation and storage-only benchmark operations. `zevria-model`
 owns validated replay/message/request values, estimates and the opt-in canonical
 derivation counter. Benchmark code imports these owners directly; no engine
@@ -34,6 +50,7 @@ without fingerprint helpers. Run them in addition to the default workspace suite
 ```sh
 rtk cargo test -p zevria-provider native_output_items_survive_capture_and_full_replay_after_reconnect
 rtk cargo test -p zevria-provider second_prompt
+rtk cargo test -p zevria-provider recovery_records_leave_prepared_full_input_and_wire_body_identical
 rtk cargo test -p zevria-provider engine_skill_lifecycle_is_incremental_with_both_explicit_wire_roles
 rtk cargo test -p zevria-core second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
 rtk cargo test -p zevria-core resumed_session_reuses_the_pre_shutdown_prefix_after_tool_activation
@@ -144,7 +161,7 @@ Mixed checkpoints intentionally replace active model history. Their snapshot
 cost therefore does **not** represent cloning every mixed durable record;
 replay-heavy histories without checkpoints isolate that scaling cost.
 
-## Baseline layout
+## Historical baseline layout
 
 Sizes are inline `size_of`, not reachable heap totals.
 
@@ -160,13 +177,13 @@ Sizes are inline `size_of`, not reachable heap totals.
 | PlanRecord | 152 |
 | EnsembleRecord | 240 |
 | CompactionCheckpoint | 56 |
-| WebSearchAttemptRecord | 184 |
+| Retired search-specific attempt (historical) | 184 |
 
 `SkillInvocation`, not the replay ledger, determines this enum's inline size.
 Boxing has **not** been justified by a clone/drop/indirection workload experiment.
 No layout change should be inferred from these sizes alone.
 
-## Baseline timing highlights
+## Historical baseline timing highlights
 
 Microseconds per complete operation; brackets are Criterion's 95% interval.
 Complete distributions and the other dimensions are in the companion CSV.
@@ -193,7 +210,7 @@ For replay/100/128: full rewrite 9.374 ms [8.877–9.949], write-only
 14.745 µs, staged sync 3.515 ms, rename 478.190 µs, clean directory sync
 8.179 µs. Filesystem scheduling/cache effects dominate several distributions.
 
-## Baseline allocations and RSS
+## Historical baseline allocations and RSS
 
 Isolated allocation pass, 8 KiB text, 1,000 requested records:
 
@@ -387,7 +404,10 @@ rtk proxy python3 crates/core/benches/support/summarize.py trusted-repeat docs/t
 rtk cargo clippy --offline -p zevria-core --bench transcript --features allocation-probe -- -D warnings
 ```
 
-## Outstanding approved implementation (not release-complete)
+## Outstanding implementation at the trusted stage (historical)
+
+This checklist records that earlier refactor stage, not the completion status of
+the current response-attempt migration described at the top of this report.
 
 1. Finish the transcript module split, durable-only `TranscriptItem`, ordered
    internal `ConversationItem`, unified durable `MessageRecord`, and validated
@@ -408,13 +428,15 @@ rtk cargo clippy --offline -p zevria-core --bench transcript --features allocati
 
 ## Remaining costs and deliberately deferred work
 
-Owned asynchronous request snapshots remain necessary while display checkpoints
-mutate the live conversation. Owned frontend events and independent engine/UI
+Owned asynchronous request snapshots remain necessary while failed-attempt
+recovery appends mutate the live conversation. Owned frontend events and independent engine/UI
 restoration state also require real ownership. Full reducer-state construction,
 provider-native/portable preparation, canonical message construction on initial
 replay admission, full-file atomic batch rewrites and filesystem synchronization
 remain real costs even after redundant clones are removed.
 
-Blanket `Arc` conversion, whole-request caches, incremental lifecycle reducers,
-adaptive-compaction changes, transactional append-log redesign and a new
-frontend event protocol are explicitly out of scope.
+The historical measurement stages deliberately deferred blanket `Arc`
+conversion, whole-request caches, incremental lifecycle reducers,
+adaptive-compaction changes, transactional append-log redesign and frontend
+protocol redesign. The current attempt migration changes the event protocol but
+does not claim new measurements for those other ownership costs.

@@ -680,7 +680,7 @@ mod tests {
     fn reconcile_follows_identity_aliases_without_losing_unrelated_folds() {
         use zevria_content::{
             AssistantPartIdentity, AssistantPresentationContent, AssistantPresentationPart,
-            AssistantSourceAddress, WebSearchAttemptRecord,
+            AssistantSourceAddress, ResponseAttempt,
         };
         let mut conversation = ConversationState::default();
         conversation.push_entry(message("initial projection"));
@@ -699,9 +699,8 @@ mod tests {
             part: AssistantPartIdentity::Summary(0),
             item_id: Some("thought".into()),
         };
-        let mut attempt = WebSearchAttemptRecord::new(zevria_foundation::ModelProfileRef::new(
-            "provider", "model",
-        ));
+        let mut attempt =
+            ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("provider", "model"));
         attempt.presentation.push(AssistantPresentationPart {
             source: source.clone(),
             content: AssistantPresentationContent::Reasoning {
@@ -709,7 +708,7 @@ mod tests {
             },
         });
         attempt.touch();
-        conversation.update_native_web_search(attempt.clone(), None);
+        conversation.update_native_attempt(attempt.clone(), None);
         let old = (0, PresentationBlockId(0));
         conversation.alias_attempt_part(old, &attempt.id, &source);
         let resolved = conversation.resolved_identity(old);

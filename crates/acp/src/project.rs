@@ -146,32 +146,30 @@ fn subtask_status(status: zevria_foundation::SubtaskStatus) -> ToolCallStatus {
 
 /// Kept separate from local function correlations, including in replay.
 #[derive(Default)]
-pub(crate) struct HostedSearchProjection(
-    HashMap<String, (String, zevria_content::WebSearchActivity)>,
-);
+pub(crate) struct HostedSearchProjection(HashMap<String, (String, zevria_content::HostedActivity)>);
 impl HostedSearchProjection {
     pub(crate) fn update(
         &mut self,
-        attempt: &zevria_content::WebSearchAttemptRecord,
+        attempt: &zevria_content::ResponseAttempt,
     ) -> Vec<AcpSessionUpdate> {
-        attempt.activity.iter().filter_map(|activity| {
+        attempt.hosted_activity.iter().filter_map(|activity| {
             let id = activity.client_id(&attempt.id);
             // Keep the existing standard ACP lifecycle projection. Richer
             // confirmed/unconfirmed evidence is carried only in response_display.
             let projected_status = if activity.status.is_terminal() { activity.status } else {
                 match attempt.outcome {
-                    zevria_content::WebSearchAttemptOutcome::InProgress => activity.status,
-                    zevria_content::WebSearchAttemptOutcome::Failed => zevria_content::WebSearchStatus::Failed,
-                    _ => zevria_content::WebSearchStatus::Interrupted,
+                    zevria_content::ResponseAttemptOutcome::InProgress => activity.status,
+                    zevria_content::ResponseAttemptOutcome::Failed => zevria_content::HostedActivityStatus::Failed,
+                    _ => zevria_content::HostedActivityStatus::Interrupted,
                 }
             };
             let title = format!("{} · {} · attempt {:?}", activity.label(), projected_status.label(), attempt.outcome);
             if self.0.get(&id).is_some_and(|prior| prior == &(title.clone(), activity.clone())) { return None; }
             let kind = match activity.action_kind() { Some("open_page") => ToolKind::Fetch, Some("search" | "find_in_page") => ToolKind::Search, _ => ToolKind::Other };
             let status = match projected_status {
-                zevria_content::WebSearchStatus::InProgress | zevria_content::WebSearchStatus::Searching => ToolCallStatus::InProgress,
-                zevria_content::WebSearchStatus::Completed => ToolCallStatus::Completed,
-                zevria_content::WebSearchStatus::Failed | zevria_content::WebSearchStatus::Interrupted => ToolCallStatus::Failed,
+                zevria_content::HostedActivityStatus::InProgress | zevria_content::HostedActivityStatus::Searching => ToolCallStatus::InProgress,
+                zevria_content::HostedActivityStatus::Completed => ToolCallStatus::Completed,
+                zevria_content::HostedActivityStatus::Failed | zevria_content::HostedActivityStatus::Interrupted => ToolCallStatus::Failed,
             };
             let raw = json!({"origin":"provider_hosted_web_search","attempt_id":attempt.id,"provider":attempt.profile.provider,"model":attempt.profile.model,"response_id":attempt.response_id,"action":activity.action});
             let previous = self.0.insert(id.clone(), (title.clone(), activity.clone()));
@@ -690,15 +688,16 @@ mod tests {
 
     #[test]
     fn hosted_ids_kinds_statuses_and_replay_are_independent() {
-        use zevria_content::WebSearchActivity;
-        use zevria_content::WebSearchAttemptOutcome;
-        use zevria_content::WebSearchAttemptRecord;
-        use zevria_content::WebSearchStatus;
-        let mut attempt = WebSearchAttemptRecord::new(ModelProfileRef::new("p", "m"));
-        attempt.activity.push(WebSearchActivity {
+        use zevria_content::HostedActivity;
+        use zevria_content::HostedActivityStatus;
+        use zevria_content::ResponseAttempt;
+        use zevria_content::ResponseAttemptOutcome;
+        let mut attempt = ResponseAttempt::new(ModelProfileRef::new("p", "m"));
+        attempt.hosted_activity.push(HostedActivity {
+            kind: zevria_content::HostedActivityKind::WebSearch,
             item_id: Some("provider-id".into()),
             output_index: 1,
-            status: WebSearchStatus::Searching,
+            status: HostedActivityStatus::Searching,
             action: Some(json!({"type":"open_page","url":"https://example.com"})),
         });
         let mut projection = HostedSearchProjection::default();
@@ -710,7 +709,7 @@ mod tests {
         assert_eq!(call.status, ToolCallStatus::InProgress);
         assert!(call.tool_call_id.to_string().starts_with("hosted-search:"));
         assert!(projection.update(&attempt).is_empty());
-        attempt.finish(WebSearchAttemptOutcome::Interrupted);
+        attempt.close(ResponseAttemptOutcome::Interrupted);
         let updates = projection.update(&attempt);
         let AcpSessionUpdate::ToolCallUpdate(update) = &updates[0] else {
             panic!("update")
@@ -725,7 +724,13 @@ mod tests {
                 .contains("interrupted")
         );
         let restored = crate::replay::replay_transcript(
-            &[zevria_transcript::transcript::TranscriptItem::WebSearchAttempt(attempt)],
+            &[
+                zevria_transcript::transcript::TranscriptItem::IncompleteResponse(
+                    zevria_transcript::IncompleteResponse::from_attempt(&attempt)
+                        .unwrap()
+                        .unwrap(),
+                ),
+            ],
             Path::new("/tmp"),
         );
         assert!(

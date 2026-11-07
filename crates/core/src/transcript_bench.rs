@@ -256,10 +256,26 @@ pub fn fixture(workload: Workload, minimum_records: usize, payload_bytes: usize)
                         vec![json!({"type":"compaction", "encrypted_content":text, "opaque_future":true})],
                     )).unwrap()], vec![],
                 ).unwrap()));
-                let mut attempt = zevria_content::WebSearchAttemptRecord::new(profile());
+                let mut attempt = zevria_content::ResponseAttempt::new(profile());
                 attempt.id = format!("attempt-{index}");
-                attempt.finish(zevria_content::WebSearchAttemptOutcome::Interrupted);
-                items.push(TranscriptItem::WebSearchAttempt(attempt));
+                attempt
+                    .presentation
+                    .push(zevria_content::AssistantPresentationPart {
+                        source: zevria_content::AssistantSourceAddress {
+                            output_index: 0,
+                            part: zevria_content::AssistantPartIdentity::Summary(0),
+                            item_id: None,
+                        },
+                        content: zevria_content::AssistantPresentationContent::Reasoning {
+                            text: "interrupted reasoning".into(),
+                        },
+                    });
+                attempt.close(zevria_content::ResponseAttemptOutcome::Interrupted);
+                items.push(TranscriptItem::IncompleteResponse(
+                    zevria_transcript::IncompleteResponse::from_attempt(&attempt)
+                        .unwrap()
+                        .unwrap(),
+                ));
                 items.push(TranscriptItem::Error {
                     error: "synthetic failure".into(),
                 });
@@ -309,8 +325,12 @@ pub fn layout() -> Vec<(&'static str, usize)> {
         ("EnsembleRecord", size_of::<EnsembleRecord>()),
         ("CompactionCheckpoint", size_of::<CompactionCheckpoint>()),
         (
-            "WebSearchAttemptRecord",
-            size_of::<zevria_content::WebSearchAttemptRecord>(),
+            "ResponseAttempt",
+            size_of::<zevria_content::ResponseAttempt>(),
+        ),
+        (
+            "IncompleteResponse",
+            size_of::<zevria_transcript::IncompleteResponse>(),
         ),
     ]
 }
