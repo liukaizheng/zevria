@@ -129,7 +129,8 @@ request snapshots, frontend messages and continuation ledgers remain real costs.
 
 ## Dependency direction
 
-The workspace has twenty-one packages; the native desktop is a separate sibling package. Arrows below mean production dependencies;
+The workspace has twenty-two packages, including the macOS-only native desktop.
+Arrows below mean production dependencies;
 “lower values” means only the foundation/content/instructions/model/workflow
 owners a package actually uses. All consumers import the owner directly: core
 is an engine, not a shared-contract umbrella.
@@ -157,7 +158,8 @@ tui           -> presentation + tui-input + tui-widgets + theme + session-api + 
 ensemble      -> acp + session-api + transcript + workflow + lower values
 host          -> core + provider + tools + acp + ensemble + theme + lower owners
 zevria        -> host + selected frontends + directly used public domain APIs
-zevria-app    -> host + presentation + theme + GPUI Kit (outside this workspace)
+desktop       -> host + presentation + theme + session-api + transcript + lower values
+                 + GPUI Kit (macOS target dependency)
 ```
 
 - **Foundation/content:** identities and policy values, generic filesystem/config
@@ -179,22 +181,41 @@ zevria-app    -> host + presentation + theme + GPUI Kit (outside this workspace)
 - **Ensemble/host/binary:** ACP worker supervision and its configuration; frontend-neutral
   application configuration, runtime construction, registries, leases and services;
   CLI dispatch, terminal setup and frontend selection.
+- **Desktop:** leaf native frontend using host composition and the shared presentation
+  reducer; GPUI-free root/child/question routing on every platform, with GPUI views,
+  controller, runtime and launch code enabled only on macOS.
 
 Only host depends directly on core in production. Adapters have no transitive
 engine dependency. Session API has no storage dependency, neither codec has a
 runtime/storage dependency, and host has no terminal frontend/widgets/input
-dependency. Integration tests may depend upward through explicit dev-dependencies.
-The binary's manifest-boundary tests enforce these rules without invoking Cargo.
+dependency. Desktop must remain a leaf, cannot reach any TUI crate, and has no
+ratatui/crossterm dependency. Integration tests may depend upward through explicit
+dev-dependencies. The binary's manifest-boundary tests discover `crates/*` and
+enforce these rules, including target-specific production edges, without invoking Cargo.
 See [the crate-split report](crate-split/README.md) for exact resolved edges,
 source/test accounting and validation evidence.
 
 ## Native GPUI desktop
 
-`../zevria-app` is a separately locked Cargo package, not a member of this workspace.
-It depends on `zevria-host`, `zevria-presentation`, `zevria-theme` and lower values;
-GPUI never enters the CLI workspace build. Neither the host nor the desktop
-has a ratatui/crossterm dependency path. No app-server, RPC, SDK or serialization
-layer was added, and the unmerged out-of-process branch is unrelated.
+`crates/desktop` is the `zevria-desktop` workspace member and binary. It inherits
+workspace dependency versions and the root `Cargo.lock`, and depends on
+`zevria-host`, `zevria-presentation`, `zevria-theme`, session API, transcripts and
+lower values. Its direct GPUI Kit and tracing-appender dependencies are macOS-only;
+actions, controller, engine, launch and UI modules are gated with them. Other
+platforms compile the GPUI-free CLI/session model and tests plus an executable
+that reports macOS-only support; `--help` works everywhere. Native builds on those
+platforms do not need GPUI, and GPUI never enters the CLI's `cargo build -p zevria`
+graph. Broad metadata/fetch commands or cross-target acquisition from a macOS host
+can still fetch platform archives without compiling them. Neither the host nor
+the desktop has a ratatui/crossterm dependency path. No app-server, RPC, SDK or
+serialization layer was added, and the unmerged
+out-of-process branch is unrelated.
+
+Shared workspace CI tests the native frontend on macOS and the GPUI-free model
+on Linux/Windows. macOS workspace builds unify additive desktop dependency
+features; release check/test steps exclude `zevria-desktop`, keeping the shipping
+CLI's feature set and provider-prefix gates isolated. The production binary is
+still built with `-p zevria`.
 
 One process-wide Tokio runtime owns the engine and supervisors. GPUI foreground
 tasks await its handles and the sole `SessionEventReceiver` directly. Each wake
@@ -214,16 +235,16 @@ permission to create a second copy. Root ensemble rows remain visible.
 
 Window close and Cmd-Q are intercepted before quitting. The controller drops
 its event pump/receiver, cloned senders, exit observer and tick, awaits the host's
-ordered shutdown, then flushes the named `zevria-app.log` logging guard and quits.
+ordered shutdown, then flushes the named `zevria-desktop.log` logging guard and quits.
 Startup/replacement/shutdown transitions are serialized, including a replacement
 requested while startup is pending. Engine failures also clean up before another
 session can start. The OS-termination hook is best-effort only (the platform's
 short quit grace is not the normal shutdown path).
 
-See [desktop implementation and validation](desktop.md) and the sibling desktop
-README for commands, supported controls, bounds and explicit limitations. This
-refactor changes no instruction text, registration order, request construction,
-routing policy, transcript envelope or provider cacheable prefix.
+See [desktop implementation and validation](desktop.md) for workspace commands,
+supported controls, bounds, history and explicit limitations. This integration
+changes no instruction text, registration order, request construction, routing
+policy, transcript envelope or provider cacheable prefix.
 
 ## Captured file guidance
 
@@ -3274,8 +3295,8 @@ call correlation, ordering, and error output where relevant.
 ## Add a frontend
 
 An in-process frontend uses `zevria-host`, never `SessionEngine`, providers or
-production tools directly. The desktop in the sibling `zevria-app` checkout is
-the reference non-terminal integration; ACP uses the host's object-safe factory.
+production tools directly. The desktop in `crates/desktop` is the reference
+non-terminal integration; ACP uses the host's object-safe factory.
 A new renderer must reuse `zevria-presentation`, rather than copy the TUI reducer.
 
 ```rust,ignore

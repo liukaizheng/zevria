@@ -96,7 +96,7 @@ fn production_domain_graph_has_only_approved_edges() {
         }
     }
     let lower = ["foundation", "content", "instructions", "model", "workflow"];
-    let allowed: [(&str, Vec<&str>); 21] = [
+    let allowed: [(&str, Vec<&str>); 22] = [
         ("foundation", vec![]),
         ("content", vec!["foundation"]),
         ("instructions", vec!["foundation", "content"]),
@@ -172,6 +172,14 @@ fn production_domain_graph_has_only_approved_edges() {
             .concat(),
         ),
         (
+            "desktop",
+            [
+                lower.as_slice(),
+                &["host", "presentation", "theme", "session-api", "transcript"],
+            ]
+            .concat(),
+        ),
+        (
             "zevria",
             [
                 lower.as_slice(),
@@ -240,25 +248,31 @@ fn production_domain_graph_has_only_approved_edges() {
     }
     for frontend in ["tui", "tui-input", "tui-widgets"] {
         assert!(!reaches(&graph, "zevria-host", &package(frontend)));
+        assert!(!reaches(&graph, "zevria-desktop", &package(frontend)));
+    }
+    for (name, dependencies) in &graph {
+        assert!(
+            !dependencies.contains("zevria-desktop"),
+            "desktop must remain a leaf frontend, but {name} depends on it"
+        );
     }
 }
 
 #[test]
-fn shared_theme_has_no_terminal_dependencies() {
+fn shared_theme_and_desktop_have_no_terminal_dependencies() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let document = manifest(&root.join("crates/theme/Cargo.toml"));
     let workspace = manifest(&root.join("Cargo.toml"));
-    let dependencies = production_dependencies(
-        &document,
-        &workspace["workspace"],
-        &root,
-        &root.join("crates/theme"),
-    );
-    for terminal in ["ratatui", "crossterm"] {
-        assert!(
-            !dependencies.contains(terminal),
-            "theme must be frontend-neutral"
-        );
+    for name in ["theme", "desktop"] {
+        let base = root.join("crates").join(name);
+        let document = manifest(&base.join("Cargo.toml"));
+        let dependencies =
+            production_dependencies(&document, &workspace["workspace"], &root, &base);
+        for terminal in ["ratatui", "crossterm"] {
+            assert!(
+                !dependencies.contains(terminal),
+                "{name} must not depend on {terminal}"
+            );
+        }
     }
 }
 

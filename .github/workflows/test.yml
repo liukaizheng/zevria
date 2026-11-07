@@ -58,6 +58,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     defaults:
       run:
         shell: bash
@@ -127,4 +131,4 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked -p zevria-ensemble -- --test-threads=1
       - name: Provider continuation and cache-prefix feature regressions
-        run: cargo test --locked -p zevria-provider -p zevria-app --features cache-diagnostics
+        run: cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics

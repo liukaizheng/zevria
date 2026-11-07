@@ -626,6 +626,8 @@ cargo build --workspace --locked
 cargo fmt --all -- --check
 cargo check --workspace --locked
 cargo test --workspace --locked
+# macOS native desktop (use -p zevria for the CLI):
+cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace
 ```
 
 The main areas of the workspace are:
@@ -633,6 +635,7 @@ The main areas of the workspace are:
 | Area | Responsibility |
 | --- | --- |
 | `crates/zevria` | CLI entry point and terminal startup. |
+| `crates/desktop` (`zevria-desktop`) | macOS GPUI frontend, with GPUI-free routing/tests and an unsupported-platform stub elsewhere. |
 | `crates/host` (`zevria-host`) | Frontend-neutral configuration, session lifecycle, restoration, discovery, and host services. |
 | `crates/presentation` | Shared session reducer, lifecycle/Plan state, semantic blocks and command/completion grammar for native frontends. |
 | `crates/core`, `crates/session-api` | Session engine and frontend/provider contracts. |
@@ -642,7 +645,7 @@ The main areas of the workspace are:
 | `crates/theme` | Ratatui-free semantic sRGB tokens, persisted themes, generation and validation. |
 | Other workspace crates | Shared values, instructions, models, workflows, tools, and transcripts. |
 
-The native GPUI desktop lives in the separate sibling `zevria-app` package; it shares the host and presentation model without adding GUI dependencies to workspace builds. See [desktop notes](docs/desktop.md).
+The native GPUI desktop is the `crates/desktop` workspace member, sharing one lockfile, dependency versions, host and presentation model. GPUI is target-gated to macOS and never enters the CLI's `cargo build -p zevria` dependency graph. Use `-p zevria` or `-p zevria-desktop` with `cargo run`. See [desktop notes](docs/desktop.md).
 
 See [architecture](docs/architecture.md) for crate boundaries and data flow.
 Follow [AGENTS.md](AGENTS.md) when contributing; changes must preserve the

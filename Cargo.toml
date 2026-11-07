@@ -43,6 +43,8 @@ crossterm = "0.29.0"
 diffy = "0.5.2"
 eventsource-stream = "0.2.3"
 futures-util = "0.3.32"
+# Apache-2.0; native desktop UI kit, a macOS-only dependency of zevria-desktop.
+gpui-kit = "=0.9.0"
 # MIT OR Unlicense; UI-only workspace path discovery with standard ignore rules.
 ignore = "0.4.33"
 libc = "0.2"

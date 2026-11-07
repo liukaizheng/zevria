@@ -314,11 +314,11 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Check the locked workspace
-        run: cargo check --locked --workspace --all-targets --target "$TARGET"
+        run: cargo check --locked --workspace --exclude zevria-desktop --all-targets --target "$TARGET"
       - name: Build the real executable used by ACP process fixtures
         run: cargo build --locked -p zevria --bin zevria --target "$TARGET"
       - name: Test the locked workspace with default features
-        run: cargo test --locked --workspace --target "$TARGET"
+        run: cargo test --locked --workspace --exclude zevria-desktop --target "$TARGET"
       - name: Enforce the five default-feature provider-prefix release gates
         if: runner.os == 'Linux'
         run: |
@@ -343,9 +343,9 @@ jobs:
               print(f'{package} {name}: {len(selected)} selected test(s)', flush=True)
               subprocess.run(args, check=True)
           PY
-      - name: Provider/app cache-diagnostics regressions (tests only)
+      - name: Provider/host cache-diagnostics regressions (tests only)
         if: runner.os == 'Linux'
-        run: cargo test --locked -p zevria-provider -p zevria-app --features cache-diagnostics --target "$TARGET"
+        run: cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics --target "$TARGET"
       - name: Build the production binary with default features
         # A separate invocation: never add cache-diagnostics or --all-features.
         run: cargo build --locked --release -p zevria --bin zevria --target "$TARGET"

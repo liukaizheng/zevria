@@ -377,6 +377,8 @@ cargo build --workspace --locked
 cargo fmt --all -- --check
 cargo check --workspace --locked
 cargo test --workspace --locked
+# macOS 原生桌面前端（CLI 使用 -p zevria）：
+cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace
 ```
 
 工作区主要目录：
@@ -384,6 +386,7 @@ cargo test --workspace --locked
 | 目录 | 职责 |
 | --- | --- |
 | `crates/zevria` | CLI 入口和终端启动。 |
+| `crates/desktop`（`zevria-desktop`） | macOS GPUI 前端；其他平台构建不依赖 GPUI 的路由/测试及提示平台不受支持的占位程序。 |
 | `crates/host`（`zevria-host`） | 前端无关的配置、会话生命周期、恢复、发现和宿主服务。 |
 | `crates/presentation` | 原生前端共享的会话 reducer、生命周期/Plan 状态、语义块及命令/补全语法。 |
 | `crates/core`、`crates/session-api` | 会话引擎以及前端/provider 契约。 |
@@ -393,7 +396,7 @@ cargo test --workspace --locked
 | `crates/theme` | 不依赖 Ratatui 的语义 sRGB 令牌、主题生成、持久化和验证。 |
 | 其他工作区 crate | 共享值、指令、模型、工作流、工具和对话记录。 |
 
-原生 GPUI 桌面前端位于独立的相邻 `zevria-app` 包，共享 host 和 presentation，不会向本工作区引入 GUI 依赖。参阅[桌面说明](docs/desktop.md)。
+原生 GPUI 桌面前端现为 `crates/desktop` 工作区成员，共享同一份锁文件、依赖版本、host 和 presentation 模型。GPUI 依赖仅在 macOS 上启用，不会进入 CLI 的 `cargo build -p zevria` 依赖图。运行时使用 `cargo run -p zevria` 或 `cargo run -p zevria-desktop`。参阅[桌面说明](docs/desktop.md)。
 
 关于 crate 边界和数据流，请参阅[架构说明](docs/architecture.md)。贡献代码时请遵循 [AGENTS.md](AGENTS.md)；所有更改都必须保留 provider 可缓存的提示前缀。
 

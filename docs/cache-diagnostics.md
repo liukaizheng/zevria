@@ -684,7 +684,9 @@ Resume extension validation (synthetic data and loopback servers only):
 - `rtk cargo test -p zevria-core resumed_session_reuses_the_pre_shutdown_prefix_after_tool_activation`:
   **1 passed**.
 - `rtk cargo test -p zevria-app --features cache-diagnostics`: **94 passed**,
-  including normal/nondefault-path and worker resume composition.
+  including normal/nondefault-path and worker resume composition. Here
+  `zevria-app` is the historical pre-rename name of today's `zevria-host`, not
+  the `zevria-desktop` frontend.
 - `rtk cargo check -p zevria --features cache-diagnostics` and
   `rtk cargo check -p zevria`: passed.
 - `rtk cargo fmt --all -- --check` and `rtk git diff --check`: passed.

@@ -1,11 +1,103 @@
-# Native desktop implementation and validation
+# Zevria Desktop
 
-The desktop is the **separate sibling `zevria-app` package**, using path dependencies
-on this checkout. Its README contains build/run instructions, supported controls,
-troubleshooting and the full limitations list. GPUI is intentionally not a workspace
-member or a dependency of the CLI/ACP build.
+Native GPUI Kit frontend for Zevria, running the **same host and engine in-process**
+as the CLI. It is not a webview, terminal emulator, app-server client or second
+implementation of provider/tool behavior. The package and binary are
+`zevria-desktop`, in `crates/desktop`, with the workspace's dependency versions
+and single root `Cargo.lock`.
 
-## Ownership map
+The source was imported from the sibling desktop's sole commit,
+`a322e14b3a2805e458168a70b9b78113afd0ab7c`, without merging unrelated history.
+The sibling checkout is not needed to build or run the workspace.
+
+## Build and run
+
+Requirements: Rust able to build the locked dependencies and a macOS native Rust
+build environment. A configured Zevria provider is needed for real sessions, not
+for the automated tests. The pre-merge frontend was validated on **macOS 27.0.1
+arm64**, **rustc 1.100.0-nightly (2026-08-23)**. The local Command Line Tools
+configuration builds both profiles; a `.app` bundle is not supplied.
+
+From the Zevria repository root:
+
+```sh
+cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace
+cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace --continue
+# -c is the short form; omit WORKSPACE to use cwd (a root cwd opens the picker).
+cargo run -p zevria-desktop --locked -- --help
+```
+
+Usage is `zevria-desktop [WORKSPACE] [--continue|-c]`. Use `--` before a workspace
+whose name begins with `-`. With two workspace binaries, select `-p zevria` for
+the CLI or `-p zevria-desktop` for the desktop rather than bare `cargo run`.
+
+**The native GUI supports macOS only.** On Linux/Windows the package builds its
+GPUI-free CLI/session model and tests, plus a stub executable that reports the
+unsupported platform and suggests the Zevria CLI. `--help`/`-h` works on every
+platform. The desktop's GPUI Kit/tracing-appender dependency declarations and
+its actions, controller, engine, launch and UI modules are macOS-gated. Native
+Linux/Windows builds do not need GPUI; the shared host's existing logging
+dependencies are unchanged.
+
+Start from a terminal. Finder launches have a minimal environment; command-based
+API keys may need a suitable PATH. The host's shell preparation, configuration,
+models.jsonc, workspace guidance, skills, tools, policy enforcement, leases and
+transcript formats are unchanged.
+
+On first run `Config::load` creates the ordinary Zevria config skeleton and
+returns an actionable error. The window shows that error rather than exiting:
+**Reveal config**, fill in the generated files, then **Retry**. The desktop does
+not create another configuration schema. Logs default to
+`~/.zevria/logs/zevria-desktop.log` (or the configured `[log]` directory).
+The old `zevria-app.log` is left alone; update any scripts using the old binary
+or log name.
+
+## Included controls
+
+- Open Workspace (Cmd-O), new session (Cmd-N), previous-session sidebar and
+  `--continue`. If there is no latest session, continue starts a new one with a
+  notice. Replacing a busy session from the sidebar asks for confirmation.
+- Live/restored transcripts, selectable user text, retained Markdown, collapsible
+  reasoning, web activity, native tool cards, structured task/reconciliation
+  lists, command fences, file-change counts and expandable diffs, Plan artifacts
+  and handoffs, validated prompt-image thumbnails, errors and compaction dividers.
+- Multiline composer: **Enter** sends, **Shift-Enter** inserts a newline. Shared
+  slash/skill completions support click, arrow selection, Tab and Enter. Built-in
+  completion Enter executes the selected built-in; skill completion only inserts.
+- Build/Plan selection, next-Build-prompt Orchestrate toggle, Stop / Cmd-. / Esc.
+  Esc first belongs to an open question, review panel or completion. Cancellation
+  targets the pending operation or the learned active turn, never a guessed ID.
+- Plan review: Implement, Implement in fresh session, Revise / recovery Close,
+  Copy and reopen Review Plan. Every decision includes the authoritative version.
+- Text, single-select, Other, multi-select and optional-skip questions. Native
+  answers use strings; ACP multi-select uses arrays. Dismiss is available only
+  when the request permits it. Terminal/close correlation cannot dismiss a newer
+  unrelated question.
+- Read-only subtask inspection and a breadcrumb back to the root. Child activity
+  never takes over root busy state or root question ownership.
+- Shared profile/reasoning/context/response/network status and persistence/Plan
+  warnings; 250 ms clock updates run only while root work is pending/active.
+- Exact primary/output copy values remain available even when display is bounded.
+
+Supported shared grammar: ordinary text, `/orchestrate <prompt>`, `$skill [args]`,
+`/compact`, `/implement`, `/implement-fresh`, `/plan`, `/build`, `/new`, `/resume`.
+Model/reasoning, skill-management, worker-review and `/ensemble-*` commands retain
+the draft and show an explicit not-yet-available notice. Input while busy is not
+queued as another turn. A submitted draft stays until acceptance; failures and
+cancellation restore it without replacing a newer draft (Recover draft keeps
+both when necessary).
+
+## Architecture and ownership
+
+```text
+GPUI window + native components
+  -> SessionController (Idle / Starting / Live / Stopping / Failed)
+  -> zevria-host::RunningSession
+       -> production engine, providers, tools, supervisors, persistence, lease
+  -> desktop WorkspaceModel (root, read-only children, question, registry)
+       -> zevria-presentation::SessionModel per pane
+            -> shared reducer, admission, Plan workflow, semantic blocks, tail
+```
 
 | Owner | Responsibility |
 | --- | --- |
@@ -18,11 +110,26 @@ member or a dependency of the CLI/ACP build.
 | Desktop `SessionController` | Starting/live/stopping/failed ownership, replacement, event/exit tasks, commands, desktop drafts, session catalog and graceful quit. |
 | Desktop `ui/` | Native retained Markdown/plain text, tool/diff/image cards, virtualized list invalidation, composer, sidebar, Plan/question surfaces and status. |
 
+`zevria-host` was previously the workspace's `zevria-app` package; it is not the
+renamed desktop. The desktop is a leaf workspace frontend: no package may depend
+on it, it cannot reach any TUI crate, and it has no direct Ratatui/Crossterm
+production dependency, including target-specific dependencies. The manifest-boundary
+tests discover all `crates/*` automatically and enforce these rules. Neither the
+host nor desktop has a Ratatui/Crossterm dependency path.
+
+The CLI's `cargo build -p zevria` graph contains no GPUI. macOS `--workspace`
+builds do include GPUI and unify additive features in shared dependencies, such
+as extra image codecs and regex support. Cross-platform workspace CI includes
+the desktop; CLI release check/test jobs exclude `zevria-desktop` to retain the
+shipping feature set and disk footprint. Workspace CI disables incremental
+compilation and dev/test debuginfo to absorb the native frontend's artifact growth.
+
 There is no RPC or app-server layer. The unmerged out-of-process `zevria-app`
 branch was not used or modified. No instruction text, tool registration order,
-request construction, routing policy or transcript envelopes were changed.
+request construction, routing policy or transcript envelopes were changed;
+cacheable prompt prefixes remain under the existing regression tests.
 
-## Important invariants
+### Important invariants
 
 - Host `take_restored()` is a one-time move. Heavy root/child/journal data does not
   have to be loaded again by a frontend; the runtime keeps its cleanup paths and
@@ -40,27 +147,91 @@ request construction, routing policy or transcript envelopes were changed.
   continuations and hosted-part updates.
 - Mode selection checks both request identity and requested mode; Ready always
   projects Plan approval independently of restored ordinary mode metadata.
-- The GPUI foreground task consumes the receiver directly, at most 64 updates per
-  wake. Tokio owns the engine. The current presentation/restoration types are Send,
-  so initial projection is off-main-thread. Markdown parser and diff completion
-  notifications remeasure the corresponding retained list row.
-- Normal close/Cmd-Q drops the pump/receiver and frontend endpoints before awaiting
-  host engine/supervisor shutdown, then flushes the named log guard and quits.
-  Replacement during startup is serialized too. A runtime exit does not permit
-  starting another engine before the old stack has been cleaned up.
+- One process-wide multithread Tokio runtime owns the engine. GPUI foreground
+  tasks await its handles and the existing receiver directly, at most 64 updates
+  per wake, without a relay thread, forwarding queue or RPC. Initial restoration
+  projection is `Send` and runs off-main-thread; session discovery and large diff
+  parsing use GPUI's background executor.
+- Transcript rows use stable projection epoch/block IDs, fingerprints, list
+  splices and remeasurement. Markdown state is retained and updated cumulatively;
+  asynchronous parser and diff-completion notifications remeasure the correct row.
+  Ordinary transcript text is not truncated by the tool-preview display bounds.
 
-## Validation ledger
+### Shutdown
 
-Environment: macOS 27.0.1 arm64; rustc 1.100.0-nightly
+Window close and Cmd-Q do **not** quit immediately. The controller stops the pump
+(dropping its sole receiver), drops cloned senders/exit/tick tasks, awaits the
+host's ordered engine/supervisor shutdown and lease release, flushes the named
+log guard, then quits. Replacements use the same path, including replacements
+during startup. Cleanup failures are surfaced rather than starting another stack
+early; a runtime exit does not permit starting another engine before cleanup.
+
+OS-forced termination only gets GPUI's short best-effort quit fallback. It cannot
+guarantee normal shutdown; durable append/recovery and stale-lease handling remain
+host responsibilities. Do not rely on a `.app` run loop returning after quit.
+Closing while startup is still constructing the host waits for that construction;
+slow external credential commands can therefore delay close.
+
+## Tests and validation
+
+Run from the workspace root on macOS:
+
+```sh
+cargo fmt --all -- --check
+cargo check --locked --workspace --all-targets
+cargo build --locked -p zevria
+cargo test --locked --workspace
+cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics
+cargo clippy --locked -p zevria-desktop --all-targets --no-deps -- -D warnings
+cargo build --locked --release -p zevria-desktop
+target/release/zevria-desktop --help
+cargo tree --locked -p zevria-desktop -i ratatui
+cargo tree --locked -p zevria-desktop -i crossterm
+cargo tree --locked -p zevria --prefix none | grep -ci gpui
+cargo tree --locked -p zevria-desktop -e features -i rustls
+```
+
+The inverse terminal trees should report that the packages are absent from the
+desktop graph; Cargo's nonzero absent-package result is expected. The CLI GPUI
+count must be `0`. Native rustls must enable only `aws-lc-rs`, not `ring`; recheck
+this after any GPUI Kit bump because enabling both providers can make the
+WebSocket TLS builder panic. `ring` in the lockfile alone is not a violation:
+the wasm-only `gpui-pre-reqwest` dependency can use it.
+
+For the same disk limits as CI, set `CARGO_INCREMENTAL=0`,
+`CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_PROFILE_TEST_DEBUG=0` before validation.
+The five individually non-empty default-feature provider-prefix release gates
+are listed in `.github/workflows/release.yml` and must still pass independently
+of desktop feature unification.
+
+Automated coverage includes renderer-free routing/question/grammar/fingerprint
+checks, binary help/argument handling, headless **real native controls**, two
+controller tests using a separate real Tokio runtime, and a local HTTP SSE
+fixture exercising host start, submit, completion through `WorkspaceModel`,
+ordered shutdown and resume. Real-I/O controller tests explicitly allow
+nondeterministic external wakes in GPUI's test scheduler; ordinary UI tests use
+synthetic events and a command channel. Linux/Windows run the GPUI-free CLI,
+routing/question and local-SSE tests, including the unsupported-platform stub
+check. No extra local targets/toolchains are needed for this; shared CI covers
+those platforms. Broad package-acquisition commands such as `cargo fetch` or
+unfiltered metadata can still fetch other platforms' crates. Cross-target
+inspection from a macOS host can also acquire GPUI/platform archives before
+narrowing the compilation graph; an offline failure there does not mean the
+non-macOS stub compiles GPUI.
+
+### Historical pre-merge validation ledger
+
+The following records describe the original split and separate desktop, **not**
+the merged workspace. Environment: macOS 27.0.1 arm64; rustc 1.100.0-nightly
 (`fb6531d55`, 2026-08-23). Commands were run in their respective checkouts.
 
-### Baseline (before changes)
+#### Baseline (before the original frontend changes)
 
 - `cargo fmt --all -- --check`: passed.
 - `cargo test --workspace`: **2,422 passed, 5 ignored**, 51 suites.
 - Main working tree was clean; sibling desktop was an uncommitted Cargo scaffold.
 
-### Automated implementation checks
+#### Automated implementation checks
 
 - After host rename: host + CLI tests **197 passed, 1 ignored**.
 - Ratatui-free palette/adapters: theme/widgets/input/TUI/CLI tests
@@ -80,7 +251,7 @@ Environment: macOS 27.0.1 arm64; rustc 1.100.0-nightly
   untouched responses/session-api/transcript code and stopped at existing
   large-enum/result-size/style lints; those unrelated APIs were not rewritten.
 
-### Final aggregate results
+#### Final aggregate results before the merge
 
 | Zevria workspace command | Result |
 | --- | --- |
@@ -94,9 +265,9 @@ Environment: macOS 27.0.1 arm64; rustc 1.100.0-nightly
 | Host inverse dependency trees for ratatui/crossterm | Both packages absent, as intended |
 | `git diff --check HEAD` | Passed |
 
-The full workspace run includes the unchanged core/provider prefix/request
+The full workspace run included the unchanged core/provider prefix/request
 regressions and the manifest-boundary tests. The additional host payload test
-verifies a one-time move while retaining shutdown/cleanup identity.
+verified a one-time move while retaining shutdown/cleanup identity.
 
 | Separate desktop package command | Result |
 | --- | --- |
@@ -109,16 +280,68 @@ verifies a one-time move while retaining shutdown/cleanup identity.
 | Inverse dependency trees for ratatui/crossterm | Both packages absent, as intended |
 | Release `--help` | Printed documented usage and exited successfully |
 
-The desktop total comprises three CLI/row tests, eleven headless native UI tests,
-six GPUI-free workspace/question/grammar tests, two mixed-runtime lifecycle tests,
-and one local-SSE end-to-end test. Completion tests verify caret placement as well
-as insertion/admission; draft tests verify that editing and undoing does not
-revive an old replacement token. Ordinary transcript text is not truncated by
-the tool-preview display bounds.
+The original desktop total comprised three CLI/row tests, eleven headless native
+UI tests, six GPUI-free workspace/question/grammar tests, two mixed-runtime
+lifecycle tests, and one local-SSE end-to-end test. Completion tests verified caret
+placement as well as insertion/admission; draft tests verified that editing and
+undoing did not revive an old replacement token. Ordinary transcript text was not
+truncated by tool-preview display bounds.
 
-Inverse-tree absence intentionally produces Cargo's nonzero “package ID did not
-match any packages” result. No commits were created; changes remain in the two
-working trees. The unmerged app-server branch was not checked out or changed.
+At that historical validation point no commits had been created and changes
+remained in the two working trees. The unmerged app-server branch was not checked
+out or changed.
+
+### Merged-workspace validation ledger
+
+Validated on **2026-11-08 (local CST)**, macOS 27.0.1 arm64, rustc
+1.100.0-nightly (`fb6531d55`, 2026-08-23). Cargo checks/builds/tests used `--locked`
+and `--offline`, with `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0` and
+`CARGO_PROFILE_TEST_DEBUG=0`. The historical counts above are not evidence for
+this merged build.
+
+| Merged workspace check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | Passed |
+| `cargo check --locked --workspace --all-targets` | Passed, no warnings |
+| `cargo build --locked -p zevria` | Passed, no warnings |
+| `cargo test --locked --workspace --no-fail-fast` | **2,492 passed, 0 failed, 5 ignored**, 59 suites |
+| `cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics` | Provider **269 passed, 2 ignored**; host **114 passed** |
+| Five default-feature provider/core prefix gates from `release.yml`, individually listed and run | All passed; selected counts **1 / 2 / 1 / 1 / 1**, none empty |
+| `cargo clippy --locked -p zevria-desktop --all-targets --no-deps -- -D warnings` | Passed, no warnings |
+| `cargo check --locked --workspace --exclude zevria-desktop --all-targets` | Passed, no warnings |
+| `cargo test --locked --workspace --exclude zevria-desktop --no-fail-fast` | **2,467 passed, 0 failed, 5 ignored**, 53 suites |
+| `cargo build --locked --release -p zevria-desktop` | Passed, no warnings |
+| `target/release/zevria-desktop --help` | Printed the documented `zevria-desktop` usage and exited successfully |
+| Both workflow YAML syntax checks; `python3 tests/install/test_release_contract.py` | Passed; **2 contract tests passed** |
+| `git diff --check` and `git diff --cached --check` | Passed |
+
+The desktop contributes **25 passed tests** on macOS: the original 23 plus two
+binary help/argument tests. The additional unsupported-platform binary test is
+compiled/run only on non-macOS CI. All 11 headless native UI tests and both
+real-I/O controller tests passed locally.
+
+Dependency checks confirmed both desktop inverse terminal trees absent (expected
+Cargo exit 101), **0 GPUI entries** in the CLI and desktop-excluded release
+workspace trees, and only the **aws-lc-rs** rustls provider in desktop, CLI and
+full-workspace native feature trees. None of the newly introduced package names
+enters the CLI graph. The provider/core default-feature prefix gates passed
+independently of the desktop's additive workspace features.
+
+Offline lock review: **550 → 1,026 package entries**, **31 existing-version
+replacements**, no package-name removals. The desktop subgraph adds 475 external
+package identities plus the desktop itself, including parallel versions under
+existing names. Newly introduced native desktop versions/checksums match the
+source lock; taffy remains **0.15.0**, unicode-properties **0.1.3**, and the CLI's
+tokio/serde_json/reqwest/rustls versions are retained. Seven offline-selected
+versions differ from the source only outside the native macOS desktop graph:
+font-types 0.12.6, open 5.4.4, yazi 0.2.1, zbus_names 4.3.4, zcheapstr 1.1.0,
+zvariant 5.15.0 and zvariant_derive 5.15.0. No broad dependency update was run.
+
+Native Linux/Windows execution, hosted-runner GPUI behavior, and stable-toolchain
+GPUI compilation await shared CI. Local cross-target inspection was blocked by
+uncached platform archives during Cargo's host-inclusive acquisition; no new
+targets/toolchains were installed. No manual GUI or real-provider acceptance run
+was performed, and the sibling checkout was left untouched.
 
 ## Manual acceptance (not performed)
 
@@ -138,20 +361,44 @@ release:
 
 No external provider credentials were exercised for this acceptance checklist.
 
+## Troubleshooting
+
+- **Config skeleton/error:** use Reveal config and Retry; provider/model errors
+  are host errors, not a desktop-specific configuration layer.
+- **Engine stopped:** inspect `zevria-desktop.log`, then Start new session. Startup
+  and cleanup errors remain visible; session replacements do not overlap engines.
+- **Build/test-support resolution:** keep the root `Cargo.lock` and use `--locked`.
+  When intentionally changing Kit features, resolve from the workspace root rather
+  than hand-patching transitive versions. The validated graph retains taffy 0.15.0
+  and unicode-properties 0.1.3 alongside Kit's test-support dependencies.
+- **Disk pressure on macOS:** native workspace builds add GPUI artifacts. Disable
+  dev/test debuginfo and incremental compilation as above; use `-p zevria` when
+  only working on the CLI. Rust-analyzer also indexes/builds the native dependency.
+- **Key-command environment:** launch via the terminal and check the command's
+  PATH; credentials are still resolved exclusively by the host/provider layers.
+- **Unsupported platform:** Linux/Windows support only the GPUI-free tests and
+  stub binary. Use `zevria`; native GUI support requires lifting the target gate
+  and adding platform GUI development packages and validation to CI.
+
 ## Explicit limitations
 
-The intended deferred scope remains: live ensemble-worker/review controls;
-model/reasoning and skill-management UI; transcript recall/edit UI; attachment
-input and `@` file mentions; multiple windows/tabs/concurrent sessions; `.app`
-packaging/signing/notarization; Windows/Linux validation; theme hot reload; and a
-full accessibility/keyboard-navigation audit. Root ensemble rows remain visible,
-but restored Plan-ensemble worker confirmation still requires the TUI.
-
-Additional implementation bounds are deliberate and visible: tool input/output previews
-are capped at 24,000 characters, parsed diffs at 128 KiB and add/delete previews
-at 1,000 source lines; exact copy is preserved. Diff views use a fixed-height
-nested viewport. Very small windows and real-provider visual/latency behavior
-have not been manually audited. OS-forced termination has only the short
-best-effort quit fallback, not the normal ordered shutdown guarantee. Closing
-while startup is still constructing the host waits for that construction before
-shutdown; slow external credential commands can therefore delay close.
+- No live ensemble-worker panes or worker confirmation/review/abandon controls.
+  `/ensemble-plan` and `/ensemble-review` are disabled. Restored unfinished Plan
+  ensembles can be observed through root rows and cancelled, but confirmation
+  still requires the TUI; see [ensemble workflows](ensemble.md).
+- No model/reasoning picker or skill-management UI (identity/status and startup
+  skill completions only). Unsupported built-ins are explicitly rejected locally.
+- No transcript recall/edit UI, image attachment input or `@` file mentions.
+  The shared model already supports transcript editing; restored images display.
+- One window and one live session; no tabs or concurrent-session UI.
+- No `.app` packaging, signing or notarization; no native Windows/Linux GUI.
+- No theme hot reload or full accessibility/keyboard-navigation parity audit.
+  Fixed-size review/question/sidebar layouts have not been audited on very small
+  windows. Large-session projection is off-thread, but no real-provider GUI
+  latency benchmark or manual visual acceptance is claimed.
+- Tool input/output previews are capped at 24,000 characters, parsed diffs at
+  128 KiB, and add/delete previews at 1,000 source lines. Raw copy remains exact.
+  Diff views use a fixed-height nested viewport. Worker journals are host-loaded
+  but individual worker panes are deliberately absent.
+- Hosted macOS runner behavior and stable-toolchain GPUI builds remain subject
+  to the shared CI run; local validation uses the toolchain recorded in the ledger.
