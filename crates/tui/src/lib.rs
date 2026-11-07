@@ -1,6 +1,6 @@
 //! Ratatui frontend for Zevria's provider-neutral session engine.
 
-mod agent_transcript;
+pub(crate) use zevria_presentation::agents as agent_transcript;
 mod app;
 mod clipboard;
 mod frame_layout;
@@ -9,8 +9,7 @@ mod input;
 mod layout;
 mod models;
 mod picker;
-mod presentation;
-mod projection;
+pub(crate) use zevria_presentation::blocks as presentation;
 mod render;
 mod runtime;
 mod skills;
@@ -18,7 +17,7 @@ mod status;
 mod status_icon;
 mod workspace;
 mod workspace_files;
-use zevria_theme as theme;
+use zevria_tui_widgets::theme;
 use zevria_tui_widgets::{chrome, diff_render, markdown, syntax, text, viewport, workspace_header};
 
 pub use app::{App, RestorationInput, UiAction};

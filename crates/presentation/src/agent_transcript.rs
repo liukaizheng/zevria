@@ -9,7 +9,7 @@ use zevria_workflow::AgentStructuredPlan;
 use zevria_workflow::AgentUsage;
 
 use crate::{
-    app::{ConversationChange, ConversationState, HistoryEntry},
+    conversation::{ConversationChange, ConversationState, HistoryEntry},
     presentation::{
         AcpToolPresentation, BlockVisibility, ChecklistItem, ChecklistStatus, ConversationEntry,
         DiagnosticTone, PresentationBlock, PresentationBlockId, PresentationBlockKind,
@@ -137,7 +137,7 @@ struct ReplayStage {
 
 /// Stateful projection used by one live or historical ACP worker pane.
 #[derive(Default)]
-pub(crate) struct AgentTranscriptReducer {
+pub struct AgentTranscriptReducer {
     current_entry: Option<usize>,
     segment: Option<SegmentTarget>,
     tools: HashMap<String, BlockLocation>,
@@ -182,7 +182,7 @@ struct ProjectionPiece {
 impl AgentTranscriptReducer {
     /// Presentation-only boundary, also restored from a root snapshot without
     /// inventing a worker journal receipt or discarding preceding history.
-    pub(crate) fn abandon(&mut self, conversation: &mut ConversationState) -> ConversationChange {
+    pub fn abandon(&mut self, conversation: &mut ConversationState) -> ConversationChange {
         if !self.review_abandoned {
             self.review_abandoned = true;
             self.replay = None;
@@ -203,7 +203,7 @@ impl AgentTranscriptReducer {
 
     /// Apply one lossless durable/lifecycle event. Message and thought values
     /// are deltas on this path.
-    pub(crate) fn apply_event(
+    pub fn apply_event(
         &mut self,
         conversation: &mut ConversationState,
         event: AgentRunEvent,
@@ -496,7 +496,7 @@ impl AgentTranscriptReducer {
     /// Apply one lossy latest-value message/thought preview. The text already
     /// includes every delta in the current segment and therefore replaces the
     /// matching block rather than appending to it.
-    pub(crate) fn apply_preview(
+    pub fn apply_preview(
         &mut self,
         conversation: &mut ConversationState,
         event: AgentRunEvent,
@@ -531,7 +531,7 @@ impl AgentTranscriptReducer {
 
     /// Repair a lossy live preview from the terminal durable report while
     /// retaining thoughts, tools, plans, and diagnostics in their positions.
-    pub(crate) fn reconcile_report(
+    pub fn reconcile_report(
         &mut self,
         conversation: &mut ConversationState,
         report: &str,
@@ -649,7 +649,7 @@ impl AgentTranscriptReducer {
         ConversationChange::replaced_from(history_index)
     }
 
-    pub(crate) fn reconcile_plan(
+    pub fn reconcile_plan(
         &mut self,
         conversation: &mut ConversationState,
         plan: &AgentStructuredPlan,
@@ -666,7 +666,7 @@ impl AgentTranscriptReducer {
         ConversationChange::default()
     }
 
-    pub(crate) fn report_duplicates_current_plan(&self, report: &str) -> bool {
+    pub fn report_duplicates_current_plan(&self, report: &str) -> bool {
         self.current_plan_markdown.as_deref() == Some(report)
     }
 

@@ -116,9 +116,9 @@ impl App {
                 }
                 if (action == Action::Confirm
                     || (action == Action::RecoverDraft && !self.drafts.has_recovery()))
-                    && !self.session.is_busy()
+                    && !self.model.session.is_busy()
                     && self.composer.is_blank()
-                    && let Some(expected) = self.workflow.fresh_retry_version()
+                    && let Some(expected) = self.model.workflow.fresh_retry_version()
                 {
                     return self.begin_plan_decision(expected, PlanDecision::ImplementFresh);
                 }
@@ -217,7 +217,7 @@ impl App {
                 }
             }
             Action::ToggleMode => {
-                let mode = match self.session.next_mode() {
+                let mode = match self.model.session.next_mode() {
                     SessionMode::Build => SessionMode::Plan,
                     SessionMode::Plan => SessionMode::Build,
                 };
@@ -269,7 +269,7 @@ impl App {
                 self.composer.close_edit_group();
                 self.interaction.enter_insert();
             }
-            Action::PlanReview if self.pane.is_root() && self.workflow.open_review() => {
+            Action::PlanReview if self.pane.is_root() && self.model.workflow.open_review() => {
                 self.interaction.clear_chords()
             }
             Action::Diagnostics if self.pane.toggle_diagnostics() => {
@@ -312,8 +312,9 @@ impl App {
             _ => {}
         }
         match self
+            .model
             .workflow
-            .handle_dialog_action(action, self.session.is_busy())
+            .handle_dialog_action(action, self.model.session.is_busy())
         {
             PlanIntent::None => None,
             PlanIntent::Close => {
@@ -346,7 +347,7 @@ impl App {
             .rendered_selection_window()
             .and_then(|window| self.view.conversation_cache().selection_at_bottom(window))
             .filter(|&selection| {
-                self.conversation.reconcile_selection(
+                self.model.conversation.reconcile_selection(
                     selection,
                     SelectionScope::Block,
                     self.pane.diagnostics_visible(),
@@ -410,11 +411,13 @@ impl App {
                         diagnostics,
                     ),
                     (SelectionScope::Block, Action::HalfPageUp) => self
+                        .model
                         .conversation
                         .previous_user_message(selection, diagnostics),
-                    (SelectionScope::Block, _) => {
-                        self.conversation.next_user_message(selection, diagnostics)
-                    }
+                    (SelectionScope::Block, _) => self
+                        .model
+                        .conversation
+                        .next_user_message(selection, diagnostics),
                 };
                 if let Some(target) = target.map(|target| self.span_representative(target))
                     && let Some(state) = self.interaction.selection_state_mut()
@@ -435,17 +438,22 @@ impl App {
                     (SelectionScope::Message, _) => {
                         let from = self.span_boundary(selection, next);
                         let target = if next {
-                            self.conversation.next_entry_selection(from, diagnostics)
+                            self.model
+                                .conversation
+                                .next_entry_selection(from, diagnostics)
                         } else {
-                            self.conversation
+                            self.model
+                                .conversation
                                 .previous_entry_selection(from, diagnostics)
                         };
                         self.span_representative(target)
                     }
                     (SelectionScope::Block, true) => self
+                        .model
                         .conversation
                         .next_block_selection(selection, diagnostics),
                     (SelectionScope::Block, false) => self
+                        .model
                         .conversation
                         .previous_block_selection(selection, diagnostics),
                 };
@@ -457,6 +465,7 @@ impl App {
             }
             Action::Copy | Action::CopyOutput => self.handle_yank(selection, now),
             Action::CopyList if scope == SelectionScope::Block => self
+                .model
                 .conversation
                 .selected_readable_list(selection)
                 .map(|text| UiAction::Copy { text }),
@@ -479,11 +488,13 @@ impl App {
                 None
             }
             Action::Confirm => self
+                .model
                 .conversation
                 .selected_subtask_id(selection)
                 .map(|id| UiAction::OpenSubtask { id })
                 .or_else(|| {
-                    self.conversation
+                    self.model
+                        .conversation
                         .selected_agent_run_id(selection)
                         .map(|id| UiAction::OpenAgentRun { id })
                 }),
@@ -508,7 +519,8 @@ impl App {
             history_index: start,
             content_index: 0,
         };
-        self.conversation
+        self.model
+            .conversation
             .reconcile_selection(
                 representative,
                 SelectionScope::Message,
@@ -527,9 +539,11 @@ impl App {
         let mut from = self.span_boundary(selection, forward);
         loop {
             let target = if forward {
-                self.conversation.next_user_entry(from, diagnostics)?
+                self.model.conversation.next_user_entry(from, diagnostics)?
             } else {
-                self.conversation.previous_user_entry(from, diagnostics)?
+                self.model
+                    .conversation
+                    .previous_user_entry(from, diagnostics)?
             };
             let representative = self.span_representative(target);
             if representative != current {
@@ -563,7 +577,7 @@ impl App {
                         return Some(FoldKey::Span { start, end });
                     }
                     FoldKey::for_selection(
-                        &self.conversation,
+                        &self.model.conversation,
                         active.selection,
                         active.scope,
                         self.pane.diagnostics_visible(),
@@ -586,7 +600,7 @@ impl App {
         self.view.capture_conversation_anchor();
         f(
             &mut self.folds,
-            &self.conversation,
+            &self.model.conversation,
             self.pane.diagnostics_visible(),
         );
         self.view.invalidate_rendered_geometry();
@@ -622,7 +636,8 @@ impl App {
                 .unwrap_or((selection.history_index, selection.history_index));
             let texts = (start..=end)
                 .filter_map(|index| {
-                    self.conversation
+                    self.model
+                        .conversation
                         .selected_message_text(index, self.pane.diagnostics_visible())
                 })
                 .collect::<Vec<_>>();
@@ -630,9 +645,10 @@ impl App {
                 text: texts.join("\n\n"),
             });
         }
-        if !self.conversation.selection_is_tool(selection) {
+        if !self.model.conversation.selection_is_tool(selection) {
             self.interaction.clear_yank();
             return self
+                .model
                 .conversation
                 .selected_plain_text(selection)
                 .map(|text| UiAction::Copy { text });
@@ -642,11 +658,13 @@ impl App {
             .selection_state_mut()
             .is_some_and(|state| state.press_yank(now));
         if double {
-            self.conversation
+            self.model
+                .conversation
                 .selected_tool_output(selection)
                 .map(|text| UiAction::Copy { text })
         } else {
-            self.conversation
+            self.model
+                .conversation
                 .selected_plain_text(selection)
                 .map(|text| UiAction::Copy { text })
         }
@@ -656,6 +674,7 @@ impl App {
         let active = self.interaction.active_selection()?;
         match active.scope {
             SelectionScope::Message => self
+                .model
                 .conversation
                 .message_recall_selection(active.selection.history_index),
             SelectionScope::Block => Some(active.selection),
@@ -664,10 +683,11 @@ impl App {
 
     pub(crate) fn can_recall_selected(&self) -> bool {
         self.capabilities().edit_transcript.is_ok()
-            && !self.conversation.has_executing_tool_calls()
-            && self.workflow.dialog().is_none()
+            && !self.model.conversation.has_executing_tool_calls()
+            && self.model.workflow.dialog().is_none()
             && self.recall_target().is_some_and(|selection| {
-                self.conversation
+                self.model
+                    .conversation
                     .recallable_selection(selection)
                     .is_some_and(|(text, _)| !text.is_blank())
             })
@@ -680,7 +700,7 @@ impl App {
         let Some(selection) = self.recall_target() else {
             return false;
         };
-        let Some((text, target)) = self.conversation.recallable_selection(selection) else {
+        let Some((text, target)) = self.model.conversation.recallable_selection(selection) else {
             return false;
         };
         let saved_input = self.composer.snapshot();

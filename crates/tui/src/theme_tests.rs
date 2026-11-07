@@ -37,7 +37,7 @@ fn assert_status_tokens_and_selection() {
         BlockVisibility, PresentationBlock, PresentationBlockId, PresentationBlockKind,
         TranscriptAppearance, WebActivityPresentation,
     };
-    use crate::status_icon::StatusIcon;
+    use crate::status_icon::{StatusIcon, StatusIconColor};
     let t = *theme::theme();
     for (icon, expected) in [
         (StatusIcon::Pending, t.text.muted),

@@ -1214,19 +1214,7 @@ pub(crate) fn next_word_start(input: &str, cursor: usize) -> usize {
         .map_or(input.len(), |(byte, _)| cursor.saturating_add(*byte))
 }
 
-/// Clamp an arbitrary byte offset to the preceding grapheme boundary.
-pub(crate) fn clamp_cursor(input: &str, cursor: usize) -> usize {
-    let cursor = cursor.min(input.len());
-    if cursor == input.len() {
-        return cursor;
-    }
-    input
-        .grapheme_indices(true)
-        .map(|(byte, _)| byte)
-        .take_while(|byte| *byte <= cursor)
-        .last()
-        .unwrap_or(0)
-}
+pub(crate) use zevria_presentation::completion::clamp_cursor;
 
 /// The grapheme boundary immediately before `cursor`.
 pub(crate) fn previous_boundary(input: &str, cursor: usize) -> usize {

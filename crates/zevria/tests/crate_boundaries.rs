@@ -96,7 +96,7 @@ fn production_domain_graph_has_only_approved_edges() {
         }
     }
     let lower = ["foundation", "content", "instructions", "model", "workflow"];
-    let allowed: [(&str, Vec<&str>); 20] = [
+    let allowed: [(&str, Vec<&str>); 21] = [
         ("foundation", vec![]),
         ("content", vec!["foundation"]),
         ("instructions", vec!["foundation", "content"]),
@@ -126,10 +126,14 @@ fn production_domain_graph_has_only_approved_edges() {
             [lower.as_slice(), &["session-api", "transcript"]].concat(),
         ),
         ("theme", vec![]),
+        (
+            "presentation",
+            [lower.as_slice(), &["session-api", "transcript"]].concat(),
+        ),
         ("tui-widgets", [lower.as_slice(), &["theme"]].concat()),
         (
             "tui-input",
-            [lower.as_slice(), &["theme", "tui-widgets"]].concat(),
+            [lower.as_slice(), &["theme", "tui-widgets", "presentation"]].concat(),
         ),
         (
             "tui",
@@ -139,6 +143,7 @@ fn production_domain_graph_has_only_approved_edges() {
                     "theme",
                     "tui-widgets",
                     "tui-input",
+                    "presentation",
                     "session-api",
                     "transcript",
                 ],
@@ -150,7 +155,7 @@ fn production_domain_graph_has_only_approved_edges() {
             [lower.as_slice(), &["session-api", "transcript", "acp"]].concat(),
         ),
         (
-            "app",
+            "host",
             [
                 lower.as_slice(),
                 &[
@@ -171,11 +176,12 @@ fn production_domain_graph_has_only_approved_edges() {
             [
                 lower.as_slice(),
                 &[
-                    "app",
+                    "host",
                     "acp",
                     "tui",
                     "tui-widgets",
                     "tui-input",
+                    "presentation",
                     "theme",
                     "session-api",
                     "transcript",
@@ -217,10 +223,10 @@ fn production_domain_graph_has_only_approved_edges() {
             !reaches(&graph, &name, &name),
             "production cycle through {name}"
         );
-        if name != "zevria-app" {
+        if name != "zevria-host" {
             assert!(
                 !graph[&name].contains("zevria-core"),
-                "only app may directly own an engine"
+                "only host may directly own an engine"
             );
         }
     }
@@ -228,12 +234,31 @@ fn production_domain_graph_has_only_approved_edges() {
         assert!(!reaches(&graph, &package(adapter), "zevria-core"));
     }
     assert!(!reaches(&graph, "zevria-session-api", "zevria-transcript"));
-    for forbidden in ["core", "session-api", "transcript", "provider", "app"] {
+    for forbidden in ["core", "session-api", "transcript", "provider", "host"] {
         assert!(!reaches(&graph, "zevria-responses", &package(forbidden)));
         assert!(!reaches(&graph, "zevria-anthropic", &package(forbidden)));
     }
     for frontend in ["tui", "tui-input", "tui-widgets"] {
-        assert!(!reaches(&graph, "zevria-app", &package(frontend)));
+        assert!(!reaches(&graph, "zevria-host", &package(frontend)));
+    }
+}
+
+#[test]
+fn shared_theme_has_no_terminal_dependencies() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let document = manifest(&root.join("crates/theme/Cargo.toml"));
+    let workspace = manifest(&root.join("Cargo.toml"));
+    let dependencies = production_dependencies(
+        &document,
+        &workspace["workspace"],
+        &root,
+        &root.join("crates/theme"),
+    );
+    for terminal in ["ratatui", "crossterm"] {
+        assert!(
+            !dependencies.contains(terminal),
+            "theme must be frontend-neutral"
+        );
     }
 }
 
@@ -259,7 +284,7 @@ store = { package = "zevria-transcript", version = "0.1" }
 [target.'cfg(windows)'.build-dependencies]
 api = { package = "zevria-session-api", version = "0.1" }
 [target.'cfg(unix)'.dev-dependencies]
-also_ignored = { package = "zevria-app", version = "0.1" }
+also_ignored = { package = "zevria-host", version = "0.1" }
 "#,
     )
     .unwrap();

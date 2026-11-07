@@ -1,12 +1,12 @@
 //! Reusable terminal rendering, text, and viewport primitives.
 
-use zevria_theme as theme;
 pub mod chrome;
 pub mod diff_render;
 pub mod markdown;
 pub mod overlay;
 pub mod syntax;
 pub mod text;
+pub mod theme;
 pub mod viewport;
 pub mod workspace_header;
 

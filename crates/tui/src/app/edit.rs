@@ -16,7 +16,7 @@ pub(crate) enum EditState {
     Recalling(RecallEdit),
     AwaitingAcceptance {
         recall: RecallEdit,
-        target_index: usize,
+        #[cfg(test)]
         compacted: bool,
     },
 }
@@ -48,6 +48,13 @@ impl EditState {
         true
     }
 
+    pub(crate) fn recalled_target(&self) -> Option<(TranscriptEditTarget, usize)> {
+        match self {
+            Self::Recalling(recall) => Some((recall.target.clone(), recall.target_index)),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn recalling(&self) -> Option<&RecallEdit> {
         match self {
@@ -77,13 +84,14 @@ impl EditState {
         };
         let target = edit.target.clone();
         *self = Self::AwaitingAcceptance {
-            target_index: edit.target_index,
+            #[cfg(test)]
             compacted: false,
             recall: edit,
         };
         Some(target)
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_automatic_pre_turn_compaction(&mut self) -> bool {
         let Self::AwaitingAcceptance { compacted, .. } = self else {
             return false;
@@ -96,12 +104,15 @@ impl EditState {
         let state = std::mem::take(self);
         match state {
             Self::AwaitingAcceptance {
-                target_index,
+                recall,
+                #[cfg(test)]
                 compacted,
-                ..
             } => Some(AcceptedEdit {
-                target_index,
+                target_index: recall.target_index,
+                #[cfg(test)]
                 compacted,
+                #[cfg(not(test))]
+                compacted: false,
             }),
             state @ (Self::None | Self::Recalling(_)) => {
                 *self = state;

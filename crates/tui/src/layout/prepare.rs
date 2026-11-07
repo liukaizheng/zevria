@@ -11,7 +11,7 @@ use crate::presentation::{
     question_response, subtask_icon, tool_argument, tool_call_denied, tool_call_failed,
     tool_result_plain_text,
 };
-use crate::status_icon::StatusIcon;
+use crate::status_icon::{StatusIcon, StatusIconColor};
 use crate::text::{display_width, format_elapsed};
 use crate::theme::theme;
 use crate::viewport::RowRange;

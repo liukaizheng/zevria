@@ -7,7 +7,8 @@ version = "0.1.1"
 edition = "2024"
 
 [workspace.dependencies]
-zevria-app = { path = "crates/app" }
+zevria-presentation = { path = "crates/presentation" }
+zevria-host = { path = "crates/host" }
 zevria-ensemble = { path = "crates/ensemble" }
 zevria-tui-input = { path = "crates/tui-input" }
 zevria-tui-widgets = { path = "crates/tui-widgets" }

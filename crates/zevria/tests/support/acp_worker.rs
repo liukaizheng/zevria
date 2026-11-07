@@ -317,7 +317,7 @@ explore = {{ provider = "test", model = "explore-must-not-run", reasoning_level 
 builder = {{ provider = "test", model = "builder-must-not-run", reasoning_level = "medium" }}
 "#,
     ));
-    zevria_app::test_support::write_fixture(path, &source).unwrap();
+    zevria_host::test_support::write_fixture(path, &source).unwrap();
 }
 fn successful(response: Value) -> Value {
     assert!(response.get("error").is_none(), "{response}");
@@ -531,10 +531,10 @@ fn actual_worker_external_reads_and_private_scratch_survive_plan_review_load_and
 fn fresh_native_worker_and_parent_synthesis_inspection_smoke() {
     const CHILD_CONFIG: &str = "ZEVRIA_INSPECTION_SMOKE_CONFIG";
     if let Some(path) = std::env::var_os(CHILD_CONFIG) {
-        let config = zevria_app::test_support::load_config(Path::new(&path)).unwrap();
+        let config = zevria_host::test_support::load_config(Path::new(&path)).unwrap();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut session = zevria_app::runtime::start_session(
-                &config, &std::env::current_dir().unwrap(), zevria_app::runtime::SessionStart::New { inherited_models: None },
+            let mut session = zevria_host::runtime::start_session(
+                &config, &std::env::current_dir().unwrap(), zevria_host::runtime::SessionStart::New { inherited_models: None },
             ).await.unwrap();
             let mut events = session.take_event_receiver().unwrap();
             session.command_sender().send(zevria_session_api::SessionCommand::Turn(

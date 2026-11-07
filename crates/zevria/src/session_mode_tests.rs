@@ -421,6 +421,6 @@ async fn worker_profile_rejects_persisted_orchestrate_without_provider_or_transc
         "{error}"
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert!(zevria_app::test_support::RootSessionLease::acquire(&path).is_ok());
+    assert!(zevria_host::test_support::RootSessionLease::acquire(&path).is_ok());
     assert!(server.requests.try_recv().is_err());
 }

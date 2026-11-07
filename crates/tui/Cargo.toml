@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+zevria-presentation = { workspace = true }
 zevria-tui-input = { workspace = true }
 zevria-tui-widgets = { workspace = true }
 zevria-theme = { workspace = true }
@@ -30,6 +31,7 @@ tracing = { workspace = true }
 unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
+zevria-presentation = { workspace = true, features = ["test-support"] }
 diffy = { workspace = true }
 zevria-tui-input = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

@@ -17,7 +17,7 @@ use std::{
 fn write_test_config(home: &std::path::Path) {
     let directory = home.join(".zevria");
     std::fs::create_dir_all(&directory).expect("create test config directory");
-    zevria_app::test_support::write_fixture(
+    zevria_host::test_support::write_fixture(
         &directory.join("config.toml"),
         r#"
 [providers.test]

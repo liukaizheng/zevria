@@ -23,14 +23,14 @@ use zevria_workflow::{
 use crate::status_icon::StatusIcon;
 
 /// Yield only plaintext reasoning parts in their original source order.
-pub(crate) fn readable_reasoning_parts(reasoning: &Reasoning) -> impl Iterator<Item = &str> {
+pub fn readable_reasoning_parts(reasoning: &Reasoning) -> impl Iterator<Item = &str> {
     zevria_content::reasoning::readable_parts(reasoning)
 }
 
 /// A complete projection replacement retires every ephemeral anchor even if
 /// the new source happens to reuse the same block and history positions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ProjectionEpoch(u64);
+pub struct ProjectionEpoch(u64);
 impl Default for ProjectionEpoch {
     fn default() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -39,7 +39,7 @@ impl Default for ProjectionEpoch {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PresentationAnchor {
+pub struct PresentationAnchor {
     pub epoch: ProjectionEpoch,
     pub history: usize,
     pub block: PresentationBlockId,
@@ -47,17 +47,17 @@ pub(crate) struct PresentationAnchor {
 
 /// Stable, pane-local identity of a semantic content block.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct PresentationBlockId(pub(crate) u64);
+pub struct PresentationBlockId(pub u64);
 
 /// One allocation domain per projection, shared by native, hosted and ACP
 /// adapters. Provider call IDs and transcript positions never enter this space.
 #[derive(Debug, Default)]
-pub(crate) struct BlockIdAllocator {
+pub struct BlockIdAllocator {
     next: u64,
 }
 
 impl BlockIdAllocator {
-    pub(crate) fn allocate(&mut self) -> PresentationBlockId {
+    pub fn allocate(&mut self) -> PresentationBlockId {
         let id = PresentationBlockId(self.next);
         self.next = self
             .next
@@ -68,7 +68,7 @@ impl BlockIdAllocator {
 
     /// An adapter may start with local ordinals (e.g. a streamed message).
     /// Committing the logical message gives all its blocks projection identities.
-    pub(crate) fn identify(&mut self, entry: &mut ConversationEntry) {
+    pub fn identify(&mut self, entry: &mut ConversationEntry) {
         let mut identities = entry
             .blocks
             .iter()
@@ -90,14 +90,14 @@ impl BlockIdAllocator {
 
 /// Explicit pane appearance, independent of composer and diagnostics state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum TranscriptAppearance {
+pub enum TranscriptAppearance {
     #[default]
     Native,
     Acp,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum PromptOrigin {
+pub enum PromptOrigin {
     #[default]
     Initial,
     Feedback,
@@ -107,7 +107,7 @@ pub(crate) enum PromptOrigin {
 }
 
 impl PromptOrigin {
-    pub(crate) const fn label(self) -> Option<&'static str> {
+    pub const fn label(self) -> Option<&'static str> {
         match self {
             Self::Initial => None,
             Self::Feedback => Some("feedback"),
@@ -119,7 +119,7 @@ impl PromptOrigin {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PromptPhase {
+pub enum PromptPhase {
     Queued,
     Dispatched,
     Recovering,
@@ -130,7 +130,7 @@ pub(crate) enum PromptPhase {
 }
 
 impl PromptPhase {
-    pub(crate) const fn terminal(self) -> bool {
+    pub const fn terminal(self) -> bool {
         matches!(self, Self::Succeeded | Self::Failed | Self::Interrupted)
     }
 }
@@ -138,18 +138,18 @@ impl PromptPhase {
 /// Display-only metadata owned by the first content block of an input. Success
 /// remains explicit even though its transient badge is no longer painted.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct PromptAnnotation {
-    pub(crate) origin: PromptOrigin,
-    pub(crate) generation: Option<u64>,
-    pub(crate) request_id: Option<zevria_workflow::WorkerControlId>,
-    pub(crate) phase: Option<PromptPhase>,
-    pub(crate) latest_attempt: Option<u64>,
-    pub(crate) cancel_requested: bool,
+pub struct PromptAnnotation {
+    pub origin: PromptOrigin,
+    pub generation: Option<u64>,
+    pub request_id: Option<zevria_workflow::WorkerControlId>,
+    pub phase: Option<PromptPhase>,
+    pub latest_attempt: Option<u64>,
+    pub cancel_requested: bool,
 }
 
 /// Conversation role whose header precedes a block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PresentationRole {
+pub enum PresentationRole {
     User,
     Assistant,
     System,
@@ -158,7 +158,7 @@ pub(crate) enum PresentationRole {
 /// Whether a block belongs in the polished transcript or only in the raw
 /// diagnostic view.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BlockVisibility {
+pub enum BlockVisibility {
     Always,
     Diagnostics,
     /// Standard projection covered by validated ordered metadata; retained,
@@ -171,14 +171,14 @@ pub(crate) enum BlockVisibility {
 /// Plain user text and Markdown-aware assistant text use the same block with
 /// an explicit rendering flavor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TextFlavor {
+pub enum TextFlavor {
     Plain,
     Markdown,
 }
 
 /// Display lifecycle for both native and ACP tool calls.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PresentedToolStatus {
+pub enum PresentedToolStatus {
     Pending,
     Running,
     Completed,
@@ -189,7 +189,7 @@ pub(crate) enum PresentedToolStatus {
 }
 
 impl PresentedToolStatus {
-    pub(crate) const fn icon(self) -> StatusIcon {
+    pub const fn icon(self) -> StatusIcon {
         match self {
             Self::Pending => StatusIcon::Pending,
             Self::Running => StatusIcon::Running,
@@ -201,14 +201,14 @@ impl PresentedToolStatus {
         }
     }
 
-    pub(crate) const fn unsuccessful(self) -> bool {
+    pub const fn unsuccessful(self) -> bool {
         matches!(self, Self::Failed | Self::Denied | Self::Interrupted)
     }
 }
 
 /// Display lifecycle retained for committed native tool-call occurrences.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeToolCallStatus {
+pub enum NativeToolCallStatus {
     Executing,
     /// The assistant call was committed, but no correlated result arrived
     /// before restore or a terminal turn event.
@@ -218,18 +218,18 @@ pub(crate) enum NativeToolCallStatus {
 
 /// Native Zevria state that is filled when its correlated result arrives.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct NativeToolState {
-    pub(crate) status: NativeToolCallStatus,
-    pub(crate) result: Option<ToolResult>,
-    pub(crate) metadata: Option<ToolResultMetadata>,
+pub struct NativeToolState {
+    pub status: NativeToolCallStatus,
+    pub result: Option<ToolResult>,
+    pub metadata: Option<ToolResultMetadata>,
     /// Decoded once at the source boundary. Raw call arguments remain intact
     /// for copying and provider correlation, including malformed JSON bytes.
-    pub(crate) arguments: Option<serde_json::Value>,
-    pub(crate) subtasks: std::collections::BTreeMap<usize, SubtaskDescriptor>,
+    pub arguments: Option<serde_json::Value>,
+    pub subtasks: std::collections::BTreeMap<usize, SubtaskDescriptor>,
 }
 
 impl NativeToolState {
-    pub(crate) fn new(status: NativeToolCallStatus, arguments: &serde_json::Value) -> Self {
+    pub fn new(status: NativeToolCallStatus, arguments: &serde_json::Value) -> Self {
         Self {
             status,
             result: None,
@@ -242,13 +242,13 @@ impl NativeToolState {
 
 /// What a `launch_subtasks` block shows beyond its separately rendered
 /// child rows; `None` hides the block.
-pub(crate) enum LaunchBatchNotice {
+pub enum LaunchBatchNotice {
     Rejected { denied: bool },
     Ended(StatusIcon),
     Unlaunched { missing: usize, requested: usize },
 }
 
-pub(crate) fn launch_batch_notice(state: &NativeToolState) -> Option<LaunchBatchNotice> {
+pub fn launch_batch_notice(state: &NativeToolState) -> Option<LaunchBatchNotice> {
     if state.status == NativeToolCallStatus::Executing {
         return None;
     }
@@ -303,14 +303,14 @@ pub(crate) fn launch_batch_notice(state: &NativeToolState) -> Option<LaunchBatch
     })
 }
 
-pub(crate) fn tool_call_denied(state: &NativeToolState) -> bool {
+pub fn tool_call_denied(state: &NativeToolState) -> bool {
     state
         .metadata
         .as_ref()
         .is_some_and(|metadata| metadata.outcome == ToolCallOutcome::Denied)
 }
 
-pub(crate) fn tool_call_failed(state: &NativeToolState) -> bool {
+pub fn tool_call_failed(state: &NativeToolState) -> bool {
     state.metadata.as_ref().is_some_and(|metadata| {
         matches!(
             metadata.outcome,
@@ -319,7 +319,7 @@ pub(crate) fn tool_call_failed(state: &NativeToolState) -> bool {
     })
 }
 
-pub(crate) fn native_tool_status(state: &NativeToolState) -> PresentedToolStatus {
+pub fn native_tool_status(state: &NativeToolState) -> PresentedToolStatus {
     match state.status {
         NativeToolCallStatus::Executing => PresentedToolStatus::Running,
         NativeToolCallStatus::Interrupted => PresentedToolStatus::Interrupted,
@@ -345,7 +345,7 @@ pub(crate) fn native_tool_status(state: &NativeToolState) -> PresentedToolStatus
     }
 }
 
-pub(crate) fn question_response(state: &NativeToolState) -> Option<QuestionResponse> {
+pub fn question_response(state: &NativeToolState) -> Option<QuestionResponse> {
     state
         .result
         .as_ref()
@@ -355,7 +355,7 @@ pub(crate) fn question_response(state: &NativeToolState) -> Option<QuestionRespo
 
 /// Resolved operation outcome shared by expanded headers, readable lists and
 /// typed folds. Item completion is not evidence that its update succeeded.
-pub(crate) fn native_header_status(call: &ToolCall, state: &NativeToolState) -> StatusIcon {
+pub fn native_header_status(call: &ToolCall, state: &NativeToolState) -> StatusIcon {
     let status = native_tool_status(state);
     if status == PresentedToolStatus::Completed {
         match call.function.name.as_str() {
@@ -386,20 +386,20 @@ pub(crate) fn native_header_status(call: &ToolCall, state: &NativeToolState) -> 
 /// Provider-neutral materialized ACP tool call. Sparse updates mutate this
 /// value in place; collection fields replace their previous contents.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct AcpToolPresentation {
-    pub(crate) id: String,
-    pub(crate) title: String,
-    pub(crate) kind: String,
-    pub(crate) status: String,
-    pub(crate) content: Vec<String>,
-    pub(crate) locations: Vec<AgentRunLocation>,
-    pub(crate) raw_input: Option<serde_json::Value>,
-    pub(crate) raw_output: Option<serde_json::Value>,
-    pub(crate) metadata: Option<ToolResultMetadata>,
+pub struct AcpToolPresentation {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub status: String,
+    pub content: Vec<String>,
+    pub locations: Vec<AgentRunLocation>,
+    pub raw_input: Option<serde_json::Value>,
+    pub raw_output: Option<serde_json::Value>,
+    pub metadata: Option<ToolResultMetadata>,
 }
 
 impl AcpToolPresentation {
-    pub(crate) fn presented_status(&self) -> PresentedToolStatus {
+    pub fn presented_status(&self) -> PresentedToolStatus {
         if let Some(metadata) = &self.metadata {
             return match metadata.outcome {
                 ToolCallOutcome::Success => PresentedToolStatus::Completed,
@@ -421,7 +421,7 @@ impl AcpToolPresentation {
         }
     }
 
-    pub(crate) fn hosted_activity(&self) -> Option<WebActivityPresentation> {
+    pub fn hosted_activity(&self) -> Option<WebActivityPresentation> {
         if !zevria_content::response::is_hosted_search_input(&self.id, self.raw_input.as_ref()) {
             return None;
         }
@@ -445,7 +445,7 @@ impl AcpToolPresentation {
         })
     }
 
-    pub(crate) fn input_text(&self) -> String {
+    pub fn input_text(&self) -> String {
         if let Some(activity) = self.hosted_activity() {
             return activity.copy_text();
         }
@@ -465,7 +465,7 @@ impl AcpToolPresentation {
         )
     }
 
-    pub(crate) fn output_text(&self) -> Option<String> {
+    pub fn output_text(&self) -> Option<String> {
         if !self.content.is_empty() {
             return Some(self.content.join("\n"));
         }
@@ -480,14 +480,14 @@ fn json_copy_text(value: &serde_json::Value) -> String {
 }
 
 /// Display-only decoding. Never use this normalized value for dispatch.
-pub(crate) fn normalized_arguments(raw: &serde_json::Value) -> Option<serde_json::Value> {
+pub fn normalized_arguments(raw: &serde_json::Value) -> Option<serde_json::Value> {
     match raw {
         serde_json::Value::String(raw) => serde_json::from_str(raw).ok(),
         value => Some(value.clone()),
     }
 }
 
-pub(crate) fn tool_argument(state: &NativeToolState, key: &str) -> Option<String> {
+pub fn tool_argument(state: &NativeToolState, key: &str) -> Option<String> {
     state
         .arguments
         .as_ref()?
@@ -499,7 +499,7 @@ pub(crate) fn tool_argument(state: &NativeToolState, key: &str) -> Option<String
 /// One shared tool block. Native calls retain the Rig value needed for result
 /// correlation and specialized bodies; ACP calls use their normalized state.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum PresentedTool {
+pub enum PresentedTool {
     Native {
         call: Box<ToolCall>,
         state: Box<NativeToolState>,
@@ -508,7 +508,7 @@ pub(crate) enum PresentedTool {
 }
 
 impl PresentedTool {
-    pub(crate) fn primary_copy(&self) -> String {
+    pub fn primary_copy(&self) -> String {
         match self {
             Self::Native { call, state } => {
                 if [
@@ -527,21 +527,21 @@ impl PresentedTool {
         }
     }
 
-    pub(crate) fn secondary_copy(&self) -> Option<String> {
+    pub fn secondary_copy(&self) -> Option<String> {
         match self {
             Self::Native { state, .. } => state.result.as_ref().map(tool_result_plain_text),
             Self::Acp(tool) => tool.output_text(),
         }
     }
 
-    pub(crate) fn native_call(&self) -> Option<(&ToolCall, &NativeToolState)> {
+    pub fn native_call(&self) -> Option<(&ToolCall, &NativeToolState)> {
         match self {
             Self::Native { call, state } => Some((&**call, &**state)),
             Self::Acp(_) => None,
         }
     }
 
-    pub(crate) fn native_call_mut(&mut self) -> Option<(&ToolCall, &mut NativeToolState)> {
+    pub fn native_call_mut(&mut self) -> Option<(&ToolCall, &mut NativeToolState)> {
         match self {
             Self::Native { call, state } => Some((&**call, &mut **state)),
             Self::Acp(_) => None,
@@ -551,14 +551,14 @@ impl PresentedTool {
 
 /// One row of a source-neutral checklist.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ChecklistItem {
-    pub(crate) text: String,
-    pub(crate) priority: Option<String>,
-    pub(crate) status: ChecklistStatus,
+pub struct ChecklistItem {
+    pub text: String,
+    pub priority: Option<String>,
+    pub status: ChecklistStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChecklistStatus {
+pub enum ChecklistStatus {
     Pending,
     InProgress,
     Completed,
@@ -566,7 +566,7 @@ pub(crate) enum ChecklistStatus {
 }
 
 impl ChecklistStatus {
-    pub(crate) const fn icon(self) -> StatusIcon {
+    pub const fn icon(self) -> StatusIcon {
         match self {
             Self::Pending => StatusIcon::Pending,
             Self::InProgress => StatusIcon::Running,
@@ -576,7 +576,7 @@ impl ChecklistStatus {
     }
 }
 
-pub(crate) const fn subtask_icon(status: SubtaskStatus) -> StatusIcon {
+pub const fn subtask_icon(status: SubtaskStatus) -> StatusIcon {
     match status {
         SubtaskStatus::Starting | SubtaskStatus::Running => StatusIcon::Running,
         SubtaskStatus::Completed => StatusIcon::Done,
@@ -585,7 +585,7 @@ pub(crate) const fn subtask_icon(status: SubtaskStatus) -> StatusIcon {
     }
 }
 
-pub(crate) const fn task_icon(status: TaskStatus) -> StatusIcon {
+pub const fn task_icon(status: TaskStatus) -> StatusIcon {
     match status {
         TaskStatus::Pending => StatusIcon::Pending,
         TaskStatus::InProgress => StatusIcon::Running,
@@ -593,18 +593,14 @@ pub(crate) const fn task_icon(status: TaskStatus) -> StatusIcon {
     }
 }
 
-pub(crate) const fn recorded_decision_icon(
-    disposition: &RecordedDecisionDisposition,
-) -> StatusIcon {
+pub const fn recorded_decision_icon(disposition: &RecordedDecisionDisposition) -> StatusIcon {
     match disposition {
         RecordedDecisionDisposition::Applied { .. } => StatusIcon::Done,
         RecordedDecisionDisposition::ObjectivelyInapplicable { .. } => StatusIcon::Dismissed,
     }
 }
 
-pub(crate) const fn unavailable_decision_icon(
-    disposition: &UnavailableDecisionDisposition,
-) -> StatusIcon {
+pub const fn unavailable_decision_icon(disposition: &UnavailableDecisionDisposition) -> StatusIcon {
     match disposition {
         UnavailableDecisionDisposition::RootQuestionRequired { .. } => StatusIcon::Pending,
         UnavailableDecisionDisposition::ObjectivelyInapplicable { .. } => StatusIcon::Dismissed,
@@ -613,20 +609,20 @@ pub(crate) const fn unavailable_decision_icon(
 
 /// A complete checklist snapshot. ACP plan updates replace `items` in place.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PresentedChecklist {
-    pub(crate) label: String,
-    pub(crate) items: Vec<ChecklistItem>,
+pub struct PresentedChecklist {
+    pub label: String,
+    pub items: Vec<ChecklistItem>,
 }
 
 impl PresentedChecklist {
-    pub(crate) fn completed_count(&self) -> usize {
+    pub fn completed_count(&self) -> usize {
         self.items
             .iter()
             .filter(|item| item.status == ChecklistStatus::Completed)
             .count()
     }
 
-    pub(crate) fn copy_text(&self) -> String {
+    pub fn copy_text(&self) -> String {
         self.items
             .iter()
             .map(|item| {
@@ -644,19 +640,19 @@ impl PresentedChecklist {
 /// One replaceable worker-plan block. ACP plan operations can switch between
 /// checklist and inline Markdown representations without leaving stale blocks.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PresentedPlan {
-    pub(crate) plan_id: Option<String>,
-    pub(crate) content: PresentedPlanContent,
+pub struct PresentedPlan {
+    pub plan_id: Option<String>,
+    pub content: PresentedPlanContent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PresentedPlanContent {
+pub enum PresentedPlanContent {
     Checklist(PresentedChecklist),
     Markdown(String),
 }
 
 impl PresentedPlan {
-    pub(crate) fn copy_text(&self) -> String {
+    pub fn copy_text(&self) -> String {
         match &self.content {
             PresentedPlanContent::Checklist(checklist) => checklist.copy_text(),
             PresentedPlanContent::Markdown(markdown) => markdown.clone(),
@@ -665,7 +661,7 @@ impl PresentedPlan {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DiagnosticTone {
+pub enum DiagnosticTone {
     Muted,
     Info,
     Success,
@@ -676,22 +672,22 @@ pub(crate) enum DiagnosticTone {
 /// A raw/lifecycle ACP item retained in chronological order but hidden from
 /// the polished view by default.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PresentedDiagnostic {
-    pub(crate) label: String,
-    pub(crate) text: String,
-    pub(crate) tone: DiagnosticTone,
+pub struct PresentedDiagnostic {
+    pub label: String,
+    pub text: String,
+    pub tone: DiagnosticTone,
 }
 
 /// Inline hosted actions, shared by native and ACP attempt projections. A
 /// group's identity is its first member, so selection follows it on a split.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct WebActivityPresentation {
-    pub(crate) members: Vec<u64>,
-    pub(crate) detail: Option<String>,
-    pub(crate) outcomes: Vec<(StatusIcon, usize)>,
+pub struct WebActivityPresentation {
+    pub members: Vec<u64>,
+    pub detail: Option<String>,
+    pub outcomes: Vec<(StatusIcon, usize)>,
 }
 impl WebActivityPresentation {
-    pub(crate) fn from_actions(
+    pub fn from_actions(
         attempt: &zevria_content::ResponseAttempt,
         actions: &[&zevria_content::HostedActivity],
     ) -> Self {
@@ -717,7 +713,7 @@ impl WebActivityPresentation {
             outcomes,
         }
     }
-    pub(crate) fn copy_text(&self) -> String {
+    pub fn copy_text(&self) -> String {
         let counted = self.detail.is_none();
         let label = self
             .detail
@@ -746,7 +742,7 @@ impl WebActivityPresentation {
 
 /// One independently selectable semantic unit.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum PresentationBlockKind {
+pub enum PresentationBlockKind {
     Text {
         text: String,
         flavor: TextFlavor,
@@ -776,19 +772,19 @@ pub(crate) enum PresentationBlockKind {
 
 /// One block inside a conversation/timeline entry.
 #[derive(Clone, Debug)]
-pub(crate) struct PresentationBlock {
-    pub(crate) id: PresentationBlockId,
-    pub(crate) revision: u64,
-    pub(crate) role: Option<PresentationRole>,
+pub struct PresentationBlock {
+    pub id: PresentationBlockId,
+    pub revision: u64,
+    pub role: Option<PresentationRole>,
     /// First content block's stable identity; decoration is never a copy target.
-    pub(crate) prompt_group: Option<PresentationBlockId>,
-    pub(crate) prompt: Option<PromptAnnotation>,
-    pub(crate) visibility: BlockVisibility,
-    pub(crate) kind: PresentationBlockKind,
+    pub prompt_group: Option<PresentationBlockId>,
+    pub prompt: Option<PromptAnnotation>,
+    pub visibility: BlockVisibility,
+    pub kind: PresentationBlockKind,
 }
 
 impl PresentationBlock {
-    pub(crate) fn visible(&self, diagnostics_visible: bool) -> bool {
+    pub fn visible(&self, diagnostics_visible: bool) -> bool {
         (self.visibility == BlockVisibility::Always
             || (self.visibility == BlockVisibility::Diagnostics && diagnostics_visible))
             && !matches!(&self.kind, PresentationBlockKind::Reasoning { parts } if parts.iter().all(|part| part.trim().is_empty()))
@@ -798,7 +794,7 @@ impl PresentationBlock {
             })
     }
 
-    pub(crate) fn primary_copy(&self) -> String {
+    pub fn primary_copy(&self) -> String {
         match &self.kind {
             PresentationBlockKind::Text { text, .. } => text.clone(),
             PresentationBlockKind::Reasoning { parts } => parts.join("\n"),
@@ -819,7 +815,7 @@ impl PresentationBlock {
     }
 
     /// Explicit readable-list copy; never substitutes for raw native y/yy.
-    pub(crate) fn readable_list_copy(&self) -> Option<String> {
+    pub fn readable_list_copy(&self) -> Option<String> {
         match &self.kind {
             PresentationBlockKind::Tool(PresentedTool::Native { call, state })
                 if matches!(
@@ -840,7 +836,7 @@ impl PresentationBlock {
         }
     }
 
-    pub(crate) fn secondary_copy(&self) -> Option<String> {
+    pub fn secondary_copy(&self) -> Option<String> {
         match &self.kind {
             PresentationBlockKind::Tool(tool) => tool.secondary_copy(),
             PresentationBlockKind::Text { .. }
@@ -855,7 +851,7 @@ impl PresentationBlock {
         }
     }
 
-    pub(crate) fn is_editable(&self) -> bool {
+    pub fn is_editable(&self) -> bool {
         self.editable_text().is_some()
             || matches!(
                 self.kind,
@@ -863,7 +859,7 @@ impl PresentationBlock {
             )
     }
 
-    pub(crate) fn editable_text(&self) -> Option<&str> {
+    pub fn editable_text(&self) -> Option<&str> {
         match &self.kind {
             PresentationBlockKind::Text {
                 text,
@@ -874,38 +870,38 @@ impl PresentationBlock {
         }
     }
 
-    pub(crate) fn native_tool(&self) -> Option<(&ToolCall, &NativeToolState)> {
+    pub fn native_tool(&self) -> Option<(&ToolCall, &NativeToolState)> {
         match &self.kind {
             PresentationBlockKind::Tool(tool) => tool.native_call(),
             _ => None,
         }
     }
 
-    pub(crate) fn native_tool_mut(&mut self) -> Option<(&ToolCall, &mut NativeToolState)> {
+    pub fn native_tool_mut(&mut self) -> Option<(&ToolCall, &mut NativeToolState)> {
         match &mut self.kind {
             PresentationBlockKind::Tool(tool) => tool.native_call_mut(),
             _ => None,
         }
     }
 
-    pub(crate) fn touch(&mut self) {
+    pub fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
 }
 
 /// A pane-local, rebuildable ordinal, never an engine TurnId or an edit target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(crate) struct DisplayTurn(pub(crate) usize);
+pub struct DisplayTurn(pub usize);
 
 /// Native header decoration only. Never enters messages, persistence, or copy payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(crate) enum NativeHeader {
+pub enum NativeHeader {
     Prompt(DisplayTurn),
     Assistant { turn: DisplayTurn, call: usize },
 }
 
 impl NativeHeader {
-    pub(crate) const fn turn(self) -> DisplayTurn {
+    pub const fn turn(self) -> DisplayTurn {
         match self {
             Self::Prompt(turn) | Self::Assistant { turn, .. } => turn,
         }
@@ -925,17 +921,17 @@ impl std::fmt::Display for NativeHeader {
 /// one-to-one; one ACP prompt cycle can contain many roles and diagnostics so
 /// hidden diagnostics do not force repeated Assistant headers.
 #[derive(Clone, Debug)]
-pub(crate) struct ConversationEntry {
-    pub(crate) header: Option<NativeHeader>,
-    pub(crate) blocks: Vec<PresentationBlock>,
+pub struct ConversationEntry {
+    pub header: Option<NativeHeader>,
+    pub blocks: Vec<PresentationBlock>,
 }
 
 /// Provider-call identity retained only for native tool-result correlation.
-pub(crate) fn provider_call_id(provider: Option<&ProviderCallId>) -> Option<&str> {
+pub fn provider_call_id(provider: Option<&ProviderCallId>) -> Option<&str> {
     provider.map(ProviderCallId::as_str)
 }
 
-pub(crate) fn tool_result_plain_text(result: &ToolResult) -> String {
+pub fn tool_result_plain_text(result: &ToolResult) -> String {
     use rig_core::message::ToolResultContent;
 
     result
@@ -951,13 +947,13 @@ pub(crate) fn tool_result_plain_text(result: &ToolResult) -> String {
 }
 
 /// Row-type markers are deliberately separate from lifecycle/status icons.
-pub(crate) enum ListMarker {
+pub enum ListMarker {
     Status(StatusIcon),
     Disagreement,
 }
 
 impl ListMarker {
-    pub(crate) fn glyph(&self) -> &'static str {
+    pub fn glyph(&self) -> &'static str {
         match self {
             Self::Status(icon) => icon.glyph(0),
             Self::Disagreement => "⚖",
@@ -965,21 +961,21 @@ impl ListMarker {
     }
 }
 
-pub(crate) struct PresentedListRow {
-    pub(crate) marker: ListMarker,
-    pub(crate) text: String,
-    pub(crate) annotation: String,
-    pub(crate) muted: bool,
+pub struct PresentedListRow {
+    pub marker: ListMarker,
+    pub text: String,
+    pub annotation: String,
+    pub muted: bool,
     /// Complete source text for readable copying, never viewport-truncated.
     copy_details: Vec<String>,
 }
 
-pub(crate) struct PresentedNativeList {
-    pub(crate) label: String,
-    pub(crate) status: StatusIcon,
-    pub(crate) explanation: Option<String>,
-    pub(crate) rows: Vec<PresentedListRow>,
-    pub(crate) reconciliation: bool,
+pub struct PresentedNativeList {
+    pub label: String,
+    pub status: StatusIcon,
+    pub explanation: Option<String>,
+    pub rows: Vec<PresentedListRow>,
+    pub reconciliation: bool,
 }
 
 impl PresentedNativeList {
@@ -1001,7 +997,7 @@ impl PresentedNativeList {
     }
 }
 
-pub(crate) fn native_list(call: &ToolCall, state: &NativeToolState) -> Option<PresentedNativeList> {
+pub fn native_list(call: &ToolCall, state: &NativeToolState) -> Option<PresentedNativeList> {
     let status = native_header_status(call, state);
     match call.function.name.as_str() {
         TASK_TOOL_NAME => {

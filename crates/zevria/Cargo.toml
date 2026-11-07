@@ -5,10 +5,10 @@ edition.workspace = true
 
 # Temporary; release profile alone does not disable explicit feature activation.
 [features]
-cache-diagnostics = ["zevria-app/cache-diagnostics"]
+cache-diagnostics = ["zevria-host/cache-diagnostics"]
 
 [dependencies]
-zevria-app = { workspace = true }
+zevria-host = { workspace = true }
 zevria-tui-widgets = { workspace = true }
 zevria-theme = { workspace = true }
 zevria-foundation = { workspace = true }
@@ -38,4 +38,4 @@ rig-core = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 tempfile = { workspace = true }
-zevria-app = { workspace = true, features = ["test-support"] }
+zevria-host = { workspace = true, features = ["test-support"] }

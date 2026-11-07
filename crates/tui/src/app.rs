@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::Event;
 #[cfg(test)]
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+#[cfg(test)]
 use rig_core::message::Message;
 use zevria_foundation::ModelProfileRef;
 use zevria_foundation::ModelRole;
@@ -43,12 +44,10 @@ use zevria_foundation::SessionMode;
 use zevria_foundation::TurnId;
 use zevria_foundation::subtask::SubtaskId;
 use zevria_instructions::SkillMeta;
-use zevria_model::CompactionTrigger;
 use zevria_session_api::SessionEvent;
 use zevria_session_api::TranscriptEdit;
 use zevria_session_api::TranscriptEditReplacement;
 use zevria_transcript::transcript::TranscriptItem;
-use zevria_workflow::AgentRunEvent;
 use zevria_workflow::AgentRunId;
 use zevria_workflow::AgentRunStatus;
 use zevria_workflow::EnsembleRunId;
@@ -80,14 +79,17 @@ use ratatui::crossterm::event::KeyEventKind;
 
 use pane::PaneState;
 pub(crate) use session::{
-    ActivePhase, ConfiguredModelProfiles, OperationKind, RetryCountdown, RetryNotice,
-    SessionActivity, SessionState, TurnTail, role_for_mode,
+    ActivePhase, ConfiguredModelProfiles, OperationKind, RetryCountdown, SessionActivity, TurnTail,
+    role_for_mode,
 };
 use view::ViewState;
 pub(crate) use workflow::{PlanChoice, PlanDialogState};
-use workflow::{PlanIntent, WorkflowState};
+use workflow::{PlanIntent, WorkflowKeys};
 
 use crate::status::{StatusAccent, StatusBarView, StatusTone};
+
+#[cfg(test)]
+pub(crate) use session::RetryNotice;
 
 const SCROLL_STEP: usize = 1;
 
@@ -154,24 +156,14 @@ pub(crate) enum AppEffect {
     PruneEnsembleRuns(Vec<EnsembleRunId>),
 }
 
-/// All authoritative frontend restoration inputs, installed atomically after
-/// transient/projection reset. This structure never enters model messages.
-pub struct RestorationInput {
-    pub items: Vec<TranscriptItem>,
-    pub workflow: zevria_workflow::PlanWorkflowState,
-    pub selected_mode: SessionMode,
-    pub model_profiles: Vec<(ModelRole, ModelProfileRef)>,
-    pub contexts: Vec<zevria_model::ContextTokenSnapshot>,
-    pub reasoning: [zevria_foundation::ReasoningLevel; ModelRole::COUNT],
-    pub persistence_error: Option<String>,
-}
+pub use zevria_presentation::RestorationInput;
+
+use zevria_presentation::{PaneScope, Reduction, SessionModel};
 
 /// Public façade over cohesive, independently valid state machines.
 #[derive(Default)]
 pub struct App {
-    session: SessionState,
-    workflow: WorkflowState,
-    conversation: ConversationState,
+    model: SessionModel,
     folds: FoldState,
     composer: ComposerState,
     interaction: InteractionState,
@@ -179,8 +171,8 @@ pub struct App {
     pane: PaneState,
     worker: worker_review::WorkerReviewUiState,
     drafts: draft_submission::DraftSubmissions,
+    mode_command_draft: Option<(crate::composer::ComposerDraft, u64)>,
     pane_id: crate::input::PaneId,
-    model_profiles: Arc<ConfiguredModelProfiles>,
     view: ViewState,
     help: Option<crate::hints::HelpOverlay>,
 }
@@ -193,19 +185,32 @@ impl App {
     pub(crate) fn subtask_inspect(title: impl Into<String>) -> Self {
         Self {
             pane: PaneState::subtask_inspect(title, ModelRole::Explore),
+            model: {
+                let mut model = SessionModel::default();
+                model.set_scope(PaneScope::Inspect {
+                    role: Some(ModelRole::Explore),
+                });
+                model
+            },
             ..Self::default()
         }
     }
 
     pub fn set_inspect_model_role(&mut self, role: ModelRole) {
         if self.pane.set_inspect_model_role(role) {
-            self.session.reconcile_inspect_role(role);
+            self.model
+                .set_scope(PaneScope::Inspect { role: Some(role) });
         }
     }
 
     pub(crate) fn acp_inspect(title: impl Into<String>) -> Self {
         Self {
             pane: PaneState::acp_inspect(title),
+            model: {
+                let mut model = SessionModel::default();
+                model.set_scope(PaneScope::Inspect { role: None });
+                model
+            },
             ..Self::default()
         }
     }
@@ -354,7 +359,7 @@ impl App {
         &self,
         run_id: &zevria_workflow::EnsembleRunId,
     ) -> Option<&zevria_workflow::AgentRunId> {
-        self.conversation.ensemble_baseline(run_id)
+        self.model.conversation.ensemble_baseline(run_id)
     }
 
     pub(crate) fn reviewed_worker_status(
@@ -362,7 +367,9 @@ impl App {
         run_id: &EnsembleRunId,
         worker_id: &AgentRunId,
     ) -> Option<AgentRunStatus> {
-        self.conversation.reviewed_worker_status(run_id, worker_id)
+        self.model
+            .conversation
+            .reviewed_worker_status(run_id, worker_id)
     }
 
     pub(crate) fn update_pane_metadata(
@@ -391,7 +398,7 @@ impl App {
         mut self,
         profiles: impl IntoIterator<Item = (ModelRole, ModelProfileRef)>,
     ) -> Self {
-        self.model_profiles = Arc::new(ConfiguredModelProfiles::from_iter(profiles));
+        self.model.model_profiles = Arc::new(ConfiguredModelProfiles::from_iter(profiles));
         self
     }
 
@@ -400,7 +407,9 @@ impl App {
         levels: [zevria_foundation::ReasoningLevel; ModelRole::COUNT],
     ) -> Self {
         for role in ModelRole::ALL {
-            self.session.install_reasoning(role, levels[role.index()]);
+            self.model
+                .session
+                .install_reasoning(role, levels[role.index()]);
         }
         self
     }
@@ -409,7 +418,7 @@ impl App {
         mut self,
         profiles: Arc<ConfiguredModelProfiles>,
     ) -> Self {
-        self.model_profiles = profiles;
+        self.model.model_profiles = profiles;
         self
     }
 
@@ -417,45 +426,26 @@ impl App {
         // Children retain their configured defaults, never the mutable root
         // Build/Plan choices. External agents without a local role omit them.
         for role in [ModelRole::Review, ModelRole::Explore, ModelRole::Builder] {
-            if let Some(level) = root.session.reasoning(role) {
-                self.session.install_reasoning(role, level);
+            if let Some(level) = root.model.session.reasoning(role) {
+                self.model.session.install_reasoning(role, level);
             }
         }
         self
     }
 
     pub(crate) fn shared_model_profiles(&self) -> Arc<ConfiguredModelProfiles> {
-        Arc::clone(&self.model_profiles)
+        Arc::clone(&self.model.model_profiles)
     }
 
     /// Snapshot both committed root selections for a session replacement.
     /// Restoration and correlated model-management acknowledgements own this
     /// state; usage telemetry, picker drafts and the active mode do not.
     pub fn session_models(&self) -> anyhow::Result<zevria_model::models::SessionModels> {
-        use zevria_model::models::{ModelSelection, SessionModels, mode_role};
-
-        anyhow::ensure!(
-            self.pane.is_root(),
-            "only the root owns session model selections"
-        );
-        let selection = |mode| -> anyhow::Result<ModelSelection> {
-            let role = mode_role(mode);
-            let profile = self.model_profiles.get(role).ok_or_else(|| {
-                anyhow::anyhow!("cannot replace session: missing committed {mode} model profile")
-            })?;
-            let reasoning = self.session.reasoning(role).ok_or_else(|| {
-                anyhow::anyhow!("cannot replace session: missing committed {mode} reasoning level")
-            })?;
-            Ok(ModelSelection::new(profile.clone(), reasoning))
-        };
-        SessionModels::new(
-            selection(SessionMode::Build)?,
-            selection(SessionMode::Plan)?,
-        )
+        self.model.session_models()
     }
 
     pub(crate) fn contains_presented_error(&self, error: &str) -> bool {
-        self.conversation.contains_presented_error(error)
+        self.model.conversation.contains_presented_error(error)
     }
 
     /// Add the session's skills to the composer command registry.
@@ -479,32 +469,27 @@ impl App {
 
     /// Rebuild committed projection from an unchanged transcript format.
     pub fn restore(&mut self, items: Vec<TranscriptItem>) {
-        self.session.reset_for_restore();
+        self.model.restore_transcript(items);
+        self.reset_frontend();
+    }
+
+    fn reset_frontend(&mut self) {
         self.drafts = Default::default();
+        self.mode_command_draft = None;
         self.worker = Default::default();
         self.help = None;
-        self.workflow.reset();
         self.composer.clear();
         self.interaction.reset();
         self.edit.reset();
-        self.conversation.restore(items);
         self.folds.clear();
         self.view.reset_conversation();
     }
 
-    /// Install one complete authoritative restore input. No commands, pending
-    /// requests, live lifecycle starts or wall-clock work are replayed.
+    /// Install one complete authoritative restore input, without replaying live work.
     pub fn restore_session(&mut self, input: RestorationInput) {
-        self.restore(input.items);
-        self.model_profiles = Arc::new(ConfiguredModelProfiles::from_iter(input.model_profiles));
-        for role in ModelRole::ALL {
-            self.session
-                .install_reasoning(role, input.reasoning[role.index()]);
-        }
-        self.restore_model_contexts(input.contexts);
-        self.restore_plan_state(input.workflow);
-        self.apply_selected_mode(input.selected_mode);
-        self.session.set_persistence_error(input.persistence_error);
+        self.reset_frontend();
+        self.model.restore(input);
+        self.leave_insert_if_composer_locked();
     }
 
     /// Seed Plan presentation after transcript restoration and before live events.
@@ -518,7 +503,7 @@ impl App {
     /// Append a visible local notice that does not enter model history.
     pub fn push_error(&mut self, error: String) {
         self.view.invalidate_rendered_geometry();
-        self.conversation.push_error(error);
+        self.model.conversation.push_error(error);
     }
 
     /// Only the resolved composer's cancellation path may clear its draft.
@@ -537,15 +522,16 @@ impl App {
         role: ModelRole,
         level: zevria_foundation::ReasoningLevel,
     ) {
-        self.session.install_reasoning(role, level);
+        self.model.session.install_reasoning(role, level);
     }
 
     pub(crate) fn begin_model_management(&mut self) -> Option<SessionMode> {
-        if self.capabilities().manage_session.is_err() || self.workflow.dialog().is_some() {
+        if self.capabilities().manage_session.is_err() || self.model.workflow.dialog().is_some() {
             return None;
         }
-        let mode = self.session.next_mode();
-        self.session
+        let mode = self.model.session.next_mode();
+        self.model
+            .session
             .begin_operation(OperationKind::ModelManagement, mode, role_for_mode(mode))
             .then_some(mode)
     }
@@ -556,7 +542,7 @@ impl App {
         snapshots: impl IntoIterator<Item = zevria_model::ContextTokenSnapshot>,
     ) {
         for snapshot in snapshots {
-            self.session.install_model(
+            self.model.session.install_model(
                 snapshot.model_role,
                 snapshot.profile.clone(),
                 Some(snapshot),
@@ -565,7 +551,7 @@ impl App {
     }
 
     pub(crate) fn finish_model_management(&mut self) {
-        self.session.finish_model_management();
+        self.model.session.finish_model_management();
     }
 
     pub(crate) fn install_model(
@@ -574,29 +560,27 @@ impl App {
         context: &zevria_foundation::ModelContextPolicy,
         snapshot: Option<zevria_model::ContextTokenSnapshot>,
     ) {
-        Arc::make_mut(&mut self.model_profiles).set(role, context.profile.clone());
-        self.session
-            .install_model(role, context.profile.clone(), snapshot);
+        self.model.install_model(role, context, snapshot);
     }
 
     pub(crate) const fn is_busy(&self) -> bool {
-        self.session.is_busy()
+        self.model.session.is_busy()
     }
 
     pub(crate) const fn active_turn_id(&self) -> Option<TurnId> {
-        self.session.active_id()
+        self.model.session.active_id()
     }
 
     pub(crate) fn accepts_progress(&self, turn_id: TurnId) -> bool {
-        self.session.accepts_progress(turn_id)
+        self.model.session.accepts_progress(turn_id)
     }
 
     pub(crate) fn accepts_terminal(&self, turn_id: TurnId) -> bool {
-        self.session.accepts_terminal(turn_id)
+        self.model.session.accepts_terminal(turn_id)
     }
 
     pub(crate) const fn cancel_target(&self) -> Option<Option<TurnId>> {
-        self.session.cancel_target()
+        self.model.session.cancel_target()
     }
 
     fn worker_busy(&self) -> bool {
@@ -604,7 +588,7 @@ impl App {
     }
 
     fn work_pending(&self) -> bool {
-        self.session.is_busy() || self.worker_busy()
+        self.model.session.is_busy() || self.worker_busy()
     }
 
     pub(crate) fn capabilities(&self) -> crate::input::Capabilities {
@@ -622,7 +606,7 @@ impl App {
             if self.work_pending() {
                 Err(WorkPending)
             } else if matches!(
-                self.workflow.snapshot(),
+                self.model.workflow.snapshot(),
                 zevria_workflow::PlanWorkflowState::Ready { .. }
             ) {
                 Err(PlanDecisionRequired)
@@ -681,7 +665,7 @@ impl App {
         self.interaction.is_insert()
             && self.can_edit_draft()
             && !self.interaction.is_selecting()
-            && self.workflow.dialog().is_none()
+            && self.model.workflow.dialog().is_none()
     }
 
     fn can_edit_draft(&self) -> bool {
@@ -698,14 +682,14 @@ impl App {
         for (available, action) in [
             (self.can_submit_work(), Action::Submit),
             (
-                self.workflow.dialog().is_some()
+                self.model.workflow.dialog().is_some()
                     || self.pane.is_worker()
                     || (matches!(
                         self.surface().id.kind,
                         SurfaceKind::Composer | SurfaceKind::Completion
                     ) && !self.composer.is_empty())
                     || (self.pane.is_root()
-                        && (!self.session.is_busy() || self.cancel_target().is_some())),
+                        && (!self.model.session.is_busy() || self.cancel_target().is_some())),
                 Action::Cancel,
             ),
             (self.can_edit_draft(), Action::Insert),
@@ -715,7 +699,7 @@ impl App {
                 Action::RecoverDraft,
             ),
             (
-                self.workflow.submitted_artifact().is_some() && self.pane.is_root(),
+                self.model.workflow.submitted_artifact().is_some() && self.pane.is_root(),
                 Action::PlanReview,
             ),
             (
@@ -740,11 +724,11 @@ impl App {
             }
         }
         if self.surface().id.kind == SurfaceKind::Transcript
-            && self.workflow.fresh_retry_version().is_none()
+            && self.model.workflow.fresh_retry_version().is_none()
         {
             hints.disabled.push(Action::Confirm);
         }
-        if self.workflow.dialog().is_some() && self.session.is_busy() {
+        if self.model.workflow.dialog().is_some() && self.model.session.is_busy() {
             hints.disabled.push(Action::Confirm);
         }
         hints.labels.push((
@@ -782,7 +766,7 @@ impl App {
         ));
         hints.labels.push((
             Action::ToggleMode,
-            match self.session.next_mode() {
+            match self.model.session.next_mode() {
                 SessionMode::Build => "Plan",
                 SessionMode::Plan => "Build",
             },
@@ -826,7 +810,7 @@ impl App {
     pub(crate) fn surface(&self) -> Surface {
         let kind = if self.help.is_some() {
             SurfaceKind::Help
-        } else if self.workflow.dialog().is_some() {
+        } else if self.model.workflow.dialog().is_some() {
             SurfaceKind::PlanReview
         } else if self.command_menu_active() {
             SurfaceKind::Completion
@@ -847,7 +831,7 @@ impl App {
             return None;
         }
         if owner == SurfaceKind::PlanReview {
-            self.workflow.hide();
+            self.model.workflow.hide();
             self.interaction.enter_normal();
             return None;
         }
@@ -859,13 +843,13 @@ impl App {
         }
         match self.cancel_target() {
             Some(turn_id) => Some(UiAction::CancelTurn { turn_id }),
-            None if !self.session.is_busy() => Some(UiAction::Quit),
+            None if !self.model.session.is_busy() => Some(UiAction::Quit),
             None => None,
         }
     }
 
     pub(crate) fn observe_clock(&mut self, now: Instant) {
-        self.session.observe_clock(now);
+        self.model.session.observe_clock(now);
     }
 
     /// Temporary focus owners and pane switches end runs without losing history.
@@ -912,7 +896,7 @@ impl App {
     ) -> Option<UiAction> {
         self.observe_clock(now);
         let composer_generation = self.composer.generation();
-        let plan_dialog_open = self.workflow.dialog().is_some();
+        let plan_dialog_open = self.model.workflow.dialog().is_some();
         debug_assert_eq!(owner.id.pane, self.pane_id);
         let action = self.dispatch_input_at(owner, input, now);
         self.reconcile_file_completion(true);
@@ -920,7 +904,7 @@ impl App {
             self.composer.close_edit_group();
         }
         if self.composer.generation() != composer_generation
-            || self.workflow.dialog().is_some() != plan_dialog_open
+            || self.model.workflow.dialog().is_some() != plan_dialog_open
         {
             self.view.invalidate_rendered_geometry();
         }
@@ -936,10 +920,11 @@ impl App {
         &self,
     ) -> Option<crate::presentation::PresentationAnchor> {
         self.interaction.selection().and_then(|selection| {
-            self.conversation
+            self.model
+                .conversation
                 .selection_identity(selection)
                 .map(|block| crate::presentation::PresentationAnchor {
-                    epoch: self.conversation.epoch(),
+                    epoch: self.model.conversation.epoch(),
                     history: selection.history_index,
                     block,
                 })
@@ -952,8 +937,9 @@ impl App {
     ) {
         if self.interaction.selection().is_some()
             && let Some(anchor) = anchor
-            && anchor.epoch == self.conversation.epoch()
+            && anchor.epoch == self.model.conversation.epoch()
             && let Some(selection) = self
+                .model
                 .conversation
                 .selection_for_identity(anchor.history, anchor.block)
         {
@@ -969,345 +955,56 @@ impl App {
         let anchor = self.presentation_selection_anchor();
         let effects = self.reduce_event(event);
         self.restore_presentation_selection(anchor);
-        self.view.reconcile_anchor_identity(&self.conversation);
-        self.folds.reconcile(&self.conversation);
+        self.view
+            .reconcile_anchor_identity(&self.model.conversation);
+        self.folds.reconcile(&self.model.conversation);
         self.leave_insert_if_composer_locked();
         effects
     }
 
     fn reduce_event(&mut self, event: SessionEvent) -> Vec<AppEffect> {
-        let mut effects = Vec::new();
-        match event {
-            SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
-                if !self.session.accepts_active(turn_id) { return effects; }
-                self.conversation.update_native_attempt(attempt, self.session.call_header());
+        let reduction = self.model.reduce(event);
+        self.apply_reduction(reduction)
+    }
+
+    fn apply_reduction(&mut self, reduction: Reduction) -> Vec<AppEffect> {
+        if let Some(kind) = reduction.accepted {
+            self.drafts.accept();
+            if kind.is_transcript_edit() {
+                self.edit.accept();
             }
-            SessionEvent::ModeResult { request_id, result } => {
-                self.accept_mode_selection(&request_id, result);
+        }
+        if let Some((_, settlement)) = reduction.settled {
+            self.edit.reject();
+            if settlement.restores_draft() {
+                self.restore_rejected_draft();
             }
-            SessionEvent::ModeChanged { mode } => self.apply_selected_mode(mode),
-            // Management transport belongs to SessionViews. Inspect panes never
-            // install root completion metadata or accept management actions.
-            SessionEvent::ModelsResult { .. } | SessionEvent::SkillsResult { .. } | SessionEvent::SkillsChanged { .. } | SessionEvent::WorkerControlResult { .. } => {}
-            SessionEvent::WorkerReviewUpdated { target, state } => {
-                self.conversation.project_worker_review(&target.run_id, &target.worker_id, &state, crate::projection::ProjectionMode::Live);
-            }
-            SessionEvent::CompactionStarted { turn_id, trigger } => {
-                let idle_role = self
-                    .pane
-                    .model_role_override()
-                    .unwrap_or_else(|| role_for_mode(self.session.next_mode()));
-                let _ = self
-                    .session
-                    .compaction_started(turn_id, trigger, idle_role);
-            }
-            SessionEvent::CompactionCompleted {
-                turn_id, trigger, ..
-            } => {
-                let Some(transition) = self.session.compaction_completed(turn_id, trigger) else {
-                    return effects;
-                };
-                self.conversation.push_compaction_divider();
-                if transition.kind.is_transcript_edit()
-                    && trigger == CompactionTrigger::AutomaticPreTurn
-                {
-                    self.edit.mark_automatic_pre_turn_compaction();
+        }
+        if reduction.plan_ready {
+            self.composer.close_edit_group();
+            self.interaction.clear_selection();
+            self.interaction.clear_chords();
+        }
+        if let Some(settled) = reduction.mode_selection {
+            match settled.result {
+                zevria_session_api::ModeSelectionResult::Accepted { .. } => {
+                    self.mode_command_draft = None;
+                    self.view.invalidate_rendered_geometry();
+                    self.composer.close_edit_group();
                 }
-            }
-            SessionEvent::TurnStarted {
-                turn_id,
-                message,
-                mode,
-            } => {
-                let role = self
-                    .pane
-                    .model_role_override()
-                    .unwrap_or_else(|| role_for_mode(mode));
-                let Some(start) = self.session.start_turn(turn_id, mode, role) else {
-                    return effects;
-                };
-                self.drafts.accept();
-                if start.operation().is_transcript_edit() {
-                    self.accept_pending_edit(&mut effects);
-                }
-                let turn = self.conversation.allocate_turn();
-                self.session.bind_display_turn(turn);
-                self.conversation.push_user_turn(message, turn);
-            }
-            SessionEvent::ModelCallStarted { turn_id, call } => {
-                let previous = self.session.call_header();
-                if self.session.model_call_started(turn_id, call) {
-                    let now = self.session.observed_at();
-                    self.conversation.finish_header(previous, now);
-                    if let Some(turn) = self.session.display_turn() {
-                        let header = self.conversation.allocate_call(turn);
-                        self.conversation.start_header(header, now);
-                        self.session.bind_call_header(header);
+                zevria_session_api::ModeSelectionResult::Rejected { .. } => {
+                    if let Some((draft, generation)) = self.mode_command_draft.take() {
+                        self.drafts
+                            .restore_or_retain(&mut self.composer, draft, generation);
                     }
                 }
             }
-            SessionEvent::EnsembleStarted {
-                turn_id,
-                start,
-                resumed,
-            } => {
-                let mode = ensemble_mode(start.workflow);
-                let role = ensemble_role(start.workflow);
-                let Some(transition) = self.session.start_ensemble(turn_id, mode, role) else {
-                    return effects;
-                };
-                self.drafts.accept();
-                if transition.operation().is_transcript_edit() {
-                    self.accept_pending_edit(&mut effects);
-                }
-                let turn = self.conversation.ensemble_turn(&start.run_id)
-                    .unwrap_or_else(|| self.conversation.allocate_turn());
-                self.session.bind_display_turn(turn);
-                if !self.conversation.has_ensemble(&start.run_id) {
-                    self.conversation.add_ensemble(
-                        start,
-                        if resumed {
-                            AgentRunStatus::Resuming
-                        } else {
-                            AgentRunStatus::Queued
-                        },
-                        Some(crate::presentation::NativeHeader::Prompt(turn)),
-                    );
-                } else if resumed {
-                    self.conversation.update_unfinished_ensemble_workers(
-                        &start.run_id,
-                        AgentRunStatus::Resuming,
-                    );
-                }
-            }
-            SessionEvent::AgentRunUpdated {
-                ensemble_run_id,
-                agent_run_id,
-                event,
-                ..
-            } => {
-                // Stable run/worker identity permits late child evidence without
-                // changing a newer root stream or retry tail.
-                if let AgentRunEvent::Status { status, detail } = event {
-                    self.conversation.update_ensemble_worker(
-                        &ensemble_run_id,
-                        &agent_run_id,
-                        status,
-                        detail.filter(|_| status.is_terminal()),
-                    );
-                }
-            }
-            SessionEvent::AgentRunFinished { ensemble_run_id, outcome, .. } => {
-                self.conversation.project_worker_completion(&ensemble_run_id, crate::projection::WorkerCompletion::outcome(&ensemble_run_id, outcome));
-            }
-            SessionEvent::EnsembleReportsReady { run_id, agents, .. } => {
-                for summary in agents {
-                    self.conversation.project_worker_completion(&run_id, crate::projection::WorkerCompletion::summary(&run_id, summary));
-                }
-            }
-            SessionEvent::PlanHandoffStarted { turn_id, handoff } => {
-                if self.session.start_plan_handoff(turn_id).is_none() {
-                    return effects;
-                }
-                let turn = self.conversation.allocate_turn();
-                self.session.bind_display_turn(turn);
-                self.conversation.push_plan_handoff(handoff, turn);
-                self.session.set_next_mode(SessionMode::Build);
-            }
-            SessionEvent::PlanStateChanged { state } => self.apply_plan_snapshot(state),
-            SessionEvent::PlanProjectionWarning {
-                version,
-                draft,
-                path,
-                error,
-            } => self.conversation.push_error(format!(
-                "Plan {version}{} remains available, but its projection at {} could not be written: {error}",
-                draft.map_or_else(String::new, |draft| format!(" draft {draft}")), path.display()
-            )),
-            SessionEvent::AssistantStreamUpdated { turn_id, snapshot } => {
-                if !self.session.preview_progress(turn_id) { return effects; }
-                if let Some(attempt) = snapshot.attempt {
-                    self.conversation.update_native_attempt(attempt, self.session.call_header());
-                } else if let Some(message) = snapshot.message.and_then(conversation::without_tool_calls) {
-                    self.session.stream(turn_id, message);
-                }
-            }
-            SessionEvent::StreamCleared { turn_id } => {
-                let _ = self.session.clear_stream(turn_id);
-            }
-            SessionEvent::Intermediate { turn_id, message, attempt_id } => {
-                if !self.session.progress(turn_id) {
-                    return effects;
-                }
-                let now = self.session.observed_at();
-                let header = self.session.call_header();
-                let _ = self.session.clear_stream(turn_id);
-                for finished in self.conversation.finish_tool_results(&message, &[]) {
-                    self.conversation.finish_header(Some(finished), now);
-                }
-                self.conversation.commit_response(message, attempt_id.as_deref(), ToolCallStatus::Executing, header);
-                // Keep the message's clock live while its commands/tools execute.
-                if !header.is_some_and(|header| self.conversation.header_has_executing_tool_calls(header)) {
-                    self.conversation.finish_header(header, now);
-                }
-            }
-            SessionEvent::ToolResults {
-                turn_id,
-                message,
-                metadata,
-            } => {
-                if !self.session.progress(turn_id) {
-                    return effects;
-                }
-                for header in self.conversation.finish_tool_results(&message, &metadata) {
-                    self.conversation.finish_header(Some(header), self.session.observed_at());
-                }
-            }
-            SessionEvent::SubtaskLaunched {
-                call_id,
-                entry_index,
-                descriptor,
-                ..
-            } => {
-                self.conversation
-                    .attach_subtask_launch(&call_id, entry_index, descriptor);
-            }
-            SessionEvent::SubtaskStatus { id, status, .. } => {
-                self.conversation.update_subtask_status(&id, status);
-            }
-            SessionEvent::PersistenceChanged { path, error } => {
-                let warning = error.map(|error| {
-                    format!(
-                        "Transcript persistence degraded at {}: {error}",
-                        path.display()
-                    )
-                });
-                self.session.set_persistence_error(warning.clone());
-                if let Some(warning) = warning {
-                    self.conversation.push_error(warning);
-                }
-            }
-            SessionEvent::UsageUpdated {
-                turn_id,
-                usage,
-                profile,
-                model_role,
-                input_token_limit,
-                context_window_tokens,
-            } => {
-                self.session.update_usage(
-                    turn_id,
-                    usage,
-                    profile,
-                    model_role,
-                    input_token_limit,
-                    context_window_tokens,
-                );
-            }
-            SessionEvent::ContextUsageUpdated { turn_id, snapshot } => {
-                self.session.update_context_usage(turn_id, snapshot);
-            }
-            SessionEvent::FreshPlanHandoffRequested { handoff } => {
-                self.session
-                    .settle_fresh_handoff_request(handoff.artifact.version);
-            }
-            SessionEvent::SubtaskSession { .. }
-            | SessionEvent::QuestionAsked { .. }
-            | SessionEvent::QuestionClosed { .. } => {}
-            SessionEvent::TurnCompleted { turn_id, message, attempt_id } => {
-                let Some((_kind, header)) = self.finish_turn(turn_id) else {
-                    return effects;
-                };
-                self.edit.reject();
-                self.conversation.interrupt_executing_tool_calls();
-                self.conversation
-                    .commit_response(message, attempt_id.as_deref(), ToolCallStatus::Finished, header);
-            }
-            SessionEvent::TurnRecovered { turn_id, .. } => {
-                let Some((_kind, _)) = self.finish_turn(turn_id) else {
-                    return effects;
-                };
-                self.edit.reject();
-                self.conversation.interrupt_executing_tool_calls();
-            }
-            SessionEvent::TurnRejected { turn_id, error } => {
-                let Some((kind, _)) = self.finish_turn(turn_id) else {
-                    return effects;
-                };
-                self.edit.reject();
-                self.restore_rejected_draft();
-                if kind.is_plan_decision() {
-                    self.workflow.restore_dialog_after_failure();
-                }
-                // The old transcript tail is authoritative; no accepted tool
-                // execution belongs to this rejected operation.
-                self.conversation.push_error(error);
-            }
-            SessionEvent::TurnFailed { turn_id, error } => {
-                let Some((kind, _)) = self.finish_turn(turn_id) else {
-                    return effects;
-                };
-                self.edit.reject();
-                self.restore_rejected_draft();
-                if kind.is_plan_decision() {
-                    self.workflow.restore_dialog_after_failure();
-                }
-                self.conversation.interrupt_executing_tool_calls();
-                self.conversation.push_error(error);
-            }
-            SessionEvent::TurnCancelled { turn_id } => {
-                let Some((kind, _)) = self.finish_turn(turn_id) else {
-                    return effects;
-                };
-                self.edit.reject();
-                self.restore_rejected_draft();
-                if kind.is_plan_decision() {
-                    self.workflow.restore_dialog_after_failure();
-                }
-                self.conversation.interrupt_executing_tool_calls();
-                self.conversation
-                    .push_error("Turn cancelled".to_string());
-            }
-            SessionEvent::NetworkStatus { turn_id, call, attempt, transport, status } => {
-                self.session.network_status(turn_id, call, attempt, transport, status);
-            }
-            SessionEvent::TurnRetrying {
-                turn_id,
-                call,
-                attempt,
-                retry_after,
-                retrying_for,
-                error,
-            } => {
-                if self.session.accepts_network(turn_id, call, attempt) {
-                    self.session.retry(turn_id, attempt, retry_after, retrying_for, error);
-                }
-            }
         }
-        effects
-    }
-
-    /// Capture the header before accepted terminal handling clears the active call.
-    /// Already settled messages keep their frozen duration; finishing is idempotent.
-    fn finish_turn(
-        &mut self,
-        turn_id: TurnId,
-    ) -> Option<(OperationKind, Option<crate::presentation::NativeHeader>)> {
-        let header = self.session.call_header();
-        let kind = self.session.finish(turn_id)?;
-        self.conversation
-            .finish_header(header, self.session.observed_at());
-        Some((kind, header))
-    }
-
-    fn accept_pending_edit(&mut self, effects: &mut Vec<AppEffect>) {
-        let Some(accepted) = self.edit.accept() else {
-            return;
-        };
-        let change = self
-            .conversation
-            .commit_edit(accepted.target_index, accepted.compacted);
-        effects.extend(self.apply_conversation_change(change));
+        if reduction.change == ConversationChange::default() {
+            Vec::new()
+        } else {
+            self.apply_conversation_change(reduction.change)
+        }
     }
 
     pub(crate) fn apply_conversation_change(
@@ -1315,8 +1012,9 @@ impl App {
         mut change: ConversationChange,
     ) -> Vec<AppEffect> {
         self.view.capture_conversation_anchor();
-        self.view.reconcile_anchor_identity(&self.conversation);
-        self.folds.reconcile(&self.conversation);
+        self.view
+            .reconcile_anchor_identity(&self.model.conversation);
+        self.folds.reconcile(&self.model.conversation);
         self.view.invalidate_rendered_geometry();
         if let Some(index) = change.invalidate_from() {
             self.view.invalidate_from(index);
@@ -1324,7 +1022,7 @@ impl App {
         if change.clears_selection() {
             self.interaction.clear_selection();
         } else if let Some(active) = self.interaction.active_selection() {
-            match self.conversation.reconcile_selection(
+            match self.model.conversation.reconcile_selection(
                 active.selection,
                 active.scope,
                 self.pane.diagnostics_visible(),
@@ -1351,28 +1049,21 @@ impl App {
     /// replacement it performs must be followed by `apply_conversation_change`.
     pub(crate) fn conversation_projection_mut(&mut self) -> &mut ConversationState {
         self.view.invalidate_rendered_geometry();
-        &mut self.conversation
+        &mut self.model.conversation
     }
 }
 
-fn ensemble_mode(workflow: EnsembleWorkflow) -> SessionMode {
-    match workflow {
-        EnsembleWorkflow::Plan => SessionMode::Plan,
-        EnsembleWorkflow::Review => SessionMode::Build,
+// Private-state characterization tests retain their original access paths.
+#[cfg(test)]
+impl std::ops::Deref for App {
+    type Target = SessionModel;
+    fn deref(&self) -> &SessionModel {
+        &self.model
     }
 }
-
-const fn ensemble_role(workflow: EnsembleWorkflow) -> ModelRole {
-    match workflow {
-        EnsembleWorkflow::Plan => ModelRole::Plan,
-        EnsembleWorkflow::Review => ModelRole::Review,
-    }
-}
-
-const fn replacement_role(replacement: &TranscriptEditReplacement) -> ModelRole {
-    match replacement {
-        TranscriptEditReplacement::Message { mode, .. }
-        | TranscriptEditReplacement::Skill { mode, .. } => role_for_mode(*mode),
-        TranscriptEditReplacement::Ensemble { workflow, .. } => ensemble_role(*workflow),
+#[cfg(test)]
+impl std::ops::DerefMut for App {
+    fn deref_mut(&mut self) -> &mut SessionModel {
+        &mut self.model
     }
 }

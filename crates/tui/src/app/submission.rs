@@ -1,12 +1,13 @@
 //! Submission, transcript edit, and Plan operation admission.
 use super::*;
+use zevria_session_api::TurnCommand;
 
 impl App {
     pub(super) fn submit(&mut self) -> Option<UiAction> {
         if self.pane.is_worker() {
             return self.submit_worker();
         }
-        if self.session.is_busy()
+        if self.model.session.is_busy()
             || !self.pane.is_root()
             || self.composer.is_blank()
             || self.composer.is_paste_pending()
@@ -27,18 +28,18 @@ impl App {
             let replacement = match classified {
                 ClassifiedInput::Message(text) => TranscriptEditReplacement::Message {
                     text,
-                    mode: self.session.next_mode(),
+                    mode: self.model.session.next_mode(),
                     behavior: zevria_foundation::RequestBehavior::Standard,
                 },
                 ClassifiedInput::Orchestrate(text) => TranscriptEditReplacement::Message {
                     text,
-                    mode: self.session.next_mode(),
+                    mode: self.model.session.next_mode(),
                     behavior: zevria_foundation::RequestBehavior::Orchestrate,
                 },
                 ClassifiedInput::Skill { name, args } => TranscriptEditReplacement::Skill {
                     name,
                     args,
-                    mode: self.session.next_mode(),
+                    mode: self.model.session.next_mode(),
                 },
                 ClassifiedInput::Ensemble { workflow, prompt } => {
                     TranscriptEditReplacement::Ensemble { workflow, prompt }
@@ -67,10 +68,15 @@ impl App {
         };
         match classified {
             ClassifiedInput::Message(text) | ClassifiedInput::Orchestrate(text) => {
-                let mode = self.session.next_mode();
-                if !self.begin_operation(OperationKind::Submit, mode, role_for_mode(mode)) {
-                    return None;
-                }
+                let TurnCommand::Submit {
+                    text,
+                    mode,
+                    behavior,
+                } = self.model.submit(text, behavior)?
+                else {
+                    unreachable!("submit admission")
+                };
+                self.after_admission();
                 self.stage_draft();
                 Some(UiAction::Submit {
                     text,
@@ -85,11 +91,10 @@ impl App {
                 self.begin_mode_selection(SessionMode::Plan, true)
             }
             ClassifiedInput::Builtin(SlashCommand::Compact) => {
-                let mode = self.session.next_mode();
-                if !self.begin_operation(OperationKind::ManualCompaction, mode, role_for_mode(mode))
-                {
-                    return None;
-                }
+                let TurnCommand::Compact { mode } = self.model.compact()? else {
+                    unreachable!("compaction admission")
+                };
+                self.after_admission();
                 self.composer.clear();
                 Some(UiAction::Compact { mode })
             }
@@ -100,10 +105,12 @@ impl App {
                 self.implement_submitted_plan(PlanDecision::ImplementFresh)
             }
             ClassifiedInput::Ensemble { workflow, prompt } => {
-                let mode = ensemble_mode(workflow);
-                if !self.begin_operation(OperationKind::Ensemble, mode, ensemble_role(workflow)) {
-                    return None;
-                }
+                let TurnCommand::RunEnsemble { workflow, prompt } =
+                    self.model.run_ensemble(workflow, prompt)?
+                else {
+                    unreachable!("ensemble admission")
+                };
+                self.after_admission();
                 self.stage_draft();
                 Some(UiAction::RunEnsemble { workflow, prompt })
             }
@@ -112,10 +119,12 @@ impl App {
                 Some(UiAction::RunCommand(command))
             }
             ClassifiedInput::Skill { name, args } => {
-                let mode = self.session.next_mode();
-                if !self.begin_operation(OperationKind::Skill, mode, role_for_mode(mode)) {
-                    return None;
-                }
+                let TurnCommand::InvokeSkill { name, args, mode } =
+                    self.model.invoke_skill(name, args)?
+                else {
+                    unreachable!("skill admission")
+                };
+                self.after_admission();
                 self.stage_draft();
                 Some(UiAction::InvokeSkill { name, args, mode })
             }
@@ -160,24 +169,28 @@ impl App {
         &mut self,
         replacement: TranscriptEditReplacement,
     ) -> Option<UiAction> {
-        let mode = replacement.mode();
-        let role = replacement_role(&replacement);
-        if !self.begin_operation(OperationKind::TranscriptEdit, mode, role) {
-            return None;
-        }
-        let target = self
-            .edit
+        let (target, target_index) = self.edit.recalled_target()?;
+        let TurnCommand::EditTranscript(edit) = self.model.edit_transcript(
+            TranscriptEdit {
+                target,
+                replacement,
+            },
+            target_index,
+        )?
+        else {
+            unreachable!("edit admission")
+        };
+        self.after_admission();
+        self.edit
             .stage_submission()
             .expect("validated recall must stage exactly once");
         self.stage_draft();
-        Some(UiAction::EditTranscript(TranscriptEdit {
-            target,
-            replacement,
-        }))
+        Some(UiAction::EditTranscript(edit))
     }
 
     pub(super) fn implement_submitted_plan(&mut self, decision: PlanDecision) -> Option<UiAction> {
         let Some(expected) = self
+            .model
             .workflow
             .submitted_artifact()
             .map(|artifact| artifact.version)
@@ -198,14 +211,12 @@ impl App {
         if !self.pane.is_root() {
             return None;
         }
-        let kind = OperationKind::plan_decision(expected, decision);
-        let role = match decision {
-            PlanDecision::Revise => ModelRole::Plan,
-            PlanDecision::ImplementCurrent | PlanDecision::ImplementFresh => ModelRole::Build,
+        let TurnCommand::ResolvePlan { expected, decision } =
+            self.model.resolve_plan(expected, decision)?
+        else {
+            unreachable!("plan admission")
         };
-        if !self.begin_operation(kind, SessionMode::Build, role) {
-            return None;
-        }
+        self.after_admission();
         if matches!(
             decision,
             PlanDecision::ImplementCurrent | PlanDecision::ImplementFresh
@@ -218,20 +229,8 @@ impl App {
     }
 
     pub(super) fn apply_plan_snapshot(&mut self, state: zevria_workflow::PlanWorkflowState) {
-        if let zevria_workflow::PlanWorkflowState::Ready { artifact }
-        | zevria_workflow::PlanWorkflowState::Published { artifact } = &state
-        {
-            self.conversation.push_plan_artifact(artifact.clone());
-        }
-        let ready = matches!(state, zevria_workflow::PlanWorkflowState::Ready { .. });
-        let draft_only = self.workflow.is_draft_update(&state);
-        let changed = self.workflow.apply_snapshot(state);
-        if !draft_only {
-            self.session.settle_plan_state(self.workflow.snapshot());
-        }
-        if ready && changed {
+        if self.model.apply_plan_snapshot(state) {
             self.composer.close_edit_group();
-            self.session.set_next_mode(SessionMode::Plan);
             self.interaction.clear_selection();
             self.interaction.clear_chords();
         }
@@ -242,7 +241,7 @@ impl App {
             self.composer.close_edit_group();
         }
         if !self.pane.can_compose()
-            && self.session.operation_kind() != Some(OperationKind::ModeManagement)
+            && self.model.session.operation_kind() != Some(OperationKind::ModeManagement)
             && self.interaction.is_insert()
         {
             self.interaction.enter_normal();
@@ -250,18 +249,9 @@ impl App {
         }
     }
 
-    pub(super) fn begin_operation(
-        &mut self,
-        kind: OperationKind,
-        mode: SessionMode,
-        role: ModelRole,
-    ) -> bool {
-        if !self.pane.is_root() || !self.session.begin_operation(kind, mode, role) {
-            return false;
-        }
+    fn after_admission(&mut self) {
         self.view.jump_bottom();
         self.interaction.clear_chords();
         self.leave_insert_if_composer_locked();
-        true
     }
 }

@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-test-support = []
+test-support = ["zevria-presentation/test-support"]
 
 [dependencies]
+zevria-presentation = { workspace = true }
 zevria-content = { workspace = true }
 zevria-foundation = { workspace = true }
 zevria-instructions = { workspace = true }

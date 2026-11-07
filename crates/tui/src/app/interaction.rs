@@ -14,11 +14,7 @@ pub(crate) struct SelectionEntry {
     pub(crate) reveal: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SelectionScope {
-    Message,
-    Block,
-}
+pub(crate) use zevria_presentation::conversation::SelectionScope;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ActiveSelection {

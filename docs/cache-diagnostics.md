@@ -121,7 +121,7 @@ can be inferred from these logs.
 ## Enable explicitly
 
 `cache-diagnostics` is default-off on all three packages. The CLI forwards to
-`zevria-app`, which forwards to `zevria-provider`. The provider's `libc` and
+`zevria-host`, which forwards to `zevria-provider`. The provider's `libc` and
 `uuid` dependency edges are optional and enabled only by this feature (both
 packages already existed in the workspace).
 
@@ -558,11 +558,11 @@ Delete these temporary assets as a unit; keep the permanent regressions separate
   `response.rs`, `response_tests.rs`, `socket.rs`, `tests.rs`, `lifecycle_tests.rs`,
   `partial_tests.rs`, `seven_turns.json`, `probe.rs`, `probe_support.rs`,
   `measurements.csv`, `rehearse_removal.py`.
-- `crates/app/src/cache_diagnostics_runtime_tests.rs` and its gated module hook.
+- `crates/host/src/cache_diagnostics_runtime_tests.rs` and its gated module hook.
 - This file: `docs/cache-diagnostics.md`, and the marked temporary observer
   paragraph in `docs/responses-compatible.md`. The rehearsal script removes both.
 - `cache-diagnostics` definition/forwarding and their temporary comments in
-  `crates/provider/Cargo.toml`, `crates/app/Cargo.toml`, `crates/zevria/Cargo.toml`.
+  `crates/provider/Cargo.toml`, `crates/host/Cargo.toml`, `crates/zevria/Cargo.toml`.
 - Every `#[cfg(feature = "cache-diagnostics")]` hook in the following files:
   - `lib.rs`: optional module declaration and `CacheDiagnosticContext` export.
   - `router.rs`: optional context, reset marker, context builder, lazy-slot
@@ -590,7 +590,7 @@ Delete these temporary assets as a unit; keep the permanent regressions separate
     `reconnecting_a_continuation_does_not_execute_its_tool_twice`.
   - `resume_wire_tests.rs`: only context attachment and snapshot assertions;
     keep the ordinary engine/JSONL/native replay regression.
-  - `crates/app/src/runtime.rs`: normal and worker context attachment and gated
+  - `crates/host/src/runtime.rs`: normal and worker context attachment and gated
     diagnostic startup-test module.
 - Remove provider optional `libc`/`uuid` dependency edges and their entries in
   the `zevria-provider` dependency list in `Cargo.lock`, not the workspace packages.

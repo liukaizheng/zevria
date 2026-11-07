@@ -1,8 +1,8 @@
 //! Pure post-quantization validation shared by generation and loading.
 use std::fmt;
 
+use crate::Rgb;
 use palette::{LinSrgb, Oklab, Srgb, convert::FromColorUnclamped};
-use ratatui::style::Color;
 
 use super::{
     ZevriaTheme,
@@ -185,14 +185,11 @@ pub(super) fn rgb(color: HexRgb) -> LinSrgb<f64> {
         .into_linear()
 }
 
-fn linear(color: Color) -> LinSrgb<f64> {
-    let Color::Rgb(r, g, b) = color else {
-        unreachable!("semantic tokens must be explicit RGB")
-    };
-    rgb(HexRgb(r, g, b))
+fn linear(color: Rgb) -> LinSrgb<f64> {
+    rgb(color)
 }
 
-pub(super) fn contrast(left: Color, right: Color) -> f64 {
+pub(super) fn contrast(left: Rgb, right: Rgb) -> f64 {
     let luminance = |c| {
         let c = linear(c);
         0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue
@@ -230,7 +227,7 @@ pub(super) const SIMULATIONS: [(&str, [[f64; 3]; 3]); 3] = [
     ),
 ];
 
-pub(super) fn simulate(color: Color, matrix: [[f64; 3]; 3]) -> Oklab<f64> {
+pub(super) fn simulate(color: Rgb, matrix: [[f64; 3]; 3]) -> Oklab<f64> {
     let c = linear(color);
     let [r, g, b] =
         matrix.map(|row| (row[0] * c.red + row[1] * c.green + row[2] * c.blue).clamp(0.0, 1.0));
@@ -250,10 +247,10 @@ mod tests {
     use super::*;
     #[test]
     fn wcag_luminance_and_quantized_thresholds_match_reference_pairs() {
-        let white = Color::Rgb(255, 255, 255);
-        assert!((contrast(white, Color::Rgb(0, 0, 0)) - 21.0).abs() < 1e-10);
-        assert!((contrast(white, Color::Rgb(119, 119, 119)) - 4.478089453577214).abs() < 1e-10);
-        assert!(contrast(white, Color::Rgb(118, 118, 118)) >= 4.5);
+        let white = Rgb(255, 255, 255);
+        assert!((contrast(white, Rgb(0, 0, 0)) - 21.0).abs() < 1e-10);
+        assert!((contrast(white, Rgb(119, 119, 119)) - 4.478089453577214).abs() < 1e-10);
+        assert!(contrast(white, Rgb(118, 118, 118)) >= 4.5);
         assert_eq!(contrast(white, white), 1.0);
     }
 

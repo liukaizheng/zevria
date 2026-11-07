@@ -1,7 +1,6 @@
 //! Versioned, concrete reference colors. The filename is the only theme identity.
 use std::{fmt, str::FromStr};
 
-use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
@@ -54,8 +53,8 @@ impl<'de> Deserialize<'de> for HexRgb {
 }
 
 impl HexRgb {
-    pub(super) const fn color(self) -> Color {
-        Color::Rgb(self.0, self.1, self.2)
+    pub(super) const fn color(self) -> Self {
+        self
     }
 }
 
@@ -105,7 +104,7 @@ pub struct ReferencePalette {
 impl ReferencePalette {
     /// Central reference → semantic graph (38 tokens). Component code never
     /// derives colors or interprets the persisted format.
-    pub(super) const fn tokens(&self) -> ZevriaTheme {
+    pub const fn tokens(&self) -> ZevriaTheme {
         ZevriaTheme {
             surfaces: SurfaceTokens {
                 canvas: self.canvas.color(),

@@ -1,9 +1,9 @@
 //! The Zevria composition root: CLI/configuration, compile-time adapters, and
 //! the terminal runtime.
 
-use zevria_app::{acp_host, clean, config, runtime, skills, theme_store};
 #[cfg(test)]
 use zevria_ensemble as ensemble;
+use zevria_host::{acp_host, clean, config, runtime, skills, theme_store};
 mod launcher;
 #[cfg(test)]
 mod session_model_tests;
@@ -13,19 +13,14 @@ mod theme_cli;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use zevria_transcript::subtask_launch_metadata;
 
 use anyhow::Context as _;
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use zevria_foundation::SubtaskId;
 use zevria_foundation::logging;
-use zevria_transcript::AgentRunTranscriptReader;
-use zevria_transcript::agent_run_path;
 use zevria_transcript::transcript;
-use zevria_transcript::transcript::TranscriptItem;
 use zevria_tui::{App, SessionViews, UiContext, UiOutcome, run_ui};
 use zevria_tui_widgets::render_startup_frame;
 
@@ -304,14 +299,14 @@ async fn main() -> anyhow::Result<()> {
     // session still fails fast and legibly.
     let mut next_start = if args.continue_session {
         let sessions_dir = transcript::sessions_dir(&workspace);
-        runtime::SessionStart::Resume(
-            transcript::latest_session_file(&sessions_dir)?.with_context(|| {
+        runtime::SessionStart::Resume(zevria_host::sessions::latest(&workspace)?.with_context(
+            || {
                 format!(
                     "no previous session to continue in {}",
                     sessions_dir.display()
                 )
-            })?,
-        )
+            },
+        )?)
     } else {
         runtime::SessionStart::New {
             inherited_models: None,
@@ -380,7 +375,7 @@ async fn run_session(
     )?;
 
     let mut running = runtime::start_session(app_config, workspace, start).await?;
-    let restoration = running.restoration();
+    let restoration = running.take_restored();
     let model_profiles = zevria_foundation::ModelRole::ALL.into_iter().map(|role| {
         (
             role,
@@ -405,34 +400,28 @@ async fn run_session(
         root_app.push_error(notice.clone());
     }
 
-    let child_launches = subtask_launch_metadata(&restoration.transcript_items);
     let mut views = SessionViews::new(root_app, workspace.to_path_buf());
     views.seed_child_creation_order(&restoration.transcript_items);
-    for (child_id, path) in transcript::subsession_files(&restoration.subsessions_dir)? {
-        let items = transcript::load(&path)?;
-        let metadata = child_launches.get(&child_id).cloned();
-        views.restore_child(SubtaskId::new(child_id), metadata, items);
+    for child in restoration.subtasks {
+        views.restore_child(child.id, child.launch, child.items);
     }
-    for item in &restoration.transcript_items {
-        let TranscriptItem::Ensemble(zevria_workflow::EnsembleRecord::Started { start }) = item
-        else {
-            continue;
-        };
-        for descriptor in &start.agents {
-            let path = agent_run_path(&restoration.agent_runs_root, &start.run_id, &descriptor.id);
-            if path.exists() {
-                views.restore_agent_run_stream(AgentRunTranscriptReader::open(&path)?)?;
-            }
-        }
+    for agent in restoration.agent_runs {
+        views.restore_agent_run(agent.records);
     }
 
+    let catalog_workspace = workspace.to_path_buf();
+    let catalog_session = restoration.session_id.clone();
     let ui_context = UiContext {
         sessions_dir: restoration.sessions_dir.clone(),
         current_session_id: restoration.session_id.clone(),
+        session_catalog: Box::new(move || {
+            zevria_host::sessions::resumable(&catalog_workspace, Some(&catalog_session))
+        }),
     };
     let command_tx = running.command_sender();
     let mut event_rx = running.take_event_receiver()?;
     let mut exit_rx = running.take_exit_receiver()?;
+    #[allow(clippy::large_enum_variant)] // One stack-local teardown outcome.
     enum ActiveSessionExit {
         Ui(anyhow::Result<UiOutcome>),
         Runtime(Option<runtime::RuntimeTaskExit>),

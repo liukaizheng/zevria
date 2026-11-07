@@ -9,11 +9,11 @@ mod reasoning_tests;
 mod replacement_tests;
 
 use std::path::{Path, PathBuf};
-use zevria_app::{
+use zevria_foundation::{ModelProfileRef, ModelRole};
+use zevria_host::{
     Config,
     test_support::{load_config as load, model_revision as revision},
 };
-use zevria_foundation::{ModelProfileRef, ModelRole};
 
 fn source() -> String {
     r#"# preserved comment
@@ -170,7 +170,7 @@ impl Fixture {
             "plan = { provider = \"p\", model = \"new/with:separators\", reasoning_level = \"low\" }",
         );
         let config =
-            zevria_app::test_support::write_fixture(&path, &format!("{source}\n{extra}")).unwrap();
+            zevria_host::test_support::write_fixture(&path, &format!("{source}\n{extra}")).unwrap();
         let models_path = zevria_foundation::config::models_path_for(&path);
         Self {
             directory,

@@ -98,7 +98,7 @@ async fn assert_rejected(fixture: &Fixture, root: &Path, bad: &Path) {
     assert_eq!(std::fs::read(&fixture.path).unwrap(), config_before);
     // Every rejected startup releases ownership and cleans its sidecar.
     assert!(!root.with_extension("jsonl.lock").exists());
-    zevria_app::test_support::RootSessionLease::acquire(root).unwrap();
+    zevria_host::test_support::RootSessionLease::acquire(root).unwrap();
 }
 
 #[tokio::test]
@@ -279,7 +279,7 @@ async fn root_and_worker_startup_sweep_only_their_namespace_and_preserve_discove
     .unwrap();
     for directory in [&roots, &workers] {
         assert!(
-            zevria_app::test_support::RootSessionLease::acquire(&directory.join("shared.jsonl"))
+            zevria_host::test_support::RootSessionLease::acquire(&directory.join("shared.jsonl"))
                 .is_err()
         );
     }

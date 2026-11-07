@@ -422,7 +422,7 @@ fn broken_selection_fails_before_terminal_but_acp_does_not_open_it() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let config = home.path().join("custom.toml");
-    zevria_app::test_support::write_fixture(&config, PROVIDERS).unwrap();
+    zevria_host::test_support::write_fixture(&config, PROVIDERS).unwrap();
     let error = result(
         &command(home.path(), workspace.path(), Some(&config))
             .output()

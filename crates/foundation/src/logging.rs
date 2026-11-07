@@ -16,6 +16,21 @@ use crate::config::LogConfig;
 /// `main` must keep it alive for the whole run (bind it to a named variable —
 /// `let _ = …` would drop it immediately).
 pub fn init(config: &LogConfig) -> anyhow::Result<WorkerGuard> {
+    init_named(config, "zevria.log")
+}
+
+/// Install file-only logging for an in-process frontend. The name must be a
+/// single file component so it cannot escape the configured log directory.
+pub fn init_named(config: &LogConfig, file_name: &str) -> anyhow::Result<WorkerGuard> {
+    anyhow::ensure!(
+        !file_name.is_empty()
+            && std::path::Path::new(file_name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                == Some(file_name)
+            && !file_name.contains(['/', '\\']),
+        "log filename must be a single nonempty file component"
+    );
     let directory = match &config.directory {
         Some(directory) => directory.clone(),
         None => crate::config::zevria_dir()?.join("logs"),
@@ -27,7 +42,7 @@ pub fn init(config: &LogConfig) -> anyhow::Result<WorkerGuard> {
         )
     })?;
 
-    let appender = tracing_appender::rolling::never(&directory, "zevria.log");
+    let appender = tracing_appender::rolling::never(&directory, file_name);
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
     // RUST_LOG wins over the configured level when set.

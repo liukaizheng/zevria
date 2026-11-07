@@ -1,0 +1,20 @@
+[package]
+name = "zevria-presentation"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+zevria-foundation = { workspace = true }
+zevria-content = { workspace = true }
+zevria-instructions = { workspace = true }
+zevria-model = { workspace = true }
+zevria-workflow = { workspace = true }
+zevria-session-api = { workspace = true }
+zevria-transcript = { workspace = true }
+rig-core = { workspace = true }
+serde_json = { workspace = true }
+unicode-segmentation = { workspace = true }
+anyhow = { workspace = true }

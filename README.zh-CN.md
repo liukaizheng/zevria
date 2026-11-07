@@ -381,12 +381,16 @@ cargo test --workspace --locked
 | 目录 | 职责 |
 | --- | --- |
 | `crates/zevria` | CLI 入口和终端启动。 |
-| `crates/app` | 配置、运行时组合和应用服务。 |
+| `crates/host`（`zevria-host`） | 前端无关的配置、会话生命周期、恢复、发现和宿主服务。 |
+| `crates/presentation` | 原生前端共享的会话 reducer、生命周期/Plan 状态、语义块及命令/补全语法。 |
 | `crates/core`、`crates/session-api` | 会话引擎以及前端/provider 契约。 |
 | `crates/provider`、`crates/responses` | 模型路由和 Responses 传输/回放。 |
 | `crates/acp`、`crates/ensemble` | ACP 前端和多智能体工作流。 |
-| `crates/tui`、`crates/tui-input`、`crates/tui-widgets`、`crates/theme` | 终端界面、输入和呈现。 |
+| `crates/tui`、`crates/tui-input`、`crates/tui-widgets` | 终端界面、输入、渲染和终端主题适配器。 |
+| `crates/theme` | 不依赖 Ratatui 的语义 sRGB 令牌、主题生成、持久化和验证。 |
 | 其他工作区 crate | 共享值、指令、模型、工作流、工具和对话记录。 |
+
+原生 GPUI 桌面前端位于独立的相邻 `zevria-app` 包，共享 host 和 presentation，不会向本工作区引入 GUI 依赖。参阅[桌面说明](docs/desktop.md)。
 
 关于 crate 边界和数据流，请参阅[架构说明](docs/architecture.md)。贡献代码时请遵循 [AGENTS.md](AGENTS.md)；所有更改都必须保留 provider 可缓存的提示前缀。
 

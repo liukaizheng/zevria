@@ -7,7 +7,7 @@ use zevria_workflow::WorkerReviewEvent as Review;
 use zevria_workflow::WorkerReviewState;
 
 #[derive(Default)]
-pub(super) struct ReviewProjection {
+pub struct ReviewProjection {
     headers: HashMap<u64, BlockLocation>,
     inputs: HashMap<u64, PromptAnnotation>,
     active: Option<u64>,
@@ -32,11 +32,7 @@ struct Settlement {
 }
 
 impl AgentTranscriptReducer {
-    pub(super) fn apply_review_event(
-        &mut self,
-        conversation: &mut ConversationState,
-        event: Review,
-    ) {
+    pub fn apply_review_event(&mut self, conversation: &mut ConversationState, event: Review) {
         match event {
             Review::InputAccepted { input } => {
                 // These guards precede prompt creation AND echo initialization.
@@ -295,7 +291,7 @@ impl AgentTranscriptReducer {
         }
     }
 
-    pub(super) fn rebuild_review_headers(&mut self, conversation: &ConversationState) {
+    pub fn rebuild_review_headers(&mut self, conversation: &ConversationState) {
         self.review.headers.clear();
         for (history_index, entry) in conversation.history().iter().enumerate() {
             let HistoryEntry::Conversation(entry) = entry else {
@@ -383,21 +379,21 @@ impl AgentTranscriptReducer {
         );
     }
 
-    pub(super) fn review_replay_boundary(&mut self) {
+    pub fn review_replay_boundary(&mut self) {
         self.review.publication_replaying = true;
         self.review.publication_enabled = false;
     }
 
-    pub(super) fn review_session_established(&mut self) {
+    pub fn review_session_established(&mut self) {
         self.review.publication_replaying = false;
     }
 
-    pub(super) fn enable_review_publication(&mut self) {
+    pub fn enable_review_publication(&mut self) {
         self.review.publication_enabled =
             self.review.active.is_some() && !self.review.publication_replaying;
     }
 
-    pub(super) fn observe_review_plan(&mut self, plan: &AgentStructuredPlan) {
+    pub fn observe_review_plan(&mut self, plan: &AgentStructuredPlan) {
         if self.review.publication_enabled
             && let Some(generation) = self.review.active
         {
@@ -416,7 +412,7 @@ impl AgentTranscriptReducer {
         }
     }
 
-    pub(super) fn observe_review_removal(&mut self, plan_id: &str) {
+    pub fn observe_review_removal(&mut self, plan_id: &str) {
         if self.review.publication_replaying {
             return;
         }
@@ -503,11 +499,7 @@ impl AgentTranscriptReducer {
         self.refresh_settlement_notice(conversation, generation);
     }
 
-    pub(super) fn observe_provider_failure(
-        &mut self,
-        conversation: &mut ConversationState,
-        error: &str,
-    ) {
+    pub fn observe_provider_failure(&mut self, conversation: &mut ConversationState, error: &str) {
         // A failure outside a correlated review round is never suppressed.
         let generation = self.review.active.or_else(|| {
             self.review
@@ -586,7 +578,7 @@ impl AgentTranscriptReducer {
 
     /// Reliable host snapshots and journal mirrors share these semantic notice
     /// identities. Snapshot errors unrelated to settlement stay independent.
-    pub(crate) fn apply_review_snapshot(
+    pub fn apply_review_snapshot(
         &mut self,
         conversation: &mut ConversationState,
         state: &WorkerReviewState,

@@ -79,8 +79,14 @@ fn append_guidance_notices(
     }
 }
 
+#[cfg(test)]
+#[path = "restoration_tests.rs"]
+mod restoration_tests;
+
 /// Owned startup intent. Only explicit root replacements inherit selections;
 /// independent starts use configuration defaults and resume uses its transcript.
+// Startup intents are infrequent owned values, not queued per-token traffic.
+#[allow(clippy::large_enum_variant)]
 pub enum SessionStart {
     New {
         inherited_models: Option<zevria_model::models::SessionModels>,
@@ -446,6 +452,9 @@ async fn start_worker_session(
         exit_tx,
     );
     Ok(RunningSession {
+        restored_taken: false,
+        restored_subtasks: Vec::new(),
+        restored_agent_runs: Vec::new(),
         restoration: SessionRestoration {
             model_contexts: models.routing.context_policies(),
             reasoning_levels: std::array::from_fn(|index| {
@@ -505,18 +514,39 @@ fn preflight_restoration(
     children: &Path,
     agents: &Path,
     items: &[TranscriptItem],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Vec<RestoredSubtask>, Vec<RestoredAgentRun>)> {
     zevria_transcript::SessionReplayError::validate(items)?;
-    for (_, path) in transcript::subsession_files(children)? {
-        let child = transcript::load(&path)?;
-        zevria_transcript::SessionReplayError::validate(&child)?;
+    let mut subtasks = Vec::new();
+    let launches = zevria_transcript::subtask_launch_metadata(items);
+    for (id, path) in transcript::subsession_files(children)? {
+        let items = transcript::load(&path)?;
+        zevria_transcript::SessionReplayError::validate(&items)?;
+        subtasks.push(RestoredSubtask {
+            launch: launches.get(&id).cloned(),
+            id: zevria_foundation::SubtaskId::new(id),
+            items,
+        });
     }
+    let mut agent_runs = Vec::new();
     for item in items {
         if let TranscriptItem::Ensemble(zevria_workflow::EnsembleRecord::Started { start }) = item {
             crate::ensemble::preflight_existing_logs(agents, start)?;
+            for descriptor in &start.agents {
+                let path = zevria_transcript::agent_run_path(agents, &start.run_id, &descriptor.id);
+                if path.exists() {
+                    let records = zevria_transcript::AgentRunTranscriptReader::open(&path)?
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    agent_runs.push(RestoredAgentRun {
+                        run_id: start.run_id.clone(),
+                        descriptor: descriptor.clone(),
+                        path,
+                        records,
+                    });
+                }
+            }
         }
     }
-    Ok(())
+    Ok((subtasks, agent_runs))
 }
 
 pub(crate) fn transcript_recovery_notice(path: &Path, malformed_lines: usize) -> Option<String> {
@@ -566,6 +596,39 @@ pub struct SessionRestoration {
     pub selected_mode: SessionMode,
 }
 
+/// One-time, host-loaded frontend restoration payload. Frontends never reopen
+/// transcript files; the runtime retains paths and lease metadata for shutdown.
+pub struct RestoredSession {
+    pub model_contexts: [zevria_foundation::ModelContextPolicy; ModelRole::COUNT],
+    pub reasoning_levels: [zevria_foundation::ReasoningLevel; ModelRole::COUNT],
+    pub model_snapshots: Vec<zevria_model::ContextTokenSnapshot>,
+    pub sessions_dir: PathBuf,
+    pub session_id: String,
+    pub subsessions_dir: PathBuf,
+    pub agent_runs_root: PathBuf,
+    pub transcript_path: PathBuf,
+    pub transcript_items: Vec<TranscriptItem>,
+    pub skill_catalog: Arc<zevria_instructions::skill::SkillCatalog>,
+    pub startup_notices: Vec<String>,
+    /// Snapshot from the fully configured engine, captured before spawning it.
+    pub plan_state: PlanWorkflowState,
+    /// Authoritative selection from the engine, independent of Plan presentation.
+    pub selected_mode: SessionMode,
+    pub subtasks: Vec<RestoredSubtask>,
+    pub agent_runs: Vec<RestoredAgentRun>,
+}
+pub struct RestoredSubtask {
+    pub id: zevria_foundation::SubtaskId,
+    pub launch: Option<zevria_foundation::SubtaskLaunchMetadata>,
+    pub items: Vec<TranscriptItem>,
+}
+pub struct RestoredAgentRun {
+    pub run_id: zevria_workflow::EnsembleRunId,
+    pub descriptor: zevria_workflow::AgentRunDescriptor,
+    pub path: PathBuf,
+    pub records: Vec<zevria_transcript::AgentRunTranscriptRecord>,
+}
+
 /// One observed engine/supervisor task ending while a frontend is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeTaskExit {
@@ -577,6 +640,9 @@ pub struct RuntimeTaskExit {
 /// senders and take the sole event receiver, while this handle retains task,
 /// transcript, and shutdown ownership.
 pub struct RunningSession {
+    restored_taken: bool,
+    restored_subtasks: Vec<RestoredSubtask>,
+    restored_agent_runs: Vec<RestoredAgentRun>,
     pub(crate) restoration: SessionRestoration,
     // Held until background shutdown and abandoned-root cleanup finish. The
     // engine also owns an Arc: dropping a frontend must not release a live engine.
@@ -594,6 +660,34 @@ impl RunningSession {
     /// transcript path used during shutdown and abandoned-root cleanup.
     pub fn restoration(&self) -> &SessionRestoration {
         &self.restoration
+    }
+
+    /// Move the startup payload exactly once. Subsequent attempts are programmer
+    /// errors, like taking the sole receiver twice, rather than empty restores.
+    pub fn take_restored(&mut self) -> RestoredSession {
+        assert!(
+            !self.restored_taken,
+            "session restoration payload was already taken"
+        );
+        self.restored_taken = true;
+        let meta = &mut self.restoration;
+        RestoredSession {
+            model_contexts: meta.model_contexts.clone(),
+            reasoning_levels: meta.reasoning_levels,
+            model_snapshots: std::mem::take(&mut meta.model_snapshots),
+            sessions_dir: meta.sessions_dir.clone(),
+            session_id: meta.session_id.clone(),
+            subsessions_dir: meta.subsessions_dir.clone(),
+            agent_runs_root: meta.agent_runs_root.clone(),
+            transcript_path: meta.transcript_path.clone(),
+            transcript_items: std::mem::take(&mut meta.transcript_items),
+            skill_catalog: meta.skill_catalog.clone(),
+            startup_notices: std::mem::take(&mut meta.startup_notices),
+            plan_state: std::mem::take(&mut meta.plan_state),
+            selected_mode: meta.selected_mode,
+            subtasks: std::mem::take(&mut self.restored_subtasks),
+            agent_runs: std::mem::take(&mut self.restored_agent_runs),
+        }
     }
 
     pub fn command_sender(&self) -> UnboundedSender<SessionCommand> {
@@ -710,9 +804,11 @@ pub async fn start_session(
     )?;
     let subsessions_dir = transcript::subsessions_dir(workspace, &root_session_id);
     let agent_runs_root = agent_runs_dir(workspace, &root_session_id);
-    if let Some(outcome) = &loaded {
-        preflight_restoration(&subsessions_dir, &agent_runs_root, &outcome.items)?;
-    }
+    let (restored_subtasks, restored_agent_runs) = if let Some(outcome) = &loaded {
+        preflight_restoration(&subsessions_dir, &agent_runs_root, &outcome.items)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let (event_tx, event_rx) = session_event_channel(app_config.session.event_queue_capacity);
     let channels = subtask_channels_with_capacity(
@@ -942,6 +1038,9 @@ pub async fn start_session(
     }
 
     Ok(RunningSession {
+        restored_taken: false,
+        restored_subtasks,
+        restored_agent_runs,
         _lease: Some(lease),
         restoration: SessionRestoration {
             model_contexts: session_models.routing.context_policies(),
@@ -1407,6 +1506,9 @@ mod tests {
             SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
         );
         let running = RunningSession {
+            restored_taken: false,
+            restored_subtasks: Vec::new(),
+            restored_agent_runs: Vec::new(),
             _lease: Some(lease),
             restoration: SessionRestoration {
                 model_contexts: crate::config::test_config().routing().context_policies(),
@@ -1459,6 +1561,9 @@ mod tests {
             SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
         );
         let running = RunningSession {
+            restored_taken: false,
+            restored_subtasks: Vec::new(),
+            restored_agent_runs: Vec::new(),
             _lease: None,
             restoration: SessionRestoration {
                 model_contexts: crate::config::test_config().routing().context_policies(),

@@ -5282,10 +5282,10 @@ dependencies = [
  "toml_edit",
  "tracing",
  "zevria-acp",
- "zevria-app",
  "zevria-content",
  "zevria-ensemble",
  "zevria-foundation",
+ "zevria-host",
  "zevria-instructions",
  "zevria-model",
  "zevria-session-api",
@@ -5333,40 +5333,6 @@ dependencies = [
  "zevria-foundation",
  "zevria-instructions",
  "zevria-model",
-]
-
-[[package]]
-name = "zevria-app"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "jsonc-parser",
- "libc",
- "rig-agent",
- "rig-core",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml",
- "toml_edit",
- "tracing",
- "zevria-acp",
- "zevria-content",
- "zevria-core",
- "zevria-ensemble",
- "zevria-foundation",
- "zevria-instructions",
- "zevria-model",
- "zevria-provider",
- "zevria-responses",
- "zevria-session-api",
- "zevria-theme",
- "zevria-tools",
- "zevria-transcript",
- "zevria-workflow",
 ]
 
 [[package]]
@@ -5460,6 +5426,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "zevria-host"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "jsonc-parser",
+ "libc",
+ "rig-agent",
+ "rig-core",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "zevria-acp",
+ "zevria-content",
+ "zevria-core",
+ "zevria-ensemble",
+ "zevria-foundation",
+ "zevria-instructions",
+ "zevria-model",
+ "zevria-provider",
+ "zevria-responses",
+ "zevria-session-api",
+ "zevria-theme",
+ "zevria-tools",
+ "zevria-transcript",
+ "zevria-workflow",
+]
+
+[[package]]
 name = "zevria-instructions"
 version = "0.1.1"
 dependencies = [
@@ -5491,6 +5491,23 @@ dependencies = [
  "zevria-content",
  "zevria-foundation",
  "zevria-instructions",
+]
+
+[[package]]
+name = "zevria-presentation"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "rig-core",
+ "serde_json",
+ "unicode-segmentation",
+ "zevria-content",
+ "zevria-foundation",
+ "zevria-instructions",
+ "zevria-model",
+ "zevria-session-api",
+ "zevria-transcript",
+ "zevria-workflow",
 ]
 
 [[package]]
@@ -5567,7 +5584,6 @@ dependencies = [
  "anyhow",
  "palette",
  "palette_derive",
- "ratatui",
  "serde",
  "syn 2.0.118",
  "toml",
@@ -5640,6 +5656,7 @@ dependencies = [
  "zevria-foundation",
  "zevria-instructions",
  "zevria-model",
+ "zevria-presentation",
  "zevria-session-api",
  "zevria-theme",
  "zevria-transcript",
@@ -5659,6 +5676,7 @@ dependencies = [
  "zevria-content",
  "zevria-foundation",
  "zevria-instructions",
+ "zevria-presentation",
  "zevria-theme",
  "zevria-tui-widgets",
  "zevria-workflow",

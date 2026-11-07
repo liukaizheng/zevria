@@ -3,19 +3,19 @@ use super::*;
 
 impl App {
     pub(crate) fn has_executing_tool_calls(&self) -> bool {
-        self.conversation.has_executing_tool_calls()
+        self.model.conversation.has_executing_tool_calls()
     }
 
     pub(crate) fn next_mode(&self) -> SessionMode {
-        self.session.next_mode()
+        self.model.session.next_mode()
     }
 
     pub(crate) fn in_flight_mode(&self) -> Option<SessionMode> {
-        self.session.in_flight_mode()
+        self.model.session.in_flight_mode()
     }
 
     pub(crate) fn in_flight_role(&self) -> Option<ModelRole> {
-        self.session.in_flight_role()
+        self.model.session.in_flight_role()
     }
 
     pub(crate) fn status_for_test(&mut self) -> StatusBarView {
@@ -23,7 +23,7 @@ impl App {
     }
 
     pub(crate) fn is_compacting(&self) -> bool {
-        self.session.is_compacting()
+        self.model.session.is_compacting()
     }
 
     pub(crate) fn input(&self) -> &str {
@@ -51,7 +51,7 @@ impl App {
     }
 
     pub(crate) fn history(&self) -> &[HistoryEntry] {
-        self.conversation.history()
+        self.model.conversation.history()
     }
 
     pub(crate) fn is_recalling(&self) -> bool {
@@ -71,7 +71,7 @@ impl App {
 impl App {
     #[cfg(test)]
     pub(crate) fn plan_state(&self) -> zevria_workflow::PlanWorkflowState {
-        self.workflow.snapshot().clone()
+        self.model.workflow.snapshot().clone()
     }
 
     #[cfg(test)]
@@ -81,7 +81,8 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn plan_choice(&self) -> PlanChoice {
-        self.workflow
+        self.model
+            .workflow
             .dialog()
             .map(PlanDialogState::choice)
             .unwrap_or_default()
@@ -89,7 +90,8 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn plan_recovery_open(&self) -> bool {
-        self.workflow
+        self.model
+            .workflow
             .dialog()
             .is_some_and(PlanDialogState::recovering)
     }
@@ -110,7 +112,7 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn streaming(&self) -> Option<Message> {
-        match self.session.activity() {
+        match self.model.session.activity() {
             SessionActivity::Active(session::ActiveOperation {
                 phase: ActivePhase::Running(TurnTail::Streaming(message)),
                 ..
@@ -123,7 +125,7 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn retry_notice(&self) -> Option<RetryNotice> {
-        match self.session.activity() {
+        match self.model.session.activity() {
             SessionActivity::Active(session::ActiveOperation {
                 phase: ActivePhase::Running(TurnTail::Retrying(notice)),
                 ..
@@ -147,7 +149,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn seed_history_entry(&mut self, entry: HistoryEntry) {
         self.view.invalidate_rendered_geometry();
-        self.conversation.seed_entry(entry);
+        self.model.conversation.seed_entry(entry);
     }
 
     #[cfg(test)]
@@ -194,13 +196,14 @@ impl App {
         kind: OperationKind,
         mode: SessionMode,
     ) -> bool {
-        self.session
+        self.model
+            .session
             .begin_operation(kind, mode, role_for_mode(mode))
     }
 
     #[cfg(test)]
     pub(crate) fn open_plan_recovery_for_test(&mut self) -> bool {
-        self.workflow.open_review()
+        self.model.workflow.open_review()
     }
 
     #[cfg(test)]
@@ -263,6 +266,6 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn set_mode_for_test(&mut self, mode: SessionMode) {
-        self.session.set_next_mode(mode);
+        self.model.session.set_next_mode(mode);
     }
 }

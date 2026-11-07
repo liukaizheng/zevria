@@ -5,9 +5,8 @@
 //! receives the resulting 24-bit RGB values: there is no runtime conversion,
 //! terminal-default color, or ANSI fallback.
 
-pub use definition::{HexRgb, ReferencePalette, ThemeDefinition};
+pub use definition::{HexRgb, HexRgb as Rgb, ReferencePalette, ThemeDefinition};
 pub use generation::generate_theme;
-use ratatui::style::Color;
 use std::sync::OnceLock;
 pub use validation::{ValidationError, ValidationFailure, validate_theme};
 
@@ -24,15 +23,12 @@ pub fn theme() -> &'static ZevriaTheme {
 
 /// Color conversion boundary for adapters such as syntax highlighters. Components
 /// select semantic roles; only this crate constructs or destructures colors.
-pub const fn rgb(red: u8, green: u8, blue: u8) -> Color {
-    Color::Rgb(red, green, blue)
+pub const fn rgb(red: u8, green: u8, blue: u8) -> Rgb {
+    Rgb(red, green, blue)
 }
 
-pub fn rgb_channels(color: Color) -> (u8, u8, u8) {
-    match color {
-        Color::Rgb(red, green, blue) => (red, green, blue),
-        _ => unreachable!("theme colors are always 24-bit RGB"),
-    }
+pub const fn rgb_channels(color: Rgb) -> (u8, u8, u8) {
+    (color.0, color.1, color.2)
 }
 
 /// Must run before the first frame or syntax highlight. No hot reload.
@@ -86,80 +82,181 @@ const REF_SYNTAX_STRING: HexRgb = HexRgb(0x92, 0xcc, 0x93); // oklch(79.0% 0.100
 const REF_SYNTAX_CONSTANT: HexRgb = HexRgb(0xe1, 0xb6, 0x6c); // oklch(80.0% 0.105 80) -> #E1B66C
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ZevriaTheme {
-    pub surfaces: SurfaceTokens,
-    pub text: TextTokens,
-    pub workflow: WorkflowTokens,
-    pub roles: RoleTokens,
-    pub feedback: FeedbackTokens,
-    pub content: ContentTokens,
-    pub syntax: SyntaxTokens,
+pub struct ZevriaTheme<C = Rgb> {
+    pub surfaces: SurfaceTokens<C>,
+    pub text: TextTokens<C>,
+    pub workflow: WorkflowTokens<C>,
+    pub roles: RoleTokens<C>,
+    pub feedback: FeedbackTokens<C>,
+    pub content: ContentTokens<C>,
+    pub syntax: SyntaxTokens<C>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SurfaceTokens {
-    pub canvas: Color,
-    pub panel: Color,
-    pub overlay: Color,
-    pub border: Color,
-    pub border_strong: Color,
-    pub selection_background: Color,
-    pub selection_foreground: Color,
+pub struct SurfaceTokens<C = Rgb> {
+    pub canvas: C,
+    pub panel: C,
+    pub overlay: C,
+    pub border: C,
+    pub border_strong: C,
+    pub selection_background: C,
+    pub selection_foreground: C,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TextTokens {
-    pub primary: Color,
-    pub secondary: Color,
-    pub muted: Color,
+pub struct TextTokens<C = Rgb> {
+    pub primary: C,
+    pub secondary: C,
+    pub muted: C,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkflowTokens {
-    pub build: Color,
-    pub plan: Color,
-    pub review: Color,
-    pub explore: Color,
+pub struct WorkflowTokens<C = Rgb> {
+    pub build: C,
+    pub plan: C,
+    pub review: C,
+    pub explore: C,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RoleTokens {
-    pub you: Color,
-    pub assistant: Color,
-    pub system: Color,
-    pub tools: Color,
+pub struct RoleTokens<C = Rgb> {
+    pub you: C,
+    pub assistant: C,
+    pub system: C,
+    pub tools: C,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FeedbackTokens {
-    pub success: Color,
-    pub warning: Color,
-    pub error: Color,
-    pub info: Color,
+pub struct FeedbackTokens<C = Rgb> {
+    pub success: C,
+    pub warning: C,
+    pub error: C,
+    pub info: C,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ContentTokens {
-    pub heading: Color,
-    pub strong: Color,
-    pub code: Color,
-    pub link: Color,
-    pub diff_addition: Color,
-    pub diff_addition_background: Color,
-    pub diff_deletion: Color,
-    pub diff_deletion_background: Color,
-    pub diff_hunk: Color,
+pub struct ContentTokens<C = Rgb> {
+    pub heading: C,
+    pub strong: C,
+    pub code: C,
+    pub link: C,
+    pub diff_addition: C,
+    pub diff_addition_background: C,
+    pub diff_deletion: C,
+    pub diff_deletion_background: C,
+    pub diff_hunk: C,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SyntaxTokens {
-    pub keyword: Color,
-    pub function: Color,
-    pub r#type: Color,
-    pub string: Color,
-    pub constant: Color,
-    pub comment: Color,
-    pub invalid: Color,
+pub struct SyntaxTokens<C = Rgb> {
+    pub keyword: C,
+    pub function: C,
+    pub r#type: C,
+    pub string: C,
+    pub constant: C,
+    pub comment: C,
+    pub invalid: C,
+}
+
+impl<C> ZevriaTheme<C> {
+    pub fn map<D>(self, mut f: impl FnMut(C) -> D) -> ZevriaTheme<D> {
+        ZevriaTheme {
+            surfaces: self.surfaces.map(&mut f),
+            text: self.text.map(&mut f),
+            workflow: self.workflow.map(&mut f),
+            roles: self.roles.map(&mut f),
+            feedback: self.feedback.map(&mut f),
+            content: self.content.map(&mut f),
+            syntax: self.syntax.map(&mut f),
+        }
+    }
+}
+
+impl<C> SurfaceTokens<C> {
+    pub fn map<D>(self, mut f: impl FnMut(C) -> D) -> SurfaceTokens<D> {
+        SurfaceTokens {
+            canvas: f(self.canvas),
+            panel: f(self.panel),
+            overlay: f(self.overlay),
+            border: f(self.border),
+            border_strong: f(self.border_strong),
+            selection_background: f(self.selection_background),
+            selection_foreground: f(self.selection_foreground),
+        }
+    }
+}
+
+impl<C> TextTokens<C> {
+    pub fn map<D>(self, mut f: impl FnMut(C) -> D) -> TextTokens<D> {
+        TextTokens {
+            primary: f(self.primary),
+            secondary: f(self.secondary),
+            muted: f(self.muted),
+        }
+    }
+}
+
+impl<C> WorkflowTokens<C> {
+    pub fn map<D>(self, mut f: impl FnMut(C) -> D) -> WorkflowTokens<D> {
+        WorkflowTokens {
+            build: f(self.build),
+            plan: f(self.plan),
+            review: f(self.review),
+            explore: f(self.explore),
+        }
+    }
+}
+
+impl<C> RoleTokens<C> {
+    pub fn map<D>(self, mut f: impl FnMut(C) -> D) -> RoleTokens<D> {
+        RoleTokens {
+            you: f(self.you),
+            assistant: f(self.assistant),
+            system: f(self.system),
+            tools: f(self.tools),
+        }
+    }
+}
+
+impl<C> FeedbackTokens<C> {
+    pub fn map<D>(self, mut f: impl FnMut(C) -> D) -> FeedbackTokens<D> {
+        FeedbackTokens {
+            success: f(self.success),
+            warning: f(self.warning),
+            error: f(self.error),
+            info: f(self.info),
+        }
+    }
+}
+
+impl<C> ContentTokens<C> {
+    pub fn map<D>(self, mut f: impl FnMut(C) -> D) -> ContentTokens<D> {
+        ContentTokens {
+            heading: f(self.heading),
+            strong: f(self.strong),
+            code: f(self.code),
+            link: f(self.link),
+            diff_addition: f(self.diff_addition),
+            diff_addition_background: f(self.diff_addition_background),
+            diff_deletion: f(self.diff_deletion),
+            diff_deletion_background: f(self.diff_deletion_background),
+            diff_hunk: f(self.diff_hunk),
+        }
+    }
+}
+
+impl<C> SyntaxTokens<C> {
+    pub fn map<D>(self, mut f: impl FnMut(C) -> D) -> SyntaxTokens<D> {
+        SyntaxTokens {
+            keyword: f(self.keyword),
+            function: f(self.function),
+            r#type: f(self.r#type),
+            string: f(self.string),
+            constant: f(self.constant),
+            comment: f(self.comment),
+            invalid: f(self.invalid),
+        }
+    }
 }
 
 /// The exact built-in fallback. Components consume `theme()` semantic roles
@@ -203,7 +300,7 @@ mod tests {
     fn every_reference_reaches_the_terminal_as_truecolor() {
         for (name, color) in all_tokens() {
             assert!(
-                matches!(color, Color::Rgb(_, _, _)),
+                matches!(color, Rgb(_, _, _)),
                 "{name} must be a 24-bit RGB token, got {color:?}"
             );
         }
@@ -211,7 +308,7 @@ mod tests {
 
     #[test]
     fn root_canvas_matches_ghostty_default() {
-        assert_eq!(ZEVRIA_DARK.surfaces.canvas, Color::Rgb(0x28, 0x2c, 0x34));
+        assert_eq!(ZEVRIA_DARK.surfaces.canvas, Rgb(0x28, 0x2c, 0x34));
     }
 
     #[test]
@@ -362,7 +459,7 @@ mod tests {
         }
     }
 
-    fn all_tokens() -> Vec<(&'static str, Color)> {
+    fn all_tokens() -> Vec<(&'static str, Rgb)> {
         vec![
             ("surface.canvas", ZEVRIA_DARK.surfaces.canvas),
             ("surface.panel", ZEVRIA_DARK.surfaces.panel),
@@ -417,7 +514,7 @@ mod tests {
         ]
     }
 
-    fn semantic_foregrounds() -> Vec<(&'static str, Color)> {
+    fn semantic_foregrounds() -> Vec<(&'static str, Rgb)> {
         vec![
             ("Build", ZEVRIA_DARK.workflow.build),
             ("Plan", ZEVRIA_DARK.workflow.plan),
@@ -450,9 +547,9 @@ mod tests {
 
     fn assert_contrast(
         foreground_name: &str,
-        foreground: Color,
+        foreground: Rgb,
         background_name: &str,
-        background: Color,
+        background: Rgb,
         minimum: f64,
     ) {
         let ratio = validation::contrast(foreground, background);
@@ -464,7 +561,7 @@ mod tests {
 
     fn assert_pairwise_separation(
         simulation: &str,
-        colors: &[(&str, Color)],
+        colors: &[(&str, Rgb)],
         matrix: [[f64; 3]; 3],
         minimum: f64,
     ) {

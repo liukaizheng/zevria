@@ -6,7 +6,7 @@ use zevria_workflow::{
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum ProjectionMode {
+pub enum ProjectionMode {
     Live,
     Restored,
 }
@@ -14,7 +14,7 @@ pub(crate) enum ProjectionMode {
 /// A completion is fallback evidence, not a replacement for authoritative
 /// review transitions. Live outcomes and durable ReportsReady use this same
 /// normalization, including exact-run confirmation/baseline validation.
-pub(crate) struct WorkerCompletion {
+pub struct WorkerCompletion {
     pub worker_id: AgentRunId,
     pub status: AgentRunStatus,
     pub partial: bool,
@@ -24,7 +24,7 @@ pub(crate) struct WorkerCompletion {
 }
 
 impl WorkerCompletion {
-    pub(crate) fn outcome(run: &EnsembleRunId, outcome: AgentRunOutcome) -> Self {
+    pub fn outcome(run: &EnsembleRunId, outcome: AgentRunOutcome) -> Self {
         let has_plan_proof = outcome.has_plan_proof();
         let baseline = outcome.confirmation.as_ref().is_some_and(|plan| {
             plan.validate(&outcome.descriptor.id)
@@ -41,7 +41,7 @@ impl WorkerCompletion {
         }
     }
 
-    pub(crate) fn summary(run: &EnsembleRunId, summary: AgentRunSummary) -> Self {
+    pub fn summary(run: &EnsembleRunId, summary: AgentRunSummary) -> Self {
         let baseline = summary.confirmation.as_ref().is_some_and(|plan| {
             plan.validate(&summary.descriptor.id)
                 && &plan.receipt.target.run_id == run

@@ -25,7 +25,7 @@ use crate::layout::prepare::{
 };
 use crate::presentation::{PresentationRole, TranscriptAppearance};
 use crate::status::render_status_bar;
-use crate::status_icon::StatusIcon;
+use crate::status_icon::{StatusIcon, StatusIconColor};
 use crate::text::{format_elapsed, truncate_display_width};
 use crate::theme::theme;
 use crate::viewport::{RowRange, render_scrollbar, rows_to_u16};

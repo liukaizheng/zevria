@@ -58,7 +58,7 @@ def remove_hooks(text):
 
 paths = ["crates/provider/src/" + name for name in [
     "lib.rs", "connection.rs", "turn.rs", "websocket_session.rs", "tests.rs", "router.rs", "resume_wire_tests.rs",
-]] + ["crates/app/src/runtime.rs"]
+]] + ["crates/host/src/runtime.rs"]
 for name in paths:
     path = root / name
     text = remove_hooks(path.read_text())
@@ -73,8 +73,8 @@ for name in paths:
 
 removals = {
     "crates/provider/Cargo.toml": '# Temporary, opt-in instrumentation. See docs/cache-diagnostics.md for removal.\n[features]\ncache-diagnostics = ["dep:libc", "dep:uuid"]\n\n',
-    "crates/app/Cargo.toml": '# Temporary; never enable by default.\ncache-diagnostics = ["zevria-provider/cache-diagnostics"]\n',
-    "crates/zevria/Cargo.toml": '# Temporary; release profile alone does not disable explicit feature activation.\n[features]\ncache-diagnostics = ["zevria-app/cache-diagnostics"]\n\n',
+    "crates/host/Cargo.toml": '# Temporary; never enable by default.\ncache-diagnostics = ["zevria-provider/cache-diagnostics"]\n',
+    "crates/zevria/Cargo.toml": '# Temporary; release profile alone does not disable explicit feature activation.\n[features]\ncache-diagnostics = ["zevria-host/cache-diagnostics"]\n\n',
 }
 for name, removed in removals.items():
     path = root / name
@@ -93,7 +93,7 @@ start = text.index('name = "zevria-provider"\n')
 end = text.index('\n]\n', start) + 3
 provider = text[start:end].replace(' "libc",\n', '').replace(' "uuid",\n', '')
 lock.write_text(text[:start] + provider + text[end:])
-(root / "crates/app/src/cache_diagnostics_runtime_tests.rs").unlink()
+(root / "crates/host/src/cache_diagnostics_runtime_tests.rs").unlink()
 shutil.rmtree(root / "crates/provider/src/cache_diagnostics")
 (root / "docs/cache-diagnostics.md").unlink()
 compatible_doc = root / "docs/responses-compatible.md"

@@ -30,26 +30,7 @@ impl HeaderTimings {
     }
 }
 
-/// Derived conversation tail consumed directly by rendering.
-pub(crate) enum ConversationTail<'a> {
-    None,
-    Compacting {
-        elapsed: Duration,
-    },
-    Waiting {
-        elapsed: Duration,
-    },
-    Streaming {
-        message: &'a Message,
-        elapsed: Duration,
-    },
-    Retrying {
-        notice: &'a RetryNotice,
-        countdown: RetryCountdown,
-        retrying_for: Duration,
-        elapsed: Duration,
-    },
-}
+pub(crate) use zevria_presentation::ConversationTail;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RenderFocus {
@@ -133,7 +114,11 @@ impl App {
         if !self.pane.is_root() {
             StatusAccent::Inspect
         } else {
-            match self.session.display_role(self.pane.model_role_override()) {
+            match self
+                .model
+                .session
+                .display_role(self.pane.model_role_override())
+            {
                 ModelRole::Build | ModelRole::Builder => StatusAccent::Build,
                 ModelRole::Plan => StatusAccent::Plan,
                 ModelRole::Review => StatusAccent::Review,
@@ -177,15 +162,19 @@ impl App {
             command_menu_active && self.composer.completion_kind() == Some(CompletionKind::File);
         let can_recall = self.can_recall_selected();
         let Self {
-            session,
-            workflow,
-            conversation,
+            model:
+                SessionModel {
+                    session,
+                    workflow,
+                    conversation,
+                    model_profiles,
+                    ..
+                },
             folds,
             composer,
             interaction,
             edit,
             pane,
-            model_profiles,
             view,
             ..
         } = self;
@@ -203,44 +192,13 @@ impl App {
         });
         let pending_manual = session.operation_kind() == Some(OperationKind::ManualCompaction)
             && matches!(session.activity(), SessionActivity::Pending(_));
-        let elapsed = session.elapsed().unwrap_or_default();
         let assistant_header = (pane.appearance()
             == crate::presentation::TranscriptAppearance::Native)
             .then(|| session.call_header())
             .flatten();
         let pending_header =
             assistant_header.is_some_and(|header| !conversation.represents_header(header));
-        let tail = if session.is_compacting() || pending_manual {
-            ConversationTail::Compacting { elapsed }
-        } else {
-            match session.activity() {
-                SessionActivity::Idle => ConversationTail::None,
-                SessionActivity::Pending(pending)
-                    if pending.kind.is_plan_decision()
-                        || pending.kind == OperationKind::ModeManagement =>
-                {
-                    ConversationTail::None
-                }
-                SessionActivity::Pending(_) => ConversationTail::Waiting { elapsed },
-                SessionActivity::Active(active) => match &active.phase {
-                    ActivePhase::Compacting { .. } => ConversationTail::Compacting { elapsed },
-                    ActivePhase::AwaitingStart | ActivePhase::Running(TurnTail::Waiting) => {
-                        ConversationTail::Waiting { elapsed }
-                    }
-                    ActivePhase::Running(TurnTail::Streaming(message)) => {
-                        ConversationTail::Streaming { message, elapsed }
-                    }
-                    ActivePhase::Running(TurnTail::Retrying(notice)) => {
-                        ConversationTail::Retrying {
-                            notice,
-                            countdown: notice.countdown(session.observed_at()),
-                            retrying_for: notice.recovery_remaining(session.observed_at()),
-                            elapsed,
-                        }
-                    }
-                },
-            }
-        };
+        let tail = ConversationTail::observe(session, session.observed_at());
         let chrome = if !pane.can_compose() {
             ComposerChrome::Inspect
         } else if let Some(active) = selected {

@@ -9,12 +9,17 @@ pub mod runtime;
 pub mod session_config;
 mod session_lease;
 mod session_models;
+pub mod sessions;
 mod settings;
 pub mod skills;
 mod subtasks;
 pub mod theme_store;
 
 pub use config::Config;
+pub use runtime::{
+    RestoredAgentRun, RestoredSession, RestoredSubtask, RunningSession, RuntimeTaskExit,
+    SessionRestoration, SessionStart, start_session,
+};
 pub use session_config::SessionConfig;
 
 #[cfg(test)]

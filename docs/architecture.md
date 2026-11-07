@@ -129,7 +129,7 @@ request snapshots, frontend messages and continuation ledgers remain real costs.
 
 ## Dependency direction
 
-The workspace has twenty packages. Arrows below mean production dependencies;
+The workspace has twenty-one packages; the native desktop is a separate sibling package. Arrows below mean production dependencies;
 “lower values” means only the foundation/content/instructions/model/workflow
 owners a package actually uses. All consumers import the owner directly: core
 is an engine, not a shared-contract umbrella.
@@ -148,14 +148,16 @@ anthropic     -> foundation + content + instructions + model
 provider      -> responses + anthropic + session-api + lower values
 tools         -> session-api + lower values
 acp           -> session-api + transcript + lower values
-theme         -> external rendering/color dependencies only
+theme         -> external color/serialization dependencies only (no terminal types)
+presentation  -> session-api + transcript + lower values
 tui-widgets   -> theme + lower values
-tui-input     -> tui-widgets + theme + lower values
-tui           -> tui-input + tui-widgets + theme + session-api + transcript
+tui-input     -> presentation + tui-widgets + theme + lower values
+tui           -> presentation + tui-input + tui-widgets + theme + session-api + transcript
                  + lower values
 ensemble      -> acp + session-api + transcript + workflow + lower values
-app           -> core + provider + tools + acp + ensemble + theme + lower owners
-zevria        -> app + selected frontends + directly used public domain APIs
+host          -> core + provider + tools + acp + ensemble + theme + lower owners
+zevria        -> host + selected frontends + directly used public domain APIs
+zevria-app    -> host + presentation + theme + GPUI Kit (outside this workspace)
 ```
 
 - **Foundation/content:** identities and policy values, generic filesystem/config
@@ -168,19 +170,60 @@ zevria        -> app + selected frontends + directly used public domain APIs
   the private session state machine, admission, capacity and durable workflows.
 - **Responses/Anthropic/provider:** pure wire conversion, parsing and accumulation;
   transport, routing, retries, attempt publication/acknowledgements and continuation.
-- **Theme/widgets/input/TUI:** one process-wide theme; reusable rendering primitives;
-  composer/commands/questions; the coupled App reducer, frame policy and terminal loop.
-- **Ensemble/app/binary:** ACP worker supervision and its configuration; frontend-neutral
+- **Presentation:** source-neutral semantic blocks, native/ACP conversation projection,
+  slash/skill and completion grammar, lifecycle/telemetry, Plan workflow, typed admission
+  and the single `SessionModel` event reducer. No renderer, theme, host or engine dependency.
+- **Theme/widgets/input/TUI:** one ratatui-free process-wide sRGB token graph; a thin
+  terminal adapter in `tui-widgets::theme`; reusable rendering primitives, composer,
+  focus/selection/viewport hooks, frame policy and terminal loop.
+- **Ensemble/host/binary:** ACP worker supervision and its configuration; frontend-neutral
   application configuration, runtime construction, registries, leases and services;
   CLI dispatch, terminal setup and frontend selection.
 
-Only app depends directly on core in production. Adapters have no transitive
+Only host depends directly on core in production. Adapters have no transitive
 engine dependency. Session API has no storage dependency, neither codec has a
-runtime/storage dependency, and app has no terminal frontend/widgets/input
+runtime/storage dependency, and host has no terminal frontend/widgets/input
 dependency. Integration tests may depend upward through explicit dev-dependencies.
 The binary's manifest-boundary tests enforce these rules without invoking Cargo.
 See [the crate-split report](crate-split/README.md) for exact resolved edges,
 source/test accounting and validation evidence.
+
+## Native GPUI desktop
+
+`../zevria-app` is a separately locked Cargo package, not a member of this workspace.
+It depends on `zevria-host`, `zevria-presentation`, `zevria-theme` and lower values;
+GPUI never enters the CLI workspace build. Neither the host nor the desktop
+has a ratatui/crossterm dependency path. No app-server, RPC, SDK or serialization
+layer was added, and the unmerged out-of-process branch is unrelated.
+
+One process-wide Tokio runtime owns the engine and supervisors. GPUI foreground
+tasks await its handles and the sole `SessionEventReceiver` directly. Each wake
+reduces at most 64 updates, then yields and notifies once; lifecycle backpressure
+and receiver stream fences are not replaced by a forwarding queue. Initial
+restoration projection runs on `spawn_blocking`. Session discovery and large
+file-diff parsing use GPUI's background executor. Retained markdown entities are
+keyed by projection epoch/block identity, use cumulative `set_text`, and notify
+row remeasurement after asynchronous parsing; `MessageScroller` uses fingerprinted
+splices/remeasurements rather than resetting the viewport for each token.
+
+Desktop `WorkspaceModel` owns only root/subtask routing, active questions and
+command-registry metadata. Every pane's event handling is `SessionModel`.
+Live ACP worker review/abandonment routing remains in TUI `SessionViews`; extracting
+that routing into presentation is a prerequisite to desktop worker controls, not
+permission to create a second copy. Root ensemble rows remain visible.
+
+Window close and Cmd-Q are intercepted before quitting. The controller drops
+its event pump/receiver, cloned senders, exit observer and tick, awaits the host's
+ordered shutdown, then flushes the named `zevria-app.log` logging guard and quits.
+Startup/replacement/shutdown transitions are serialized, including a replacement
+requested while startup is pending. Engine failures also clean up before another
+session can start. The OS-termination hook is best-effort only (the platform's
+short quit grace is not the normal shutdown path).
+
+See [desktop implementation and validation](desktop.md) and the sibling desktop
+README for commands, supported controls, bounds and explicit limitations. This
+refactor changes no instruction text, registration order, request construction,
+routing policy, transcript envelope or provider cacheable prefix.
 
 ## Captured file guidance
 
@@ -401,8 +444,15 @@ sources have closed and all eligible updates have drained.
 
 ## TUI state and pending/active contract
 
-The Ratatui frontend keeps `App` as its public façade and input/event
-coordinator, but its logical state is a product of private state machines:
+Both native frontends consume `zevria_presentation::SessionModel`. It owns
+`session`, `workflow`, `conversation`, committed profile fallbacks, pane scope
+and pending transcript-edit acceptance. `reduce(SessionEvent) -> Reduction`
+reports accepted/settled operations, conversation replacement, Plan readiness and
+correlated mode settlement at the former TUI hook points. Typed admission enters
+Pending before returning commands; `apply_stream`, restoration and the live tail
+are shared too. The Ratatui `App` is now an input/render façade over that model,
+not another implementation of the event semantics:
+
 
 - `SessionState` owns the next idle mode, pending/active operation lifecycle,
   immutable in-flight mode and exact `ModelRole`, one event-authoritative
@@ -421,8 +471,8 @@ coordinator, but its logical state is a product of private state machines:
   Span keys sit above Message keys, which sit above stable presentation block
   identities and selectable non-conversation item indices. Unfolding an outer
   layer preserves the inner folds;
-- `EditState` owns either a recalled draft or an edit waiting for durable
-  acceptance;
+- TUI `EditState` owns the recall draft and its local pending/recovery lifecycle;
+  target truncation and pre-turn-compaction acceptance live only in `SessionModel`;
 - `DraftSubmissions` owns immutable staged/rejected drafts and replacement-generation
   checks; `WorkerReviewUiState` owns the bound worker, ordinary/urgent controls and
   the accepted-result-to-snapshot handoff;
@@ -1125,7 +1175,7 @@ Its focused modules define the strict saved schema, deterministic Rust
 OKLCH generator, and pure post-quantization contrast/CVD validation. One
 centralized reference-to-semantic graph maps 27 concrete colors to 38 fields in
 `surfaces`, `text`, `workflow`, `roles`, `feedback`, `content`, and `syntax`.
-Widgets consume the public read-only process-lifetime `zevria_theme::theme()` accessor rather than
+Frontend adapters consume the public read-only process-lifetime `zevria_theme::theme()` accessor rather than
 fixed constants or raw RGB values. Build, Plan, Review, and Explore keep stable
 workflow accents, speakers/tools use independent role accents, and feedback
 retains recognizable meanings. Markdown, diffs, status, workspace metadata,
@@ -2107,7 +2157,7 @@ launch_subtasks tool (zevria-tools)
 session-api registry + channels (SubtaskLauncher / SubtaskLaunchRequest)
 │
 ▼
-supervisor (zevria-app, subtasks.rs)
+supervisor (zevria-host, subtasks.rs)
 ├── fresh single-profile Explore or Builder router/transport per child (ProviderRouterFactory)
 ├── independent SessionEngine/history and kind-specific instruction set
 ├── Explore: shared command-only registry
@@ -3176,27 +3226,32 @@ call correlation, ordering, and error output where relevant.
 
 ## Add a frontend
 
-A frontend needs only command/event channels. It does not need provider access,
-the tool registry, transcript ownership, or terminal knowledge in core.
+An in-process frontend uses `zevria-host`, never `SessionEngine`, providers or
+production tools directly. The desktop in the sibling `zevria-app` checkout is
+the reference non-terminal integration; ACP uses the host's object-safe factory.
+A new renderer must reuse `zevria-presentation`, rather than copy the TUI reducer.
 
 ```rust,ignore
-let (command_tx, command_rx) = unbounded_channel();
-let (event_tx, mut event_rx) = session_event_channel(256);
-let mut engine_task = tokio::spawn(engine.run(command_rx, event_tx));
-
+let mut running = zevria_host::start_session(&config, &workspace, start).await?;
+let restored = running.take_restored(); // one move; child transcripts already loaded
+let mut model = restore_frontend(restored)?; // installs presentation::RestorationInput
+let commands = running.command_sender();
+let mut updates = running.take_event_receiver()?;
+let mut exits = running.take_exit_receiver()?;
 loop {
     tokio::select! {
-        result = &mut engine_task => {
-            // Distinguish Ok(Ok(())), Ok(Err(replay_error)), and Err(join_error).
-            observe_runtime_exit(result);
-            break;
-        }
-        Some(update) = event_rx.recv() => match update {
-            SessionUpdate::Lifecycle(event) => reduce_lifecycle(event),
-            SessionUpdate::Streams(batch) => apply_changed_streams(batch),
+        exit = exits.recv() => { show_engine_stopped(exit); break; }
+        update = updates.recv() => match update {
+            Some(SessionUpdate::Lifecycle(event)) => apply_hooks(model.reduce(event)),
+            Some(SessionUpdate::Streams(batch)) => apply_changed_panes(&mut model, batch),
+            None => break,
         },
     }
 }
+drop(updates); // unblock bounded lifecycle sends before joining
+drop(commands);
+drop(exits);
+running.shutdown().await?;
 ```
 
 Send `SessionCommand::Turn(TurnCommand)` work and select on the single ordered update
@@ -3213,12 +3268,13 @@ the artifact into dialog-only state, and send versioned `ResolvePlan`
 decisions while disabling duplicate confirmation until the workflow settles
 or fails.
 
-App's `runtime::RunningSession` owns provider startup, transcript restoration and
+Host's `RunningSession` owns provider startup, transcript restoration and
 repair, the engine and supervisors, lease retention, background-failure observation,
-ordered shutdown, and empty-transcript cleanup. A frontend borrows read-only
-restoration data, takes the sole event receiver and a cloned command sender, then
-drops those endpoints before awaiting runtime shutdown. Neither the authoritative
-cleanup path nor the runtime's task/lease ownership is publicly mutable. App's
+ordered shutdown, and empty-transcript cleanup. A frontend takes one
+`RestoredSession` payload (including already-loaded child transcripts and
+worker-journal records), the sole event receiver and a cloned command sender,
+then drops those endpoints before awaiting runtime shutdown. Neither the authoritative
+cleanup path nor the runtime's task/lease ownership is publicly mutable. Host's
 `acp_host` implements `zevria-acp`'s object-safe runtime factory over that handle;
 this keeps provider and production-tool dependencies out of the ACP frontend crate.
 Validated application configuration likewise exposes only read-only startup views,
@@ -3227,7 +3283,7 @@ so its source values cannot diverge from derived routing and compaction policy.
 The Ratatui implementation demonstrates the separation:
 
 - [`app.rs`](../crates/tui/src/app.rs) — public façade, input coordinator, and
-  effectful cross-domain reducer, with focused state modules under
+  frontend-specific `Reduction` hooks, with focused terminal state modules under
   [`app/`](../crates/tui/src/app/);
 - [`composer.rs`](../crates/tui-input/src/composer.rs) — grapheme-aware editor and
   command/skill completion state;
@@ -3262,7 +3318,7 @@ The Ratatui implementation demonstrates the separation:
   workspace chrome and routes tagged child events into inspect-only panes;
 - [`markdown.rs`](../crates/tui-widgets/src/markdown.rs) — Markdown parsing and layout.
 
-The sibling [`zevria-acp`](../crates/acp/) frontend builds an ACP V1 Agent over the same channels. It owns session registration, protocol correlation, append-only stream segmentation, transcript replay, form elicitation, and Plan decisions, but receives provider-neutral runtime handles from app. It never initializes Ratatui/crossterm and never depends on provider or production-tool implementations.
+The sibling [`zevria-acp`](../crates/acp/) frontend builds an ACP V1 Agent over the same channels. It owns session registration, protocol correlation, append-only stream segmentation, transcript replay, form elicitation, and Plan decisions, but receives provider-neutral runtime handles from host. It never initializes Ratatui/crossterm and never depends on provider or production-tool implementations.
 
 Headless frontend tests can consume the event receiver directly; no terminal
 or provider-specific types are necessary.

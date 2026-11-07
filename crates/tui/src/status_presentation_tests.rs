@@ -7,7 +7,7 @@ use crate::presentation::{
     NativeToolState, PresentationBlock, PresentationBlockId, PresentedChecklist, PresentedPlan,
     PresentedPlanContent, PresentedTool, WebActivityPresentation,
 };
-use crate::status_icon::StatusIcon;
+use crate::status_icon::{StatusIcon, StatusIconColor};
 
 fn block(kind: PresentationBlockKind) -> PresentationBlock {
     PresentationBlock {

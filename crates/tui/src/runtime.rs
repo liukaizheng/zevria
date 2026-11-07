@@ -14,7 +14,7 @@ use std::{
 use tokio::sync::mpsc::{UnboundedSender, error::TryRecvError};
 use zevria_model::models::{ModelSelectionScope, SessionModels};
 use zevria_session_api::{SessionCommand, SessionEvent, SessionEventReceiver, SessionUpdate};
-use zevria_transcript::transcript::{SessionSummary, list_sessions};
+use zevria_transcript::transcript::SessionSummary;
 use zevria_workflow::PlanHandoff;
 
 #[cfg(test)]
@@ -29,10 +29,14 @@ pub struct UiContext {
     pub sessions_dir: PathBuf,
     /// The live session, excluded from the resume picker.
     pub current_session_id: String,
+    /// Host-owned discovery; presentation never knows the host implementation.
+    pub session_catalog: Box<dyn Fn() -> anyhow::Result<Vec<SessionSummary>> + Send + Sync>,
 }
 
 /// Why the UI loop ended.
 #[derive(Debug, PartialEq)]
+// Owned replacement data crosses the terminal teardown boundary only once.
+#[allow(clippy::large_enum_variant)]
 pub enum UiOutcome {
     Quit,
     /// Rebuild the whole session stack on the transcript at this path.
@@ -319,14 +323,8 @@ pub(crate) fn drain_update_burst(
 /// open the picker over them. Listing failures surface as a root-pane notice;
 /// the UI keeps running either way.
 fn open_resume_picker(views: &mut SessionViews, context: &UiContext) {
-    match list_sessions(&context.sessions_dir) {
-        Ok(sessions) => {
-            let other_sessions: Vec<SessionSummary> = sessions
-                .into_iter()
-                .filter(|summary| summary.id != context.current_session_id)
-                .collect();
-            views.open_session_picker(other_sessions);
-        }
+    match (context.session_catalog)() {
+        Ok(sessions) => views.open_session_picker(sessions),
         Err(error) => views.show_root_error(format!("Failed to list sessions: {error:#}")),
     }
 }

@@ -4,6 +4,7 @@ use crate::presentation::{
     BlockVisibility, DiagnosticTone, PresentationBlock, PromptOrigin, PromptPhase,
     TranscriptAppearance,
 };
+use crate::status_icon::StatusIconColor;
 use zevria_content::PromptBlock;
 use zevria_content::PromptImage;
 use zevria_content::UserPrompt;
