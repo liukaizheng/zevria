@@ -347,8 +347,9 @@ provider configurations:
 ```
 
 The configured string is the **header name**, not a static ID or a template.
-Zevria supplies the persistent conversation ID as its value. A root or resumed
-session uses its transcript filename stem. The value stays stable across
+Zevria supplies the stable allocated conversation ID as its value. A root or
+resumed session uses its intended transcript filename stem, even before a new
+session's transcript is materialized. The value stays stable across
 turns, tool follow-ups, model changes, resets, retries, and reconnects. Fresh
 roots, Explore and Build children, and native Zevria ensemble-worker sessions use their
 own IDs. External ACP agents manage their own provider transports.
@@ -968,8 +969,10 @@ metadata.
 
 In the TUI, bare `/model-session` selects an existing configured profile for the
 root composer's captured model role and then requires explicit confirmation of a
-supported reasoning level. It durably saves the complete per-mode selection for
-resume and TUI replacements, **without changing config**. The picker says
+supported reasoning level. It retains the complete per-mode selection for live
+TUI replacements and, once a conversation is saved, for resume, **without changing
+config**. Model/reasoning-only changes in a new session stay in memory and create
+no transcript file; global-default changes still persist through `/model`. The picker says
 **session only — kept on /new, fresh handoff and resume; config unchanged**. Bare `/model` uses the same searchable picker, visibly labeled
 as saving the role's global default too.
 
@@ -1000,9 +1003,12 @@ an automatic provider request; it does not reset model preferences. Later defaul
 changes do not replace the inherited pair. Resumed roots restore their last
 successfully selected Build and Plan identities **and reasoning levels** from a
 version-1 `zevria_session_models` header, including a session-only switch acknowledged
-just before closing with no later assistant response. A subsequent `/new` inherits
-that restored pair. Metadata-only abandoned roots
-still are not kept as resumable conversations. Review, Explore, and
+just before closing with no later assistant response, once a conversation has been
+saved. A subsequent `/new` inherits that restored pair. A new unused session has
+no transcript and is not resumable after close; live `/new` inheritance still
+retains its current choices. Existing historical files keep their current rules:
+empty/models-only abandoned roots are excluded, but mode-bearing roots remain
+resumable even without messages. Review, Explore, and
 Builder adopt current globals; external workers are unchanged. Exact, case-sensitive
 provider/model keys resolve against current endpoints, credentials, capabilities
 and limits, not a frozen historical config. Removing a saved catalog identity or
@@ -1013,8 +1019,9 @@ counting, or conversion calls to recover selections. Other active sessions keep
 their routes. Original native replay and source identities are preserved;
 destination projection—not transcript relabeling—makes visible history portable,
 even for two models under the same provider. Inherited routing and compaction policies
-use current catalog capabilities and limits, and the complete pair is written to the
-new transcript header before any opening Plan handoff. Selection metadata is not
+use current catalog capabilities and limits. The complete pair is staged in memory
+and published with the first accepted conversation, including an opening Plan
+handoff, before generation. Publication does not rotate session/cache identity. Selection metadata is not
 provider input, instructions, or Plan content; it does not change cacheable prefix
 construction, and a replacement still has a new session/cache identity.
 
@@ -1038,7 +1045,8 @@ preparation and before persistence. A session-only switch retains that revision
 and never calls a config writer or enters its transaction; a readable, read-only
 config is sufficient. A validated portable checkpoint is saved first if needed,
 then the selected role's session header is replaced before the active route is
-installed and success acknowledged. If this header save fails, active and saved
+installed and success acknowledged. This is memory-only for pending new sessions;
+materialized transcripts retain their existing atomic header-replacement behavior. If this header save fails, active and saved
 selections are unchanged, **config was not modified**, and no newly committed
 global revision is returned. Any already-saved checkpoint is reported explicitly;
 retrying `/model-session` can reuse it without another summary call.
@@ -1047,8 +1055,8 @@ retrying `/model-session` can reuse it without another summary call.
 If saving the default fails, a checkpoint may remain while the active model and
 default stay unchanged. If the later header save fails, the global default **has
 changed** but active and saved session selections have not; the rejection returns
-the committed global revision for retry. A crash after header commit restores the
-selection without a UI acknowledgement. A compatible already-active
+the committed global revision for retry. For a materialized transcript, a crash
+after header commit restores the selection without a UI acknowledgement. A compatible already-active
 `/model-session` selection is a no-op with no transcript rewrite or route reset,
 but preflight is never skipped when conversion is required. `/model` still saves
 an already-active session-local choice as the default. Only the selected TOML
@@ -1076,9 +1084,11 @@ Current provider interoperability and explicit profile conversion remain
 supported; they do not relax persisted-format validation. A stable `.jsonl.lock`
 root lease rejects cooperating live writers, survives transcript replacement, and
 is held through shutdown/cleanup; it cannot coordinate older binaries or external
-editors. Older binaries may reject the new header. Metadata-only abandoned roots
-are skipped in listings and `--continue` and cleaned up on shutdown; malformed and
-substantive logs remain discoverable. Metadata is never model input or frontend
+editors. Leases remain independent of file existence; shutdown does not flush a
+pending metadata-only session. Older binaries may reject the new header. Existing
+empty/models-only abandoned roots without a mode are skipped in listings and
+`--continue` and cleaned up on shutdown; existing mode-bearing, malformed and
+substantive logs remain discoverable. No historical purge is performed. Metadata is never model input or frontend
 history, and history edits preserve the current selection snapshot.
 
 ## Reasoning within model selection
@@ -1097,8 +1107,9 @@ reconnect the WebSocket**. Changed request properties cause one full-input resen
 on the same socket, preserving the identical prefix; normal continuation resumes
 thereafter. Reasoning is never part of the profile/cache key.
 
-Fresh roots save explicit Build and Plan selections, including their effective
-levels. Resume retains both even after defaults change. An unsupported saved level
+Fresh roots stage explicit Build and Plan selections, including their effective
+levels, in memory. The first accepted conversation saves the complete current
+header; resume then retains both even after defaults change. An unsupported saved level
 is an error, never a startup fallback or silent header rewrite. Review/Explore/Builder
 retain their opening/resume-config snapshot behavior. Management and its metadata
 never enter the prompt transcript, prompt history, instructions, or ACP replay.

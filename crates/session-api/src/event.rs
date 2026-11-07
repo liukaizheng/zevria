@@ -3,7 +3,8 @@
 use super::*;
 use std::path::PathBuf;
 
-/// Correlated outcome of an idle-only durable root mode selection.
+/// Correlated authoritative outcome of an idle-only root mode selection.
+/// New-session metadata remains in memory until the first saved conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModeSelectionResult {
     Accepted { mode: SessionMode, changed: bool },

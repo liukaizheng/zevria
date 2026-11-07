@@ -88,7 +88,8 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     /// Commit one transcript-owned proposal and install its validated replay
-    /// only after durability. Invalid prospective evidence cannot poison the
+    /// after acceptance (durable for conversational work; metadata-only new
+    /// sessions remain in memory). Invalid prospective evidence cannot poison the
     /// healthy branch; raw committed evidence still uses the terminal latch.
     pub(super) fn commit_anchored_records(
         &mut self,

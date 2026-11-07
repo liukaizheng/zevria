@@ -152,7 +152,13 @@ impl<P: ModelProvider> SessionEngine<P> {
         skills: Arc<SkillCatalog>,
     ) -> anyhow::Result<Self> {
         let application_prompt = provider.application_prompt().to_string();
-        let initial = zevria_transcript::transcript::load(transcript.path())?;
+        // A pending writer is an explicitly allocated new session, not a
+        // missing resume file. Existing writers must still load successfully.
+        let initial = if transcript.is_pending() {
+            Vec::new()
+        } else {
+            zevria_transcript::transcript::load(transcript.path())?
+        };
         let replay = validate_session_replay(&initial)?;
         let mut conversation = Conversation::new(transcript);
         conversation.adopt_persisted(initial);

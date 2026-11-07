@@ -829,6 +829,12 @@ builder = {{ provider = "test", model = "fixture", reasoning_level = "medium" }}
         });
         assert!(!path.with_extension("jsonl.lock").exists());
         assert!(path.is_file());
+        let replacement_path =
+            controller.read_with(cx, |this, _| this.model.transcript_path.clone());
+        assert!(
+            !replacement_path.exists(),
+            "unused desktop replacement stays pending"
+        );
         controller.update(cx, |this, cx| {
             this.replace(
                 SessionRequest {
@@ -851,6 +857,7 @@ builder = {{ provider = "test", model = "fixture", reasoning_level = "medium" }}
             controller.read_with(cx, |this, _| this.phase == Phase::Idle)
         });
         assert!(!path.with_extension("jsonl.lock").exists());
+        assert!(!replacement_path.exists());
         server.abort();
     }
     #[gpui_kit::test]
@@ -883,8 +890,16 @@ builder = {{ provider = "test", model = "fixture", reasoning_level = "medium" }}
                 this.phase == Phase::Live && this.workspace.as_ref() == Some(&second)
             })
         });
-        for session in zevria_host::sessions::resumable(&first, None).unwrap() {
-            assert!(!session.path.with_extension("jsonl.lock").exists());
+        let pending_path = controller.read_with(cx, |this, _| this.model.transcript_path.clone());
+        assert!(!pending_path.exists());
+        for entry in std::fs::read_dir(zevria_transcript::transcript::sessions_dir(&first)).unwrap()
+        {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.ends_with(".jsonl") && !name.ends_with(".jsonl.lock"),
+                "outgoing unused session leaked {name}"
+            );
         }
         controller.update(cx, |this, cx| this.stop(cx));
         until(cx, |cx| {

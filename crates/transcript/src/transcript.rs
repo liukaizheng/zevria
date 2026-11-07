@@ -926,18 +926,83 @@ fn preview_line(prompt_text: &str) -> String {
     preview
 }
 
-/// Appends transcript items to a session's `{id}.jsonl` file.
+/// Storage for a session's intended `{id}.jsonl` path. Newly allocated logs
+/// remain pending until Conversation commits substantive conversational input.
 pub struct TranscriptWriter {
     session_id: String,
-    file: std::fs::File,
+    file: TranscriptFile,
     path: PathBuf,
     recovered_malformed_lines: usize,
-    read_only: bool,
     needs_newline: bool,
 }
 
+enum TranscriptFile {
+    Pending,
+    Writable(std::fs::File),
+    ReadOnly(std::fs::File),
+}
+
+impl TranscriptFile {
+    fn handle(&self) -> Option<&std::fs::File> {
+        match self {
+            Self::Pending => None,
+            Self::Writable(file) | Self::ReadOnly(file) => Some(file),
+        }
+    }
+}
+
 impl TranscriptWriter {
-    /// Start a new session: pick a fresh id and create its file.
+    /// Allocate a fresh ID and intended path without creating a transcript.
+    /// Directory and lease activity is independent of transcript persistence.
+    pub fn allocate(sessions_dir: &Path) -> anyhow::Result<Self> {
+        for _ in 0..8 {
+            if let Some(writer) = Self::try_allocate_with_id(sessions_dir, &pick_session_id())? {
+                return Ok(writer);
+            }
+        }
+        anyhow::bail!(
+            "failed to pick an unused session id in {}",
+            sessions_dir.display()
+        )
+    }
+
+    /// Allocate an already-chosen ID. Publication checks for collisions again;
+    /// allocation does not reserve the filename or overwrite existing history.
+    pub fn allocate_with_id(sessions_dir: &Path, session_id: &str) -> anyhow::Result<Self> {
+        Self::try_allocate_with_id(sessions_dir, session_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "a session file for {session_id} already exists in {}",
+                sessions_dir.display()
+            )
+        })
+    }
+
+    fn try_allocate_with_id(sessions_dir: &Path, session_id: &str) -> anyhow::Result<Option<Self>> {
+        std::fs::create_dir_all(sessions_dir).with_context(|| {
+            format!(
+                "failed to create the sessions directory at {}",
+                sessions_dir.display()
+            )
+        })?;
+        let path = sessions_dir.join(format!("{session_id}.jsonl"));
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(Self {
+                session_id: session_id.to_string(),
+                file: TranscriptFile::Pending,
+                path,
+                recovered_malformed_lines: 0,
+                needs_newline: false,
+            })),
+            Err(error) => Err(anyhow::Error::from(error).context(format!(
+                "failed to inspect the intended session file at {}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Explicitly construct a persisted empty log (e.g. a historical fixture).
+    /// Production new sessions must use [`Self::allocate`] instead.
     pub fn create(sessions_dir: &Path) -> anyhow::Result<Self> {
         // A v4 collision is practically impossible, but `create_new` keeps a
         // collision from silently appending to another session's file.
@@ -981,10 +1046,9 @@ impl TranscriptWriter {
         {
             Ok(file) => Ok(Some(Self {
                 session_id: session_id.to_string(),
-                file,
+                file: TranscriptFile::Writable(file),
                 path,
                 recovered_malformed_lines: 0,
-                read_only: false,
                 needs_newline: false,
             })),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
@@ -1029,21 +1093,28 @@ impl TranscriptWriter {
             .with_context(|| format!("failed to open the session file at {}", path.display()))?;
         Ok(Self {
             session_id,
-            file,
+            file: if read_only {
+                TranscriptFile::ReadOnly(file)
+            } else {
+                TranscriptFile::Writable(file)
+            },
             path,
             recovered_malformed_lines: 0,
-            read_only,
             needs_newline,
         })
     }
 
+    pub const fn is_pending(&self) -> bool {
+        matches!(self.file, TranscriptFile::Pending)
+    }
+
     pub const fn is_read_only(&self) -> bool {
-        self.read_only
+        matches!(self.file, TranscriptFile::ReadOnly(_))
     }
 
     fn ensure_writable(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !self.read_only,
+            !self.is_read_only(),
             "the session transcript was opened read-only; mutations and repair are disabled"
         );
         Ok(())
@@ -1052,9 +1123,13 @@ impl TranscriptWriter {
     /// Append an item as a JSON line and flush it to disk.
     pub fn append(&mut self, item: &TranscriptItem) -> anyhow::Result<()> {
         self.ensure_writable()?;
+        let file = self
+            .file
+            .handle()
+            .context("pending transcripts must be mutated through Conversation")?;
         if matches!(item, TranscriptItem::SessionModels(_)) {
             anyhow::ensure!(
-                self.file.metadata()?.len() == 0,
+                file.metadata()?.len() == 0,
                 "session models must be a unique first record; replace the canonical header instead"
             );
         }
@@ -1063,24 +1138,21 @@ impl TranscriptWriter {
             proposed.push(item.clone());
             session_mode(&proposed)?;
         }
-        self.append_record(item)
+        self.persist_records(std::slice::from_ref(item), true)
     }
 
     // Only public checked append and the private validated transaction call this.
     fn append_record(&mut self, item: &TranscriptItem) -> anyhow::Result<()> {
-        let mut line = serde_json::to_vec(item).context("failed to serialize a transcript item")?;
-        anyhow::ensure!(
-            line.len() < MAX_ROOT_RECORD_BYTES,
-            "root transcript record exceeds the 64 MiB limit"
-        );
-        line.push(b'\n');
+        let mut line = serialize_record(item)?;
         if self.needs_newline {
             line.insert(0, b'\n');
         }
-        self.file
-            .write_all(&line)
-            .and_then(|()| self.file.flush())
-            .and_then(|()| self.file.sync_data())
+        let TranscriptFile::Writable(file) = &mut self.file else {
+            anyhow::bail!("appending requires a materialized writable transcript");
+        };
+        file.write_all(&line)
+            .and_then(|()| file.flush())
+            .and_then(|()| file.sync_data())
             .with_context(|| {
                 format!(
                     "failed to append to the session file at {}",
@@ -1100,8 +1172,96 @@ impl TranscriptWriter {
     /// changed on disk".
     pub fn rewrite(&mut self, items: &[TranscriptItem]) -> anyhow::Result<()> {
         self.ensure_writable()?;
+        anyhow::ensure!(
+            !self.is_pending(),
+            "pending transcripts must be mutated through Conversation"
+        );
         validate_header(items.iter())?;
-        self.rewrite_records(items)
+        self.persist_records(items, false)
+    }
+
+    /// Raw mutation paths preserve their existing header checks. Pending
+    /// proposals additionally need lifecycle validation before memory-only
+    /// acceptance. Prepared anchored proposals already validated exactly once.
+    fn persist_unprepared(
+        &mut self,
+        items: &[TranscriptItem],
+        single_append: bool,
+    ) -> anyhow::Result<()> {
+        if self.is_pending() {
+            crate::validate_session_replay(items)?;
+        } else {
+            validate_header(items.iter())?;
+        }
+        self.persist_records(items, single_append)
+    }
+
+    /// The one storage decision for all Conversation mutations and repair.
+    /// Pending metadata stays exclusively in Conversation.items. The first
+    /// substantive proposal publishes the complete sequence, never just a tail.
+    fn persist_records(
+        &mut self,
+        items: &[TranscriptItem],
+        single_append: bool,
+    ) -> anyhow::Result<()> {
+        self.ensure_writable()?;
+        if self.is_pending() {
+            if items.iter().any(is_conversation_item) {
+                self.publish_records(items)?;
+            } else {
+                // Memory-only acceptance must not bypass serialization or the
+                // same per-record bounds enforced by durable writes.
+                for item in items {
+                    serialize_record(item)?;
+                }
+            }
+            Ok(())
+        } else if single_append {
+            self.append_record(items.last().context("missing appended item")?)
+        } else {
+            self.rewrite_records(items)
+        }
+    }
+
+    fn publish_records(&mut self, items: &[TranscriptItem]) -> anyhow::Result<()> {
+        let parent = self
+            .path
+            .parent()
+            .context("session file has no parent directory")?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+            format!(
+                "failed to stage the initial session file for {}",
+                self.path.display()
+            )
+        })?;
+        write_items(staged.as_file_mut(), &self.path, items)?;
+        staged.as_file().sync_all().with_context(|| {
+            format!(
+                "failed to sync the initial session file for {}",
+                self.path.display()
+            )
+        })?;
+        // No-clobber publication returns the already-open staged handle. An
+        // allocation/publication race cannot replace a different history, and
+        // there is no fallible reopen after the canonical file becomes visible.
+        let file = staged
+            .persist_noclobber(&self.path)
+            .map_err(|error| error.error)
+            .with_context(|| {
+                format!(
+                    "failed to publish the initial session file at {}",
+                    self.path.display()
+                )
+            })?;
+        self.file = TranscriptFile::Writable(file);
+        self.needs_newline = false;
+        if let Err(error) = sync_directory(parent) {
+            tracing::warn!(
+                target: "zevria_core::transcript", path = %self.path.display(), %error,
+                "initial session publication committed but the parent directory could not be synced"
+            );
+        }
+        Ok(())
     }
 
     // Private persistence primitive: callers either validate raw headers above,
@@ -1119,7 +1279,7 @@ impl TranscriptWriter {
                 self.path.display()
             )
         })?;
-        if let Ok(metadata) = self.file.metadata() {
+        if let Some(metadata) = self.file.handle().and_then(|file| file.metadata().ok()) {
             staged
                 .as_file()
                 .set_permissions(metadata.permissions())
@@ -1155,7 +1315,7 @@ impl TranscriptWriter {
                 self.path.display()
             )));
         }
-        self.file = staged_file;
+        self.file = TranscriptFile::Writable(staged_file);
         self.needs_newline = false;
         if let Err(error) = sync_directory(parent) {
             // The replacement and writer handle already agree. Directory
@@ -1184,6 +1344,16 @@ impl TranscriptWriter {
     }
 }
 
+fn serialize_record(item: &TranscriptItem) -> anyhow::Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(item).context("failed to serialize a transcript item")?;
+    anyhow::ensure!(
+        line.len() < MAX_ROOT_RECORD_BYTES,
+        "root transcript record exceeds the 64 MiB limit"
+    );
+    line.push(b'\n');
+    Ok(line)
+}
+
 /// Write every item to an already-created staged file.
 fn write_items(
     file: &mut std::fs::File,
@@ -1191,12 +1361,7 @@ fn write_items(
     items: &[TranscriptItem],
 ) -> anyhow::Result<()> {
     for item in items {
-        let mut line = serde_json::to_vec(item).context("failed to serialize a transcript item")?;
-        anyhow::ensure!(
-            line.len() < MAX_ROOT_RECORD_BYTES,
-            "root transcript record exceeds the 64 MiB limit"
-        );
-        line.push(b'\n');
+        let line = serialize_record(item)?;
         file.write_all(&line).with_context(|| {
             format!(
                 "failed to write the staged session file for {}",
@@ -1237,6 +1402,26 @@ pub fn is_prompt_item(item: &TranscriptItem) -> bool {
         TranscriptItem::SkillInvocation(_)
             | TranscriptItem::Message(Message::User { .. })
             | TranscriptItem::RequestPrompt { .. }
+    )
+}
+
+/// Whether a record establishes conversational content for a newly allocated
+/// session. This is intentionally independent of historical abandonment rules
+/// and editable-prompt numbering. Responses/tool evidence are substantive even
+/// without a projected user message; directives, headers and notices are not.
+pub fn is_conversation_item(item: &TranscriptItem) -> bool {
+    matches!(
+        item,
+        TranscriptItem::Message(_)
+            | TranscriptItem::RequestPrompt { .. }
+            | TranscriptItem::ProviderMessage(_)
+            | TranscriptItem::ToolResults { .. }
+            | TranscriptItem::IncompleteResponse(_)
+            | TranscriptItem::SkillInvocation(_)
+            | TranscriptItem::Plan(PlanRecord::Handoff { .. })
+            | TranscriptItem::Ensemble(EnsembleRecord::Started { .. })
+            | TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. })
+            | TranscriptItem::Compaction(_)
     )
 }
 
@@ -1330,11 +1515,11 @@ pub fn is_compaction_prompt_item(item: &TranscriptItem) -> bool {
 /// One live conversation and the writer for its complete persisted sequence.
 ///
 /// The item list is the *single* in-memory representation of a session's
-/// conversation. Model input projects from it; disk equals the live items,
-/// including ordered directives. Item indices equal file-line indices when
-/// blank lines are excluded. Required changes install memory after persistence
-/// commits; completed work can remain in memory under explicitly degraded
-/// persistence.
+/// conversation. Model input projects from it. Pending new sessions keep
+/// metadata and directives only here; the first conversational commit publishes
+/// the entire ordered sequence. Thereafter disk equals the live items (excluding
+/// blank lines), unless completed work is retained under degraded persistence.
+/// Required conversational changes install memory only after publication.
 pub struct Conversation {
     items: Vec<TranscriptItem>,
     writer: TranscriptWriter,
@@ -1359,9 +1544,9 @@ impl Conversation {
         }
     }
 
-    /// Adopt items already present in the log — the resume path, where the
-    /// writer was opened with [`TranscriptWriter::append_to`] on the very file
-    /// they were loaded from. Nothing is written.
+    /// Install validated startup items without writing: either metadata for a
+    /// pending new session, or items loaded from this writer's existing log.
+    /// The caller owns replay validation; this is not a mutation/acceptance API.
     pub fn adopt_persisted(&mut self, items: Vec<TranscriptItem>) {
         self.items = items;
     }
@@ -1377,7 +1562,8 @@ impl Conversation {
         }
     }
 
-    /// Commit a canonical snapshot before changing memory or an active route.
+    /// Install a canonical snapshot before changing an active route. Pending
+    /// new sessions retain it in memory; saved logs commit it durably.
     /// Equal selections do not rewrite history. Missing metadata on a saved
     /// root is unsupported and must never trigger implicit model inference.
     pub fn replace_session_models(&mut self, models: SessionModels) -> anyhow::Result<()> {
@@ -1395,7 +1581,7 @@ impl Conversation {
             );
             replacement.insert(0, TranscriptItem::SessionModels(models));
         }
-        self.writer.rewrite(&replacement)?;
+        self.writer.persist_unprepared(&replacement, false)?;
         self.items = replacement;
         Ok(())
     }
@@ -1416,8 +1602,9 @@ impl Conversation {
     }
 
     /// Assemble, validate, and persist one authoritative anchored proposal.
-    /// The returned replay belongs to the exact items installed after durability;
-    /// failed validation or persistence never installs prospective state.
+    /// The returned replay belongs to the exact installed items. Conversational
+    /// work requires durability; metadata-only new sessions stay in memory.
+    /// Failed validation or persistence never installs prospective state.
     pub fn commit_anchored(
         &mut self,
         index: Option<usize>,
@@ -1470,21 +1657,25 @@ impl Conversation {
                 self.persistence_error.is_none(),
                 "session transcript persistence is degraded"
             );
-        } else if !change.single_append {
+        } else if !change.single_append
+            || (self.writer.is_pending() && self.persistence_error.is_some())
+        {
             self.ensure_durable()?;
         }
         if change.items != self.items {
-            if change.single_append {
-                if let Err(error) = self
-                    .writer
-                    .append_record(change.items.last().expect("one appended item"))
-                {
+            let pending = self.writer.is_pending();
+            if let Err(error) = self
+                .writer
+                .persist_records(&change.items, change.single_append)
+            {
+                if !pending && change.single_append {
                     let error = error.context("the session transcript is degraded");
                     self.persistence_error = Some(format!("{error:#}"));
                     return Err(error);
                 }
-            } else {
-                self.writer.rewrite_records(&change.items)?;
+                // Initial publication is atomic and has no partial canonical
+                // tail to repair. Rejected input remains retryable, not degraded.
+                return Err(error);
             }
             self.items = change.items;
         }
@@ -1534,6 +1725,16 @@ impl Conversation {
     /// trailing line that must be repaired before another append.
     pub fn push_required(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
         self.writer.ensure_writable()?;
+        if self.writer.is_pending() && self.persistence_error.is_some() {
+            self.ensure_durable()?;
+        }
+        if self.writer.is_pending() {
+            let mut replacement = self.items.clone();
+            replacement.push(item);
+            self.writer.persist_unprepared(&replacement, true)?;
+            self.items = replacement;
+            return Ok(());
+        }
         if let Err(error) = self.writer.append(&item) {
             let error = error.context("the session transcript is degraded");
             self.persistence_error = Some(format!("{error:#}"));
@@ -1554,7 +1755,7 @@ impl Conversation {
         self.ensure_durable()?;
         let mut replacement = self.items.clone();
         replacement.extend(new_items);
-        self.writer.rewrite(&replacement)?;
+        self.writer.persist_unprepared(&replacement, false)?;
         self.items = replacement;
         Ok(())
     }
@@ -1565,16 +1766,32 @@ impl Conversation {
     /// any further pre-effect work starts.
     pub fn push_completed(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
         self.writer.ensure_writable()?;
-        let result = self
-            .ensure_durable()
-            .and_then(|_| self.writer.append(&item));
-        match result {
-            Ok(()) => {
-                self.items.push(item);
-                Ok(())
+        let pending = if self.writer.is_pending() {
+            let mut replacement = self.items.clone();
+            replacement.push(item.clone());
+            crate::validate_session_replay(&replacement)?;
+            if !replacement.iter().any(is_conversation_item) {
+                // No external conversational evidence to retain on failure:
+                // reject invalid/oversized metadata just like required changes.
+                self.writer.persist_records(&replacement, true)?;
+                self.items = replacement;
+                return Ok(());
             }
+            Some(replacement)
+        } else {
+            None
+        };
+        let result = self.ensure_durable().and_then(|_| {
+            if let Some(replacement) = &pending {
+                self.writer.persist_records(replacement, true)
+            } else {
+                self.writer.append(&item)
+            }
+        });
+        self.items.push(item);
+        match result {
+            Ok(()) => Ok(()),
             Err(error) => {
-                self.items.push(item);
                 let error = error.context("the session transcript is degraded");
                 self.persistence_error = Some(format!("{error:#}"));
                 Err(error)
@@ -1594,9 +1811,22 @@ impl Conversation {
         }
         let mut replacement = self.items.clone();
         replacement.extend(new_items);
-        let result = self
-            .ensure_durable()
-            .and_then(|_| self.writer.rewrite(&replacement));
+        let pending = self.writer.is_pending();
+        if pending {
+            crate::validate_session_replay(&replacement)?;
+            if !replacement.iter().any(is_conversation_item) {
+                self.writer.persist_records(&replacement, false)?;
+                self.items = replacement;
+                return Ok(());
+            }
+        }
+        let result = self.ensure_durable().and_then(|_| {
+            if pending {
+                self.writer.persist_records(&replacement, false)
+            } else {
+                self.writer.persist_unprepared(&replacement, false)
+            }
+        });
         self.items = replacement;
         match result {
             Ok(()) => Ok(()),
@@ -1612,10 +1842,14 @@ impl Conversation {
     /// of the complete live conversation. Returns `true` after a successful repair.
     pub fn ensure_durable(&mut self) -> anyhow::Result<bool> {
         self.writer.ensure_writable()?;
-        if self.persistence_error.is_none() {
+        if self.writer.is_pending() && !self.items.iter().any(is_conversation_item) {
+            // Shutdown/repair must never flush intentional metadata-only state.
             return Ok(false);
         }
-        if let Err(error) = self.writer.rewrite(&self.items) {
+        if self.persistence_error.is_none() && !self.writer.is_pending() {
+            return Ok(false);
+        }
+        if let Err(error) = self.writer.persist_unprepared(&self.items, false) {
             let error = error.context("failed to repair the degraded session transcript");
             self.persistence_error = Some(format!("{error:#}"));
             return Err(error);
@@ -1670,7 +1904,8 @@ impl Conversation {
     pub fn truncate(&mut self, index: usize) -> anyhow::Result<()> {
         self.ensure_durable()?;
         let index = index.max(self.leading_metadata_len());
-        self.writer.rewrite(&self.items[..index])?;
+        self.writer
+            .persist_unprepared(&self.items[..index], false)?;
         self.items.truncate(index);
         Ok(())
     }
@@ -1694,7 +1929,7 @@ impl Conversation {
         let index = index.max(self.leading_metadata_len());
         let mut replacement = self.items[..index].to_vec();
         replacement.extend(new_items);
-        self.writer.rewrite(&replacement)?;
+        self.writer.persist_unprepared(&replacement, false)?;
         self.items = replacement;
         Ok(())
     }
@@ -2646,6 +2881,10 @@ mod model_tests;
 #[cfg(test)]
 #[path = "transcript_mode_tests.rs"]
 mod mode_tests;
+
+#[cfg(test)]
+#[path = "pending_persistence_tests.rs"]
+mod pending_persistence_tests;
 
 #[cfg(test)]
 #[path = "prepared_change_tests.rs"]
@@ -3978,7 +4217,8 @@ mod tests {
         // Replace only the writer handle with a read-only descriptor. The
         // path remains replaceable, so the subsequent full rewrite can heal
         // the simulated append failure exactly as a later submission would.
-        conversation.writer.file = std::fs::File::open(&path).expect("read-only handle");
+        conversation.writer.file =
+            TranscriptFile::Writable(std::fs::File::open(&path).expect("read-only handle"));
         let completed = TranscriptItem::Message(Message::assistant("completed answer"));
         conversation
             .push_completed(completed.clone())
@@ -4022,7 +4262,7 @@ mod tests {
         conversation
             .push_required(TranscriptItem::Message(Message::user("prompt")))
             .unwrap();
-        conversation.writer.file = std::fs::File::open(&path).unwrap();
+        conversation.writer.file = TranscriptFile::Writable(std::fs::File::open(&path).unwrap());
         assert!(
             conversation
                 .push_completed(TranscriptItem::Message(Message::assistant(

@@ -36,7 +36,8 @@ pub struct ModelCandidate {
 
 pub const SESSION_MODELS_VERSION: u32 = 1;
 
-/// Complete durable selections for the two session-owned roles.
+/// Complete selections for the two session-owned roles. New sessions stage
+/// these in memory until the first accepted conversation is saved.
 /// No reasoning defaults may be inferred on resume.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "SessionModelsWire")]
@@ -123,7 +124,8 @@ pub enum ReplayPreflight {
     ConversionRequired { sources: Vec<ModelProfileRef> },
 }
 
-/// Both scopes are durable for this session; only SessionAndDefault writes config.
+/// Both scopes update this session. Transcript durability starts with the first
+/// saved conversation; only SessionAndDefault also writes global config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSelectionScope {
     SessionOnly,

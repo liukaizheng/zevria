@@ -308,7 +308,7 @@ async fn root_and_worker_startup_sweep_only_their_namespace_and_preserve_discove
 }
 
 #[tokio::test]
-async fn fresh_root_shutdown_preserves_selected_build_metadata_and_removes_sidecar() {
+async fn fresh_root_keeps_metadata_in_memory_without_a_transcript_and_releases_sidecar() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
     let root = fixture
@@ -317,7 +317,7 @@ async fn fresh_root_shutdown_preserves_selected_build_metadata_and_removes_sidec
         })
         .await;
     let path = root.restoration().transcript_path.clone();
-    let before = std::fs::read(&path).unwrap();
+    assert!(!path.exists());
     assert_eq!(root.restoration().selected_mode, SessionMode::Build);
     assert!(matches!(
         root.restoration().transcript_items.as_slice(),
@@ -329,14 +329,18 @@ async fn fresh_root_shutdown_preserves_selected_build_metadata_and_removes_sidec
     assert!(!transcript::is_abandoned_root(&path));
     assert!(path.with_extension("jsonl.lock").exists());
     root.shutdown().await.unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!path.exists());
     assert!(!path.with_extension("jsonl.lock").exists());
     assert!(path.parent().unwrap().join(".leases.lock").is_file());
     assert!(
         transcript::list_sessions(path.parent().unwrap())
             .unwrap()
-            .iter()
-            .any(|session| session.path == path)
+            .is_empty()
+    );
+    assert!(
+        transcript::latest_session_file(path.parent().unwrap())
+            .unwrap()
+            .is_none()
     );
     assert!(server.requests.try_recv().is_err());
 }

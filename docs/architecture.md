@@ -407,7 +407,7 @@ still perform their own refreshes. The runtime then discovers writable
 unfinished ensemble recovery and dispatches it before prequeued frontend
 commands, supervises active work and control traffic, and attempts best-effort
 transcript durability repair only after normal shutdown or channel exhaustion.
-Read-only sessions neither queue automatic recovery nor repair the transcript.
+Repair never materializes a pending metadata-only new session. Read-only sessions neither queue automatic recovery nor repair the transcript.
 One supervisor handles both turns and model maintenance. Incoming turns queue
 FIFO during either kind of work. Management mutations are rejected as busy,
 while skill queries read the captured projection. `CancelTurn { None }` cancels
@@ -1336,9 +1336,11 @@ payload; loading validates the version and re-renders the exact model-facing tex
 Append, atomic rewrite and degraded-writer repair write every item. Required
 updates validate the full sequence before commit. Completed tool results, embedded
 full activation pins and directives remain one truthful live batch even if
-persistence fails. Further generation waits for repair. Disk equals all live
-items; indices match physical lines excluding blanks. Directives stay hidden in
-TUI/ACP.
+persistence fails. Further generation waits for repair. Once a transcript is
+materialized, disk equals all live items and indices match physical lines excluding
+blanks. Pending new sessions retain pre-conversation state only in this same item
+sequence; there is no separate writer or frontend buffer. Directives stay hidden
+in TUI/ACP.
 
 Resume restores workflow/model selections, full historical pins and directives
 at their recorded positions. Replay validates each directive against its pin and
@@ -1522,11 +1524,34 @@ If the prefix has no compaction prompt, compaction is reported as unavailable.
 
 ## Session model persistence and recovery
 
-A root transcript starts with metadata only:
+A root's authoritative sequence starts with model metadata:
 
 ```json
 {"zevria_session_models":{"version":1,"build":{"profile":{"provider":"p","model":"a"},"reasoning_level":"medium"},"plan":{"profile":{"provider":"p","model":"b"},"reasoning_level":"high"}}}
 ```
+
+New sessions allocate their ID and intended transcript path immediately but do
+**not** create a `.jsonl` file until conversational input is accepted. Startup
+model/mode selections, guidance refresh, commands, rejected/blank submissions and
+standalone notices remain in memory. Exiting or replacing an unused session does
+not save it, even while it is live. The first accepted text/image/orchestrated
+prompt, direct skill invocation, typed Plan handoff, or ensemble start publishes
+the **complete current ordered sequence**, including headers and required
+directives, before acceptance events, generation or tool dispatch. Response/tool
+evidence is also substantive; headers, directives and notices alone are not.
+Publication stages and syncs the complete file and uses no-clobber semantics,
+checking collisions again after allocation and retaining the staged file handle.
+A failed initial publication rejects required input without installing it or
+leaving a partial canonical transcript; the pending session can retry. Accepted
+conversations remain resumable even if generation fails or is cancelled. Later
+edits never delete a previously conversational transcript.
+
+This is transcript suppression, not zero filesystem activity: leases and existing
+auxiliary-directory behavior remain independent, and global settings retain their
+configuration-persistence rules. Unsaved new sessions naturally do not enter
+disk-based lists or `--continue`. Native worker recovery of an allocated but
+never-prompted ID follows the existing explicit missing-session/interrupted path;
+it does not silently recreate history. Agent-run evidence logs are separate artifacts.
 
 This canonical snapshot records current selections, not creation provenance.
 It contains no credentials, endpoints, supported-level catalogs, or frozen limits:
@@ -1541,14 +1566,17 @@ preserve the current header; editing an old prompt never reverts a later selecti
 It contributes no model input, retained-user content, prompt ordinal, TUI row, or
 ACP replay update. Request-local orchestration uses the saved Build identity;
 the header does not acquire another model role. The session-local selected workflow mode
-is durable state separate from these model identities and from Plan artifacts
-(see the frontend workflow below). Empty files and valid models-only roots
+is state separate from these model identities and from Plan artifacts; for new
+sessions it becomes durable with the first saved conversation (see below).
+**Existing historical files are unchanged:** empty files and valid models-only roots
 (with optional trailing whitespace) without a saved mode are hidden from listings/`--continue` and removed
-best-effort on clean shutdown. Any mode-bearing root, including a new canonical
-Build header or an explicit Plan → Build selection, is retained even with
-no messages. Damaged, retired instruction-bearing, or substantive history is
-never classified as safely empty. Fresh roots write models plus mode, native
-ensemble workers write models, and ordinary child logs may start empty.
+best-effort on clean shutdown. Any existing mode-bearing root, including a
+canonical Build header or an explicit Plan → Build selection, is retained even
+with no messages. Damaged, retired instruction-bearing, or substantive history is
+never classified as safely empty. No historical purge or broader abandonment
+classification is introduced. Fresh roots stage models plus mode in memory,
+native ensemble workers stage models, and ordinary children may start without
+metadata; each publishes only when its conversation begins.
 
 Root and native-worker resume require saved Build and Plan identities. Missing,
 duplicate, misplaced, malformed, or unsupported metadata rejects startup before
@@ -1694,7 +1722,9 @@ Configuration-default changes do not retarget either inherited mode; fresh Plan
 implementation uses the saved Build selection, never the Plan model.
 CLI `--continue`, TUI `/resume`, and ACP load/resume restore the **last successfully
 selected Build and Plan identities and reasoning levels** from the version-1 header, including
-changes acknowledged immediately before closing, with no later assistant response.
+changes acknowledged immediately before closing, with no later assistant response,
+**once a conversation has been saved**. Model/mode-only new sessions remain unsaved;
+live `/new` inheritance still preserves their current choices.
 Review, Explore, and Builder still use session-opening globals. Ordinary resume never rewrites
 globals. The header stores complete selections, not credentials or a historical config
 snapshot; removing a selected catalog entry or supported reasoning level blocks
@@ -1721,8 +1751,9 @@ usage telemetry, picker drafts, the active mode, or a stale startup snapshot.
 normal outgoing shutdown, `SessionStart::New` or `SessionStart::FromPlan` receives
 explicit inherited selections. Resume has no inherited override. Fresh startup
 reloads catalogs, capabilities, limits, and other-role defaults, validates the
-complete pair, builds routing and compaction policies from it, and durably writes
-the existing version-1 `SessionModels` header before any opening handoff executes.
+complete pair, builds routing and compaction policies from it, and stages the
+existing version-1 `SessionModels` header in memory. Acceptance of an opening
+handoff durably publishes the header together with that handoff before it executes.
 Missing or inconsistent frontend state and unavailable selections are errors, not
 reasons to infer defaults. No process-global preference or new schema is involved.
 These selections remain typed startup state and transcript metadata, excluded from
@@ -1766,7 +1797,8 @@ Persistence is checkpoint-first, **not** a two-file atomic transaction:
    before persistence; session-only selection cannot rely on a config writer here.
 3. Durably append/install a validated portable checkpoint if required.
 4. **Only for `/model`:** atomically save the selected global assignment.
-5. Atomically replace only the selected role in the root's Build/Plan header.
+5. Replace only the selected role in the root's Build/Plan header: atomically on
+   disk for an existing transcript, or in memory for a pending new session.
 6. Infallibly install the prepared route/limits and publish success.
 
 `/model-session` never calls the settings save service or enters a config-writing
@@ -1789,8 +1821,9 @@ remain unchanged, but a successful checkpoint remains. If the later header save
 fails, the **global default was saved**, but active and durable session selections
 remain unchanged; the rejection carries the committed global revision for retry.
 The UI explicitly reports either partial outcome and any saved checkpoint.
-A crash after header commit restores the selection even if the acknowledgement
-never reached the frontend. Cancellation before persistence installs neither. Every synthetic source request resets continuation state,
+For a materialized transcript, a crash after header commit restores the selection
+even if the acknowledgement never reached the frontend. Pending new-session local
+choices survive live replacement but not process exit unless conversation is saved. Cancellation before persistence installs neither. Every synthetic source request resets continuation state,
 on success and failure. Accepted genuine profile switches also reset every initialized
 continuation, exact-count cache, usage baseline, and context snapshot, and re-arm
 the selected role's capacity assessment. Ordinary Build/Plan mode changes retain
@@ -2197,7 +2230,9 @@ private native job helper around the pinned SDK's direct-child cleanup. WSL
 handoff is whole-application and never treated as Windows-owned Linux descendants;
 no cleanup terminates a distribution. See [Windows runtime setup](windows.md).
 
-Transcript appends use complete writes, flush, and `sync_data`. Rewrites and
+New-session metadata alone is intentionally pending, not degraded persistence;
+shutdown/`ensure_durable` never flushes it into a file. Once materialized,
+transcript appends use complete writes, flush, and `sync_data`. Rewrites and
 edited-turn replacement are staged, synced, and atomically renamed. If a
 completed external action cannot be appended, it remains in the authoritative
 in-memory conversation and the session becomes persistence-degraded; new work
@@ -2785,10 +2820,11 @@ escape so recall cannot accidentally turn data into a command. ACP requires the
 version-1 `zevria.orchestration` prompt metadata extension; ordinary text is literal.
 Neither surface implicitly switches modes or approves/revises a pending Plan.
 
-The acknowledged selection is session-local durable state, not a global default
-and not a side effect of the next prompt. `--continue`, `/resume`, and ordinary
+The acknowledged selection is authoritative session-local state, not a global
+default. Once a conversation has been saved, `--continue`, `/resume`, and ordinary
 ACP load/resume restore it, including a switch immediately followed by close with
-no intervening assistant response. Selecting a mode alone does not approve,
+no intervening assistant response. A new unused session keeps mode-only choices
+in memory and creates no transcript, so it cannot be resumed after close. Selecting a mode alone does not approve,
 abandon, revise, or erase a Plan artifact. A pending **Ready** artifact forces
 Plan mode and retains the existing versioned approval decision; this restoration
 is not approval and cannot start implementation. Planning with a retained artifact,
@@ -2812,7 +2848,8 @@ Literal marker text inside a message stays ordinary text.
 Supported histories without this record use their authoritative Plan state:
 Planning/Ready/Published restore Plan; Idle/Resolved restore Build. Model header
 changes, compaction, and transcript edits preserve the selection. `SetMode` uses
-a staged atomic rewrite, returns correlated `ModeResult`, and allocates no turn ID
+a staged atomic rewrite for materialized transcripts (memory-only installation
+for pending new sessions), returns correlated `ModeResult`, and allocates no turn ID
 or provider request. Equal selections do not rewrite. Busy, read-only, restricted
 profile, degraded-persistence, and Ready requests are rejected without queueing.
 Accepted workflow actions use `ModeChanged` and commit their selected mode with
@@ -2840,9 +2877,10 @@ selections, including configuration-origin choices, and rediscovers skills witho
 an opening prompt or automatic model turn. `/new` resets conversation, not model
 preferences; configuration changes refresh catalogs and other roles but do not
 replace the inherited Build/Plan pair. `/resume` and `--continue` restore the target
-transcript's pair, which a subsequent `/new` then inherits. Substantive old conversations and their related
-artifacts remain available through `/resume`; roots with canonical mode metadata
-are also retained without messages. Empty files and valid legacy metadata-only
+transcript's pair, which a subsequent `/new` then inherits. Repeated unused
+`/new` replacements create no transcript files. Substantive old conversations and
+their related artifacts remain available through `/resume`; existing historical
+roots with canonical mode metadata are also retained without messages. Empty files and valid legacy metadata-only
 roots without a saved mode are excluded and removed best-effort, while damaged
 or substantive history is never safely empty. This is a fresh session,
 not a full process/configuration reload: workspace contents, global settings
@@ -3400,9 +3438,11 @@ fresh session rather than migrating these histories. Current incomplete-response
 v1 and ACP display v2 do not change provider replay v1 or any request bytes.
 
 
-Build/Plan selection is durable session-local engine state, distinct
+Build/Plan selection is authoritative session-local engine state, distinct
 from the immutable in-flight request mode and from the Build/Plan model identities.
-Mode-only changes do not require a subsequent prompt to survive close/resume.
+After a conversation is saved, mode-only changes need no subsequent prompt to
+survive close/resume. Before that, new-session selections remain memory-only;
+existing historical metadata-only files retain their discovery/resume behavior.
 The Plan workflow is independently reconstructed from standalone `zevria_plan`
 transcript records, so pending approval is neither ephemeral nor inferred from
 message text. Ready forces Plan without approving it; retained or Published

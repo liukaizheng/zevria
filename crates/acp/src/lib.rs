@@ -70,8 +70,9 @@ impl AcpConfig {
     }
 }
 
-/// Whether a runtime starts a fresh durable transcript or an exact existing
-/// transcript selected by its public session ID.
+/// Whether a runtime allocates a fresh session or opens an exact existing
+/// transcript by public ID. New IDs are live immediately, but become reopenable
+/// only after accepted conversational input materializes their transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStart {
     New,
@@ -126,7 +127,8 @@ pub trait SessionRuntimeLifecycle: Send {
     fn shutdown(self: Box<Self>) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 }
 
-/// One fully started, transcript-backed runtime handed to the ACP frontend.
+/// One fully started runtime handed to ACP. New sessions may still have a
+/// pending transcript and keep their initial metadata only in memory.
 ///
 /// The frontend owns the command sender and event receiver. It must drop both
 /// before awaiting [`SessionRuntimeLifecycle::shutdown`], preserving Zevria's

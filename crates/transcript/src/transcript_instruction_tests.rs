@@ -138,7 +138,8 @@ fn rewrites_batches_edits_headers_and_degraded_repair_preserve_all_items() {
     assert_eq!(conversation.prompt_position(1), Some(5));
     assert_projection(&conversation);
     // Fail a real persisted append, keeping truthful completed work in memory.
-    conversation.writer.file = std::fs::File::open(conversation.path()).unwrap();
+    conversation.writer.file =
+        TranscriptFile::Writable(std::fs::File::open(conversation.path()).unwrap());
     assert!(
         conversation
             .push_completed(TranscriptItem::Message(Message::assistant(

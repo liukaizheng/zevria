@@ -34,7 +34,7 @@ fn removed_recovery(home: &Path, workspace: &Path, id: &str) -> Output {
 }
 
 #[test]
-fn real_acp_mode_only_selection_survives_immediate_close_load_and_resume() {
+fn real_acp_pending_mode_only_selection_stays_unsaved_and_historical_modes_resume() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     // No provider is reachable: mode selection and restoration must not generate.
@@ -72,19 +72,44 @@ fn real_acp_mode_only_selection_survives_immediate_close_load_and_resume() {
         let path = transcript::sessions_dir(workspace.path()).join(format!("{id}.jsonl"));
         let selected = rpc.request("session/set_mode", json!({"sessionId":id,"modeId":mode_id}));
         assert!(selected.get("error").is_none(), "{selected}");
-        let items = transcript::load(&path).unwrap();
-        assert!(matches!(
-            items.as_slice(),
-            [
-                TranscriptItem::SessionModels(_),
-                TranscriptItem::SessionMode(mode)
-            ] if *mode == selected_mode
-        ));
-        assert!(transcript::model_input(&items).is_empty());
-        let persisted = std::fs::read(&path).unwrap();
+        assert!(
+            !path.exists(),
+            "live mode-only sessions must not create a transcript"
+        );
+        assert!(
+            transcript::list_sessions(path.parent().unwrap())
+                .unwrap()
+                .iter()
+                .all(|summary| summary.id != id)
+        );
         let closed = rpc.request("session/close", json!({"sessionId":id}));
         assert!(closed.get("error").is_none(), "{closed}");
-        assert_eq!(std::fs::read(&path).unwrap(), persisted);
+        assert!(!path.exists());
+        for method in ["session/load", "session/resume"] {
+            let missing = rpc.request(
+                method,
+                json!({"sessionId":id,"cwd":workspace.path(),"mcpServers":[]}),
+            );
+            assert!(
+                missing.get("error").is_some(),
+                "unused IDs are not reopenable: {missing}"
+            );
+        }
+        // Historical mode-only files remain discoverable and byte-preserved.
+        let selection = zevria_model::models::ModelSelection::new(
+            ModelProfileRef::new("test", "test-model"),
+            zevria_foundation::ReasoningLevel::Medium,
+        );
+        let items = vec![
+            TranscriptItem::SessionModels(
+                SessionModels::new(selection.clone(), selection).unwrap(),
+            ),
+            TranscriptItem::SessionMode(selected_mode),
+        ];
+        let mut writer = TranscriptWriter::create_with_id(path.parent().unwrap(), &id).unwrap();
+        writer.rewrite(&items).unwrap();
+        drop(writer);
+        let persisted = std::fs::read(&path).unwrap();
         assert!(!transcript::is_abandoned_root(&path));
         assert!(
             transcript::list_sessions(&transcript::sessions_dir(workspace.path()))
@@ -105,6 +130,51 @@ fn real_acp_mode_only_selection_survives_immediate_close_load_and_resume() {
         }
     }
     assert_eq!(std::fs::read(config_path).unwrap(), config_before);
+}
+
+#[test]
+fn real_acp_unused_root_and_worker_sessions_stay_unsaved_through_eof() {
+    for worker in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        super::write_test_config(home.path());
+        let config = home.path().join(".zevria/config.toml");
+        let mut rpc = if worker {
+            Rpc::start_worker(home.path(), workspace.path(), &config)
+        } else {
+            Rpc::start(home.path(), workspace.path())
+        };
+        let initialized = rpc.request(
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{}}),
+        );
+        assert!(initialized.get("error").is_none(), "{initialized}");
+        let mut paths = Vec::new();
+        for _ in 0..3 {
+            let created = rpc.request(
+                "session/new",
+                json!({"cwd":workspace.path(),"mcpServers":[]}),
+            );
+            assert!(created.get("error").is_none(), "{created}");
+            let id = created["result"]["sessionId"].as_str().unwrap();
+            let directory = if worker {
+                workspace.path().join(".zevria/ensemble-sessions")
+            } else {
+                transcript::sessions_dir(workspace.path())
+            };
+            let path = directory.join(format!("{id}.jsonl"));
+            assert!(!path.exists());
+            assert!(path.with_extension("jsonl.lock").exists());
+            assert!(transcript::list_sessions(&directory).unwrap().is_empty());
+            paths.push(path);
+        }
+        rpc.eof_and_reap();
+        for path in paths {
+            assert!(!path.exists());
+            assert!(!path.with_extension("jsonl.lock").exists());
+            assert!(path.parent().unwrap().join(".leases.lock").exists());
+        }
+    }
 }
 
 #[test]
@@ -208,9 +278,16 @@ fn real_acp_crash_sidecars_are_reclaimed_on_next_startup_and_history_resumes() {
                     fresh["result"]["sessionId"].as_str().unwrap()
                 ))
                 .exists(),
-            !worker,
-            "ordinary root selection survives closing; workers retain legacy cleanup"
+            false,
+            "new unused roots and workers never materialize a transcript"
         );
+        for method in ["session/resume", "session/load"] {
+            let missing = successor.request(method, json!({"sessionId":fresh["result"]["sessionId"],"cwd":workspace.path(),"mcpServers":[]}));
+            assert!(
+                missing.get("error").is_some(),
+                "an allocated but never-prompted ID must stay missing: {missing}"
+            );
+        }
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert!(directory.join(".leases.lock").is_file());
     }

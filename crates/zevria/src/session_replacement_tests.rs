@@ -223,18 +223,16 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
             original_revision
         );
         assert!(server.requests.try_recv().is_err());
-        assert_eq!(
-            transcript::load_report(&source_path)
-                .unwrap()
-                .session_models()
-                .unwrap()
-                .unwrap(),
-            &expected
+        assert!(
+            !source_path.exists(),
+            "model-only selection does not save a new session"
         );
 
-        // Seed non-model source state to prove that /new carries only choices.
-        let mut items = transcript::load(&source_path).unwrap();
-        items[1] = TranscriptItem::SessionMode(SessionMode::Plan);
+        // Explicitly seed historical source state to prove /new carries only choices.
+        let mut items = vec![
+            TranscriptItem::SessionModels(expected.clone()),
+            TranscriptItem::SessionMode(SessionMode::Plan),
+        ];
         items.push(TranscriptItem::Message(rig_core::message::Message::user(
             "SOURCE_CONVERSATION",
         )));
@@ -255,7 +253,8 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
         items.push(TranscriptItem::Plan(PlanRecord::Started {
             id: zevria_workflow::PlanId::new(),
         }));
-        let mut writer = TranscriptWriter::append_to(source_path.clone()).unwrap();
+        let mut writer =
+            TranscriptWriter::create_with_id(source_path.parent().unwrap(), &source_id).unwrap();
         writer.rewrite(&items).unwrap();
         drop(writer);
         let source_before = std::fs::read(&source_path).unwrap();
@@ -343,7 +342,8 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
                     .is_empty()
             );
             let path = running.restoration().transcript_path.clone();
-            let empty_bytes = std::fs::read(&path).unwrap();
+            assert!(!path.exists());
+            let live_models = tui_models(running.restoration());
             previous_id = running.restoration().session_id.clone();
             previous_path = path.clone();
             let mut events = running.take_event_receiver().unwrap();
@@ -391,20 +391,22 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
             }
             running.shutdown().await.unwrap();
             if replacement == 0 {
-                assert_eq!(std::fs::read(&path).unwrap(), empty_bytes);
+                assert!(!path.exists());
+                inherited = live_models;
+            } else {
+                assert_eq!(
+                    transcript::load_report(&path)
+                        .unwrap()
+                        .session_models()
+                        .unwrap()
+                        .unwrap(),
+                    &expected
+                );
+                let restored = fixture.start(runtime::SessionStart::Resume(path)).await;
+                assert_models(restored.restoration(), &expected, &current_config);
+                inherited = tui_models(restored.restoration());
+                restored.shutdown().await.unwrap();
             }
-            assert_eq!(
-                transcript::load_report(&path)
-                    .unwrap()
-                    .session_models()
-                    .unwrap()
-                    .unwrap(),
-                &expected
-            );
-            let restored = fixture.start(runtime::SessionStart::Resume(path)).await;
-            assert_models(restored.restoration(), &expected, &current_config);
-            inherited = tui_models(restored.restoration());
-            restored.shutdown().await.unwrap();
             assert_eq!(std::fs::read(&source_path).unwrap(), source_before);
             assert_config_unchanged();
         }

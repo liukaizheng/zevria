@@ -1,4 +1,4 @@
-//! Frontend-neutral ownership of one transcript-backed Zevria session.
+//! Frontend-neutral ownership of one Zevria session and its pending or saved transcript.
 
 use std::{
     path::{Path, PathBuf},
@@ -415,9 +415,7 @@ async fn start_worker_session(
     let writer = if loaded.is_some() {
         transcript::TranscriptWriter::append_to(path.clone())?
     } else {
-        let mut writer = transcript::TranscriptWriter::create_with_id(&directory, &id)?;
-        writer.rewrite(&items)?;
-        writer
+        transcript::TranscriptWriter::allocate_with_id(&directory, &id)?
     };
     #[cfg(feature = "cache-diagnostics")]
     let provider = provider.with_cache_diagnostics(zevria_provider::CacheDiagnosticContext::new(
@@ -452,6 +450,7 @@ async fn start_worker_session(
         exit_tx,
     );
     Ok(RunningSession {
+        cleanup_abandoned_history: loaded.is_some(),
         restored_taken: false,
         restored_subtasks: Vec::new(),
         restored_agent_runs: Vec::new(),
@@ -586,7 +585,9 @@ pub struct SessionRestoration {
     pub session_id: String,
     pub subsessions_dir: PathBuf,
     pub agent_runs_root: PathBuf,
+    /// Intended path; a new unused session has no transcript file yet.
     pub transcript_path: PathBuf,
+    /// Authoritative startup items, including pending in-memory metadata.
     pub transcript_items: Vec<TranscriptItem>,
     pub skill_catalog: Arc<zevria_instructions::skill::SkillCatalog>,
     pub startup_notices: Vec<String>,
@@ -606,7 +607,9 @@ pub struct RestoredSession {
     pub session_id: String,
     pub subsessions_dir: PathBuf,
     pub agent_runs_root: PathBuf,
+    /// Intended path; a new unused session has no transcript file yet.
     pub transcript_path: PathBuf,
+    /// Authoritative startup items, including pending in-memory metadata.
     pub transcript_items: Vec<TranscriptItem>,
     pub skill_catalog: Arc<zevria_instructions::skill::SkillCatalog>,
     pub startup_notices: Vec<String>,
@@ -640,6 +643,10 @@ pub struct RuntimeTaskExit {
 /// senders and take the sole event receiver, while this handle retains task,
 /// transcript, and shutdown ownership.
 pub struct RunningSession {
+    // Only existing histories use conservative legacy cleanup. A new pending
+    // path may acquire a competing file after allocation; shutdown must not
+    // delete someone else's file after rejected no-clobber publication.
+    cleanup_abandoned_history: bool,
     restored_taken: bool,
     restored_subtasks: Vec<RestoredSubtask>,
     restored_agent_runs: Vec<RestoredAgentRun>,
@@ -711,7 +718,8 @@ impl RunningSession {
 
     /// Preserve the established ownership sequence: signal Shutdown, drop
     /// command and event endpoints, await engine, await supervisor, then remove
-    /// an abandoned empty or valid metadata-only transcript best-effort.
+    /// an eligible existing abandoned transcript best-effort. An absent pending
+    /// transcript is normal and shutdown does not materialize it.
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
         if let Some(command_tx) = self.command_tx.take() {
             let _ = command_tx.send(SessionCommand::Control(
@@ -734,7 +742,8 @@ impl RunningSession {
             Ok(())
         };
 
-        let transcript_is_empty = transcript::is_abandoned_root(&self.restoration.transcript_path);
+        let transcript_is_empty = self.cleanup_abandoned_history
+            && transcript::is_abandoned_root(&self.restoration.transcript_path);
         if transcript_is_empty
             && let Err(error) = std::fs::remove_file(&self.restoration.transcript_path)
         {
@@ -748,7 +757,7 @@ impl RunningSession {
     }
 }
 
-/// Start one provider connection, transcript writer, engine, ensemble
+/// Start one provider connection, possibly pending transcript writer, engine, ensemble
 /// supervisor, question broker, and subtask supervisor without constructing a
 /// terminal frontend.
 pub async fn start_session(
@@ -886,10 +895,7 @@ pub async fn start_session(
     let transcript = match &start {
         SessionStart::Resume(_) => transcript::TranscriptWriter::append_to(root_path)?,
         SessionStart::New { .. } | SessionStart::FromPlan { .. } => {
-            let mut writer =
-                transcript::TranscriptWriter::create_with_id(&sessions_dir, &root_session_id)?;
-            writer.rewrite(&transcript_items)?;
-            writer
+            transcript::TranscriptWriter::allocate_with_id(&sessions_dir, &root_session_id)?
         }
     };
     let transcript_path = transcript.path().to_path_buf();
@@ -932,7 +938,8 @@ pub async fn start_session(
     tracing::info!(target: "zevria::runtime",
         session_id = transcript.session_id(),
         path = %transcript_path.display(),
-        "recording the session transcript"
+        pending = transcript.is_pending(),
+        "opened session transcript storage"
     );
 
     let ensemble = Arc::new(EnsembleSupervisor::new(
@@ -1030,6 +1037,7 @@ pub async fn start_session(
     );
     let supervisor_task = observe_task("subtask supervisor", supervisor, exit_tx);
 
+    let cleanup_abandoned_history = matches!(&start, SessionStart::Resume(_));
     if let SessionStart::FromPlan { handoff, .. } = start {
         command_tx
             .send(SessionCommand::Turn(
@@ -1039,6 +1047,7 @@ pub async fn start_session(
     }
 
     Ok(RunningSession {
+        cleanup_abandoned_history,
         restored_taken: false,
         restored_subtasks,
         restored_agent_runs,
@@ -1294,7 +1303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_shutdown_cleans_empty_transcripts_and_releases_isolated_leases() {
+    async fn unused_worker_stays_unmaterialized_and_shutdown_releases_isolated_leases() {
         let workspace = tempfile::tempdir().unwrap();
         let config = crate::config::test_config();
         let worker = start_session_with_profile(
@@ -1308,6 +1317,7 @@ mod tests {
         .await
         .unwrap();
         let path = worker.restoration.transcript_path.clone();
+        assert!(!path.exists());
         assert_eq!(worker.restoration.plan_state, PlanWorkflowState::Idle);
         assert_eq!(worker.restoration.selected_mode, SessionMode::Build);
         assert!(worker.supervisor_task.is_none());
@@ -1421,6 +1431,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_worker_shutdown_never_deletes_a_competing_abandoned_file() {
+        for models_only in [false, true] {
+            let workspace = tempfile::tempdir().unwrap();
+            let mut worker =
+                start_worker_session(&crate::config::test_config(), workspace.path(), None)
+                    .await
+                    .unwrap();
+            let path = worker.restoration.transcript_path.clone();
+            assert!(!path.exists());
+            let bytes = if models_only {
+                let mut bytes =
+                    serde_json::to_vec(&worker.restoration.transcript_items[0]).unwrap();
+                bytes.push(b'\n');
+                bytes
+            } else {
+                Vec::new()
+            };
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(transcript::is_abandoned_root(&path));
+            let mut events = worker.take_event_receiver().unwrap();
+            worker
+                .command_sender()
+                .send(SessionCommand::Turn(
+                    zevria_session_api::TurnCommand::Submit {
+                        text: "must not be accepted".into(),
+                        mode: SessionMode::Build,
+                        behavior: zevria_foundation::RequestBehavior::Standard,
+                    },
+                ))
+                .unwrap();
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(
+                    event,
+                    zevria_session_api::SessionUpdate::Lifecycle(
+                        zevria_session_api::SessionEvent::TurnRejected { .. }
+                    )
+                ),
+                "{event:?}"
+            );
+            worker.shutdown().await.unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert!(!path.with_extension("jsonl.lock").exists());
+        }
+    }
+
+    #[tokio::test]
     async fn dropping_frontend_or_aborting_observer_keeps_a_surviving_engine_leased() {
         for abort_observer in [false, true] {
             let workspace = tempfile::tempdir().unwrap();
@@ -1459,9 +1519,10 @@ mod tests {
             }
             assert_eq!(lease.strong_count(), 0);
             assert!(!sidecar.exists());
-            // Abandoned-transcript removal still belongs to explicit shutdown,
-            // not an eager RunningSession::Drop or lease destructor.
-            assert!(path.exists());
+            assert!(
+                !path.exists(),
+                "a leased but unused worker never creates history"
+            );
         }
     }
 
@@ -1507,6 +1568,7 @@ mod tests {
             SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
         );
         let running = RunningSession {
+            cleanup_abandoned_history: true,
             restored_taken: false,
             restored_subtasks: Vec::new(),
             restored_agent_runs: Vec::new(),
@@ -1562,6 +1624,7 @@ mod tests {
             SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
         );
         let running = RunningSession {
+            cleanup_abandoned_history: true,
             restored_taken: false,
             restored_subtasks: Vec::new(),
             restored_agent_runs: Vec::new(),

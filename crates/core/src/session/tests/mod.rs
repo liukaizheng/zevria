@@ -4,6 +4,7 @@ mod directives;
 mod instruction_persistence;
 mod mode;
 mod orchestration;
+mod pending_persistence;
 mod plan_drafts;
 mod prompt;
 mod prompt_admission;

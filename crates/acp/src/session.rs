@@ -106,7 +106,7 @@ impl State {
 struct PendingMode {
     request_id: String,
     mode: SessionMode,
-    // The waiter can leave before the engine acknowledges its durable commit.
+    // The waiter can leave before the engine acknowledges its authoritative selection.
     // Correlation and the admission lock outlive that local RPC request.
     outcome: Option<oneshot::Sender<Result<(), AcpError>>>,
 }
@@ -431,7 +431,7 @@ impl LiveSession {
         {
             // Unmatched or already-resolved replies cannot overwrite a newer
             // selection. An abandoned waiter still has a correlated pending
-            // entry and must reconcile the engine's durable result below.
+            // entry and must reconcile the engine's authoritative result below.
             return Ok(());
         }
         let pending = state.pending_mode.as_mut().expect("matched pending mode");

@@ -561,17 +561,15 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
         a
     );
     let fresh_path = fresh.restoration().transcript_path.clone();
-    let fresh_bytes = std::fs::read(&fresh_path).unwrap();
+    assert!(!fresh_path.exists());
     assert_eq!(fresh.restoration().selected_mode, SessionMode::Build);
-    assert!(!transcript::is_abandoned_root(&fresh_path));
+    let TranscriptItem::SessionModels(expected_models) = &fresh.restoration().transcript_items[0]
+    else {
+        panic!("in-memory model header");
+    };
+    let expected_models = expected_models.clone();
     fresh.shutdown().await.unwrap();
-    assert_eq!(std::fs::read(&fresh_path).unwrap(), fresh_bytes);
-    let expected_models = transcript::load_report(&fresh_path)
-        .unwrap()
-        .session_models()
-        .unwrap()
-        .unwrap()
-        .clone();
+    assert!(!fresh_path.exists());
     // An independent FromPlan start with no source selections still uses defaults.
     let source_session_id = path.file_stem().unwrap().to_str().unwrap();
     let source_before = std::fs::read(&path).unwrap();
@@ -1296,7 +1294,7 @@ async fn production_acp_factory_restores_models_and_reports_legacy_errors() {
         .await
         .unwrap();
     assert!(listed.iter().any(|session| session.id == id));
-    assert!(listed.iter().any(|session| session.id == selected_build_id));
+    assert!(listed.iter().all(|session| session.id != selected_build_id));
     selected_build.lifecycle.shutdown().await.unwrap();
     assert!(
         factory
@@ -1304,7 +1302,7 @@ async fn production_acp_factory_restores_models_and_reports_legacy_errors() {
             .await
             .unwrap()
             .iter()
-            .any(|session| session.id == selected_build_id)
+            .all(|session| session.id != selected_build_id)
     );
     assert!(server.requests.try_recv().is_err());
 }

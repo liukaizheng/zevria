@@ -116,7 +116,7 @@ fn required_failure_installs_neither_items_nor_replay_and_preserves_writer_seman
     let path = conversation.path().to_path_buf();
     let bytes = std::fs::read(&path).unwrap();
     // An already-open read-only handle reliably fails an append on all platforms.
-    conversation.writer.file = std::fs::File::open(&path).unwrap();
+    conversation.writer.file = TranscriptFile::Writable(std::fs::File::open(&path).unwrap());
     assert!(
         conversation
             .commit_anchored(

@@ -6,6 +6,7 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("payload.jsonl");
     let mut running = RunningSession {
+        cleanup_abandoned_history: true,
         restored_taken: false,
         restored_subtasks: vec![RestoredSubtask {
             id: zevria_foundation::SubtaskId::new("child"),

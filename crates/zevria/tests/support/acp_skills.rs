@@ -11,7 +11,7 @@ use std::{
 
 pub(super) struct Rpc {
     child: Child,
-    input: ChildStdin,
+    input: Option<ChildStdin>,
     output: mpsc::Receiver<Value>,
     next_id: u64,
     changes: Vec<Value>,
@@ -61,7 +61,7 @@ impl Rpc {
         });
         Self {
             child,
-            input,
+            input: Some(input),
             output,
             next_id: 0,
             changes: Vec::new(),
@@ -75,15 +75,32 @@ impl Rpc {
         self.child.kill().expect("kill ACP owner");
         self.child.wait().expect("reap ACP owner");
     }
+    /// Graceful EOF coverage must wait for normal runtime/lease shutdown, not
+    /// rely on Drop's crash-style kill or a sleep to infer process completion.
+    pub(super) fn eof_and_reap(mut self) {
+        drop(self.input.take());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(status.success(), "ACP EOF shutdown failed: {status}");
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ACP EOF shutdown timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
     pub(super) fn request(&mut self, method: &str, params: Value) -> Value {
         self.next_id += 1;
         writeln!(
-            self.input,
+            self.input.as_mut().unwrap(),
             "{}",
             json!({"jsonrpc":"2.0", "id":self.next_id, "method":method, "params":params})
         )
         .unwrap();
-        self.input.flush().unwrap();
+        self.input.as_mut().unwrap().flush().unwrap();
         loop {
             let value = self
                 .output
@@ -97,8 +114,8 @@ impl Rpc {
                     "worker requested implementation approval: {value}"
                 );
                 self.questions.push(value.clone());
-                writeln!(self.input, "{}", json!({"jsonrpc":"2.0", "id":value["id"], "result":{"action":"accept", "content":{"question_0":"option_0"}}})).unwrap();
-                self.input.flush().unwrap();
+                writeln!(self.input.as_mut().unwrap(), "{}", json!({"jsonrpc":"2.0", "id":value["id"], "result":{"action":"accept", "content":{"question_0":"option_0"}}})).unwrap();
+                self.input.as_mut().unwrap().flush().unwrap();
                 continue;
             }
             if value["method"] == "_zevria/skills/changed" {

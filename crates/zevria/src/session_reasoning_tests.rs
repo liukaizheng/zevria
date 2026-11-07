@@ -96,19 +96,9 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
             let mut events = running.take_event_receiver().unwrap();
             change(&running, &mut events, mode, scope, revision_before.clone()).await;
             assert_eq!(std::fs::read(&fixture.models_path).unwrap(), model_bytes);
-            assert_eq!(
-                transcript::load(&path).unwrap().len(),
-                2,
-                "only metadata, no prompt, turn or instruction change"
-            );
-            let saved = transcript::load_report(&path).unwrap();
-            assert_eq!(
-                saved
-                    .session_models()
-                    .unwrap()
-                    .unwrap()
-                    .reasoning_for_mode(mode),
-                Level::High
+            assert!(
+                !path.exists(),
+                "reasoning selection alone must not save a new session"
             );
             if scope == Scope::SessionOnly {
                 assert_eq!(std::fs::read(&fixture.path).unwrap(), ordinary);
@@ -154,6 +144,15 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
                 .expect(&context.profile.provider, &context.profile.model)
                 .await;
             assert_eq!(request["reasoning"]["effort"], "high");
+            let saved = transcript::load_report(&path).unwrap();
+            assert_eq!(
+                saved
+                    .session_models()
+                    .unwrap()
+                    .unwrap()
+                    .reasoning_for_mode(mode),
+                Level::High
+            );
             running.shutdown().await.unwrap();
             let resumed = fixture
                 .start(runtime::SessionStart::Resume(path.clone()))

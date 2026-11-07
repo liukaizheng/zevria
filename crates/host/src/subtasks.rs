@@ -250,7 +250,7 @@ async fn run_child_session(
     abandoned: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<String> {
     let id = request.descriptor.id.clone();
-    let transcript = TranscriptWriter::create_with_id(&config.subsessions_dir, id.as_str())?;
+    let transcript = TranscriptWriter::allocate_with_id(&config.subsessions_dir, id.as_str())?;
     if request.turn.is_cancelled() {
         anyhow::bail!("subtask cancelled before its model turn started");
     }
@@ -610,6 +610,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn child_cancelled_before_its_first_turn_never_creates_a_transcript() {
+        for kind in [SubtaskKind::Explore, SubtaskKind::Build] {
+            let workspace = tempfile::tempdir().unwrap();
+            let directory = workspace.path().join("subsessions");
+            let (events, _receiver) = session_event_channel(32);
+            let config =
+                test_supervisor_config("ws://127.0.0.1:1".into(), events, directory.clone());
+            let turn = turn();
+            turn.cancellation().cancel();
+            let request = ChildSession {
+                descriptor: SubtaskDescriptor {
+                    id: zevria_foundation::subtask::SubtaskId::new("cancelled"),
+                    parent_session_id: "root".into(),
+                    title: "cancelled child".into(),
+                    kind,
+                    workspace: None,
+                    status: SubtaskStatus::Starting,
+                },
+                prompt: "never accepted".into(),
+                turn,
+                workspace: None,
+            };
+            assert!(
+                run_child_session(
+                    &request,
+                    &config,
+                    tokio_util::sync::CancellationToken::new()
+                )
+                .await
+                .is_err()
+            );
+            assert!(!directory.join("cancelled.jsonl").exists());
+        }
+    }
+
+    #[tokio::test]
     async fn a_child_that_cannot_connect_still_resolves_a_failed_outcome() {
         let workspace = tempfile::tempdir().expect("workspace");
         let subsessions_dir = workspace.path().join("subsessions");
@@ -643,7 +679,7 @@ mod tests {
             outcome.await.expect("resolved outcome"),
             SubtaskOutcome::Failed { .. }
         ));
-        // The child transcript was created before the connection attempt.
+        // The admitted child prompt was persisted before the connection attempt.
         assert!(
             subsessions_dir
                 .join(format!("{}.jsonl", metadata.id))

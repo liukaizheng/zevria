@@ -46,7 +46,7 @@ Worker-specific differences:
 - Worker Plan requires the client's `plan` capability (Plan operations), including for restored Planning/Ready sessions. Unsupported activation is rejected with runtime/lease cleanup. Canonical Ready Markdown is sent exactly as `plan_update` with `type = "markdown"` and a stable artifact-derived Plan ID, before the successful prompt response. A successful `submit_plan` result alone is not completion proof. Stored draft saves emit Planning snapshots but never Plan-channel proof, change prompt decision phases, or authorize implementation.
 - Plans are proposals for parent review: no implementation instructions or approval form is emitted. `/implement` and implementation choices are rejected in workers. Only an explicit parent worker-control receipt (`/confirm`, `/baseline`, or the existing confirm shortcut) confirms a proposal. Optional host `/baseline` selects one exact confirmed revision as synthesis foundation/preference authority; `/unbaseline` clears the selection but retains confirmation. These are parent controls, not ACP protocol extensions or provider commands; worker output cannot select itself. Transfers preserve previous confirmations and feedback/withdrawal clears both confirmation and selection. Explicit requirements, captured choices and factual correction outrank baseline preferences. Once all participating workers are confirmed, a run originally selecting multiple workers uses parent verification and synthesis. A Plan run originally selecting exactly one worker instead publishes that exact confirmed Markdown directly, without root inspection, rewriting, synthesis tools or root model calls. Abandoning workers from a multi-worker run does not enable this shortcut. Both paths publish without another approval or an automatic Build transition; implementation still requires a later explicit version-checked command. Questions about unresolved consequential preferences still use normal forms and dismissal/cancellation handling.
 - Ready load/resume restores `plan` and republishes the retained artifact without a model request. Replay never grants freshness or confirmation. Genuine nonempty follow-up feedback goes through revision and model work in the same session; it does not merely retransmit Ready proof. Prose-only discussion is valid but requires a fresh `submit_plan {}` publication before parent confirmation. Feedback edits the retained working copy with `update_plan`, optionally using `read_plan` for exact text. Intentional unchanged resubmission qualifies; history replay does not. Restored Planning with a newer draft republishes only its retained submitted artifact, not draft changes. A new ensemble invocation creates fresh sessions; discussion does not.
-- Native worker transcripts and `.jsonl.lock` leases live exclusively in `<workspace>/.zevria/ensemble-sessions/`. New/list/load/resume/exact-ID lookup and cleanup share this namespace, with no root fallback. A create-only `.gitignore` containing `*` preserves existing user guards. Workers do not create `.zevria/plans` Markdown projections and cannot displace the parent in ordinary `/resume` or `--continue` discovery.
+- `session/new` allocates an ID and acquires a lease without creating a transcript; the first accepted conversational input saves it. Allocated-but-never-prompted IDs remain usable live but missing-session recovery is explicitly interrupted, never silently recreated. Native worker transcripts and `.jsonl.lock` leases live exclusively in `<workspace>/.zevria/ensemble-sessions/`. New/list/load/resume/exact-ID lookup and cleanup share this namespace, with no root fallback. A create-only `.gitignore` containing `*` preserves existing user guards. Workers do not create `.zevria/plans` Markdown projections and cannot displace the parent in ordinary `/resume` or `--continue` discovery.
 
 Normalized parent evidence remains in `.zevria/agent-runs/...`. Native transcripts and parent logs can contain source material, diagnostics and accepted non-secret decisions; ignore guards are not confidentiality or retention controls. See [ensemble.md](ensemble.md) for default participation, opt-out, and recovery contracts.
 
@@ -139,13 +139,15 @@ in the complete top-level instruction set, not as ordered developer input. Withi
 one workflow it remains byte-identical across ordinary turns and skill activation. This applies to Zevria-owned
 native workers too, not external ACP agents' independent provider clients.
 Active sessions and retries are not hot-reloaded. The TUI's `/model-session` changes only the
-composer's captured model role, saved for resume and TUI replacement with config unchanged. Build targets
+composer's captured model role, retained for live TUI replacement and saved for
+resume once a conversation is persisted, with config unchanged. Build targets
 Build; Plan targets Plan. `/model` also saves that role's complete assignment in
 `config.toml`. Orchestration does not change model selection or reasoning.
 Both pickers require a profile choice followed by explicit reasoning confirmation;
 the first stage does not save or apply anything. ACP
 loading/resuming that same root restores either command's saved local choices, including a switch acknowledged
-just before closing without another assistant response. TUI `/new` and
+just before closing without another assistant response, provided a conversation
+has already been saved. Metadata-only new sessions remain unsaved. TUI `/new` and
 `/implement-fresh` (or the equivalent fresh-approval dialog action) inherit **both
 current Build and Plan provider/model/reasoning selections**, including choices
 originally derived from configuration. A subsequent `/new` after resume inherits
@@ -157,7 +159,8 @@ ACP new-session or worker behavior. Missing catalog identities or reasoning leve
 block inherited startup just as they block resume; another inheriting `/new` cannot
 fix them. Restore the catalog entry/level or independently launch with valid defaults.
 The version-1 header is not a historical configuration snapshot: capabilities and
-limits are reloaded, the inherited pair is persisted before any opening handoff,
+limits are reloaded, the inherited pair is staged in memory and persisted together
+with acceptance of any opening handoff before generation,
 and model preferences never enter Plan content, instructions, or provider messages.
 Cacheable prompt-prefix construction is unchanged; replacements still receive a
 new session/cache identity.
@@ -234,10 +237,13 @@ Stop all sessions/workers before using it. Configuration `.skills.lock` files ar
 outside this protocol. Older binaries may also reject the new metadata schema.
 
 Model changes commit checkpoint (if required), global default, then session header
-before installing the route/acknowledging success. A header failure after the global
+before installing the route/acknowledging success. A pending new session installs
+that header in memory instead of creating a metadata-only file; global-default
+saves still follow their existing configuration rules. A header failure after the global
 save leaves active and saved session selections unchanged, but reports that the
 global default was saved and supplies its new revision for retry. A crash after
-header commit restores the selection even without acknowledgement.
+header commit on a materialized transcript restores the selection even without
+acknowledgement.
 
 ## Supported ACP V1 surface
 
@@ -323,14 +329,15 @@ Builder retain dedicated child model roles and restricted toolsets. See
 Legacy transcripts containing persisted Orchestrate mode fail load/resume with
 an actionable diagnostic and are not rewritten.
 
-Mode selection is a session-local durable control, not model input, a model tool,
-plan submission, or approval. Accepted changes survive an immediate close followed
-by load/resume, even without another prompt or assistant response, and never write
-a global mode default. Ready restoration forces Plan but does not approve or start
+Mode selection is an authoritative session-local control, not model input, a model
+tool, plan submission, or approval. Once a conversation is saved, accepted changes
+survive immediate close/load/resume without another prompt or assistant response.
+A new mode-only session stays in memory, creates no transcript and cannot be
+reopened after close. Mode selection never writes a global mode default. Ready restoration forces Plan but does not approve or start
 implementation. A retained revision artifact or ensemble Published artifact does
 not erase a later explicit mode selection. New sessions still start Build.
 
-The response and `CurrentModeUpdate` follow the engine's correlated durable
+The response and `CurrentModeUpdate` follow the engine's correlated authoritative
 acknowledgement; the frontend never switches optimistically. Pending selection
 blocks prompt admission and conflicting management. Cancelling the RPC cannot
 undo an already-enqueued atomic save: it resolves the caller's wait, but admission
@@ -384,19 +391,30 @@ Prompt cancellation, `QuestionClosed`, session close, and connection loss cancel
 
 ## Sessions, replay, and TUI interoperability
 
-An ACP `SessionId` is the file stem of the corresponding root transcript under:
+An ACP `SessionId` is allocated immediately as the intended filename stem under:
 
 ```text
 <workspace>/.zevria/sessions/<session-id>.jsonl
 ```
 
-ACP and TUI sessions use the same persistence. A session created through ACP can later be opened with `zevria --continue`, and an existing TUI session can be listed, loaded, or resumed by an ACP client.
+ACP and TUI sessions use the same persistence. A new session creates no `.jsonl`
+file while idle, browsing commands, changing mode/model, refreshing guidance, or
+rejecting blank/invalid input. The first accepted text/image/orchestrated prompt,
+direct skill invocation, typed Plan handoff, or ensemble start publishes complete
+ordered history before acceptance effects, generation or tools. Failure or
+cancellation after acceptance keeps that resumable history. Before publication,
+the ID is usable in the live session but cannot be reopened after close/EOF.
+After publication, ACP sessions can be opened with `zevria --continue`, and saved
+TUI sessions can be listed, loaded or resumed by ACP. Leases and auxiliary
+directories can still touch disk; agent-run evidence logs are separate artifacts.
 
 Session IDs are resolved only by exact matches returned from Zevria's transcript listing. The server never joins an arbitrary client-supplied ID into a filesystem path, so path-like IDs such as `../other` cannot traverse outside the session directory.
 
-`session/list` is newest-first, omits empty files and valid legacy metadata-only roots without a saved mode, uses bounded preview titles, and returns bounded cursor pages. Mode-bearing roots remain listed even without messages. `session/load` sends visible replay updates before its response; `session/resume` starts the same durable state without replaying old messages.
+`session/list` is newest-first, omits empty files and valid legacy metadata-only roots without a saved mode, uses bounded preview titles, and returns bounded cursor pages. Existing historical mode-bearing roots remain listed and byte-preserved even
+without messages; unused new sessions have no file to list. This does not broaden
+historical cleanup predicates or retrospectively delete history. `session/load` sends visible replay updates before its response; `session/resume` starts the same durable state without replaying old messages.
 
-Replay includes ordered user text and images, assistant text, supported reasoning, tool calls and correlated results, captured file changes, task snapshots, provider-backed canonical messages, compact direct skill invocations, typed Plan handoffs, and visible transcript errors. It intentionally omits session mode/model selection metadata, embedded skill application snapshots, ordered skill directives, compaction internals, non-handoff Plan metadata, hidden ensemble synthesis payloads, and raw provider replay envelopes. Structured direct invocations own their full typed activation pins; tool-result records carry hidden skill applications, never frontend-facing result metadata. Compaction checkpoints are v1 and store neither instruction snapshots nor historical pin identities; provider replay remains v1. Acknowledgement wording has no lifecycle authority. There are no standalone pin records or pin-sidecar adjacency requirements. Only incomplete current-format trailing JSONL appends are automatically recoverable, including skill directives that can be derived again from pins and policy; pin-bearing lifecycle tails and completed invalid inner envelopes are never discarded. Invalid, tampered, or unsupported records reject the entire startup, not just the affected row, and preserve the original bytes. No partial or read-only session is published for such history. Engine protocol, application/file guidance, workflow JSON and role text, capability modules, and eligible skills render as the complete top-level instruction set. Skill bodies and revocations alone remain typed ordered model input, hidden from ACP conversation rows. The instruction set is not a transcript record; directives persist as hidden `zevria_skill_directive` records containing only version 1 and a semantic payload, with text re-rendered on load. Full skill activation bodies, digests, metadata and provenance intentionally persist in pins. Resume reproduces historical directive positions and validates them against pins before dispatch, while rebuilding current guidance and reconciling policy changes without repeating unchanged directives. Immediate maintenance uses captured current application/file guidance without activating skills. Instructions remain byte-identical within a workflow across turns and skill activation; workflow switches and catalog-management mutations intentionally change them. Unchanged instructions, tools and policy preserve the pre-shutdown input prefix across resume; changed guidance and server-side cache retention can still prevent cache reuse. Retired instruction-bearing histories, including unsupported skill directive versions, are rejected unchanged before session publication or tail repair, with no migration; start a fresh session. Directive records live in the JSONL, not a separate instruction-state file. This does not erase old files, quoted conversation/summary text, or provider retention. Ordinary requests receive the same complete eligible catalog with bounded descriptions and model-led selection contract as TUI requests; no ACP extension or text rewriting is required for automatic selection. Versioned `_zevria/skills/*` extensions provide metadata management and typed invocation without replaying bodies. Ordinary ACP text retains its existing semantics and cannot configure skill roots.
+Replay includes ordered user text and images, assistant text, supported reasoning, tool calls and correlated results, captured file changes, task snapshots, provider-backed canonical messages, compact direct skill invocations, typed Plan handoffs, and visible transcript errors. It intentionally omits session mode/model selection metadata, embedded skill application snapshots, ordered skill directives, compaction internals, non-handoff Plan metadata, hidden ensemble synthesis payloads, and raw provider replay envelopes. Structured direct invocations own their full typed activation pins; tool-result records carry hidden skill applications, never frontend-facing result metadata. Compaction checkpoints are v1 and store neither instruction snapshots nor historical pin identities; provider replay remains v1. Acknowledgement wording has no lifecycle authority. There are no standalone pin records or pin-sidecar adjacency requirements. Only incomplete current-format trailing JSONL appends are automatically recoverable, including skill directives that can be derived again from pins and policy; pin-bearing lifecycle tails and completed invalid inner envelopes are never discarded. Invalid, tampered, or unsupported records reject the entire startup, not just the affected row, and preserve the original bytes. No partial or read-only session is published for such history. Engine protocol, application/file guidance, workflow JSON and role text, capability modules, and eligible skills render as the complete top-level instruction set. Skill bodies and revocations alone remain typed ordered model input, hidden from ACP conversation rows. The instruction set is not a transcript record; directives are retained in the authoritative live sequence and, when the transcript materializes, persist as hidden `zevria_skill_directive` records containing only version 1 and a semantic payload, with text re-rendered on load. Full skill activation bodies, digests, metadata and provenance intentionally persist in pins. Resume reproduces historical directive positions and validates them against pins before dispatch, while rebuilding current guidance and reconciling policy changes without repeating unchanged directives. Immediate maintenance uses captured current application/file guidance without activating skills. Instructions remain byte-identical within a workflow across turns and skill activation; workflow switches and catalog-management mutations intentionally change them. Unchanged instructions, tools and policy preserve the pre-shutdown input prefix across resume; changed guidance and server-side cache retention can still prevent cache reuse. Retired instruction-bearing histories, including unsupported skill directive versions, are rejected unchanged before session publication or tail repair, with no migration; start a fresh session. Directive records live in the JSONL, not a separate instruction-state file. This does not erase old files, quoted conversation/summary text, or provider retention. Ordinary requests receive the same complete eligible catalog with bounded descriptions and model-led selection contract as TUI requests; no ACP extension or text rewriting is required for automatic selection. Versioned `_zevria/skills/*` extensions provide metadata management and typed invocation without replaying bodies. Ordinary ACP text retains its existing semantics and cannot configure skill roots.
 
 Provider replay uses destination-specific preflight for ACP generation as well
 as TUI turns, Plan handoff, and ensemble synthesis. Exact configured profiles

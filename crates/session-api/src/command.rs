@@ -144,7 +144,8 @@ pub enum ControlCommand {
 /// Idle-only correlated maintenance. Queries may be serviced while busy.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ManagementCommand {
-    /// Durable idle-only ordinary-root selection; never allocates a turn.
+    /// Authoritative idle-only root selection; never allocates a turn. Pending
+    /// new sessions retain it in memory until conversational input is saved.
     SetMode {
         request_id: String,
         mode: SessionMode,

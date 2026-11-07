@@ -78,13 +78,9 @@ async fn fresh_root_headers_and_selected_only_restoration_are_frontend_authorita
     ));
     let headers = fresh.restoration().transcript_items.clone();
     let fresh_path = fresh.restoration().transcript_path.clone();
-    let fresh_bytes = std::fs::read(&fresh_path).unwrap();
+    assert!(!fresh_path.exists());
     fresh.shutdown().await.unwrap();
-    assert_eq!(std::fs::read(&fresh_path).unwrap(), fresh_bytes);
-    assert!(
-        !transcript::is_abandoned_root(&fresh_path),
-        "the canonical Build selection survives even an immediate fresh-root close"
-    );
+    assert!(!fresh_path.exists());
 
     let factory = crate::acp_host::AcpHostFactory::new(Arc::new(load(&fixture.path).unwrap()));
     for (id, selected_mode) in [
@@ -134,7 +130,7 @@ async fn fresh_root_headers_and_selected_only_restoration_are_frontend_authorita
 }
 
 #[tokio::test]
-async fn production_mode_selection_survives_immediate_close_across_tui_and_acp() {
+async fn pending_mode_selection_stays_unsaved_and_historical_modes_resume_across_tui_and_acp() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
     let config_before = std::fs::read(&fixture.path).unwrap();
@@ -148,7 +144,7 @@ async fn production_mode_selection_survives_immediate_close_across_tui_and_acp()
         let id = tui.restoration().session_id.clone();
         let path = tui.restoration().transcript_path.clone();
         let mut expected = tui.restoration().transcript_items.clone();
-        let original = std::fs::read(&path).unwrap();
+        assert!(!path.exists());
         let mut events = tui.take_event_receiver().unwrap();
         assert!(events.try_recv().is_err());
         select_mode(
@@ -158,7 +154,7 @@ async fn production_mode_selection_survives_immediate_close_across_tui_and_acp()
             false,
         )
         .await;
-        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!path.exists());
         select_mode(&tui.command_sender(), &mut events, SessionMode::Plan, true).await;
         select_mode(
             &tui.command_sender(),
@@ -167,18 +163,29 @@ async fn production_mode_selection_survives_immediate_close_across_tui_and_acp()
             selected_mode != SessionMode::Plan,
         )
         .await;
-        // In particular, Plan -> Build returns to the exact canonical
-        // fresh header, which must remain discoverable on immediate shutdown.
+        // Neither Build -> Plan nor Plan -> Build materializes a new session.
+        assert!(!path.exists());
         tui.shutdown().await.unwrap();
         assert!(events.try_recv().is_err());
+        assert!(!path.exists());
+        assert!(
+            factory
+                .list(fixture.directory.path().to_path_buf())
+                .await
+                .unwrap()
+                .iter()
+                .all(|session| session.id != id)
+        );
+        // Explicitly seed historical selected-only history. Its existing
+        // discovery/resume and immediate-close durability remain unchanged.
         expected[1] = TranscriptItem::SessionMode(selected_mode);
+        let mut historical = TranscriptWriter::create_with_id(path.parent().unwrap(), &id).unwrap();
+        historical.rewrite(&expected).unwrap();
+        drop(historical);
         assert_eq!(transcript::load(&path).unwrap(), expected);
         assert!(!transcript::is_abandoned_root(&path));
         assert!(!path.with_extension("jsonl.lock").exists());
         let selected_bytes = std::fs::read(&path).unwrap();
-        if selected_mode == SessionMode::Build {
-            assert_eq!(selected_bytes, original);
-        }
         assert!(server.requests.try_recv().is_err());
         assert!(
             factory
@@ -255,13 +262,13 @@ async fn production_mode_selection_does_not_allocate_turns_or_call_the_provider(
         })
         .await;
     let path = root.restoration().transcript_path.clone();
-    let before = std::fs::read(&path).unwrap();
+    assert!(!path.exists());
     let mut events = root.take_event_receiver().unwrap();
     for mode in [SessionMode::Plan, SessionMode::Build] {
         select_mode(&root.command_sender(), &mut events, mode, true).await;
         assert!(server.requests.try_recv().is_err());
     }
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!path.exists());
     // The first actual prompt must still own turn 1 in this same engine, not
     // merely in a new runtime that would reset an accidentally spent turn ID.
     root.command_sender()
@@ -278,6 +285,7 @@ async fn production_mode_selection_does_not_allocate_turns_or_call_the_provider(
             SessionEvent::TurnStarted { turn_id, mode, .. } => {
                 assert_eq!(turn_id, zevria_foundation::TurnId::new(1));
                 assert_eq!(mode, SessionMode::Build);
+                assert!(path.is_file(), "acceptance must follow publication");
                 break;
             }
             SessionEvent::TurnFailed { error, .. } | SessionEvent::TurnRejected { error, .. } => {
