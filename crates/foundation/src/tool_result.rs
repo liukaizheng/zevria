@@ -139,6 +139,7 @@ impl ToolCallOutcome {
 pub enum ToolResultDetail {
     /// Captured mutations, including any that survive a failed edit.
     FileChanges(Vec<FileChangeOutput>),
+    CommandJob(crate::CommandJobDetail),
     PlanDraft(PlanDraftDetail),
     /// Input-ordered terminal slots, retaining every accepted child identity.
     Subtasks(Vec<SubtaskEntryMetadata>),
@@ -152,6 +153,13 @@ impl rig_core::tool::ContextValue for ToolResultDetail {
 }
 
 impl ToolResultDetail {
+    pub fn command_job(&self) -> Option<&crate::CommandJobDetail> {
+        match self {
+            Self::CommandJob(job) => Some(job),
+            _ => None,
+        }
+    }
+
     pub fn plan_draft(&self) -> Option<&PlanDraftDetail> {
         match self {
             Self::PlanDraft(draft) => Some(draft),
@@ -205,6 +213,10 @@ pub struct ToolResultMetadata {
 }
 
 impl ToolResultMetadata {
+    pub fn command_job(&self) -> Option<&crate::CommandJobDetail> {
+        self.detail.as_ref().and_then(ToolResultDetail::command_job)
+    }
+
     pub fn with_diagnostic(mut self, diagnostic: impl Into<String>) -> Self {
         self.diagnostic = Some(diagnostic.into());
         self

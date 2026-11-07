@@ -1337,7 +1337,9 @@ impl LiveSession {
                     self.send_update(update)?;
                 }
             }
-            SessionEvent::SubtaskSession { .. } => {}
+            SessionEvent::SubtaskSession { .. }
+            | SessionEvent::CommandJobUpdated { .. }
+            | SessionEvent::CommandControlResult { .. } => {}
             SessionEvent::PersistenceChanged { path, error } => {
                 let detail = error.map_or_else(
                     || format!("Transcript persistence recovered at {}.", path.display()),

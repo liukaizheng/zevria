@@ -34,6 +34,8 @@ pub enum SlashCommand {
     ModelSession,
     /// Inspect and manage the two fixed skill locations.
     Skills,
+    /// Inspect and control this session's shell jobs, even while busy.
+    Jobs,
     /// Pick a previous session of this workspace and resume it.
     Resume,
     /// Reset the conversation in Build, retaining both modes' model/reasoning choices.
@@ -121,6 +123,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         command: SlashCommand::Skills,
         name: "skills",
         description: "Inspect, enable/disable, and reload local skills",
+    },
+    CommandSpec {
+        command: SlashCommand::Jobs,
+        name: "jobs",
+        description: "Inspect, terminate, or background running shell commands",
     },
     CommandSpec {
         command: SlashCommand::Model,
@@ -467,6 +474,7 @@ mod tests {
                 "ensemble-plan",
                 "ensemble-review",
                 "skills",
+                "jobs",
                 "model",
                 "model-session",
             ]
@@ -533,6 +541,7 @@ mod tests {
                 "ensemble-plan",
                 "ensemble-review",
                 "skills",
+                "jobs",
                 "model",
                 "model-session",
             ]
@@ -867,6 +876,7 @@ mod tests {
                 "ensemble-plan",
                 "ensemble-review",
                 "skills",
+                "jobs",
                 "model",
                 "model-session",
             ]

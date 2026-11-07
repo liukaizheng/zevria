@@ -1,6 +1,8 @@
 //! Tools that Zevria exposes to the model.
 
 mod command;
+mod command_status;
+mod command_terminate;
 mod create_plan;
 mod delete;
 mod edit;
@@ -22,6 +24,8 @@ mod write;
 mod plan_authoring_tests;
 
 pub use command::{CommandArgs, CommandError, CommandLimits, CommandTool};
+pub use command_status::{CommandStatusArgs, CommandStatusTool};
+pub use command_terminate::{CommandTerminateArgs, CommandTerminateTool};
 pub use create_plan::{CreatePlanArgs, CreatePlanTool};
 pub use delete::{DeleteArgs, DeleteTool};
 pub use edit::{EditArgs, EditTool, ReplacementArgs};

@@ -33,6 +33,7 @@ pub(crate) enum SurfaceKind {
     Skills,
     Sessions,
     Models,
+    Jobs,
     Question,
     Help,
 }
@@ -44,9 +45,10 @@ impl SurfaceKind {
             Self::Completion | Self::PlanReview => 1,
             Self::Skills => 2,
             Self::Sessions => 3,
-            Self::Models => 4,
-            Self::Question => 5,
-            Self::Help => 6,
+            Self::Jobs => 4,
+            Self::Models => 5,
+            Self::Question => 6,
+            Self::Help => 7,
         }
     }
 }
@@ -85,7 +87,7 @@ impl Surface {
             PlanReview => (false, true, ScrollTarget::Transcript, false),
             Skills => (true, false, ScrollTarget::List, false),
             Sessions => (true, false, ScrollTarget::List, false),
-            Models => (true, false, ScrollTarget::List, false),
+            Models | Jobs => (true, false, ScrollTarget::List, false),
             Question => (true, false, ScrollTarget::Form, true),
             Help => (true, false, ScrollTarget::List, false),
         };
@@ -109,6 +111,7 @@ impl Surface {
             SurfaceKind::Question => KeyContext::Question,
             SurfaceKind::Skills => KeyContext::SkillsList,
             SurfaceKind::Models => KeyContext::ModelList,
+            SurfaceKind::Jobs => KeyContext::JobsList,
             SurfaceKind::Sessions => KeyContext::OverlayList,
             SurfaceKind::Help => KeyContext::Help,
         }

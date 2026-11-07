@@ -20,6 +20,7 @@ struct ActiveWorkControl {
     work: ActiveWork,
     question_responder: Option<QuestionResponder>,
     worker_controls: WorkerControlRouter,
+    command_jobs: Option<zevria_session_api::CommandJobs>,
     skill_queries: Arc<Mutex<zevria_instructions::skill::SkillContext>>,
 }
 
@@ -95,6 +96,15 @@ impl<P: ModelProvider> SessionEngine<P> {
                 self.dispatch_work(TurnWork::Command(command), commands, pending, events)
                     .await
             }
+            SessionCommand::Control(ControlCommand::Command(control)) => {
+                let _ = events
+                    .send(command_control_reply(
+                        self.capabilities.command_jobs.as_ref(),
+                        control,
+                    ))
+                    .await;
+                Ok(RunControl::Continue)
+            }
             SessionCommand::Control(ControlCommand::Worker(control)) => {
                 let result =
                     WorkerControlResult::rejected(control, "no active interactive worker review");
@@ -137,6 +147,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     },
                     question_responder: self.capabilities.question_responder.clone(),
                     worker_controls: self.capabilities.worker_controls.clone(),
+                    command_jobs: self.capabilities.command_jobs.clone(),
                     skill_queries: Arc::new(Mutex::new(self.management_skill_context()?)),
                 };
                 let active = self
@@ -159,6 +170,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             work: ActiveWork::Turn(turn.clone()),
             question_responder: self.capabilities.question_responder.clone(),
             worker_controls: self.capabilities.worker_controls.clone(),
+            command_jobs: self.capabilities.command_jobs.clone(),
             skill_queries: self.enter_turn()?,
         };
         // Preserve the Send-only provider contract by erasing the nested future.
@@ -226,6 +238,20 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 }
 
+pub(super) fn command_control_reply(
+    jobs: Option<&zevria_session_api::CommandJobs>,
+    control: zevria_session_api::CommandControl,
+) -> SessionEvent {
+    let request_id = control.request_id.clone();
+    let result = jobs.map_or_else(
+        || zevria_session_api::CommandControlResult::Rejected {
+            message: "command jobs are not enabled for this session".into(),
+        },
+        |jobs| jobs.handle_control(control),
+    );
+    SessionEvent::CommandControlResult { request_id, result }
+}
+
 impl ActiveWorkControl {
     fn cancel(&self, requested: Option<TurnId>) {
         match &self.work {
@@ -248,6 +274,9 @@ impl ActiveWorkControl {
         let mut reply = None;
         match incoming {
             Some(SessionCommand::Turn(command)) => pending.push_back(TurnWork::Command(command)),
+            Some(SessionCommand::Control(ControlCommand::Command(control))) => {
+                reply = Some(command_control_reply(self.command_jobs.as_ref(), control));
+            }
             Some(SessionCommand::Control(ControlCommand::Worker(control))) => {
                 if let Err(result) = self.worker_controls.route(control) {
                     reply = Some(SessionEvent::WorkerControlResult { result });

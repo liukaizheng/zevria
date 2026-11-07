@@ -6,6 +6,7 @@ mod clipboard;
 mod frame_layout;
 mod hints;
 mod input;
+mod jobs;
 mod layout;
 mod models;
 mod picker;

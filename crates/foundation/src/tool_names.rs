@@ -1,5 +1,9 @@
 //! Canonical literal names shared by policy and tool registration.
 pub const COMMAND_TOOL_NAME: &str = "command";
+pub const COMMAND_STATUS_TOOL_NAME: &str = "command_status";
+pub const COMMAND_TERMINATE_TOOL_NAME: &str = "command_terminate";
+pub const COMMAND_JOB_TOOL_NAMES: [&str; 2] =
+    [COMMAND_STATUS_TOOL_NAME, COMMAND_TERMINATE_TOOL_NAME];
 pub const EDIT_TOOL_NAME: &str = "edit";
 pub const WRITE_TOOL_NAME: &str = "write";
 pub const DELETE_TOOL_NAME: &str = "delete";

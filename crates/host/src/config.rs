@@ -53,6 +53,14 @@ auto_trigger_percent = 90
 # [theme]
 # name = "ocean"
 
+[command]
+timeout_seconds = 300
+capture_bytes = 1048576
+# Running background job cap. Set 0 for the foreground-only command surface.
+max_background_jobs = 8
+# Optional total wall-clock limit, at least timeout_seconds. Omit for no limit.
+# background_timeout_seconds = 3600
+
 [acp]
 max_sessions = 4
 expose_session_list = true
@@ -95,10 +103,6 @@ plan_mode = "plan"
 review_mode = "review"
 env = {}
 login_hint = "Configure Zevria's providers in models.jsonc and all five mode assignments with reasoning_level in config.toml before running an ensemble."
-
-[command]
-timeout_seconds = 300
-capture_bytes = 1048576
 
 [log]
 # Log level filter: trace, debug, info, warn, error, or off.
@@ -454,6 +458,8 @@ builder = { provider = "test", model = "test-model", reasoning_level = "medium" 
 pub struct CommandConfig {
     pub timeout_seconds: u64,
     pub capture_bytes: usize,
+    pub max_background_jobs: usize,
+    pub background_timeout_seconds: Option<u64>,
 }
 
 impl Default for CommandConfig {
@@ -461,6 +467,8 @@ impl Default for CommandConfig {
         Self {
             timeout_seconds: 300,
             capture_bytes: 1024 * 1024,
+            max_background_jobs: 8,
+            background_timeout_seconds: None,
         }
     }
 }
@@ -469,6 +477,14 @@ impl CommandConfig {
     fn validate(self) -> anyhow::Result<()> {
         if self.timeout_seconds == 0 {
             anyhow::bail!("command.timeout_seconds must be greater than zero");
+        }
+        if self
+            .background_timeout_seconds
+            .is_some_and(|seconds| seconds < self.timeout_seconds)
+        {
+            anyhow::bail!(
+                "command.background_timeout_seconds must be at least command.timeout_seconds"
+            );
         }
         if self.capture_bytes < 2 {
             anyhow::bail!("command.capture_bytes must be at least 2");

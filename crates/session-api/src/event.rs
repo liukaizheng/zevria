@@ -20,9 +20,24 @@ impl ModeSelectionResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandControlResult {
+    Inspected(Vec<CommandJobView>),
+    Accepted(CommandJobSnapshot),
+    Rejected { message: String },
+}
+
 /// Provider-neutral events consumed by frontends.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
+    /// Runtime-only display state, independent of turn acceptance and persistence.
+    CommandJobUpdated {
+        job: CommandJobSnapshot,
+    },
+    CommandControlResult {
+        request_id: String,
+        result: CommandControlResult,
+    },
     /// Independent response presentation; never an executable call or text fence.
     ResponseAttemptUpdated {
         turn_id: TurnId,
@@ -738,7 +753,9 @@ impl SessionEventReceiver {
         match &event.event {
             SessionEvent::ResponseAttemptUpdated { .. }
             | SessionEvent::NetworkStatus { .. }
-            | SessionEvent::EngineIdle => {}
+            | SessionEvent::EngineIdle
+            | SessionEvent::CommandJobUpdated { .. }
+            | SessionEvent::CommandControlResult { .. } => {}
             SessionEvent::AgentRunUpdated {
                 event: AgentRunEvent::ResponseDisplay { .. },
                 ..

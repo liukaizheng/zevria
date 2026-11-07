@@ -31,6 +31,13 @@ use crate::runtime::{
 };
 use std::path::Path;
 
+fn test_jobs() -> zevria_session_api::CommandJobs {
+    zevria_session_api::CommandJobs::new(
+        crate::runtime::command_job_limits(CommandConfig::default()),
+        None,
+    )
+}
+
 fn test_launcher() -> SubtaskLauncher {
     let (events_tx, _events_rx) = session_event_channel(32);
     subtask_channels("test-root", events_tx).launcher
@@ -50,6 +57,7 @@ async fn production_registry_pins_names_order_and_schemas() {
         test_question_requester(),
         CommandConfig::default(),
         131_072,
+        Some(test_jobs()),
     )
     .expect("tool server")
     .snapshot()
@@ -62,6 +70,8 @@ async fn production_registry_pins_names_order_and_schemas() {
             .collect::<Vec<_>>(),
         [
             "command",
+            "command_status",
+            "command_terminate",
             "task",
             "launch_subtasks",
             "edit",
@@ -100,7 +110,9 @@ async fn production_registry_pins_names_order_and_schemas() {
         serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
     assert_eq!(snapshot, expected);
     let expected_parameters = vec![
-        CommandTool::new(workspace.path().to_path_buf()).parameters(),
+        CommandTool::with_jobs(workspace.path().to_path_buf(), test_jobs()).parameters(),
+        zevria_tools::CommandStatusTool::new(test_jobs()).parameters(),
+        zevria_tools::CommandTerminateTool::new(test_jobs()).parameters(),
         TaskTool.parameters(),
         LaunchSubtasksTool::new(test_launcher(), workspace.path().to_path_buf()).parameters(),
         EditTool::new(workspace.path().to_path_buf()).parameters(),
@@ -138,6 +150,16 @@ async fn production_registry_pins_names_order_and_schemas() {
             (
                 "command",
                 serde_json::json!(["command"]),
+                serde_json::json!(false)
+            ),
+            (
+                "command_status",
+                serde_json::json!([]),
+                serde_json::json!(false)
+            ),
+            (
+                "command_terminate",
+                serde_json::json!(["id"]),
                 serde_json::json!(false)
             ),
             (
@@ -219,6 +241,7 @@ async fn empty_skill_registry_keeps_skill_capable_mode_tools_advertised() {
         test_question_requester(),
         CommandConfig::default(),
         131_072,
+        Some(test_jobs()),
     )
     .expect("tool server")
     .snapshot()
@@ -228,7 +251,7 @@ async fn empty_skill_registry_keeps_skill_capable_mode_tools_advertised() {
             .iter()
             .any(|definition| definition.name == SKILL_TOOL_NAME)
     );
-    let policies = build_session_policies(zevria_workflow::config::PlanConfig::default());
+    let policies = build_session_policies(zevria_workflow::config::PlanConfig::default(), true);
     for mode in [SessionMode::Build, SessionMode::Plan] {
         let policy = policies.policy(mode);
         assert!(policy.skills_enabled);
@@ -244,6 +267,7 @@ async fn explore_registry_is_command_only_and_uses_configured_limits() {
     let command_config = CommandConfig {
         timeout_seconds: 17,
         capture_bytes: 42,
+        ..CommandConfig::default()
     };
     let definitions = build_explore_tools(workspace.path(), command_config)
         .expect("tool server")
@@ -289,7 +313,7 @@ async fn explore_registry_is_command_only_and_uses_configured_limits() {
 
 #[test]
 fn production_policies_pin_mode_directives_and_plan_tool_access() {
-    let policies = build_session_policies(zevria_workflow::config::PlanConfig::default());
+    let policies = build_session_policies(zevria_workflow::config::PlanConfig::default(), true);
     let build = policies.policy(SessionMode::Build);
     assert_eq!(build.model_role, ModelRole::Build);
     assert_eq!(build.instructions, BUILD_MODE_INSTRUCTIONS);
@@ -299,6 +323,8 @@ fn production_policies_pin_mode_directives_and_plan_tool_access() {
             &[
                 "web_search".to_string(),
                 "command".to_string(),
+                "command_status".to_string(),
+                "command_terminate".to_string(),
                 "task".to_string(),
                 "edit".to_string(),
                 "write".to_string(),
@@ -338,6 +364,8 @@ fn production_policies_pin_mode_directives_and_plan_tool_access() {
         Some(
             &[
                 "command".to_string(),
+                "command_status".to_string(),
+                "command_terminate".to_string(),
                 "web_search".to_string(),
                 "launch_subtasks".to_string(),
                 "skill".to_string(),
@@ -364,17 +392,22 @@ fn production_policies_pin_mode_directives_and_plan_tool_access() {
 
 #[test]
 fn plan_configuration_can_only_remove_optional_capabilities() {
-    let policies = build_session_policies(zevria_workflow::config::PlanConfig {
-        allow_subtasks: false,
-        allow_skills: false,
-        ..zevria_workflow::config::PlanConfig::default()
-    });
+    let policies = build_session_policies(
+        zevria_workflow::config::PlanConfig {
+            allow_subtasks: false,
+            allow_skills: false,
+            ..zevria_workflow::config::PlanConfig::default()
+        },
+        true,
+    );
     let plan = policies.policy(SessionMode::Plan);
     assert_eq!(
         plan.allowed_tool_names.as_deref(),
         Some(
             &[
                 "command".to_string(),
+                "command_status".to_string(),
+                "command_terminate".to_string(),
                 "web_search".to_string(),
                 "question".to_string(),
                 "create_plan".to_string(),
@@ -403,6 +436,51 @@ fn plan_configuration_can_only_remove_optional_capabilities() {
     assert!(build.skills_enabled);
     assert!(!build.allows_tool(QUESTION_TOOL_NAME));
     assert!(!build.allows_tool(SUBMIT_PLAN_TOOL_NAME));
+}
+
+#[tokio::test]
+async fn zero_background_cap_keeps_the_foreground_only_registry_and_policies() {
+    let workspace = tempfile::tempdir().unwrap();
+    let config = CommandConfig {
+        max_background_jobs: 0,
+        ..CommandConfig::default()
+    };
+    let definitions = build_tools(
+        workspace.path(),
+        test_launcher(),
+        test_question_requester(),
+        config,
+        131_072,
+        None,
+    )
+    .unwrap()
+    .snapshot()
+    .take_definitions();
+    let fixture: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../tests/fixtures/root-tools.json")).unwrap();
+    assert_eq!(definitions.len(), fixture.len() - 2);
+    assert_eq!(
+        definitions[0].description,
+        command_tool(workspace.path().into(), config)
+            .unwrap()
+            .description()
+    );
+    assert_eq!(
+        definitions[0].parameters,
+        CommandTool::new(workspace.path().into()).parameters()
+    );
+    for (definition, expected) in definitions[1..].iter().zip(&fixture[3..]) {
+        assert_eq!(
+            serde_json::json!({"name": definition.name, "description": definition.description, "parameters": definition.parameters}),
+            *expected
+        );
+    }
+    let policies = build_session_policies(Default::default(), false);
+    for mode in SessionMode::ALL {
+        for name in zevria_foundation::COMMAND_JOB_TOOL_NAMES {
+            assert!(!policies.policy(mode).allows_tool(name));
+        }
+    }
 }
 
 #[test]
@@ -434,6 +512,7 @@ async fn skill_tool_definition_has_a_stable_bodyless_contract() {
         test_question_requester(),
         CommandConfig::default(),
         131_072,
+        Some(test_jobs()),
     )
     .expect("tool server")
     .snapshot()

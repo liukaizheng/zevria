@@ -55,6 +55,7 @@ pub(crate) enum StatusTone {
 /// One semantic status snapshot. Rendering owns all adaptive compression.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct StatusBarView {
+    pub(crate) jobs: usize,
     pub(crate) primary: String,
     pub(crate) accent: StatusAccent,
     pub(crate) tone: StatusTone,
@@ -86,6 +87,7 @@ enum ModelDetail {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RenderOptions {
+    jobs: bool,
     response: ResponseDetail,
     context_source: bool,
     optional_left: bool,
@@ -97,6 +99,7 @@ struct RenderOptions {
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
+            jobs: true,
             response: ResponseDetail::Full,
             context_source: true,
             optional_left: true,
@@ -180,6 +183,12 @@ fn select_candidate(view: &StatusBarView, width: usize) -> StatusCandidate {
         return candidate;
     }
 
+    // Jobs are informative, never displace activity, controls, or telemetry.
+    options.jobs = false;
+    if let Some(candidate) = fitting_candidate(view, options, width) {
+        return candidate;
+    }
+
     options.response = ResponseDetail::Total;
     if let Some(candidate) = fitting_candidate(view, options, width) {
         return candidate;
@@ -233,6 +242,9 @@ fn fitting_candidate(
 
 fn build_candidate(view: &StatusBarView, options: RenderOptions) -> StatusCandidate {
     let mut left = Vec::new();
+    if options.jobs && view.jobs > 0 {
+        left.push(format!("{} jobs", view.jobs));
+    }
     if options.optional_left {
         left.extend(
             view.detail
@@ -409,6 +421,28 @@ mod tests {
     }
 
     #[test]
+    fn jobs_are_dropped_before_any_other_status_segment() {
+        let mut view = complete_view();
+        view.jobs = 2;
+        let full = build_candidate(&view, RenderOptions::default());
+        assert!(full.tail.contains("2 jobs"));
+        let without_jobs = build_candidate(
+            &view,
+            RenderOptions {
+                jobs: false,
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!(select_candidate(&view, full.minimum_width()), full);
+        assert_eq!(
+            select_candidate(&view, without_jobs.minimum_width()),
+            without_jobs
+        );
+        assert!(without_jobs.right.contains("last in"));
+        assert!(!without_jobs.tail.contains("2 jobs"));
+    }
+
+    #[test]
     fn response_detail_is_compressed_before_controls() {
         let mut view = complete_view();
         view.compact_controls = Some("short".into());
@@ -473,6 +507,7 @@ mod tests {
                 compact_controls: true,
                 model: ModelDetail::Omitted,
                 context: false,
+                jobs: false,
             },
         ];
         let candidates = options

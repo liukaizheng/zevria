@@ -373,6 +373,7 @@ async fn production_build_rejects_builder_launch_before_workspace_or_child_provi
         zevria_session_api::question_channels(events.clone()).requester,
         config.command,
         config.session.plan.max_artifact_bytes,
+        None,
     )
     .unwrap();
     let provider =
@@ -382,7 +383,7 @@ async fn production_build_rejects_builder_launch_before_workspace_or_child_provi
     let mut engine = SessionEngine::new(
         provider,
         tools,
-        build_session_policies(config.session.plan),
+        build_session_policies(config.session.plan, false),
         transcript,
         Arc::new(SkillCatalog::default()),
     )
@@ -499,6 +500,7 @@ async fn ten_real_response_launches_share_limits_and_return_original_slots() {
             zevria_session_api::question_channels(events.clone()).requester,
             config.command,
             config.session.plan.max_artifact_bytes,
+            None,
         )
         .unwrap();
         let models = &config;
@@ -509,7 +511,7 @@ async fn ten_real_response_launches_share_limits_and_return_original_slots() {
         let mut engine = SessionEngine::new(
             provider,
             tools,
-            build_session_policies(config.session.plan),
+            build_session_policies(config.session.plan, false),
             transcript,
             Arc::new(SkillCatalog::default()),
         )

@@ -1,7 +1,7 @@
 [
   {
     "name": "command",
-    "description": "Run a non-interactive shell command with Zevria's startup workspace as its working directory and return its exit status, stdout, and stderr. Commands execute with the application's permissions and are not sandboxed, read-only, or confined to the workspace. Commands time out after 300 seconds. Captured output is bounded to 1048576 bytes total, and stdout/stderr are each elided in the middle beyond 16384 bytes before entering model history.",
+    "description": "Run a non-interactive shell command with Zevria's startup workspace as its working directory and return its exit status, stdout, and stderr. Commands execute with the application's permissions and are not sandboxed, read-only, or confined to the workspace. Foreground commands time out after 300 seconds. Captured output is bounded to 1048576 bytes total, and stdout/stderr are each elided in the middle beyond 16384 bytes before entering model history. Set background: true for long builds, test suites, or servers, not quick inspection commands. Background jobs return a job ID immediately; use command_status for incremental output and optional waiting, or command_terminate to stop one process tree. At most 8 background jobs can run. Jobs persist across turns and Ctrl+C but end with the session; there is no default background time limit. A user can move a foreground command to the background or terminate it without cancelling the turn. Descendants started using & or nohup in a foreground command are still terminated when its shell exits.",
     "parameters": {
       "type": "object",
       "additionalProperties": false,
@@ -9,6 +9,14 @@
         "command": {
           "type": "string",
           "description": "The shell command to execute."
+        },
+        "background": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Start a session-owned background job instead of waiting for completion.",
+          "default": null
         }
       },
       "required": [
@@ -16,6 +24,55 @@
       ],
       "description": "Arguments accepted by the [`CommandTool`].",
       "title": "CommandArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "command_status",
+    "description": "List this session's model-visible command jobs, or inspect one job and read stdout/stderr produced since the last model read. With an id, optionally wait up to 300 seconds for completion; waiting never stops the job and turn cancellation only cancels the wait. Jobs do not survive restarts. Frontend inspection does not consume model output.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Job ID; omit or use null to list this session's jobs.",
+          "default": null
+        },
+        "wait_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "description": "Optionally wait for this job to finish, capped at the foreground timeout."
+        }
+      },
+      "title": "CommandStatusArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": []
+    }
+  },
+  {
+    "name": "command_terminate",
+    "description": "Terminate one command job's entire process tree without cancelling the agent turn. Wait for graceful termination and forced cleanup, then return final status and unread output. Already-finished jobs return their final status. Use command_status without an id to list jobs; jobs do not survive restarts.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The command job ID to terminate."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "CommandTerminateArgs",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },

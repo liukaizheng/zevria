@@ -13,6 +13,8 @@ use zevria_transcript::test_support::TranscriptRewriteBlocker;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+#[path = "command_jobs.rs"]
+mod command_jobs;
 #[path = "idle_notifications.rs"]
 mod idle_notifications;
 #[path = "maintenance.rs"]

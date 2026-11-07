@@ -80,6 +80,7 @@ pub struct SessionModel {
     pub conversation: ConversationState,
     pub model_profiles: Arc<ConfiguredModelProfiles>,
     scope: PaneScope,
+    jobs: crate::jobs::CommandJobsState,
     pending_edit: Option<PendingEdit>,
 }
 pub struct RestorationInput {
@@ -93,9 +94,23 @@ pub struct RestorationInput {
 }
 
 impl SessionModel {
+    pub fn jobs(&self) -> &crate::jobs::CommandJobsState {
+        &self.jobs
+    }
+    pub fn running_job_count(&self) -> usize {
+        self.jobs.running_count()
+    }
+    pub fn job_for_call(&self, call: &str) -> Option<&zevria_foundation::CommandJobSnapshot> {
+        self.jobs.job_for_call(call)
+    }
     pub fn reduce(&mut self, event: SessionEvent) -> Reduction {
         let mut effects = Reduction::default();
         match event {
+            SessionEvent::CommandJobUpdated { job } => {
+                self.conversation.update_command_job(&job);
+                self.jobs.update(job);
+            }
+            SessionEvent::CommandControlResult { .. } => {}
             SessionEvent::EngineIdle => self.session.observe_engine_idle(),
             SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
                 if !self.session.accepts_active(turn_id) { return effects; }
@@ -280,6 +295,7 @@ impl SessionModel {
                 for header in self.conversation.finish_tool_results(&message, &metadata) {
                     self.conversation.finish_header(Some(header), self.session.observed_at());
                 }
+                for job in self.jobs.iter() { self.conversation.update_command_job(job); }
             }
             SessionEvent::SubtaskLaunched {
                 call_id,
@@ -516,6 +532,9 @@ impl SessionModel {
         self.workflow.reset();
         self.pending_edit = None;
         self.conversation.restore(items);
+        for job in self.jobs.iter() {
+            self.conversation.update_command_job(job);
+        }
     }
     pub fn restore(&mut self, input: RestorationInput) {
         self.restore_transcript(input.items);

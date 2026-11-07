@@ -29,7 +29,6 @@ use zevria_instructions::prompts::{
 };
 use zevria_instructions::skill::discover_skills;
 use zevria_provider::{ProviderRouter, ProviderRouterFactory};
-use zevria_session_api::QuestionRequester;
 use zevria_session_api::SessionCommand;
 use zevria_session_api::SessionEventReceiver;
 use zevria_session_api::SessionEventSender;
@@ -37,10 +36,11 @@ use zevria_session_api::SubtaskLauncher;
 use zevria_session_api::question_channels;
 use zevria_session_api::session_event_channel;
 use zevria_session_api::subtask_channels_with_capacity;
+use zevria_session_api::{CommandJobLimits, CommandJobs, QuestionRequester};
 use zevria_tools::{
-    CommandLimits, CommandTool, CreatePlanTool, DeleteTool, EditTool, LaunchSubtasksTool,
-    QuestionTool, ReadPlanTool, ReconcileReportsTool, SkillReadTool, SkillTool, SubmitPlanTool,
-    TaskTool, UpdatePlanTool, WriteTool,
+    CommandLimits, CommandStatusTool, CommandTerminateTool, CommandTool, CreatePlanTool,
+    DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool, ReadPlanTool, ReconcileReportsTool,
+    SkillReadTool, SkillTool, SubmitPlanTool, TaskTool, UpdatePlanTool, WriteTool,
 };
 use zevria_transcript::agent_runs_dir;
 use zevria_transcript::transcript;
@@ -105,10 +105,18 @@ pub(crate) fn build_tools(
     questions: QuestionRequester,
     command_config: CommandConfig,
     max_plan_artifact_bytes: usize,
+    jobs: Option<CommandJobs>,
 ) -> anyhow::Result<ToolServerHandle> {
     let workspace = workspace.to_path_buf();
-    let server = ToolServer::new()
-        .tool(command_tool(workspace.clone(), command_config)?)
+    let server = if let Some(jobs) = jobs {
+        ToolServer::new()
+            .tool(CommandTool::with_jobs(workspace.clone(), jobs.clone()))
+            .tool(CommandStatusTool::new(jobs.clone()))
+            .tool(CommandTerminateTool::new(jobs))
+    } else {
+        ToolServer::new().tool(command_tool(workspace.clone(), command_config)?)
+    };
+    let server = server
         .tool(TaskTool)
         .tool(LaunchSubtasksTool::new(launcher, workspace.clone()))
         .tool(EditTool::new(workspace.clone()))
@@ -156,6 +164,18 @@ pub(crate) fn build_isolated_build_tools(
         .run())
 }
 
+pub(crate) fn command_job_limits(config: CommandConfig) -> CommandJobLimits {
+    CommandJobLimits {
+        max_running_background: config.max_background_jobs,
+        retained_finished: 8,
+        capture_bytes: config.capture_bytes,
+        foreground_timeout: std::time::Duration::from_secs(config.timeout_seconds),
+        background_timeout: config
+            .background_timeout_seconds
+            .map(std::time::Duration::from_secs),
+    }
+}
+
 pub(crate) fn command_tool(
     workspace: PathBuf,
     config: CommandConfig,
@@ -169,7 +189,10 @@ pub(crate) fn command_tool(
     )
 }
 
-pub(crate) fn build_session_policies(plan: zevria_workflow::config::PlanConfig) -> SessionPolicies {
+pub(crate) fn build_session_policies(
+    plan: zevria_workflow::config::PlanConfig,
+    command_jobs: bool,
+) -> SessionPolicies {
     let mut build_tools = [
         zevria_foundation::WEB_SEARCH_TOOL_NAME,
         "command",
@@ -187,6 +210,16 @@ pub(crate) fn build_session_policies(plan: zevria_workflow::config::PlanConfig) 
         "command".to_string(),
         zevria_foundation::WEB_SEARCH_TOOL_NAME.into(),
     ];
+    if command_jobs {
+        build_tools.splice(
+            2..2,
+            zevria_foundation::COMMAND_JOB_TOOL_NAMES.map(str::to_string),
+        );
+        plan_tools.splice(
+            1..1,
+            zevria_foundation::COMMAND_JOB_TOOL_NAMES.map(str::to_string),
+        );
+    }
     if plan.allow_subtasks {
         plan_tools.push(LAUNCH_SUBTASKS_TOOL_NAME.to_string());
     }
@@ -450,6 +483,7 @@ async fn start_worker_session(
         exit_tx,
     );
     Ok(RunningSession {
+        command_jobs: None,
         cleanup_abandoned_history: loaded.is_some(),
         restored_taken: false,
         restored_subtasks: Vec::new(),
@@ -643,6 +677,7 @@ pub struct RuntimeTaskExit {
 /// senders and take the sole event receiver, while this handle retains task,
 /// transcript, and shutdown ownership.
 pub struct RunningSession {
+    command_jobs: Option<CommandJobs>,
     // Only existing histories use conservative legacy cleanup. A new pending
     // path may acquire a competing file after allocation; shutdown must not
     // delete someone else's file after rejected no-clobber publication.
@@ -721,6 +756,9 @@ impl RunningSession {
     /// an eligible existing abandoned transcript best-effort. An absent pending
     /// transcript is normal and shutdown does not materialize it.
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
+        if let Some(jobs) = &self.command_jobs {
+            jobs.close();
+        }
         if let Some(command_tx) = self.command_tx.take() {
             let _ = command_tx.send(SessionCommand::Control(
                 zevria_session_api::ControlCommand::Shutdown,
@@ -741,6 +779,10 @@ impl RunningSession {
         } else {
             Ok(())
         };
+
+        if let Some(jobs) = self.command_jobs.take() {
+            jobs.shutdown(std::time::Duration::from_secs(5)).await;
+        }
 
         let transcript_is_empty = self.cleanup_abandoned_history
             && transcript::is_abandoned_root(&self.restoration.transcript_path);
@@ -866,7 +908,25 @@ pub async fn start_session(
         tracing::warn!(target: "zevria::runtime", "{}", diagnostic.message);
     }
     let skills = skill_catalog.clone();
-    let policies = build_session_policies(app_config.session.plan);
+    let command_jobs = (app_config.command.max_background_jobs > 0).then(|| {
+        CommandJobs::new(
+            command_job_limits(app_config.command),
+            Some(event_tx.clone()),
+        )
+    });
+    if let Some(jobs) = &command_jobs {
+        jobs.reserve_ids(
+            original_items
+                .iter()
+                .filter_map(|item| match item {
+                    TranscriptItem::ToolResults { metadata, .. } => Some(metadata),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|meta| meta.command_job().map(|job| job.id.clone())),
+        );
+    }
+    let policies = build_session_policies(app_config.session.plan, command_jobs.is_some());
     let skill_service = Arc::new(crate::skills::LocalSkillService {
         roots: skill_catalog
             .roots
@@ -883,6 +943,7 @@ pub async fn start_session(
         question_channels.requester,
         app_config.command,
         app_config.session.plan.max_artifact_bytes,
+        command_jobs.clone(),
     )?;
     let provider = ProviderRouter::root(
         &session_models.routing,
@@ -960,6 +1021,9 @@ pub async fn start_session(
         .with_question_responder(question_channels.responder)
         .with_ensemble_launcher(ensemble)
         .with_plans_dir(transcript::plans_dir(workspace));
+    if let Some(jobs) = &command_jobs {
+        engine = engine.with_command_jobs(jobs.clone());
+    }
     if let Some(path) = &app_config.source_path {
         engine = engine.with_model_management(
             Arc::new(crate::models::LocalModelSettings {
@@ -1047,6 +1111,7 @@ pub async fn start_session(
     }
 
     Ok(RunningSession {
+        command_jobs,
         cleanup_abandoned_history,
         restored_taken: false,
         restored_subtasks,
@@ -1172,11 +1237,14 @@ mod tests {
         use zevria_instructions::prompts::INSPECTION_POLICY_INSTRUCTIONS;
         for allow_subtasks in [false, true] {
             for allow_skills in [false, true] {
-                let policies = build_session_policies(zevria_workflow::config::PlanConfig {
-                    allow_subtasks,
-                    allow_skills,
-                    ..Default::default()
-                });
+                let policies = build_session_policies(
+                    zevria_workflow::config::PlanConfig {
+                        allow_subtasks,
+                        allow_skills,
+                        ..Default::default()
+                    },
+                    true,
+                );
                 let plan = policies.policy(SessionMode::Plan);
                 assert_eq!(plan.instructions, PLAN_MODE_INSTRUCTIONS);
                 assert_eq!(
@@ -1567,7 +1635,30 @@ mod tests {
         let skills = Arc::new(
             SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
         );
+        let jobs = CommandJobs::new(
+            command_job_limits(CommandConfig::default()),
+            Some(event_tx.clone()),
+        );
+        use rig_agent::tool::Tool as _;
+        CommandTool::with_jobs(directory.path().into(), jobs.clone())
+            .call(
+                &mut rig_agent::tool::ToolContext::new(),
+                zevria_tools::CommandArgs {
+                    command: "echo $$ > job-pid; sleep 0.5; printf leaked > leaked".into(),
+                    background: Some(true),
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !directory.path().join("job-pid").exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let running = RunningSession {
+            command_jobs: Some(jobs),
             cleanup_abandoned_history: true,
             restored_taken: false,
             restored_subtasks: Vec::new(),
@@ -1606,6 +1697,21 @@ mod tests {
         );
         assert!(!transcript_path.exists());
         assert!(!sidecar.exists());
+        tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+        assert!(
+            !directory.path().join("leaked").exists(),
+            "shutdown must kill background commands"
+        );
+        #[cfg(unix)]
+        {
+            let pid: i32 = std::fs::read_to_string(directory.path().join("job-pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            // SAFETY: signal zero only probes whether this recorded child remains.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        }
     }
 
     #[tokio::test]
@@ -1624,6 +1730,7 @@ mod tests {
             SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
         );
         let running = RunningSession {
+            command_jobs: None,
             cleanup_abandoned_history: true,
             restored_taken: false,
             restored_subtasks: Vec::new(),

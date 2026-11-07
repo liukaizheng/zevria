@@ -15,6 +15,7 @@ pub(crate) enum Overlay {
     Picker(SessionPicker),
     Models,
     Skills,
+    Jobs,
     Question(QuestionDialog),
     Help(HelpOverlay),
 }
@@ -24,6 +25,7 @@ impl Overlay {
             Self::Picker(_) => SurfaceKind::Sessions,
             Self::Models => SurfaceKind::Models,
             Self::Skills => SurfaceKind::Skills,
+            Self::Jobs => SurfaceKind::Jobs,
             Self::Question(_) => SurfaceKind::Question,
             Self::Help(_) => SurfaceKind::Help,
         }
@@ -40,6 +42,7 @@ pub(crate) struct OverlayController {
     // Correlated management requests live beyond the modal that initiated them.
     pub(crate) models: ModelPicker,
     pub(crate) skills: SkillManager,
+    pub(crate) jobs: crate::jobs::JobsOverlay,
 }
 impl OverlayController {
     fn replace(&mut self, overlay: Overlay) {
@@ -57,6 +60,10 @@ impl OverlayController {
     ) {
         self.models.show(mode, scope);
         self.replace(Overlay::Models);
+    }
+    pub(crate) fn show_jobs(&mut self) {
+        self.jobs.show();
+        self.replace(Overlay::Jobs);
     }
     pub(crate) fn show_skills(&mut self) {
         self.skills.show();
@@ -85,6 +92,7 @@ impl OverlayController {
         match overlay {
             Overlay::Models => self.models.is_open(),
             Overlay::Skills => self.skills.is_open(),
+            Overlay::Jobs => self.jobs.is_open(),
             _ => true,
         }
     }
@@ -111,6 +119,7 @@ impl OverlayController {
     pub(crate) fn invalidate_geometry(&mut self) {
         self.models.invalidate_geometry();
         self.skills.invalidate_geometry();
+        self.jobs.invalidate_geometry();
         for entry in &mut self.stack {
             match entry {
                 Overlay::Picker(picker) => picker.invalidate_geometry(),
@@ -133,6 +142,7 @@ impl OverlayController {
                 Overlay::Picker(picker) => picker.render(frame, bounds),
                 Overlay::Models => self.models.render(frame, bounds),
                 Overlay::Skills => self.skills.render(frame, bounds),
+                Overlay::Jobs => self.jobs.render(frame, bounds),
                 Overlay::Question(question) => question.render(frame, bounds),
                 Overlay::Help(help) => help.render(frame, bounds),
             }
@@ -147,6 +157,7 @@ impl OverlayController {
         let context = match &self.stack[index] {
             Overlay::Models => self.models.context(),
             Overlay::Skills => self.skills.context(),
+            Overlay::Jobs => self.jobs.context(),
             Overlay::Question(question) => question.context(),
             Overlay::Picker(_) => KeyContext::OverlayList,
             Overlay::Help(_) => KeyContext::Help,
@@ -159,6 +170,7 @@ impl OverlayController {
                 Overlay::Question(question) => question.hint_eligibility(),
                 Overlay::Models => self.models.hint_eligibility(),
                 Overlay::Skills => self.skills.hint_eligibility(),
+                Overlay::Jobs => self.jobs.hint_eligibility(),
                 Overlay::Picker(picker) => picker.hint_eligibility(),
                 Overlay::Help(_) => unreachable!("help closes rather than nesting"),
             };
@@ -199,6 +211,12 @@ impl OverlayController {
                 match input {
                     UserInput::Key(key) => self.models.handle_input(key),
                     UserInput::Paste(text) => self.models.paste(&text),
+                }
+                None
+            }
+            Overlay::Jobs => {
+                if let UserInput::Key(key) = input {
+                    self.jobs.handle_input(key);
                 }
                 None
             }

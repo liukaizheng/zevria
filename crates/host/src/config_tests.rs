@@ -566,10 +566,33 @@ fn invalid_session_acp_command_and_ensemble_limits_fail_loading() {
         "[acp]\nmax_sessions=0",
         "[command]\ntimeout_seconds=0",
         "[command]\ncapture_bytes=1",
+        "[command]\nbackground_timeout_seconds=0",
+        "[command]\ntimeout_seconds=300\nbackground_timeout_seconds=299",
         "[ensemble]\nmax_concurrent_agents=0",
     ] {
         assert!(parse(invalid).is_err(), "{invalid}");
     }
+}
+
+#[test]
+fn command_background_defaults_and_opt_out_are_valid() {
+    let default = parse("").unwrap().command;
+    assert_eq!(default.max_background_jobs, 8);
+    assert_eq!(default.background_timeout_seconds, None);
+    assert_eq!(
+        parse("[command]\nmax_background_jobs=0")
+            .unwrap()
+            .command
+            .max_background_jobs,
+        0
+    );
+    assert_eq!(
+        parse("[command]\nbackground_timeout_seconds=300")
+            .unwrap()
+            .command
+            .background_timeout_seconds,
+        Some(300)
+    );
 }
 
 #[test]

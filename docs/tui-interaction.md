@@ -21,10 +21,27 @@ user input. Modifier and press/repeat/release policy is normalized before routin
 | Question | Global | Correlated Dismissed response | Form/editor | No |
 | Model picker | Global | Cancel correlated management request; retain correlation until settled | List/details/editor | No |
 | Session/skill picker | Global | Dismiss only this surface | List/details/editor | No |
+| Jobs | Global | Dismiss only this surface; jobs and the root turn keep running | Job list / stdout and stderr tails | No |
 
-Global paint order, from lowest to highest, is skills, sessions, models, questions.
+Global paint order, from lowest to highest, is skills, sessions, jobs, models,
+questions, help.
 Suspended surfaces retain state. Only the resolved owner can install the cursor.
 Text in a dialog belongs to the dialog, never the pane composer.
+
+`/jobs` opens the Jobs overlay even while the root is busy or has locally queued
+follow-ups. It is frontend-only: it never allocates a turn, enters the follow-up
+queue, or sends text to the model. The list shows running foreground/background
+commands and up to eight recent finished background jobs, including their IDs,
+status, elapsed time, and command previews. Enter inspects bounded stdout/stderr
+tails; Backspace/Left/`b` returns to the list. `x` terminates a running job and `m`
+moves a running foreground command into the background. Ineligible actions are
+both disabled and omitted from hints. Escape or Ctrl+C dismisses only the overlay;
+`?` opens its help. Inspection refreshes on open, lifecycle updates, and once a
+second while open, without consuming the model's incremental output cursor.
+The root status bar shows a lowest-priority `N jobs` count, and background command
+rows retain a `background · job-xxxxxx` badge plus live status when available.
+Jobs survive turn cancellation but end when the session is closed or replaced;
+resumed transcripts display old badges without restoring the processes.
 
 Editing, work submission, control eligibility, transcript rewriting, management,
 and navigation are independent capabilities. Root and live-worker drafts remain

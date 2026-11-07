@@ -12,6 +12,8 @@ pub enum KeyContext {
     OverlayInspect,
     SkillsList,
     SkillsInspect,
+    JobsList,
+    JobsInspect,
     ModelList,
     ModelReasoning,
     ModelConfirm,
@@ -30,6 +32,7 @@ impl KeyContext {
             Self::OverlayList => "Sessions",
             Self::OverlayInspect => "Inspect",
             Self::SkillsList | Self::SkillsInspect => "Skills",
+            Self::JobsList | Self::JobsInspect => "Jobs",
             Self::ModelList | Self::ModelReasoning | Self::ModelConfirm => "Models",
             Self::PlanDecision => "Plan decision",
             Self::Question => "Question",
@@ -374,6 +377,10 @@ const TEXT: &[Binding] = &[
     b!(Home, "start", 0, "Text entry", key(Home)),
     b!(End, "end", 0, "Text entry", key(End)),
 ];
+const JOBS: &[Binding] = &[
+    b!(Terminate, "terminate", 2, "Jobs", key(Char('x'))),
+    b!(MoveToBackground, "background", 3, "Jobs", key(Char('m'))),
+];
 const HELP: &[Binding] = &[b!(Help, "help", 5, "Help", key(Char('?')))];
 const HELP_CLOSE: &[Binding] = &[b!(Help, "close", 5, "Help", key(Char('?')))];
 
@@ -396,6 +403,8 @@ pub fn bindings(context: KeyContext) -> impl Iterator<Item = &'static Binding> {
         OverlayInspect => &[LIST, PAGES, GLOBAL, HELP],
         SkillsList => &[CONFIRM, SKILLS, FILTER, LIST, PAGES, GLOBAL, HELP],
         SkillsInspect => &[INSPECT, SKILLS, FILTER, LIST, PAGES, GLOBAL, HELP],
+        JobsList => &[CONFIRM, JOBS, LIST, PAGES, GLOBAL, HELP],
+        JobsInspect => &[INSPECT, JOBS, LIST, PAGES, GLOBAL, HELP],
         ModelList => &[CONFIRM, FILTER, LIST, PAGES, GLOBAL, HELP],
         ModelReasoning => &[CONFIRM, INSPECT, LIST, PAGES, GLOBAL, HELP],
         ModelConfirm => &[CONFIRM, LIST, PAGES, GLOBAL, HELP],
@@ -558,6 +567,8 @@ mod tests {
             KeyContext::OverlayList,
             KeyContext::SkillsList,
             KeyContext::SkillsInspect,
+            KeyContext::JobsList,
+            KeyContext::JobsInspect,
             KeyContext::ModelList,
             KeyContext::ModelReasoning,
             KeyContext::ModelConfirm,
@@ -599,6 +610,8 @@ mod tests {
             KeyContext::OverlayInspect,
             KeyContext::SkillsList,
             KeyContext::SkillsInspect,
+            KeyContext::JobsList,
+            KeyContext::JobsInspect,
             KeyContext::ModelList,
             KeyContext::ModelReasoning,
             KeyContext::ModelConfirm,
@@ -654,6 +667,8 @@ mod tests {
                 KeyContext::OverlayInspect,
                 KeyContext::SkillsList,
                 KeyContext::SkillsInspect,
+                KeyContext::JobsList,
+                KeyContext::JobsInspect,
                 KeyContext::ModelList,
                 KeyContext::ModelReasoning,
                 KeyContext::ModelConfirm,

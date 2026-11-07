@@ -13,6 +13,13 @@ impl App {
         if self.composer.is_blank() {
             return self.send_queued_now();
         }
+        // Frontend-only control is admitted before busy/queue gates.
+        if matches!(
+            self.composer.classify(),
+            Ok(ClassifiedInput::Builtin(SlashCommand::Jobs))
+        ) {
+            return self.submit_nonqueued(ClassifiedInput::Builtin(SlashCommand::Jobs));
+        }
         let queueable = matches!(
             self.capabilities().queue_work,
             Ok(()) | Err(crate::input::DisabledReason::QueueFull)
@@ -46,7 +53,9 @@ impl App {
     }
 
     fn submit_nonqueued(&mut self, classified: ClassifiedInput) -> Option<UiAction> {
-        if self.model.session.is_busy() {
+        if self.model.session.is_busy()
+            && !matches!(classified, ClassifiedInput::Builtin(SlashCommand::Jobs))
+        {
             return None;
         }
         if !matches!(classified, ClassifiedInput::Builtin(_)) && !self.can_submit_work() {

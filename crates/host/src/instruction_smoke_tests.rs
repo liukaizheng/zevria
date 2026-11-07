@@ -1,4 +1,6 @@
 //! Production Responses smoke: mode switching, tool activation, shutdown, and resume.
+#[path = "command_job_smoke_tests.rs"]
+mod command_jobs;
 use super::*;
 use serde_json::{Value, json};
 use std::time::Duration;

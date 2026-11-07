@@ -284,6 +284,9 @@ Frontends send three explicit `SessionCommand` families:
   run/turn/worker-scoped Plan feedback, confirmation and optional baseline selection, and shutdown. Control
   traffic never allocates a root turn ID or enters the work queue. Worker controls
   have their own correlated request IDs and a bounded, nonblocking router.
+  `Command(CommandControl)` inspects, terminates, or backgrounds a shell job, with
+  a correlated `CommandControlResult` reply. Idle, busy, and direct dispatch use
+  the same registry; these controls never touch turn cancellation or model input.
 - `Manage(ManagementCommand)`: correlated root mode selection (`SetMode`), model selection, and skill management.
   Mutations are idle-only; skill queries can use the captured live projection.
 
@@ -2215,8 +2218,8 @@ warning, and backoff; a progressing stream still has no total duration limit.
 These timers never restart completed local tools or impose deadlines on approval
 waits or external ACP worker processes.
 
-Shell commands default to a five-minute wall-clock timeout and 1 MiB combined
-stdout/stderr capture. The configured limits apply identically to root
+Foreground shell commands default to a five-minute wall-clock timeout and 1 MiB
+combined stdout/stderr capture. The foreground limits apply identically to root
 sessions and both child kinds. Both streams are drained concurrently into
 bounded head/tail buffers, preventing pipe deadlocks without retaining
 unbounded output. On Unix each command owns a process group; timeout,
@@ -2229,6 +2232,45 @@ capture drains, including on ordinary shell exit. Configured ACP agents use a
 private native job helper around the pinned SDK's direct-child cleanup. WSL
 handoff is whole-application and never treated as Windows-owned Linux descendants;
 no cleanup terminates a distribution. See [Windows runtime setup](windows.md).
+
+Root Build and Plan (including ACP roots) share a session-owned `CommandJobs`
+registry. Every root command is a job: foreground calls wait as before, while
+`command { command, background: true }` returns a short random `job-xxxxxx` ID.
+`command_status` lists model-owned jobs or reads incremental stdout/stderr for
+one ID, optionally waiting without stopping it. `command_terminate` stops just
+that process tree. A user can inspect running foreground commands through
+`/jobs`, terminate one without cancelling the turn, or move it to the background
+and release the blocked tool call immediately. Turn cancellation terminates
+only the foreground command it is waiting on; background jobs survive turn
+completion and Ctrl+C.
+
+Background jobs have no default deadline. `command.background_timeout_seconds`,
+when set, must be at least `command.timeout_seconds`; the total wall-clock
+budget is re-armed when a foreground job is moved to the background.
+`command.max_background_jobs` caps running background jobs (default 8); zero
+restores the foreground-only root registry and policies. At most eight finished
+background jobs are retained; completed foreground jobs are removed immediately.
+Each job keeps bounded head/tail capture, with 16 KiB per-stream model elision
+and independent, non-consuming 8 KiB frontend tails. UTF-8 fragments at the
+running model cursor are held until complete; discarded gaps are explicit.
+
+Jobs are runtime-only and do not survive process restart or session replacement.
+Ordinary tool results persist their bytes (including once-only `job updates:`
+completion footers) plus a display-only `ToolResultDetail::CommandJob` sidecar.
+`CommandJobUpdated` and `CommandControlResult` events are frontend-only,
+non-fencing, and never persisted or injected into core model input. No job IDs,
+counts, status, or output enter instructions or tool definitions: provider prompt
+prefixes stay static and history remains append-only.
+
+Session shutdown (`/new`, `/resume`, `/implement-fresh`, quit, or ACP close)
+closes registration before signalling the engine, joins the engine and child
+supervisor, then terminates/drains command jobs before abandoned-history cleanup.
+Unix termination sends SIGTERM to the owned process group, waits up to two
+seconds, then sends SIGKILL; Windows kills the owned Job Object. Supervisor abort
+and registry drop also kill the process tree. Unix groups can outlive a hard
+SIGKILL of Zevria itself; explicit cleanup is not crash recovery. Programs that
+open `/dev/tty` can still interact with or be stopped by the terminal session;
+affected commands remain visible and killable through `/jobs`.
 
 New-session metadata alone is intentionally pending, not degraded persistence;
 shutdown/`ensure_durable` never flushes it into a file. Once materialized,
@@ -2271,6 +2313,10 @@ supervisor (zevria-host, subtasks.rs)
 │   └── stream batches republished under the child id on the parent channel
 └── exactly one SubtaskOutcome per launch, even on cancellation/connect failure
 ```
+
+Explore/Build children and ensemble workers keep foreground-only commands, with
+private event-less registries and unchanged tool definitions. They cannot access
+the root job registry or leave session-owned background jobs running.
 
 The tool requires a nonblank title and prompt; violations return model-fixable
 invalid-argument failures before any request is queued or child metadata is

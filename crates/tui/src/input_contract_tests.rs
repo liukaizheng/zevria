@@ -318,6 +318,56 @@ fn stale_questions_cannot_capture_a_new_turn_or_an_idle_pane() {
 }
 
 #[test]
+fn jobs_overlay_is_global_captures_input_and_dismisses_without_cancelling_busy_root() {
+    let mut root = App::new();
+    enter_insert(&mut root);
+    root.set_input_for_test("saved draft", 5);
+    let mut views = SessionViews::new(root, PathBuf::from("/tmp"));
+    views.apply(SessionEvent::TurnStarted {
+        turn_id: TEST_TURN_ID,
+        message: Message::user("work"),
+        mode: SessionMode::Build,
+    });
+    views.overlays.show_jobs();
+    views.apply(SessionEvent::CommandJobUpdated {
+        job: zevria_foundation::CommandJobSnapshot {
+            id: zevria_foundation::CommandJobId::new("job-test01"),
+            call_id: None,
+            command: "sleep 600".into(),
+            mode: zevria_foundation::CommandJobMode::Foreground,
+            status: zevria_foundation::CommandJobStatus::Running,
+            started_at: std::time::SystemTime::now(),
+            finished_at: None,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        },
+    });
+    let text = rendered_views_text(&mut views, 120, 28);
+    assert!(text.contains("Jobs"));
+    assert!(text.contains("job-test01"));
+    assert!(text.contains("1 jobs"));
+    views.handle_event(Event::Paste("ignored overlay paste".into()));
+    assert_eq!(views.root.input(), "saved draft");
+    assert_eq!(views.handle_event(key(KeyCode::Char('x'))), None);
+    assert!(views.overlays.jobs.commands.iter().any(|c| matches!(
+        c,
+        zevria_session_api::SessionCommand::Control(zevria_session_api::ControlCommand::Command(
+            zevria_session_api::CommandControl {
+                action: zevria_session_api::CommandControlAction::Terminate { .. },
+                ..
+            }
+        ))
+    )));
+    assert_eq!(
+        views.handle_event(modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        None
+    );
+    assert!(!views.overlays.jobs.is_open());
+    assert!(views.root.is_busy());
+    assert_eq!(views.root.input(), "saved draft");
+}
+
+#[test]
 fn question_owns_input_above_a_suspended_picker_and_draft() {
     let mut root = App::new();
     enter_insert(&mut root);

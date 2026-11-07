@@ -130,6 +130,7 @@ impl TurnCommand {
 /// Interaction traffic never allocates a turn and is never queued.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlCommand {
+    Command(CommandControl),
     Worker(WorkerControl),
     AnswerQuestion {
         request_id: QuestionRequestId,
@@ -139,6 +140,20 @@ pub enum ControlCommand {
         turn_id: Option<TurnId>,
     },
     Shutdown,
+}
+
+/// Frontend-only shell job control; never queues work or cancels a turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandControl {
+    pub request_id: String,
+    pub action: CommandControlAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandControlAction {
+    Inspect { id: Option<CommandJobId> },
+    Terminate { id: CommandJobId },
+    MoveToBackground { id: CommandJobId },
 }
 
 /// Idle-only correlated maintenance. Queries may be serviced while busy.

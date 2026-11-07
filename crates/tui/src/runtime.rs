@@ -119,6 +119,12 @@ pub async fn run_ui(
         if engine_done {
             views.root.mode_selection_disconnected();
         }
+        views.overlays.jobs.tick(Instant::now());
+        while let Some(command) = views.overlays.jobs.commands.pop_front() {
+            commands
+                .send(command)
+                .map_err(|_| anyhow::anyhow!("session engine stopped before job control"))?;
+        }
         while let Some(command) = views.overlays.models.commands.pop_front() {
             commands
                 .send(command)
@@ -232,6 +238,7 @@ pub async fn run_ui(
                             SlashCommand::Resume => open_resume_picker(&mut views, context),
                             SlashCommand::New => return new_session_outcome(&views.root),
                             SlashCommand::Skills => views.overlays.show_skills(),
+                            SlashCommand::Jobs => views.overlays.show_jobs(),
                             SlashCommand::Model | SlashCommand::ModelSession => {
                                 let scope = if command == SlashCommand::ModelSession {
                                     ModelSelectionScope::SessionOnly

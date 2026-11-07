@@ -232,6 +232,7 @@ pub(super) struct ModelManagement {
 
 #[derive(Default)]
 pub(super) struct RootCapabilities {
+    pub(super) command_jobs: Option<zevria_session_api::CommandJobs>,
     pub(super) mode_management: bool,
     pub(super) idle_notifications: bool,
     /// Captured from the same configuration as the subtask supervisor. None

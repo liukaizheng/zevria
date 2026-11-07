@@ -219,6 +219,8 @@ pub enum NativeToolCallStatus {
 /// Native Zevria state that is filled when its correlated result arrives.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeToolState {
+    /// Live display-only state; absent on resume until a new job is started.
+    pub command_job: Option<zevria_foundation::CommandJobSnapshot>,
     pub status: NativeToolCallStatus,
     pub result: Option<ToolResult>,
     pub metadata: Option<ToolResultMetadata>,
@@ -234,6 +236,7 @@ impl NativeToolState {
             status,
             result: None,
             metadata: None,
+            command_job: None,
             arguments: normalized_arguments(arguments),
             subtasks: std::collections::BTreeMap::new(),
         }

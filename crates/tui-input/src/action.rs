@@ -57,5 +57,7 @@ pub enum Action {
     Back,
     Toggle,
     Reload,
+    Terminate,
+    MoveToBackground,
     Type(char),
 }

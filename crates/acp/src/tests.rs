@@ -1077,6 +1077,8 @@ impl SessionRuntimeFactory for FakeFactory {
                                 PlanDecision::ImplementFresh => {}
                             }
                         }
+                        SessionCommand::Control(zevria_session_api::ControlCommand::Command(_)) => {
+                        }
                         SessionCommand::Control(zevria_session_api::ControlCommand::Worker(_)) => {
                             panic!("worker review controls must never enter an ACP child runtime")
                         }

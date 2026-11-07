@@ -1154,8 +1154,35 @@ fn render_tool_call(
                 Some("bash"),
                 Style::default().fg(theme().roles.tools),
             );
+            let badge = state
+                .metadata
+                .as_ref()
+                .and_then(|m| m.detail.as_ref())
+                .and_then(|d| d.command_job())
+                .map(|job| {
+                    let live = state
+                        .command_job
+                        .as_ref()
+                        .map(|j| format!(" · {}", j.status))
+                        .unwrap_or_default();
+                    format!(" · background · {}{live}", job.id)
+                });
+            if let Some(badge) = &badge
+                && let Some(last) = command_lines.last_mut()
+            {
+                last.spans.push(Span::styled(
+                    badge.clone(),
+                    Style::default().fg(theme().text.muted),
+                ));
+            }
+            let mut label = command_lines.first().cloned().unwrap_or_default();
+            if command_lines.len() > 1
+                && let Some(badge) = badge
+            {
+                label.spans.push(Span::raw(badge));
+            }
             let header = FoldHeader {
-                label: command_lines.first().cloned().unwrap_or_default(),
+                label,
                 outcomes: vec![(status, None)],
                 counted: false,
             };

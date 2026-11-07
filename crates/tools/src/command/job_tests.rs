@@ -1,0 +1,217 @@
+use super::*;
+use crate::{CommandStatusArgs, CommandStatusTool, CommandTerminateArgs, CommandTerminateTool};
+use zevria_foundation::{SessionMode, TurnId};
+use zevria_session_api::{CommandControl, CommandControlAction, CommandControlResult};
+fn jobs() -> CommandJobs {
+    CommandJobs::new(
+        CommandJobLimits {
+            max_running_background: 1,
+            retained_finished: 8,
+            capture_bytes: 4096,
+            foreground_timeout: Duration::from_secs(5),
+            background_timeout: None,
+        },
+        None,
+    )
+}
+async fn start(tool: &CommandTool, command: &str) -> CommandJobId {
+    let mut context = ToolContext::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        tool.call(
+            &mut context,
+            CommandArgs {
+                command: command.into(),
+                background: Some(true),
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let detail = context.result::<ToolResultDetail>().unwrap().unwrap();
+    let id = detail.command_job().unwrap().id.clone();
+    assert!(result.contains(id.as_str()));
+    id
+}
+async fn status(jobs: &CommandJobs, id: &CommandJobId, wait: Option<u64>) -> String {
+    CommandStatusTool::new(jobs.clone())
+        .call(
+            &mut ToolContext::new(),
+            CommandStatusArgs {
+                id: Some(id.to_string()),
+                wait_seconds: wait,
+            },
+        )
+        .await
+        .unwrap()
+}
+#[tokio::test]
+async fn background_returns_promptly_incremental_output_cap_and_footer_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let jobs = jobs();
+    let tool = CommandTool::with_jobs(directory.path().into(), jobs.clone());
+    let id = start(
+        &tool,
+        "printf first; sleep 0.3; printf second; printf done > done",
+    )
+    .await;
+    assert!(
+        tool.call(
+            &mut ToolContext::new(),
+            CommandArgs {
+                command: "sleep 10".into(),
+                background: Some(true)
+            }
+        )
+        .await
+        .is_err()
+    );
+    let first = status(&jobs, &id, Some(0)).await;
+    let last = status(&jobs, &id, Some(5)).await;
+    assert_eq!(
+        first.matches("first").count() + last.matches("first").count(),
+        1
+    );
+    assert!(last.contains("second"));
+    assert!(directory.path().join("done").exists());
+    assert!(!status(&jobs, &id, None).await.contains("second"));
+    let id2 = start(&tool, "printf update").await;
+    jobs.wait_terminal(&id2, Duration::from_secs(5), &Default::default())
+        .await
+        .unwrap();
+    let result = tool
+        .call(
+            &mut ToolContext::new(),
+            CommandArgs {
+                command: "printf other".into(),
+                background: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("job updates:"));
+    assert!(result.contains(id2.as_str()));
+    let result = tool
+        .call(
+            &mut ToolContext::new(),
+            CommandArgs {
+                command: "printf other".into(),
+                background: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!result.contains("job updates:"));
+}
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn terminate_and_shutdown_kill_descendants() {
+    let directory = tempfile::tempdir().unwrap();
+    let jobs = jobs();
+    let tool = CommandTool::with_jobs(directory.path().into(), jobs.clone());
+    let id = start(&tool, "(sleep 0.5; printf leak > leak) & sleep 10").await;
+    let result = CommandTerminateTool::new(jobs.clone())
+        .call(
+            &mut ToolContext::new(),
+            CommandTerminateArgs { id: id.to_string() },
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("terminated"));
+    let id = start(&tool, "sleep 0.5; printf leak > leak").await;
+    jobs.shutdown(Duration::from_secs(3)).await;
+    assert!(jobs.snapshot(&id).unwrap().status.is_terminal());
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    assert!(!directory.path().join("leak").exists());
+}
+#[tokio::test]
+async fn user_terminate_and_move_do_not_cancel_turn() {
+    for move_it in [false, true] {
+        let jobs = jobs();
+        let tool = CommandTool::with_jobs(PathBuf::from("."), jobs.clone());
+        let token = tokio_util::sync::CancellationToken::new();
+        let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, token.clone());
+        let worker = tokio::spawn(async move {
+            let mut context = ToolContext::new();
+            context.insert_scope(turn);
+            let result = tool
+                .call(
+                    &mut context,
+                    CommandArgs {
+                        command: "sleep 0.5; printf done".into(),
+                        background: None,
+                    },
+                )
+                .await;
+            (result, context)
+        });
+        let id = loop {
+            let result = jobs.handle_control(CommandControl {
+                request_id: "inspect".into(),
+                action: CommandControlAction::Inspect { id: None },
+            });
+            if let CommandControlResult::Inspected(v) = result {
+                if let Some(job) = v.first() {
+                    break job.snapshot.id.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        };
+        let action = if move_it {
+            CommandControlAction::MoveToBackground { id: id.clone() }
+        } else {
+            CommandControlAction::Terminate { id: id.clone() }
+        };
+        assert!(matches!(
+            jobs.handle_control(CommandControl {
+                request_id: "action".into(),
+                action
+            }),
+            CommandControlResult::Accepted(_)
+        ));
+        let (result, context) = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!token.is_cancelled());
+        if move_it {
+            assert!(result.unwrap().contains("moved to the background"));
+            assert!(context.result::<ToolResultDetail>().unwrap().is_some());
+            assert!(status(&jobs, &id, Some(5)).await.contains("done"));
+        } else {
+            assert!(matches!(result, Err(CommandError::Terminated { .. })));
+        }
+    }
+}
+#[tokio::test]
+async fn cancelling_status_wait_leaves_job_running_and_background_survives_turn() {
+    let jobs = jobs();
+    let tool = CommandTool::with_jobs(PathBuf::from("."), jobs.clone());
+    let id = start(&tool, "sleep 10").await;
+    let token = tokio_util::sync::CancellationToken::new();
+    let mut context = ToolContext::new();
+    context.insert_scope(TurnContext::new(
+        TurnId::new(1),
+        SessionMode::Plan,
+        token.clone(),
+    ));
+    token.cancel();
+    let error = CommandStatusTool::new(jobs.clone())
+        .call(
+            &mut context,
+            CommandStatusArgs {
+                id: Some(id.to_string()),
+                wait_seconds: Some(5),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CommandError::Cancelled { .. }));
+    assert!(context.result::<ToolCancelled>().unwrap().is_some());
+    assert_eq!(
+        jobs.snapshot(&id).unwrap().status,
+        CommandJobStatus::Running
+    );
+    jobs.shutdown(Duration::from_secs(3)).await;
+}

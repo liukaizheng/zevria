@@ -262,6 +262,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         self
     }
 
+    pub fn with_command_jobs(mut self, jobs: zevria_session_api::CommandJobs) -> Self {
+        self.capabilities.command_jobs = Some(jobs);
+        self
+    }
+
     /// Attach the response endpoint paired with the root `question` tool.
     pub fn with_question_responder(mut self, responder: QuestionResponder) -> Self {
         self.capabilities.question_responder = Some(responder);
@@ -369,6 +374,14 @@ impl<P: ModelProvider> SessionEngine<P> {
             SessionCommand::Turn(command) => {
                 let turn = self.next_turn(command.mode());
                 self.handle_turn(command, &turn, events).await
+            }
+            SessionCommand::Control(ControlCommand::Command(control)) => {
+                let reply = runtime::command_control_reply(
+                    self.capabilities.command_jobs.as_ref(),
+                    control,
+                );
+                let _ = events.send(reply).await;
+                Ok(())
             }
             SessionCommand::Control(ControlCommand::Worker(control)) => {
                 if let Err(result) = self.capabilities.worker_controls.route(control) {

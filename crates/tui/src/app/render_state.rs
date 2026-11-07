@@ -161,6 +161,11 @@ impl App {
         let command_menu_active = self.command_menu_active();
         let file_menu_active =
             command_menu_active && self.composer.completion_kind() == Some(CompletionKind::File);
+        let running_jobs = if self.pane.is_root() {
+            self.model.running_job_count()
+        } else {
+            0
+        };
         let can_recall = self.can_recall_selected();
         let queue = self.queue.view();
         let Self {
@@ -343,6 +348,7 @@ impl App {
             )
         });
         let status = StatusBarView {
+            jobs: running_jobs,
             primary,
             accent,
             tone,

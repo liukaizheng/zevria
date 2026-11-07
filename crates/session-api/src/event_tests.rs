@@ -24,6 +24,52 @@ async fn engine_idle_does_not_fence_an_unread_root_preview() {
 }
 
 #[tokio::test]
+async fn command_job_events_do_not_fence_an_unread_root_preview() {
+    let (sender, mut receiver) = session_event_channel(8);
+    ProgressReporter::new(sender.clone()).stream_updated(Message::assistant("keep job preview"));
+    let jobs = CommandJobs::new(
+        CommandJobLimits {
+            max_running_background: 1,
+            retained_finished: 8,
+            capture_bytes: 1024,
+            foreground_timeout: std::time::Duration::from_secs(30),
+            background_timeout: None,
+        },
+        Some(sender.clone()),
+    );
+    let job = jobs
+        .register("example".into(), None, CommandJobMode::Background)
+        .await
+        .unwrap();
+    sender
+        .send(SessionEvent::CommandControlResult {
+            request_id: "inspect".into(),
+            result: CommandControlResult::Accepted(job.snapshot()),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        receiver.recv().await,
+        Some(SessionUpdate::Lifecycle(
+            SessionEvent::CommandJobUpdated { .. }
+        ))
+    ));
+    assert!(matches!(
+        receiver.recv().await,
+        Some(SessionUpdate::Lifecycle(
+            SessionEvent::CommandControlResult { .. }
+        ))
+    ));
+    assert!(matches!(
+        receiver.recv().await,
+        Some(SessionUpdate::Streams(SessionStreamBatch {
+            root: Some(_),
+            ..
+        }))
+    ));
+}
+
+#[tokio::test]
 async fn network_status_is_call_scoped_and_does_not_fence_unread_preview() {
     use crate::event::{NetworkStatus, NetworkTransport};
     let (sender, mut receiver) = session_event_channel(8);

@@ -1102,6 +1102,7 @@ fn unlaunched_metadata(call_id: &str, outcome: ToolCallOutcome) -> ToolResultMet
 
 fn launch_state_with_result(outcome: ToolCallOutcome, output: &str) -> crate::app::ToolCallState {
     crate::app::ToolCallState {
+        command_job: None,
         arguments: None,
         status: ToolCallStatus::Finished,
         result: Some(ToolResult {

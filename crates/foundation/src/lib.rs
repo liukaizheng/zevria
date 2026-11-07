@@ -1,5 +1,6 @@
 //! Foundational identities, policies, tool contracts and configuration discovery.
 pub mod atomic_file;
+pub mod command_job;
 pub mod config;
 pub mod contained_read;
 pub mod logging;
@@ -17,6 +18,7 @@ pub mod tool_result;
 pub mod windows_io;
 #[cfg(windows)]
 pub mod windows_process;
+pub use command_job::*;
 pub use config::{LoadOrCreate, ModelContextPolicy, ModelProfileRef, ReasoningLevel};
 pub use policy::*;
 pub use question::*;

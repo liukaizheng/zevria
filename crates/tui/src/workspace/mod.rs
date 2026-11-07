@@ -717,7 +717,7 @@ impl SessionViews {
     }
 
     pub(crate) fn clock_required(&self) -> bool {
-        self.visible_app().is_busy()
+        self.visible_app().is_busy() || self.overlays.jobs.is_open()
     }
 
     /// Open the modal session picker over whatever pane is visible.
@@ -796,6 +796,10 @@ impl SessionViews {
     }
 
     fn apply_event(&mut self, event: SessionEvent) {
+        self.overlays.jobs.event(&event);
+        if matches!(event, SessionEvent::CommandControlResult { .. }) {
+            return;
+        }
         if let SessionEvent::ModelsResult { request_id, result } = &event {
             if self.overlays.models.accept(request_id, result) {
                 if let zevria_model::models::ModelManagementResult::Changed {

@@ -1434,6 +1434,32 @@ impl ConversationState {
         pending.push((entry_index, descriptor));
     }
 
+    pub fn update_command_job(&mut self, job: &zevria_foundation::CommandJobSnapshot) {
+        for entry in self.history.iter_mut().rev() {
+            let HistoryEntry::Conversation(entry) = entry else {
+                continue;
+            };
+            for block in &mut entry.blocks {
+                let Some((call, state)) = block.native_tool_mut() else {
+                    continue;
+                };
+                if call.function.name == zevria_foundation::COMMAND_TOOL_NAME
+                    && (job.call_id.as_deref() == Some(call.id.wire().as_ref())
+                        || state
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.detail.as_ref())
+                            .and_then(|d| d.command_job())
+                            .is_some_and(|d| d.id == job.id))
+                    && state.command_job.as_ref() != Some(job)
+                {
+                    state.command_job = Some(job.clone());
+                    block.touch();
+                }
+            }
+        }
+    }
+
     /// Keep status-before-launch observations; never regress terminal children
     /// when delayed Starting/Running announcements arrive.
     pub fn update_subtask_status(&mut self, id: &SubtaskId, status: SubtaskStatus) {

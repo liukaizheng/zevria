@@ -502,7 +502,7 @@ fn task_plan(tasks: &TaskList) -> Plan {
 
 fn tool_kind(name: &str, arguments: &Value) -> ToolKind {
     match name {
-        "command" => ToolKind::Execute,
+        "command" | "command_status" | "command_terminate" => ToolKind::Execute,
         "edit" | "write" => {
             if arguments
                 .get("move_to")
@@ -534,7 +534,7 @@ fn tool_title(name: &str, arguments: &Value) -> String {
                 |title| format!("{name}: {}", bounded(title, 120)),
             );
     }
-    let detail = ["file_path", "path", "title", "command", "name"]
+    let detail = ["file_path", "path", "title", "command", "name", "id"]
         .into_iter()
         .find_map(|key| arguments.get(key).and_then(Value::as_str))
         .map(|value| bounded(value, 120));
