@@ -1,6 +1,29 @@
 use crate::*;
 
 #[tokio::test]
+async fn engine_idle_does_not_fence_an_unread_root_preview() {
+    let (sender, mut receiver) = session_event_channel(1);
+    let reporter = ProgressReporter::new(sender.clone());
+    reporter.stream_updated(Message::assistant("keep this preview"));
+    sender.send(SessionEvent::EngineIdle).await.unwrap();
+    assert_eq!(
+        receiver.recv().await,
+        Some(SessionUpdate::Lifecycle(SessionEvent::EngineIdle))
+    );
+    assert!(matches!(
+        receiver.recv().await,
+        Some(SessionUpdate::Streams(SessionStreamBatch {
+            root: Some(SessionStreamState {
+                message: Some(Message::Assistant { .. }),
+                ..
+            }),
+            ..
+        }))
+    ));
+    assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+}
+
+#[tokio::test]
 async fn network_status_is_call_scoped_and_does_not_fence_unread_preview() {
     use crate::event::{NetworkStatus, NetworkTransport};
     let (sender, mut receiver) = session_event_channel(8);

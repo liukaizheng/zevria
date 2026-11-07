@@ -688,6 +688,12 @@ fn worker_busy_snapshots_allow_editing_but_block_duplicate_work() {
             app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
                 .is_none()
         );
+        assert_eq!(
+            app.queue.len(),
+            0,
+            "live worker feedback never enters the root queue"
+        );
+        assert_eq!(app.composer.text(), "/re retained\ndraft");
         app.handle_event(Event::Paste("newer".into()));
         assert_ne!(app.composer.text(), "/re retained\ndraft");
         app.handle_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL));

@@ -273,6 +273,7 @@ async fn completed(
     limit: u64,
 ) {
     let mut usage = false;
+    let mut completed = false;
     loop {
         match event(receiver).await {
             SessionEvent::UsageUpdated {
@@ -288,6 +289,13 @@ async fn completed(
             }
             SessionEvent::TurnCompleted { .. } => {
                 assert!(usage);
+                completed = true;
+            }
+            SessionEvent::EngineIdle => {
+                assert!(
+                    completed,
+                    "interactive idle barrier follows the terminal event"
+                );
                 return;
             }
             SessionEvent::TurnFailed { error, .. } => panic!("turn failed: {error}"),

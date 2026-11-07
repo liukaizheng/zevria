@@ -12,6 +12,109 @@ use zevria_session_api::{
 };
 use zevria_workflow::{PlanArtifact, PlanDecision, PlanId, PlanVersion, PlanWorkflowState};
 const TURN: TurnId = TurnId::new(7);
+
+#[test]
+fn quiescence_requires_a_post_terminal_barrier_and_restore_resets_it() {
+    use crate::session::SessionActivity;
+    use zevria_foundation::ModelRole;
+    let mut model = SessionModel::default();
+    assert!(model.session.is_quiescent());
+    assert!(!model.session.has_turn_work());
+    assert!(model.begin_operation(
+        OperationKind::ModeManagement,
+        SessionMode::Build,
+        ModelRole::Build
+    ));
+    assert!(model.session.is_quiescent());
+    assert!(!model.session.has_turn_work());
+    model.session.finish_mode_management();
+    model
+        .submit("hello".into(), RequestBehavior::Standard)
+        .unwrap();
+    assert!(!model.session.is_quiescent());
+    assert!(model.session.has_turn_work());
+    model.reduce(E::EngineIdle);
+    assert!(!model.session.is_quiescent());
+    start(&mut model);
+    model.reduce(E::EngineIdle);
+    assert!(!model.session.is_quiescent());
+    model.reduce(E::TurnCompleted {
+        turn_id: TURN,
+        message: Message::assistant("done"),
+        attempt_id: None,
+    });
+    assert!(!model.session.has_turn_work());
+    assert!(!model.session.is_quiescent());
+    model.reduce(E::EngineIdle);
+    assert!(model.session.is_quiescent());
+    start(&mut model);
+    assert!(!model.session.is_quiescent());
+    assert!(matches!(
+        model.session.activity(),
+        SessionActivity::Active(_)
+    ));
+    model.session.reset_for_restore();
+    assert!(model.session.is_quiescent());
+    model.reduce(E::CompactionStarted {
+        turn_id: TURN,
+        trigger: zevria_model::CompactionTrigger::Manual,
+    });
+    assert!(!model.session.is_quiescent());
+    model.session.reset_for_restore();
+    assert!(model.session.is_quiescent());
+}
+
+#[test]
+fn explicit_mode_admission_captures_mode_and_role_without_changing_selection() {
+    use crate::session::SessionActivity;
+    use zevria_foundation::ModelRole;
+    use zevria_session_api::TurnCommand;
+    for skill in [false, true] {
+        let mut model = SessionModel::default();
+        let command = if skill {
+            model.invoke_skill_in_mode(
+                zevria_instructions::SkillName::parse("review").unwrap(),
+                "args".into(),
+                SessionMode::Plan,
+            )
+        } else {
+            model.submit_in_mode(
+                "prompt".into(),
+                RequestBehavior::Orchestrate,
+                SessionMode::Plan,
+            )
+        }
+        .unwrap();
+        assert!(matches!(
+            command,
+            TurnCommand::Submit {
+                mode: SessionMode::Plan,
+                behavior: RequestBehavior::Orchestrate,
+                ..
+            } | TurnCommand::InvokeSkill {
+                mode: SessionMode::Plan,
+                ..
+            }
+        ));
+        let SessionActivity::Pending(pending) = model.session.activity() else {
+            panic!("pending")
+        };
+        assert_eq!(
+            (pending.mode, pending.role),
+            (SessionMode::Plan, ModelRole::Plan)
+        );
+        assert_eq!(model.next_mode(), SessionMode::Build);
+    }
+    let mut model = SessionModel::default();
+    model.apply_selected_mode(SessionMode::Plan);
+    assert!(matches!(
+        model.submit("hello".into(), RequestBehavior::Standard),
+        Some(TurnCommand::Submit {
+            mode: SessionMode::Plan,
+            ..
+        })
+    ));
+}
 fn pending() -> SessionModel {
     let mut model = SessionModel::default();
     assert!(

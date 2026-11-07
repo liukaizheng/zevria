@@ -23,6 +23,47 @@ mod session_replacement_tests;
 
 const MAX_EVENT_BURST: usize = 64;
 
+fn send_turn_action(
+    commands: &UnboundedSender<SessionCommand>,
+    action: UiAction,
+) -> anyhow::Result<()> {
+    use zevria_session_api::TurnCommand;
+    let (command, operation) = match action {
+        UiAction::Submit {
+            text,
+            mode,
+            behavior,
+        } => (
+            TurnCommand::Submit {
+                text,
+                mode,
+                behavior,
+            },
+            "the prompt",
+        ),
+        UiAction::EditTranscript(edit) => {
+            (TurnCommand::EditTranscript(edit), "the transcript edit")
+        }
+        UiAction::InvokeSkill { name, args, mode } => (
+            TurnCommand::InvokeSkill { name, args, mode },
+            "the skill invocation",
+        ),
+        UiAction::Compact { mode } => (TurnCommand::Compact { mode }, "compaction"),
+        UiAction::RunEnsemble { workflow, prompt } => (
+            TurnCommand::RunEnsemble { workflow, prompt },
+            "the ensemble command",
+        ),
+        UiAction::ResolvePlan { expected, decision } => (
+            TurnCommand::ResolvePlan { expected, decision },
+            "the Plan decision",
+        ),
+        _ => unreachable!("only turn actions use the turn transport"),
+    };
+    commands
+        .send(SessionCommand::Turn(command))
+        .map_err(|_| anyhow::anyhow!("the session engine stopped before accepting {operation}"))
+}
+
 /// Workspace facts the runtime needs to execute slash commands.
 pub struct UiContext {
     /// `{workspace}/.zevria/sessions`, listed by `/resume`.
@@ -88,6 +129,9 @@ pub async fn run_ui(
                 .send(command)
                 .map_err(|_| anyhow::anyhow!("session engine stopped before skill management"))?;
         }
+        if !engine_done && let Some(action) = views.dispatch_queued_root_work() {
+            send_turn_action(commands, action)?;
+        }
         files.set_request(views.file_search_request());
         views.observe_clock(Instant::now());
         terminal.draw(|frame| views.render(frame))?;
@@ -148,47 +192,12 @@ pub async fn run_ui(
                         Some(UiAction::SetMode { request_id, mode }) => {
                             views.send_mode_selection(commands, request_id, mode);
                         }
-                        Some(UiAction::Submit { text, mode, behavior }) => {
-                            commands.send(SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { text, mode, behavior })).map_err(|_| {
-                                anyhow::anyhow!("the session engine stopped before accepting the prompt")
-                            })?;
-                        }
-                        Some(UiAction::EditTranscript(edit)) => {
-                            commands
-                                .send(SessionCommand::Turn(zevria_session_api::TurnCommand::EditTranscript(edit)))
-                                .map_err(|_| {
-                                    anyhow::anyhow!(
-                                        "the session engine stopped before accepting the transcript edit"
-                                    )
-                                })?;
-                        }
-                        Some(UiAction::InvokeSkill { name, args, mode }) => {
-                            commands
-                                .send(SessionCommand::Turn(zevria_session_api::TurnCommand::InvokeSkill { name, args, mode }))
-                                .map_err(|_| {
-                                    anyhow::anyhow!(
-                                        "the session engine stopped before accepting the skill invocation"
-                                    )
-                                })?;
-                        }
-                        Some(UiAction::Compact { mode }) => {
-                            commands
-                                .send(SessionCommand::Turn(zevria_session_api::TurnCommand::Compact { mode }))
-                                .map_err(|_| {
-                                    anyhow::anyhow!(
-                                        "the session engine stopped before accepting compaction"
-                                    )
-                                })?;
-                        }
-                        Some(UiAction::RunEnsemble { workflow, prompt }) => {
-                            commands
-                                .send(SessionCommand::Turn(zevria_session_api::TurnCommand::RunEnsemble { workflow, prompt }))
-                                .map_err(|_| {
-                                    anyhow::anyhow!(
-                                        "the session engine stopped before accepting the ensemble command"
-                                    )
-                                })?;
-                        }
+                        Some(action @ (UiAction::Submit { .. }
+                            | UiAction::EditTranscript(_)
+                            | UiAction::InvokeSkill { .. }
+                            | UiAction::Compact { .. }
+                            | UiAction::RunEnsemble { .. }
+                            | UiAction::ResolvePlan { .. })) => send_turn_action(commands, action)?,
                         Some(UiAction::WorkerControl(control)) => {
                             commands.send(SessionCommand::Control(zevria_session_api::ControlCommand::Worker(control)))
                                 .map_err(|_| anyhow::anyhow!("the session engine stopped before accepting worker control"))?;
@@ -214,15 +223,6 @@ pub async fn run_ui(
                                 .map_err(|_| {
                                     anyhow::anyhow!(
                                         "the session engine stopped before accepting the question response"
-                                    )
-                                })?;
-                        }
-                        Some(UiAction::ResolvePlan { expected, decision }) => {
-                            commands
-                                .send(SessionCommand::Turn(zevria_session_api::TurnCommand::ResolvePlan { expected, decision }))
-                                .map_err(|_| {
-                                    anyhow::anyhow!(
-                                        "the session engine stopped before accepting the Plan decision"
                                     )
                                 })?;
                         }

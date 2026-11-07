@@ -96,6 +96,7 @@ impl SessionModel {
     pub fn reduce(&mut self, event: SessionEvent) -> Reduction {
         let mut effects = Reduction::default();
         match event {
+            SessionEvent::EngineIdle => self.session.observe_engine_idle(),
             SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
                 if !self.session.accepts_active(turn_id) { return effects; }
                 self.conversation.update_native_attempt(attempt, self.session.call_header());
@@ -559,10 +560,17 @@ impl SessionModel {
             && !matches!(self.workflow.snapshot(), PlanWorkflowState::Ready { .. })
     }
     pub fn submit(&mut self, text: UserPrompt, behavior: RequestBehavior) -> Option<TurnCommand> {
+        self.submit_in_mode(text, behavior, self.next_mode())
+    }
+    pub fn submit_in_mode(
+        &mut self,
+        text: UserPrompt,
+        behavior: RequestBehavior,
+        mode: SessionMode,
+    ) -> Option<TurnCommand> {
         if !self.admits_work() || text.is_blank() {
             return None;
         }
-        let mode = self.next_mode();
         self.begin_operation(OperationKind::Submit, mode, role_for_mode(mode))
             .then_some(TurnCommand::Submit {
                 text,
@@ -575,10 +583,17 @@ impl SessionModel {
         name: zevria_instructions::SkillName,
         args: UserPrompt,
     ) -> Option<TurnCommand> {
+        self.invoke_skill_in_mode(name, args, self.next_mode())
+    }
+    pub fn invoke_skill_in_mode(
+        &mut self,
+        name: zevria_instructions::SkillName,
+        args: UserPrompt,
+        mode: SessionMode,
+    ) -> Option<TurnCommand> {
         if !self.admits_work() {
             return None;
         }
-        let mode = self.next_mode();
         self.begin_operation(OperationKind::Skill, mode, role_for_mode(mode))
             .then_some(TurnCommand::InvokeSkill { name, args, mode })
     }

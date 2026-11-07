@@ -37,6 +37,7 @@ pub enum Action {
     DeleteLine,
     DeleteToEnd,
     Edit,
+    EditQueued,
     PlanReview,
     PlanCurrent,
     PlanFresh,

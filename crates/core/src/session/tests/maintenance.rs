@@ -81,12 +81,26 @@ async fn start_maintenance() -> (
     oneshot::Sender<InputTokenCount>,
     mpsc::UnboundedReceiver<GatedCall>,
 ) {
+    start_maintenance_with_idle_notifications(false).await
+}
+
+async fn start_maintenance_with_idle_notifications(
+    idle_notifications: bool,
+) -> (
+    tempfile::TempDir,
+    RunningSession,
+    oneshot::Sender<InputTokenCount>,
+    mpsc::UnboundedReceiver<GatedCall>,
+) {
     let (directory, transcript) = test_transcript();
     let (inner, calls) = GatedProvider::new();
     let (counts, mut counted) = mpsc::unbounded_channel();
     let mut engine = engine(MaintenanceProvider { inner, counts }, transcript)
         .with_compaction_policy(test_compaction_policy(1_000, 80, 0))
         .with_model_management(Arc::new(MaintenanceSettings), "revision".into());
+    if idle_notifications {
+        engine = engine.with_idle_notifications();
+    }
     engine.policies = test_policies_for_tools(&[]);
     engine
         .conversation
@@ -128,6 +142,20 @@ async fn start_maintenance() -> (
         .unwrap()
         .unwrap();
     (directory, run, count, calls)
+}
+
+#[tokio::test]
+async fn model_maintenance_does_not_emit_an_idle_barrier() {
+    let (_directory, mut run, count, mut calls) =
+        start_maintenance_with_idle_notifications(true).await;
+    count.send(InputTokenCount::Exact(100)).unwrap();
+    run.until(|event| matches!(event, SessionEvent::ModelsResult { request_id, result: ModelManagementResult::Changed { .. } } if request_id == "maintenance")).await;
+    let lifecycle = run.shutdown().await;
+    assert!(!lifecycle.iter().any(|event| matches!(
+        event,
+        SessionEvent::EngineIdle | SessionEvent::TurnStarted { .. }
+    )));
+    assert!(calls.try_recv().is_err());
 }
 
 #[tokio::test]

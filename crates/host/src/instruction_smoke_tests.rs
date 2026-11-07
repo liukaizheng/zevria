@@ -9,6 +9,7 @@ use zevria_session_api::{
 
 async fn completed(events: &mut zevria_session_api::SessionEventReceiver) {
     tokio::time::timeout(Duration::from_secs(10), async {
+        let mut completed = false;
         while let Some(update) = events.recv().await {
             if let SessionUpdate::Lifecycle(event) = update {
                 assert!(
@@ -21,11 +22,18 @@ async fn completed(events: &mut zevria_session_api::SessionEventReceiver) {
                     "{event:?}"
                 );
                 if matches!(event, SessionEvent::TurnCompleted { .. }) {
+                    completed = true;
+                }
+                if matches!(event, SessionEvent::EngineIdle) {
+                    assert!(
+                        completed,
+                        "interactive root idle barrier must follow completion"
+                    );
                     return;
                 }
             }
         }
-        panic!("event channel closed before completion");
+        panic!("event channel closed before the post-completion idle barrier");
     })
     .await
     .unwrap();
@@ -63,6 +71,101 @@ async fn select_mode(
     })
     .await
     .unwrap();
+}
+
+fn responses_config(address: std::net::SocketAddr) -> String {
+    format!(
+        r#"
+[session]
+preamble = "STABLE_APPLICATION_GUIDANCE"
+[providers.test]
+base_url = "http://{address}/v1/responses"
+api_key = "fixture"
+supports_websockets = false
+[providers.test.input_token_count]
+enabled = false
+[providers.test.models.test-model]
+context_window_tokens = 272000
+retained_user_tokens = 20000
+reasoning_levels = ["low", "medium", "high"]
+reasoning_summary_level = "detailed"
+[modes]
+build = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
+plan = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
+review = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
+explore = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
+builder = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
+"#
+    )
+}
+
+#[tokio::test]
+async fn interactive_root_publishes_engine_idle_after_prompt_completion() {
+    let temporary = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(temporary.path()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut reader = tokio::io::BufReader::new(&mut stream);
+        let mut length = None;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = Some(value.trim().parse::<usize>().unwrap());
+            }
+        }
+        let length = length.unwrap();
+        assert!(length < 1024 * 1024);
+        let mut request = vec![0; length];
+        reader.read_exact(&mut request).await.unwrap();
+        let response = json!({"type":"response.completed","sequence_number":1,"response":{
+            "id":"idle-fixture", "object":"response", "created_at":0,"status":"completed",
+            "error":null,"incomplete_details":null,"instructions":null,"model":"test-model",
+            "max_output_tokens":null,"usage":null,"tools":[],"output":[{
+                "type":"message","id":"idle-message","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"Done."}]
+            }]
+        }});
+        let body = format!("data: {response}\n\n");
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    });
+    let config = crate::test_support::write_fixture(
+        &workspace.join("config.toml"),
+        &responses_config(address),
+    )
+    .unwrap();
+    let mut running = start_session(
+        &config,
+        &workspace,
+        SessionStart::New {
+            inherited_models: None,
+        },
+    )
+    .await
+    .unwrap();
+    let mut events = running.take_event_receiver().unwrap();
+    running
+        .command_sender()
+        .send(SessionCommand::Turn(TurnCommand::Submit {
+            text: "one prompt".into(),
+            mode: SessionMode::Build,
+            behavior: zevria_foundation::RequestBehavior::Standard,
+        }))
+        .unwrap();
+    completed(&mut events).await; // Asserts TurnCompleted precedes EngineIdle.
+    select_mode(&running, &mut events, SessionMode::Plan).await;
+    running.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 fn policy(text: &str) -> Value {
@@ -126,29 +229,7 @@ async fn responses_instruction_modules_survive_modes_skill_activation_and_resume
         }
         requests
     });
-    let source = format!(
-        r#"
-[session]
-preamble = "STABLE_APPLICATION_GUIDANCE"
-[providers.test]
-base_url = "http://{address}/v1/responses"
-api_key = "fixture"
-supports_websockets = false
-[providers.test.input_token_count]
-enabled = false
-[providers.test.models.test-model]
-context_window_tokens = 272000
-retained_user_tokens = 20000
-reasoning_levels = ["low", "medium", "high"]
-reasoning_summary_level = "detailed"
-[modes]
-build = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
-plan = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
-review = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
-explore = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
-builder = {{ provider = "test", model = "test-model", reasoning_level = "medium" }}
-"#
-    );
+    let source = responses_config(address);
     let config_path = workspace.join("config.toml");
     let config = crate::test_support::write_fixture(&config_path, &source).unwrap();
     let mut running = start_session(

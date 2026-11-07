@@ -9,6 +9,8 @@ pub(crate) enum DisabledReason {
     WorkPending,
     PlanDecisionRequired,
     RecallActive,
+    QueueFull,
+    NothingPending,
 }
 
 pub(crate) type Admission = Result<(), DisabledReason>;
@@ -17,6 +19,7 @@ pub(crate) type Admission = Result<(), DisabledReason>;
 pub(crate) struct Capabilities {
     pub edit_draft: Admission,
     pub submit_work: Admission,
+    pub queue_work: Admission,
     pub edit_transcript: Admission,
     pub manage_session: Admission,
 }

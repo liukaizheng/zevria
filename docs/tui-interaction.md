@@ -14,7 +14,7 @@ user input. Modifier and press/repeat/release policy is normalized before routin
 | Surface | Capture | Ctrl-C | Navigation target | Pane shortcuts |
 | --- | --- | --- | --- | --- |
 | Composer/completion | Pane-local | Clear its draft/pending paste, then pane cancellation | Editor or completion list | Yes, except completion owns Tab |
-| Root transcript/selection | Pane-local | Cancel eligible work; quit only when idle | Transcript | Yes |
+| Root transcript/selection | Pane-local | Cancel eligible work and pause queued follow-ups; when idle, clear the queue before quitting on the next Ctrl-C | Transcript | Yes |
 | Live worker transcript/selection | Pane-local | Cancel only bound eligible worker input | Transcript | Yes |
 | Historical/child transcript | Read-only | No root cancellation or quit | Transcript | Yes |
 | Plan review | Pane-local | Hide, without a workflow decision | Reviewed transcript; arrows select choices | Yes |
@@ -28,8 +28,9 @@ Text in a dialog belongs to the dialog, never the pane composer.
 
 Editing, work submission, control eligibility, transcript rewriting, management,
 and navigation are independent capabilities. Root and live-worker drafts remain
-editable during work. Historical/frozen panes cannot compose. New work admission
-locks before acknowledgement; a hidden Ready Plan still blocks new work.
+editable during work. Historical/frozen panes cannot compose. Engine work admission
+locks before acknowledgement; root prompt-like follow-ups can instead enter a local
+queue. A hidden Ready Plan still blocks both submission and queueing.
 
 ## Transactions and activation
 
@@ -58,24 +59,28 @@ Insert-mode Enter inserts a newline. Only press events activate, not repeats or
 releases; selecting or highlighting a row never runs it.
 
 Ctrl-Enter classifies the actual draft without accepting the highlighted row and
-submits an eligible work item or control. Invalid classification retains the
-complete draft. Enter activation uses the same submission path: busy, recall,
-read-only, pending clipboard/control, exact Plan-version/worker-revision and
-acknowledgement protections are unchanged. Root and worker command namespaces
+submits an eligible work item or control, or queues a root follow-up while turn
+work is pending/running. Invalid classification retains the complete draft and
+shows a notice, including during queueable busy work. Valid nonqueueable controls
+and ensembles remain silently inert while busy. Enter activation uses the same
+submission path; recall, read-only, pending clipboard/control, exact
+Plan-version/worker-revision and acknowledgement protections are unchanged. Root and worker command namespaces
 are disjoint. Leading space escapes command classification; worker `//` escapes
 a literal leading slash.
 
-Successful prompt dispatch returns the pane to **Normal** input mode immediately,
-without changing the selected Build or Plan mode or waiting for
-engine acknowledgement. This includes ordinary and image-only prompts, skills,
+Successful prompt dispatch or enqueue returns the pane to **Normal** input mode
+immediately, without waiting for engine acknowledgement. Direct submission and
+enqueue do not change the selected Build or Plan mode; explicitly sending a
+mode-labelled queued item uses that item's captured mode. This includes ordinary and image-only prompts, skills,
 ensembles, recalled-prompt replacements, and live-worker feedback. The composer
 cursor is hidden and navigation keys act on the transcript. Press `i` to resume
 editing, including while work runs, subject to existing locks. Later
 acknowledgements, failures, and completion events do not override that chosen
 focus. Empty, invalid, or blocked attempts retain their focus and complete draft;
 management and control slash commands keep their existing focus behavior. Root
-drafts still stage at dispatch, while worker drafts clear only on a matching
-acknowledgement and only if unchanged.
+drafts stage at direct dispatch; queued drafts snapshot at enqueue and stage
+independently of the live composer when later dispatched. Worker drafts clear
+only on a matching acknowledgement and only if unchanged.
 
 `/build` and `/plan` are mode controls; Shift-Tab toggles only those modes.
 `/orchestrate <prompt>` is a one-request Build modifier, not a mode command or
@@ -110,6 +115,67 @@ and an eligible exact proposal revision. Ineligible confirmation is not advertis
 as an executable shortcut. A Normal-mode composer is not labeled locked merely
 because it lacks editing focus. Pending durable transcript edits do retain a
 stronger draft/paste/undo lock until acceptance or rejection.
+
+## Queued follow-ups
+
+The root TUI owns a memory-only, pane-local FIFO queue of at most **20** follow-ups.
+During pending or running non-management turn work, Insert **Ctrl-Enter** queues
+ordinary prompts (including image-only prompts), `/orchestrate <prompt>`, and
+`$skill [args]`. Queueing snapshots the complete draft, including images, cursor
+and undo history, clears the composer, returns to Normal and jumps to the bottom.
+The selected mode is captured with each item. Unknown commands/skills, missing
+orchestration prompts, and images attached to controls show a notice and keep the
+draft. A full queue also keeps the draft. Built-ins, ensembles and recalled
+transcript replacements are not queued; valid busy attempts keep today's inert
+behavior and retain draft/focus. Live Plan-worker feedback admission is unchanged.
+
+Automatic dispatch admits one head item as an ordinary engine turn, only when the
+root is idle, no Ready Plan/review or transcript edit is blocking, no draft is
+awaiting acceptance, and the engine's post-turn **EngineIdle** barrier has arrived.
+This barrier follows all lifecycle events, including Plan Ready publication after
+TurnCompleted. New submissions also queue behind a running queue in this short
+idle window. The root queue drains even while another pane is visible. Dispatch
+never changes a newer composer draft, focus or scroll position.
+
+A nonempty queue **pauses until resumed** when Ctrl-C requests root cancellation,
+a root operation fails or is rejected, a new Ready Plan is published, or its
+head's captured mode differs from the selected mode. Cancellation pauses at request
+time: if the queue was empty then, items queued afterward can still run after
+cancellation settles. Cancelled, Completed and Recovered events do not themselves
+pause a queue. Adding more items, changing mode, compaction, transcript edits and
+Plan decisions do not resume it, even after choosing Revise.
+
+Only explicit actions that start work now resume the queue:
+
+- With an empty prompt and an idle root, **Normal Enter** (unless a fresh-handoff
+  retry is pending) or **Insert Ctrl-Enter** sends the head immediately. This works
+  for both paused queues and running queues waiting for a missing barrier. It
+  clears the pause and uses the displayed captured mode even if it differs from
+  the current selection; this explicit consent can change the persisted mode.
+- While idle and paused, a direct prompt, `/orchestrate`, `$skill` or ensemble send
+  runs ahead of the paused items and resumes the queue after that work settles.
+
+In Normal mode, **e** moves the newest queued item back into an editable, empty
+composer in Insert mode, restoring the exact draft. It is unavailable during
+recall or outside the root. Remaining items keep FIFO order. Root transcript
+**Ctrl-C** while idle clears all queued items with a notice rather than quitting;
+the next Ctrl-C quits. A focused nonempty composer still clears its draft first.
+While busy, Ctrl-C still cancels eligible work and pauses a nonempty queue.
+
+To prevent silent loss, `/new`, `/resume`, `/implement-fresh`, the fresh-handoff
+Plan choice and its Enter/`r` retry are refused while any items remain queued.
+A queued item rejected, failed or cancelled before acceptance uses ordinary staged
+recovery: restore only into an untouched empty composer, otherwise retain it for
+Normal `r`. Acceptance never discards a newer draft. Restore/session replacement
+resets this transient queue; it is not saved across restarts or crashes.
+
+A roleless, render-only tail after running/network status shows up to five
+`○ Build/Plan · preview` rows, a `+N more queued` count and, when paused,
+`Queue paused · reason`. Previews are sanitized, collapsed to one line and
+width-truncated; composer flags show `N queued` and `paused`. These rows also
+remain visible in idle panes with a queue, but never enter history, selection,
+copying, folding or turn-start targets. Contextual hints advertise `queue`,
+`send queued`, `e edit queued` and `clear queue` only when eligible.
 
 ## Workspace file references
 

@@ -3083,6 +3083,10 @@ fn command_menu_stays_inactive_in_normal_mode_and_busy_completion_cannot_submit(
     assert_eq!(app.input(), "/$");
     assert!(app.command_menu_active());
     assert_eq!(app.handle_event(ctrl_enter()), None);
+    assert!(
+        matches!(app.history(), [HistoryEntry::Error(error)] if error == "Unknown command: /$")
+    );
+    let history_len = app.history().len();
     for (prefix, full) in [
         ("/ne", "/new "),
         ("/mod", "/model "),
@@ -3093,7 +3097,11 @@ fn command_menu_stays_inactive_in_normal_mode_and_busy_completion_cannot_submit(
         assert_eq!(app.handle_event(key(KeyCode::Enter)), None);
         assert_eq!(app.input(), full);
         assert!(!app.mode_selection_pending());
-        assert!(app.history().is_empty());
+        assert_eq!(
+            app.history().len(),
+            history_len,
+            "valid busy built-ins add no further history"
+        );
     }
     app.reduce_without_effects(SessionEvent::TurnRejected {
         turn_id: TurnId::new(405),

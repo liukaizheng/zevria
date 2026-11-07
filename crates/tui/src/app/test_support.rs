@@ -2,6 +2,18 @@
 use super::*;
 
 impl App {
+    pub(crate) fn queue_for_test(&self) -> QueueView {
+        self.queue.view()
+    }
+
+    pub(crate) fn draft_for_test(&self) -> crate::composer::ComposerDraft {
+        self.composer.snapshot()
+    }
+
+    pub(crate) fn prompt_for_test(&self) -> zevria_content::UserPrompt {
+        self.composer.prompt()
+    }
+
     pub(crate) fn has_executing_tool_calls(&self) -> bool {
         self.model.conversation.has_executing_tool_calls()
     }

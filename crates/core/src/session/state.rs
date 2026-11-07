@@ -233,6 +233,7 @@ pub(super) struct ModelManagement {
 #[derive(Default)]
 pub(super) struct RootCapabilities {
     pub(super) mode_management: bool,
+    pub(super) idle_notifications: bool,
     /// Captured from the same configuration as the subtask supervisor. None
     /// means this engine is not an orchestration-capable root.
     pub(super) subtask_concurrency: Option<usize>,

@@ -13,6 +13,8 @@ use zevria_transcript::test_support::TranscriptRewriteBlocker;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+#[path = "idle_notifications.rs"]
+mod idle_notifications;
 #[path = "maintenance.rs"]
 mod maintenance;
 #[path = "mode_runtime.rs"]
@@ -1113,7 +1115,7 @@ async fn active_shutdown_and_channel_exhaustion_await_cleanup_and_discard_pendin
         let (events, receiver) = session_event_channel(1);
         let backpressure = events.clone();
         let mut run = RunningSession::start(
-            engine(provider, transcript),
+            engine(provider, transcript).with_idle_notifications(),
             [submit("active")],
             events,
             receiver,
@@ -1148,6 +1150,11 @@ async fn active_shutdown_and_channel_exhaustion_await_cleanup_and_discard_pendin
         );
         let lifecycle = run.finish().await;
         assert_turns_do_not_overlap(&lifecycle, &[1]);
+        assert!(
+            !lifecycle
+                .iter()
+                .any(|event| matches!(event, SessionEvent::EngineIdle))
+        );
         assert!(lifecycle.iter().any(|event| matches!(event, SessionEvent::TurnCancelled { turn_id } if *turn_id == call.turn.id)));
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
@@ -1215,7 +1222,7 @@ async fn fatal_active_replay_bypasses_control_backpressure_and_discards_queued_w
     let (events, receiver) = session_event_channel(1);
     let backpressure = events.clone();
     let mut run = RunningSession::start(
-        engine(provider, transcript),
+        engine(provider, transcript).with_idle_notifications(),
         [submit("active")],
         events,
         receiver,
@@ -1275,6 +1282,7 @@ async fn fatal_active_replay_bypasses_control_backpressure_and_discards_queued_w
         SessionEvent::TurnCompleted { .. }
             | SessionEvent::TurnFailed { .. }
             | SessionEvent::TurnCancelled { .. }
+            | SessionEvent::EngineIdle
     )));
     let bytes = std::fs::read_to_string(path).unwrap();
     assert!(!bytes.contains("pending must not run"));

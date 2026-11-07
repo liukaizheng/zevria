@@ -445,9 +445,16 @@ parameterless built-in command. Commands needing a prompt, skills, and file
 references only complete text; a suffix or attached image also prevents automatic
 execution. Enter with no matching result does nothing.
 
-Root and live Plan-worker drafts remain editable while work is pending or running;
-submitting another work item is restricted independently. Acknowledgements never
-clear a newer draft. Historical and frozen panes are read-only.
+Root and live Plan-worker drafts remain editable while work is pending or running.
+In the root, `Ctrl+Enter` queues prompts (including images), `/orchestrate` and
+`$skill` follow-ups in a visible, memory-only FIFO queue of up to 20 items. Each
+runs as its own turn in its captured Build/Plan mode after earlier work fully
+settles. Cancellation requests, failures/rejections, Ready Plans and mode mismatches
+pause the queue until an explicit send; Plan decisions alone do not resume it.
+An idle direct prompt-like send while paused runs ahead and resumes the queue.
+Session replacement is blocked until queued items are sent or cleared. Live
+Plan-worker admission is unchanged. Acknowledgements never clear a newer draft.
+Historical and frozen panes are read-only.
 
 | Key | Action |
 | --- | --- |
@@ -456,7 +463,10 @@ clear a newer draft. Historical and frozen panes are read-only.
 | `Home` / `End` | Navigate to the start / end of the focused editor, list, transcript, or dialog. |
 | `Tab` / `Ctrl+I` | Open the latest child when pane navigation is available; while completion is active, accept highlighted text only. |
 | `r` | In Normal mode with an empty composer, recover a retained rejected draft. |
-| `Ctrl+C` | Act on the focused surface only: a composer clears its draft first; a transcript cancels eligible local work. Only an idle root may quit. Dialogs dismiss/cancel locally. |
+| `Ctrl+Enter` while busy | Queue a root prompt, `/orchestrate` or `$skill` follow-up and return to Normal; built-ins and ensembles are not queued. |
+| `e` | In root Normal mode with an empty editable composer and no recall, edit the newest queued draft, including its images and undo history. |
+| `Enter` / `Ctrl+Enter` on an empty prompt | On an idle root, send the next queued item and resume the queue in its displayed captured mode, even while waiting for the engine barrier. Use Normal Enter (unless a fresh-handoff retry is pending) or Insert Ctrl+Enter. |
+| `Ctrl+C` | Act on the focused surface only: a composer clears its draft first; a transcript cancels eligible local work and pauses queued follow-ups. When idle, clear the root queue before quitting on the next press. Dialogs dismiss/cancel locally. |
 
 Plan review defaults to **Revise**. Arrows, numbers and `n` select; `Enter`
 activates the selected eligible choice. `Esc` and `Ctrl+C` hide review without

@@ -22,10 +22,22 @@ impl DraftSubmissions {
         );
         let draft = composer.snapshot();
         composer.clear();
+        self.stage_detached(draft, composer.generation());
+    }
+
+    pub(super) fn stage_detached(&mut self, draft: ComposerDraft, replacement_generation: u64) {
+        assert!(
+            self.pending.is_none(),
+            "work admission must precede draft staging"
+        );
         self.pending = Some(StagedDraft {
             draft,
-            replacement_generation: composer.generation(),
+            replacement_generation,
         });
+    }
+
+    pub(super) fn has_pending(&self) -> bool {
+        self.pending.is_some()
     }
 
     pub(super) fn accept(&mut self) {

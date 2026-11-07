@@ -137,6 +137,10 @@ pub enum SessionEvent {
         message: Message,
         attempt_id: Option<String>,
     },
+    /// Opt-in, non-fencing ordering barrier after dispatched turn work has
+    /// published all lifecycle events and no more turn work is queued. This
+    /// frontend-only metadata has no presentation content and is never persisted.
+    EngineIdle,
     /// Recovery repaired terminal workflow records for an assistant response
     /// that was already present in the restored transcript. Frontends should
     /// unlock the turn without appending another message.
@@ -731,7 +735,9 @@ impl SessionEventReceiver {
     pub(super) fn lifecycle_update(&mut self, event: SequencedSessionEvent) -> SessionUpdate {
         let existing = hosted_activity_update(&event.event, &mut self.hosted_actions);
         match &event.event {
-            SessionEvent::ResponseAttemptUpdated { .. } | SessionEvent::NetworkStatus { .. } => {}
+            SessionEvent::ResponseAttemptUpdated { .. }
+            | SessionEvent::NetworkStatus { .. }
+            | SessionEvent::EngineIdle => {}
             SessionEvent::AgentRunUpdated {
                 event: AgentRunEvent::ResponseDisplay { .. },
                 ..
@@ -742,6 +748,7 @@ impl SessionEventReceiver {
                     event.as_ref(),
                     SessionEvent::ResponseAttemptUpdated { .. }
                         | SessionEvent::NetworkStatus { .. }
+                        | SessionEvent::EngineIdle
                 ) => {}
             SessionEvent::SubtaskSession { id, .. } | SessionEvent::SubtaskStatus { id, .. } => {
                 let fence = self.subtask_fences.entry(id.clone()).or_default();

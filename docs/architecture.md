@@ -338,7 +338,15 @@ See [image input](image-input.md) for user behavior, limits, and privacy.
   context window; and
 - `ContextUsageUpdated` events carrying the authoritative projected size,
   count source, trigger, input ceiling, and physical window for the next
-  prepared request.
+  prepared request; and
+- opt-in `EngineIdle`, a non-fencing, frontend-only ordering barrier with no
+  presentation content. The interactive ordinary root grants
+  `with_idle_notifications()` alongside mode management. After dispatched turn
+  work exits and finishes publishing all lifecycle events, the run loop emits it
+  only on Continue with no further queued turn work. Management, control, queries,
+  shutdown and fatal outcomes emit none; worker/profile engines remain unchanged.
+  It is never persisted or included in model input. In particular, Plan completion
+  publishes `TurnCompleted` before `PlanStateChanged::Ready`, then `EngineIdle`.
 
 Replay and execution availability are explicit engine-owned enum states:
 
@@ -455,7 +463,7 @@ not another implementation of the event semantics:
 
 
 - `SessionState` owns the next idle mode, pending/active operation lifecycle,
-  immutable in-flight mode and exact `ModelRole`, one event-authoritative
+  immutable in-flight mode and exact `ModelRole`, post-turn quiescence, one event-authoritative
   profile/usage/context telemetry slot per role, correlated mode selection, and persistence health;
 - `WorkflowState` owns the authoritative `PlanWorkflowState` snapshot separately
   from local review visibility and choice; identical snapshots preserve dismissal;
@@ -473,8 +481,12 @@ not another implementation of the event semantics:
   layer preserves the inner folds;
 - TUI `EditState` owns the recall draft and its local pending/recovery lifecycle;
   target truncation and pre-turn-compaction acceptance live only in `SessionModel`;
+- TUI `FollowUpQueue` owns at most 20 memory-only root follow-ups with complete
+  `ComposerDraft` snapshots, classified prompt/skill work, captured mode, bounded
+  sanitized preview and an optional pause reason. Items have no engine turn IDs
+  until ordinary admission; no queue state is persisted or added to GPUI;
 - `DraftSubmissions` owns immutable staged/rejected drafts and replacement-generation
-  checks; `WorkerReviewUiState` owns the bound worker, ordinary/urgent controls and
+  checks, including detached queued drafts that never clear a newer composer; `WorkerReviewUiState` owns the bound worker, ordinary/urgent controls and
   the accepted-result-to-snapshot handoff;
 - `PaneState` explicitly distinguishes Root, LivePlanWorker, HistoricalAgent and
   SubtaskInspect. Appearance, titles, diagnostics, model-role overrides and external
@@ -568,6 +580,36 @@ known yet, but a turn terminal cannot settle correlated model management.
 An early `TurnRejected` from `Compact`, `ResolvePlan`, or any other admission
 failure unlocks the UI and restores a pending Plan dialog without interrupting
 accepted tool rows or pruning a rejected edit's original tail.
+
+Work admission locks immediately, but root prompt/image, `/orchestrate` and skill
+follow-ups can enqueue locally while non-management turn work runs. Valid busy
+built-ins, ensembles and recalls retain their inert behavior; invalid queueable
+classification shows a local notice without clearing the draft. An unpaused queue
+also captures new submissions during the idle window before the barrier, preserving
+FIFO. The runtime checks the root even when a child is visible and sends at most
+one ordinary `TurnCommand` per loop through explicit-mode admission APIs.
+
+Automatic dispatch requires idle root activity, quiescence, no Ready Plan or open
+review, no recall/edit and no pending staged draft. Local non-management admission,
+authoritative start and compaction clear quiescence; `EngineIdle` sets it only
+without pending/active turn work, ignoring a stale barrier after a new command.
+If the head's captured mode differs from the current selection, automatic dispatch
+pauses instead of switching persisted mode. Explicit blank-composer Enter or Insert
+Ctrl-Enter can send a queued item without quiescence or a mode match, so even a
+missing barrier cannot strand work. Only that explicit action consents to a queued
+mode switch.
+
+Cancellation requests pause only an already nonempty queue. Failed/Rejected
+settlements, new Ready publication and mode mismatch also pause it; normal,
+cancelled and recovered terminals do not. Only an explicit send-queued action or
+a successful direct prompt-like/ensemble send while idle and paused resumes it.
+Plan decisions, mode changes, transcript edits and compaction do not. Normal `e`
+restores the newest exact draft into an empty composer; idle root transcript Ctrl-C
+clears the queue before quit. Session replacement/fresh-handoff actions are refused
+while queued, and restoration resets the queue. See the
+[TUI interaction contract](tui-interaction.md#queued-follow-ups) for recovery and
+ownership details. Provider instructions, tool schemas, request construction and
+the cacheable prefix are unchanged: dispatched items are ordinary turns.
 
 Active presentation is also typed: running turns have exactly one waiting,
 streaming, or retry tail, while compaction is a separate phase. Accepted
@@ -692,8 +734,13 @@ titles likewise have no progress suffix. Narrow status bars retain width-safe
 truncation. Header wrapping and selection geometry include the numeric decoration,
 without adding headers, status timing, or blank boundaries to selection ranges.
 
-Idle and pending Plan-decision states have no synthetic tail. Native child
-panes time their forwarded session lifecycle; ACP-only agent panes do not
+Idle and pending Plan-decision states have no synthetic tail unless a root queue
+is nonempty. Queue rows append after operation/network status with the same gap
+rules and no gutter accent: optional warning pause header, five mode-labelled
+Pending rows, then a hidden-item count. Sanitized single-line previews are bounded
+at enqueue and width-truncated for rendering. Queue status remains outside caches,
+history, folding, selection/copy and turn targets; composer flags show count/pause.
+Native child panes time their forwarded session lifecycle; ACP-only agent panes do not
 fabricate native turns or timers. `SessionViews` observes the visible app's
 clock immediately before each draw. A 250 ms Tokio interval with skipped
 missed ticks triggers redraws only while that visible app is busy; hidden busy

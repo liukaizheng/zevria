@@ -945,6 +945,7 @@ pub async fn start_session(
         .with_skill_catalog(skill_catalog.clone())?
         .with_transcript_items(transcript_items.clone())?
         .with_mode_management()
+        .with_idle_notifications()
         .with_subtask_concurrency(app_config.session.max_concurrent_subtasks)
         .with_guidance_roots(guidance_roots(workspace))
         .with_skill_management(skill_service, [true, app_config.session.plan.allow_skills])?

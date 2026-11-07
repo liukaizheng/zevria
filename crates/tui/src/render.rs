@@ -144,6 +144,7 @@ impl App {
                 }),
             )));
         }
+        status_lines.extend(queue_status_lines(&parts.queue, usize::from(wrap_width)));
         let status_height = wrapped_height(&status_lines, wrap_width);
         // Committed entries already own a trailing gap. A streamed message or
         // header-only tail needs a blank row before the roleless status block.
@@ -345,6 +346,54 @@ impl App {
         self.render_help(frame, layout.modal_body);
         layout
     }
+}
+
+/// Queue rows are render-only, outside cached history and selection geometry.
+pub(crate) fn queue_status_lines(
+    queue: &crate::app::QueueView,
+    width: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let muted = Style::default().fg(theme().text.muted);
+    let mut lines = Vec::new();
+    if let Some(reason) = queue.paused {
+        lines.push(Line::from(Span::styled(
+            truncate_display_width(&format!("Queue paused · {}", reason.label()), width),
+            Style::default().fg(theme().feedback.warning),
+        )));
+    }
+    for row in &queue.rows {
+        let (mode, color) = match row.mode {
+            SessionMode::Build => ("Build", theme().workflow.build),
+            SessionMode::Plan => ("Plan", theme().workflow.plan),
+        };
+        let icon = StatusIcon::Pending.glyph(0);
+        let prefix = format!("{icon} {mode} · ");
+        let text = truncate_display_width(&format!("{prefix}{}", row.preview), width);
+        if let Some(rest) = text.strip_prefix(&format!("{icon} ")) {
+            // Preserve mode styling even when a narrow pane truncates the label.
+            let mode_end = rest
+                .char_indices()
+                .nth(mode.len())
+                .map_or(rest.len(), |(i, _)| i);
+            lines.push(Line::from(vec![
+                Span::styled(format!("{icon} "), muted),
+                Span::styled(rest[..mode_end].to_owned(), Style::default().fg(color)),
+                Span::styled(rest[mode_end..].to_owned(), muted),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(text, muted)));
+        }
+    }
+    if queue.hidden > 0 {
+        lines.push(Line::from(Span::styled(
+            truncate_display_width(&format!("+{} more queued", queue.hidden), width),
+            muted,
+        )));
+    }
+    lines
 }
 
 /// Render transient status from already-observed time, never from a live clock.

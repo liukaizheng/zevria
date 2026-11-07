@@ -11,6 +11,9 @@ mod keys;
 mod mode;
 pub(crate) mod overlays;
 mod pane;
+mod queue;
+pub(crate) use queue::QueueView;
+use queue::{FollowUpQueue, MAX_QUEUED_FOLLOW_UPS, QueuePause, QueuedFollowUp, QueuedWork};
 mod render_state;
 mod session;
 mod submission;
@@ -171,6 +174,7 @@ pub struct App {
     pane: PaneState,
     worker: worker_review::WorkerReviewUiState,
     drafts: draft_submission::DraftSubmissions,
+    queue: FollowUpQueue,
     mode_command_draft: Option<(crate::composer::ComposerDraft, u64)>,
     pane_id: crate::input::PaneId,
     view: ViewState,
@@ -475,6 +479,7 @@ impl App {
 
     fn reset_frontend(&mut self) {
         self.drafts = Default::default();
+        self.queue = Default::default();
         self.mode_command_draft = None;
         self.worker = Default::default();
         self.help = None;
@@ -623,9 +628,28 @@ impl App {
                 Ok(())
             }
         });
+        let queue_work = editable.and_then(|()| {
+            if !self.pane.is_root() {
+                Err(ReadOnly)
+            } else if !self.edit.is_none() {
+                Err(RecallActive)
+            } else if matches!(
+                self.model.workflow.snapshot(),
+                zevria_workflow::PlanWorkflowState::Ready { .. }
+            ) {
+                Err(PlanDecisionRequired)
+            } else if !self.model.session.has_turn_work() && !self.queue.is_running_nonempty() {
+                Err(NothingPending)
+            } else if self.queue.len() == MAX_QUEUED_FOLLOW_UPS {
+                Err(QueueFull)
+            } else {
+                Ok(())
+            }
+        });
         crate::input::Capabilities {
             edit_draft: editable,
             submit_work: work,
+            queue_work,
             edit_transcript: management,
             manage_session: management,
         }
@@ -680,7 +704,13 @@ impl App {
         use crate::input::Action;
         let mut hints = crate::hints::Eligibility::default();
         for (available, action) in [
-            (self.can_submit_work(), Action::Submit),
+            (
+                self.can_submit_work()
+                    || self.capabilities().queue_work.is_ok()
+                    || (self.composer.is_blank() && self.can_send_queued()),
+                Action::Submit,
+            ),
+            (self.can_edit_queued(), Action::EditQueued),
             (
                 self.model.workflow.dialog().is_some()
                     || self.pane.is_worker()
@@ -725,11 +755,22 @@ impl App {
         }
         if self.surface().id.kind == SurfaceKind::Transcript
             && self.model.workflow.fresh_retry_version().is_none()
+            && !(self.composer.is_blank() && self.can_send_queued())
         {
             hints.disabled.push(Action::Confirm);
         }
         if self.model.workflow.dialog().is_some() && self.model.session.is_busy() {
             hints.disabled.push(Action::Confirm);
+        }
+        if self.composer.is_blank() && self.can_send_queued() {
+            hints.labels.push((Action::Submit, "send queued"));
+            if self.surface().id.kind == SurfaceKind::Transcript
+                && self.model.workflow.fresh_retry_version().is_none()
+            {
+                hints.labels.push((Action::Confirm, "send queued"));
+            }
+        } else if self.capabilities().queue_work.is_ok() {
+            hints.labels.push((Action::Submit, "queue"));
         }
         hints.labels.push((
             Action::Diagnostics,
@@ -745,6 +786,8 @@ impl App {
                 "clear/cancel worker"
             } else if self.work_pending() {
                 "cancel turn"
+            } else if self.can_clear_queue() {
+                "clear queue"
             } else {
                 "quit"
             },
@@ -842,7 +885,16 @@ impl App {
             return None;
         }
         match self.cancel_target() {
-            Some(turn_id) => Some(UiAction::CancelTurn { turn_id }),
+            Some(turn_id) => {
+                self.queue.pause(QueuePause::Cancelled);
+                self.view.invalidate_rendered_geometry();
+                Some(UiAction::CancelTurn { turn_id })
+            }
+            None if self.can_clear_queue() => {
+                let count = self.queue.clear();
+                self.push_error(format!("Cleared {count} queued follow-ups."));
+                None
+            }
             None if !self.model.session.is_busy() => Some(UiAction::Quit),
             None => None,
         }
@@ -975,12 +1027,22 @@ impl App {
             }
         }
         if let Some((_, settlement)) = reduction.settled {
+            match &settlement {
+                zevria_presentation::Settlement::Failed(_) => self.queue.pause(QueuePause::Failed),
+                zevria_presentation::Settlement::Rejected(_) => {
+                    self.queue.pause(QueuePause::Rejected)
+                }
+                _ => {}
+            }
+            self.view.invalidate_rendered_geometry();
             self.edit.reject();
             if settlement.restores_draft() {
                 self.restore_rejected_draft();
             }
         }
         if reduction.plan_ready {
+            self.queue.pause(QueuePause::PlanDecision);
+            self.view.invalidate_rendered_geometry();
             self.composer.close_edit_group();
             self.interaction.clear_selection();
             self.interaction.clear_chords();

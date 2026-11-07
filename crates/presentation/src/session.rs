@@ -310,6 +310,7 @@ pub struct SessionState {
     observed_at: Instant,
     next_mode: SessionMode,
     activity: SessionActivity,
+    quiescent: bool,
     telemetry: [RoleTelemetry; ModelRole::COUNT],
     reasoning: [Option<zevria_foundation::ReasoningLevel>; ModelRole::COUNT],
     persistence_error: Option<String>,
@@ -322,6 +323,7 @@ impl Default for SessionState {
             observed_at: Instant::now(),
             next_mode: SessionMode::Build,
             activity: SessionActivity::Idle,
+            quiescent: true,
             telemetry: std::array::from_fn(|_| RoleTelemetry::default()),
             reasoning: [None; ModelRole::COUNT],
             persistence_error: None,
@@ -403,6 +405,9 @@ impl SessionState {
         if !matches!(self.activity, SessionActivity::Idle) {
             return false;
         }
+        if !kind.is_management() {
+            self.quiescent = false;
+        }
         self.activity = SessionActivity::Pending(PendingOperation {
             started_at: self.observed_at,
             kind,
@@ -414,6 +419,26 @@ impl SessionState {
 
     pub const fn is_busy(&self) -> bool {
         !matches!(self.activity, SessionActivity::Idle)
+    }
+
+    /// Root turn work excludes management, which does not publish idle barriers.
+    pub const fn has_turn_work(&self) -> bool {
+        match &self.activity {
+            SessionActivity::Idle => false,
+            SessionActivity::Pending(pending) => !pending.kind.is_management(),
+            SessionActivity::Active(_) => true,
+        }
+    }
+
+    /// Ignore barriers that predate a newly admitted or authoritative turn.
+    pub fn observe_engine_idle(&mut self) {
+        if !self.has_turn_work() {
+            self.quiescent = true;
+        }
+    }
+
+    pub const fn is_quiescent(&self) -> bool {
+        self.quiescent
     }
 
     pub const fn is_compacting(&self) -> bool {
@@ -561,6 +586,7 @@ impl SessionState {
         self.pending_mode_selection = None;
         self.persistence_error = None;
         self.activity = SessionActivity::Idle;
+        self.quiescent = true;
         self.telemetry = std::array::from_fn(|_| RoleTelemetry::default());
     }
 
@@ -639,6 +665,7 @@ impl SessionState {
             }
             SessionActivity::Pending(_) | SessionActivity::Active(_) => return None,
         };
+        self.quiescent = false;
         self.activity = SessionActivity::Active(ActiveOperation {
             started_at,
             id,
@@ -687,6 +714,7 @@ impl SessionState {
             }
             _ => (None, None, None),
         };
+        self.quiescent = false;
         self.activity = SessionActivity::Active(ActiveOperation {
             started_at,
             id,

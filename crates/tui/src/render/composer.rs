@@ -31,6 +31,15 @@ pub(super) fn render_composer_surface(
         }
         flags.push_str(&format!("{} images", parts.image_ranges.len()));
     }
+    if parts.queue.len > 0 {
+        if !flags.is_empty() {
+            flags.push_str(" · ");
+        }
+        flags.push_str(&format!("{} queued", parts.queue.len));
+        if parts.queue.paused.is_some() {
+            flags.push_str(" · paused");
+        }
+    }
     if parts.paste_pending {
         if !flags.is_empty() {
             flags.push_str(" · ");

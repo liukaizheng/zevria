@@ -294,6 +294,7 @@ const NORMAL: &[Binding] = &[
     b!(Select, "select", 2, "Actions", key(Char('v'))),
     b!(PlanReview, "plan choices", 3, "Actions", key(Char('p'))),
     b!(RecoverDraft, "recover draft", 1, "Actions", key(Char('r'))),
+    b!(EditQueued, "edit queued", 2, "Actions", key(Char('e'))),
     b!(
         ConfirmWorker,
         "confirm worker",
@@ -681,6 +682,32 @@ mod tests {
                 Some(action)
             );
         }
+    }
+
+    #[test]
+    fn edit_queued_is_transcript_only_and_has_one_spelling() {
+        let event = KeyEvent::new(Char('e'), KeyModifiers::NONE);
+        assert_eq!(
+            ChordState::default().resolve(KeyContext::Transcript, event),
+            Some(Action::EditQueued)
+        );
+        assert_eq!(
+            ChordState::default().resolve(KeyContext::Composer, event),
+            Some(Action::Type('e'))
+        );
+        assert_eq!(
+            ChordState::default().resolve(KeyContext::BlockNav, event),
+            None
+        );
+        for context in [KeyContext::Composer, KeyContext::BlockNav] {
+            assert!(!bindings(context).any(|b| b.action == Action::EditQueued));
+        }
+        let entries = bindings(KeyContext::Transcript)
+            .filter(|b| b.action == Action::EditQueued)
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key_label(), "e");
+        assert_eq!(entries[0].label, "edit queued");
     }
 
     #[test]

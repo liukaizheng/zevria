@@ -101,6 +101,7 @@ pub(crate) struct RenderParts<'a> {
     pub(crate) chrome: ComposerChrome,
     pub(crate) plan_dialog: Option<PlanDialogView<'a>>,
     pub(crate) tail: ConversationTail<'a>,
+    pub(crate) queue: QueueView,
     pub(crate) network_status: Option<(String, bool)>,
     pub(crate) assistant_header: Option<crate::presentation::NativeHeader>,
     pub(crate) header_timings: HeaderTimings,
@@ -161,6 +162,7 @@ impl App {
         let file_menu_active =
             command_menu_active && self.composer.completion_kind() == Some(CompletionKind::File);
         let can_recall = self.can_recall_selected();
+        let queue = self.queue.view();
         let Self {
             model:
                 SessionModel {
@@ -377,6 +379,7 @@ impl App {
             chrome,
             plan_dialog,
             tail,
+            queue,
             network_status: session.network_message(),
             assistant_header,
             header_timings: HeaderTimings::observe(conversation, session.observed_at()),

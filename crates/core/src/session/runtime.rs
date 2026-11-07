@@ -24,6 +24,13 @@ struct ActiveWorkControl {
 }
 
 impl<P: ModelProvider> SessionEngine<P> {
+    /// Explicit composition-root grant for frontend ordering barriers, never
+    /// installed on children or workers. Notifications are not persisted.
+    pub fn with_idle_notifications(mut self) -> Self {
+        self.capabilities.idle_notifications = true;
+        self
+    }
+
     /// Restored work and queued turns run FIFO. Shutdown cancels and drains the
     /// active work, discards the queue, and repairs persistence only on normal exit.
     pub async fn run(
@@ -158,6 +165,12 @@ impl<P: ModelProvider> SessionEngine<P> {
         let active = self.execute_turn(work, events, &turn).boxed();
         let outcome = Self::supervise(active, &control, commands, pending, events).await;
         self.exit_turn();
+        if self.capabilities.idle_notifications
+            && outcome == Ok(RunControl::Continue)
+            && pending.is_empty()
+        {
+            let _ = events.send(SessionEvent::EngineIdle).await;
+        }
         if outcome.is_err() {
             events.stream_cleared(turn.id);
         }

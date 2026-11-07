@@ -251,6 +251,11 @@ pub struct SessionViews {
 }
 
 impl SessionViews {
+    /// Root follow-ups drain independently of which pane owns input.
+    pub(crate) fn dispatch_queued_root_work(&mut self) -> Option<UiAction> {
+        self.root.dispatch_next_queued()
+    }
+
     pub fn new(mut root: App, startup_workspace: PathBuf) -> Self {
         // Capture relative API inputs now, not against a later process cwd.
         // Canonicalization and all discovery still belong to the file worker.

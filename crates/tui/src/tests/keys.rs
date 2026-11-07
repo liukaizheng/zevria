@@ -1019,8 +1019,10 @@ fn submission_returns_to_transcript_navigation_before_acknowledgement_and_while_
     app.handle_event(key(KeyCode::Char('k')));
     assert_eq!(app.input(), "next draft\njk");
     assert_eq!(app.handle_event(ctrl_enter()), None);
-    assert!(app.interaction().is_insert());
-    assert_eq!(app.input(), "next draft\njk");
+    assert!(app.interaction().is_normal());
+    assert!(app.input().is_empty());
+    assert_eq!(app.queue_for_test().len, 1);
+    assert_eq!(app.queue_for_test().rows[0].preview, "next draft jk");
 }
 
 #[test]

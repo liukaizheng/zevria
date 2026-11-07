@@ -122,6 +122,13 @@ impl App {
                 {
                     return self.begin_plan_decision(expected, PlanDecision::ImplementFresh);
                 }
+                if action == Action::Confirm
+                    && self.model.workflow.fresh_retry_version().is_none()
+                    && self.composer.is_blank()
+                    && self.can_send_queued()
+                {
+                    return self.send_queued_now();
+                }
                 if self.pane.is_worker() && action == Action::ConfirmWorker {
                     return self.confirm_worker(false);
                 }
@@ -259,6 +266,7 @@ impl App {
             return;
         }
         match action {
+            Action::EditQueued => self.edit_newest_queued(),
             Action::Select if self.interaction.is_normal() => {
                 if let Some(entry) = self.rendered_selection_entry() {
                     self.interaction.enter_selection_entry(entry);
