@@ -288,8 +288,7 @@ See [image input](image-input.md) for user behavior, limits, and privacy.
 - `SubtaskLaunched`, `SubtaskSession`, and `SubtaskStatus` for child-subsession
   lifecycle and forwarded child events (see "Subtasks" below); and
 - authoritative `PlanStateChanged` snapshots for live transitions (not startup
-  readiness), typed handoff events, and
-  non-blocking `PlanProjectionWarning` events; and
+  readiness), including draft-only Planning updates immediately after a saved batch's ToolResults; typed handoff events; and non-blocking `PlanProjectionWarning` events with optional draft sequence. Frontends do not advance revision/decision phases for Planning-to-Planning draft snapshots; and
 - persistence-health events for frontend-visible transcript failures; and
 - `UsageUpdated` events carrying the latest completed response usage, exact
   active provider/model profile, `ModelRole`, input ceiling, and physical
@@ -1790,7 +1789,7 @@ On success at boundary `k`, the replacement is **summary first, then exact
 `source[k..n]`**. Full-history success has an empty source tail. Tail items retain
 value, variant, content, identifiers, replay envelopes, and order; they are not
 selected, truncated, or bounded by `retained_user_tokens` (including zero). The
-engine's task snapshot remains a separate suffix. Version-1 checkpoints contain
+engine's task snapshot remains a separate suffix, followed by the exact current Plan text (the working copy in Planning, or the artifact in Ready/Published) with a fixed draft/revision label. Live, edited-prefix and manual compaction and portable `/model` conversion preserve this suffix; Idle and Resolved add nothing. Existing checkpoints are unchanged. Version-1 checkpoints contain
 no instruction snapshot. Live and resumed projection borrow and fold preceding
 directives with the reducer's skill keys/order: revocations remove effective bodies.
 Projection places the effective boundary directives after replacement history
@@ -1821,11 +1820,11 @@ second adapter and are not translated. HTTP-only providers set
 disabled independently under `providers.<key>.compatibility` in `models.jsonc`. See
 [Responses-compatible gateways](responses-compatible.md).
 
-Production allow-lists for ordinary turns are explicit. Build receives `command`, `task`, `edit`,
+Production allow-lists for ordinary turns are explicit. Build receives `web_search`, `command`, `task`, `edit`,
 `write`, `delete`, `launch_subtasks`, and eligible `skill` and `skill_read`
 tools. The two skill registrations are statically registered
-in root runtimes even when not advertised. Plan receives `command`, optional
-`launch_subtasks`, mode-enabled skill tools, `question`, and `submit_plan`. Explore children
+in root runtimes even when not advertised. Plan receives `command`, `web_search`, optional
+`launch_subtasks`, mode-enabled skill tools, `question`, `create_plan`, `update_plan`, `read_plan`, and `submit_plan`. The authoring registrations have this fixed order after `question`; they are absent from Build's allow-list, so Build's advertised definitions and instruction bytes are unchanged. Explore children
 receive only `command` plus an empty skill catalog. Build children receive exactly
 `command`, `task`, `edit`, `write`, and `delete`, rooted at their reserved directory.
 Both child registries omit interaction, skill, planning, reconciliation, and nested
@@ -1833,8 +1832,7 @@ launch tools physically, with skills disabled in both nominal mode policies.
 
 Ensemble root synthesis applies a narrower policy override without changing
 the underlying Plan and Review model roles: Ensemble Plan receives exactly
-`command`, `reconcile_reports`, `question`, and `submit_plan`, while Ensemble
-Review receives exactly `command`. Ordinary Plan does not allow
+`web_search`, `command`, `reconcile_reports`, `question`, `create_plan`, `update_plan`, `read_plan`, and `submit_plan`, while Ensemble Review receives `command` and provider-hosted `web_search`. Ordinary Plan does not allow
 `reconcile_reports`, even though the production registry contains it. Explore
 children use a physically command-only registry, and ACP projection classifies
 reconciliation as a thinking tool.
@@ -1860,7 +1858,7 @@ accepted-but-unavailable choices require one root question.
 
 Root calls and results use the normal durable transcript. A post-`ReportsReady`
 tail reducer correlates assistant calls with tool-result metadata and
-reconstructs all four gate stages after restart without rereading child logs.
+reconstructs all four gate stages after restart without rereading child logs. It replays Plan records through the tail and derives an accepted no-argument submission's candidate from the final working copy, never from `submit_plan` arguments. The candidate lock prevents later draft changes. Pre-upgrade unfinished synthesis with a one-shot accepted submission cannot recover that candidate.
 This preserves the exact durable synthesis input and retains completed
 inspection, reconciliation, question, and submission work. Existing historical
 `ReportsReady` records are not rewritten.
@@ -1922,8 +1920,7 @@ children run while the remaining calls execute; ordinary calls remain
 sequential. Result slots keep the original assistant-call order, and all
 completed work is recorded before continuing.
 
-Ordinary Plan still serializes a batch containing `submit_plan` in assistant
-order. The first valid candidate is retained by the inert submission gate; all
+Every batch containing any Plan-authoring tool is serialized in assistant order. Plan-mode turns seed a prospective Planning state, inject a read-only per-call `PlanDraftScope`, and reduce each returned full draft before acknowledging success. Later calls see that state; a failed create/update denies a subsequent same-response submission. Submitted candidates must equal the working copy byte for byte. Without a Planning scope the tools fail cleanly, even if a custom Build policy permits every registered tool. The first valid candidate is retained by the inert submission gate; all
 later calls in that turn are denied, and the model receives one continuation
 for a short confirmation. The candidate is committed only after the entire
 provider turn succeeds.
@@ -2645,7 +2642,7 @@ New root sessions start in **Build**. There are exactly two root modes:
 | Root mode | Parent capabilities | Native Explore children | Native Build children | Root model role |
 | --- | --- | --- | --- | --- |
 | Build | Full ordinary parent toolset; direct implementation | Available | Only on an explicitly orchestrated request | Build |
-| Plan | Restricted inspection, questions, and `submit_plan`; configurable skills | Only when `session.plan.allow_subtasks` permits | Forbidden | Plan |
+| Plan | Restricted inspection, questions, and stored draft authoring/submission; configurable skills | Only when `session.plan.allow_subtasks` permits | Forbidden | Plan |
 
 `/orchestrate <prompt>` is request-local behavior in Build, not a third mode. The
 parent may edit, run commands, integrate, and validate directly, but successful
@@ -2905,23 +2902,15 @@ reduction failure is terminal. Successful replacement invalidates provider
 continuation and prepared counts, refreshes skill policies and live queries,
 re-estimates context usage, and recomputes automatic-compaction arming.
 
-The first accepted Plan prompt appends `PlanRecord::Started` and enters
-`Planning`. Clarifications and partial responses complete normally and remain
-`Planning`; `TurnCompleted` has no approval meaning. The model explicitly
-finishes through `submit_plan`. After its short confirmation succeeds, the
-engine appends `PlanRecord::Ready` containing the complete canonical Markdown,
-projects it to
-`.zevria/plans/<session-id>/<plan-id>-<first-title-slug>.md`, emits
-`TurnCompleted`, and then emits `PlanStateChanged::Ready`. A projection failure
-is only a warning because the transcript is canonical. Projection writes occur
-only at Ready transitions, including recovery that commits a new Ready artifact;
-restoring an already committed artifact does not project it again.
+The first accepted Plan prompt appends `PlanRecord::Started` and enters `Planning { id, previous, draft }`. The working copy is the saved draft, otherwise the retained submitted artifact after Revise, otherwise absent. `create_plan { markdown, replace }` saves an initial draft early; an existing working copy requires explicit replacement. `update_plan { edits }` applies 1–32 ordered, atomic literal replacements or fence-aware exact ATX section-body edits. A failed edit changes nothing and points to `read_plan {}`, which returns a one-line label/byte count followed by the exact stored text. Only reading returns the body; save acknowledgements are deterministic and contain no mirror path. Titles derive from the first `# <title>` line (3–8 words). Draft sections may be incomplete; submission reports every missing or empty canonical section together.
 
-The native Ratatui transcript renders the call itself as one compact
-`submit_plan · <title> · <status>` row. It never renders the raw arguments or
-canonical Markdown there, hides the successful acknowledgement, and surfaces
-only unsuccessful result text. The complete Markdown remains visible once in
-the dedicated, selectable Plan artifact entry.
+Each successful save stores a full `PlanRecord::DraftSaved { draft }` snapshot: target `PlanVersion`, cycle-local sequence starting at 1, exact Markdown and source turn. `[ToolResults, DraftSaved…, directive updates…]` is one atomic transcript rewrite. Saves survive turns, restart, compaction and feedback but neither open approval nor anchor compaction. The engine emits `ToolResults`, then a draft-changing `PlanStateChanged`, and writes the latest draft once per batch. RevisionRequested clears the draft and retains the artifact as the working copy for the next revision. Ready, Published, resolution and abandonment discard draft state.
+
+Only no-argument `submit_plan {}` completes planning; it validates and submits the stored text unchanged. Unchanged resubmission is allowed. After its short final confirmation succeeds, the engine appends `PlanRecord::Ready`, emits `TurnCompleted`, then `PlanStateChanged::Ready`. Ready and synthesized Published records must equal the cycle's saved draft in target and text; legacy cycles without drafts still replay, and confirmed-worker publication is exempt. A failed or cancelled provider confirmation leaves the durable draft available for later resubmission.
+
+After a persisted draft batch or artifact publication, the engine atomically writes `.zevria/plans/<session-id>/<plan-id>-<first-title-slug>.md`. The first saved title (draft or artifact) fixes the path. Canonical text gains a trailing newline; direct worker publication stays byte-exact. Workers/children never write projections. This mirror is write-only: never read as input, repaired on restore, or imported after manual edits. Saves overwrite manual edits; rewind/abandonment can leave stale content. Projection failures are non-blocking `PlanProjectionWarning { version, draft, path, error }` events; draft warnings are deduplicated per thread until a write succeeds. The path appears only in display metadata, never model results or the cacheable prefix.
+
+Native transcript rows show `create_plan · <title>` with a bounded Markdown preview and muted mirror path, and `update_plan · N edits` with a bounded +/- diff. Successful `read_plan` results are hidden. Pending submission shows only `submit_plan`; completed rows use the detail title, falling back to legacy arguments. Successful submission acknowledgements are hidden; failures always show diagnostics. `ToolResultDetail::PlanDraft` never counts as a workspace change. Restore ignores DraftSaved records for rows, using the original calls and results instead. The complete submitted Markdown remains visible in the dedicated selectable artifact entry.
 
 The Ready snapshot renders a dedicated, selectable Plan artifact plus three
 versioned actions: implement here, implement fresh, or revise. `Plan ready` or
@@ -2933,7 +2922,7 @@ last submitted artifact and increments the next artifact's revision. `Esc`
 enters that revision state and returns the composer to Normal mode; `p` reopens
 the three-choice dialog for the retained version. `/implement` resolves it in
 the current conversation and `/implement-fresh` resolves it through a fresh
-typed handoff, even after additional unfinished revision discussion. An accepted
+typed handoff, even after additional unfinished revision discussion. When a newer unsubmitted draft exists, the recovery dialog explicitly warns that its changes are not included: implementation still uses the retained submitted revision. An accepted
 Standard Build prompt while Planning still abandons the unfinished thread;
 simply selecting Build does not. Explicit orchestration is rejected while Planning
 or Ready, without revising, abandoning, or approving the Plan. Ordinary submissions while Ready are rejected,
@@ -2951,7 +2940,7 @@ or Published. No frontend
 constructs a magic prompt or turns the handoff into generic text. A failed fresh
 startup leaves the source Resolved and retryable.
 
-`Started`, `Ready`, `RevisionRequested`, and `Resolved` records are not model
+`Started`, `DraftSaved`, `Ready`, `Published`, `RevisionRequested`, and `Resolved` records are not model
 visible. `Handoff` is the sole workflow record projected into model history.
 An implementation resolution may follow `Ready`, `Published`, or a matching
 retained artifact in `Planning`; no draft revision prose is promoted into the handoff.
@@ -2971,7 +2960,7 @@ and installs state reduced from only the retained prefix, so workflow records
 in the discarded tail cannot gate or alter the replacement.
 
 `[session.plan]` configures `max_artifact_bytes` (default and hard ceiling
-131072), `allow_subtasks`, and `allow_skills`. These settings can only narrow
+131072, also enforced on drafts and at the hard ceiling during replay), `allow_subtasks`, and `allow_skills`. The authoring tools change engine state, not workspace source. These settings can only narrow
 Plan's optional workflow capabilities; they cannot add structured mutation
 tools or native Build children. Request-local orchestration cannot override these settings.
 Plan always receives `command`, whose inspection-only use is enforced by
@@ -3030,8 +3019,7 @@ An activation embeds its full snapshot; reapplication identifies the pinned name
 There are no standalone activation records or invocation version fields. Pins
 remain hidden metadata; only the compact invocation projects as a user message,
 with ordered `zevria_skill_directive` records supplying model-facing bodies.
-Plan workflow records occupy a standalone `zevria_plan` object. `Ready` stores
-the complete artifact, so replay never consults assistant prose or a generated
+Plan workflow records occupy a standalone `zevria_plan` object. `DraftSaved` stores full working snapshots and `Ready` stores the complete artifact, so replay never consults assistant prose or a generated
 Markdown file; `Handoff` stores typed metadata and its engine-generated
 model-visible prompt. Provider assistant messages instead persist a versioned native item ledger
 under `zevria_provider_replay` alone (no sidecars or duplicate canonical message fields):

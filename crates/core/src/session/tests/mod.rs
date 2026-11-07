@@ -4,6 +4,7 @@ mod directives;
 mod instruction_persistence;
 mod mode;
 mod orchestration;
+mod plan_drafts;
 mod prompt;
 mod prompt_admission;
 #[cfg(feature = "test-support")]
@@ -497,6 +498,9 @@ struct WriteTestTool {
 }
 
 struct SubmitPlanStubTool;
+struct CreatePlanStubTool;
+struct UpdatePlanStubTool;
+struct ReadPlanStubTool;
 
 struct ReconcileReportsStubTool;
 
@@ -505,9 +509,14 @@ struct QuestionStubTool {
 }
 
 #[derive(Deserialize)]
-struct SubmitPlanStubArgs {
-    title: String,
+struct CreatePlanStubArgs {
     markdown: String,
+    replace: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdatePlanStubArgs {
+    edits: Vec<zevria_workflow::PlanEdit>,
 }
 
 #[derive(Deserialize)]
@@ -737,8 +746,8 @@ impl Tool for WriteTestTool {
 
 impl Tool for SubmitPlanStubTool {
     const NAME: &'static str = SUBMIT_PLAN_TOOL_NAME;
-    type Error = std::convert::Infallible;
-    type Args = SubmitPlanStubArgs;
+    type Error = zevria_workflow::PlanValidationError;
+    type Args = NoArgs;
     type Output = String;
 
     fn description(&self) -> String {
@@ -752,14 +761,110 @@ impl Tool for SubmitPlanStubTool {
     async fn call(
         &self,
         context: &mut ToolContext,
-        args: Self::Args,
+        _: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        let candidate = PlanCandidate::validate(args.title, args.markdown, 128 * 1024)
-            .expect("test candidate must be valid");
+        let scope = test_plan_scope(context)?;
+        let candidate = PlanCandidate::from_markdown(
+            scope
+                .markdown
+                .clone()
+                .ok_or_else(|| zevria_workflow::PlanValidationError("no working copy".into()))?,
+            MAX_PLAN_ARTIFACT_BYTES,
+        )?;
         context
             .insert_result(candidate)
             .expect("test metadata serializes");
         Ok("accepted".to_string())
+    }
+}
+
+fn test_plan_scope(
+    context: &ToolContext,
+) -> Result<Arc<PlanDraftScope>, zevria_workflow::PlanValidationError> {
+    context
+        .scope::<PlanDraftScope>()
+        .ok_or_else(|| zevria_workflow::PlanValidationError("missing Planning scope".into()))
+}
+fn test_save_draft(context: &mut ToolContext, scope: &PlanDraftScope, markdown: String) {
+    context
+        .insert_result(PlanDraft {
+            target: scope.target,
+            sequence: scope.next_sequence,
+            markdown,
+            source_turn_id: scope.turn_id,
+        })
+        .unwrap();
+}
+impl Tool for CreatePlanStubTool {
+    const NAME: &'static str = CREATE_PLAN_TOOL_NAME;
+    type Error = zevria_workflow::PlanValidationError;
+    type Args = CreatePlanStubArgs;
+    type Output = String;
+    fn description(&self) -> String {
+        "save a test draft".into()
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+    async fn call(
+        &self,
+        context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<String, Self::Error> {
+        let scope = test_plan_scope(context)?;
+        if scope.markdown.is_some() && !args.replace {
+            return Err(zevria_workflow::PlanValidationError(
+                "working copy exists".into(),
+            ));
+        }
+        zevria_workflow::validate_draft_markdown(&args.markdown, MAX_PLAN_ARTIFACT_BYTES)?;
+        test_save_draft(context, &scope, args.markdown);
+        Ok("saved".into())
+    }
+}
+impl Tool for UpdatePlanStubTool {
+    const NAME: &'static str = UPDATE_PLAN_TOOL_NAME;
+    type Error = zevria_workflow::PlanValidationError;
+    type Args = UpdatePlanStubArgs;
+    type Output = String;
+    fn description(&self) -> String {
+        "edit a test draft".into()
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+    async fn call(
+        &self,
+        context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<String, Self::Error> {
+        let scope = test_plan_scope(context)?;
+        let text = scope
+            .markdown
+            .as_deref()
+            .ok_or_else(|| zevria_workflow::PlanValidationError("no working copy".into()))?;
+        let markdown =
+            zevria_workflow::apply_plan_edits(text, &args.edits, MAX_PLAN_ARTIFACT_BYTES)?;
+        test_save_draft(context, &scope, markdown);
+        Ok("saved".into())
+    }
+}
+impl Tool for ReadPlanStubTool {
+    const NAME: &'static str = READ_PLAN_TOOL_NAME;
+    type Error = zevria_workflow::PlanValidationError;
+    type Args = NoArgs;
+    type Output = String;
+    fn description(&self) -> String {
+        "read a test draft".into()
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+    async fn call(&self, context: &mut ToolContext, _: Self::Args) -> Result<String, Self::Error> {
+        test_plan_scope(context)?
+            .markdown
+            .clone()
+            .ok_or_else(|| zevria_workflow::PlanValidationError("no working copy".into()))
     }
 }
 
@@ -927,11 +1032,27 @@ fn plan_submission_policies() -> SessionPolicies {
         ),
         TurnPolicy::new(
             "Plan test instructions",
-            Some(vec![SUBMIT_PLAN_TOOL_NAME.to_string()]),
+            Some(
+                PLAN_AUTHORING_TOOL_NAMES
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect(),
+            ),
             ModelRole::Plan,
             false,
         ),
     )
+}
+
+fn saved_plan_record(id: PlanId, markdown: &str) -> TranscriptItem {
+    TranscriptItem::Plan(PlanRecord::DraftSaved {
+        draft: PlanDraft {
+            target: PlanVersion { id, revision: 1 },
+            sequence: 1,
+            markdown: markdown.into(),
+            source_turn_id: TurnId::new(1),
+        },
+    })
 }
 
 fn valid_plan_markdown(title: &str, goal: &str) -> String {
@@ -941,13 +1062,37 @@ fn valid_plan_markdown(title: &str, goal: &str) -> String {
     )
 }
 
-fn submit_plan_call(title: &str, markdown: &str) -> Message {
+fn submit_plan_call() -> Message {
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call("submit-plan", SUBMIT_PLAN_TOOL_NAME, json!({})),
+    ]))
+}
+fn create_plan_call(markdown: &str) -> Message {
     Message::Assistant(rig_core::message::AssistantMessage::new(vec![
         named_tool_call(
-            "submit-plan",
-            SUBMIT_PLAN_TOOL_NAME,
-            json!({"title": title, "markdown": markdown}),
+            "create-plan",
+            CREATE_PLAN_TOOL_NAME,
+            json!({"markdown": markdown, "replace": false}),
         ),
+    ]))
+}
+fn update_plan_call(old: &str, new: &str) -> Message {
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call(
+            "update-plan",
+            UPDATE_PLAN_TOOL_NAME,
+            json!({"edits": [{"type": "replace", "old_string": old, "new_string": new, "replace_all": false}]}),
+        ),
+    ]))
+}
+fn create_and_submit_plan_call(_title: &str, markdown: &str) -> Message {
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        named_tool_call(
+            "create-plan",
+            CREATE_PLAN_TOOL_NAME,
+            json!({"markdown": markdown, "replace": true}),
+        ),
+        named_tool_call("submit-plan", SUBMIT_PLAN_TOOL_NAME, json!({})),
     ]))
 }
 

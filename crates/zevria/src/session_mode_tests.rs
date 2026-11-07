@@ -331,6 +331,7 @@ async fn roots_without_selected_mode_metadata_use_the_engine_plan_fallback() {
             PlanWorkflowState::Planning {
                 id: artifact.version.id,
                 previous: None,
+                draft: None,
             },
             SessionMode::Plan,
         ),

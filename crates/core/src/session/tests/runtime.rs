@@ -547,6 +547,7 @@ async fn restored_plan_is_available_before_run_without_startup_events_or_project
         &PlanWorkflowState::Planning {
             id: artifact.version.id,
             previous: Some(artifact.clone()),
+            draft: None,
         }
     );
     let (events, receiver) = session_event_channel(32);

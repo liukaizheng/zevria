@@ -39,6 +39,12 @@ pub(super) fn append_task_snapshot_context(
     }
 }
 
+pub(super) fn append_plan_context(history: &mut Vec<OwnedModelRequestItem>, context: Option<&str>) {
+    if let Some(context) = context {
+        history.push(OwnedModelRequestItem::message(Message::user(context)));
+    }
+}
+
 pub(super) fn automatic_compaction_armed_for(items: &[TranscriptItem]) -> bool {
     items
         .iter()
@@ -69,6 +75,7 @@ pub(super) struct CompactionSource {
     pub(super) instructions: zevria_instructions::InstructionSet,
     pub(super) retained_user_candidates: Vec<String>,
     pub(super) task_snapshot: Option<TaskList>,
+    pub(super) plan_context: Option<String>,
 }
 
 impl<P: ModelProvider> SessionEngine<P> {
@@ -108,6 +115,11 @@ impl<P: ModelProvider> SessionEngine<P> {
                     retained_user_candidates:
                         zevria_transcript::transcript::retained_user_candidates(prefix),
                     task_snapshot: latest_successful_task_snapshot(prefix),
+                    plan_context: replay_plan_state(prefix.iter().filter_map(|item| match item {
+                        TranscriptItem::Plan(record) => Some(record),
+                        _ => None,
+                    }))?
+                    .checkpoint_context(),
                 };
                 self.prepare_compaction(
                     CompactionTrigger::AutomaticPreTurn,
@@ -259,6 +271,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         };
 
         append_task_snapshot_context(&mut replacement_history, source.task_snapshot.as_ref());
+        append_plan_context(&mut replacement_history, source.plan_context.as_deref());
 
         if turn.is_cancelled() {
             self.provider.reset();
@@ -300,6 +313,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             instructions: self.prepare_maintenance_guidance(),
             retained_user_candidates: self.conversation.retained_user_candidates(),
             task_snapshot: latest_successful_task_snapshot(self.conversation.items()),
+            plan_context: self.plan_state()?.checkpoint_context(),
         };
         let checkpoint = self
             .prepare_compaction(trigger, policy, events, turn, &source)

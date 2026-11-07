@@ -23,8 +23,9 @@ use ratatui::{
 use rig_core::message::ToolCall;
 use unicode_segmentation::UnicodeSegmentation as _;
 use zevria_foundation::{
-    FileChange, LAUNCH_SUBTASKS_TOOL_NAME, QUESTION_TOOL_NAME, QuestionResponse,
-    RECONCILE_REPORTS_TOOL_NAME, SKILL_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME,
+    CREATE_PLAN_TOOL_NAME, FileChange, LAUNCH_SUBTASKS_TOOL_NAME, QUESTION_TOOL_NAME,
+    QuestionResponse, READ_PLAN_TOOL_NAME, RECONCILE_REPORTS_TOOL_NAME, SKILL_TOOL_NAME,
+    SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
 };
 use zevria_workflow::{AgentRunStatus, EnsembleWorkflow, PlanArtifact, PlanHandoff};
 
@@ -1123,6 +1124,22 @@ fn render_tool_call(
     ) {
         return Some(render_native_list(call, state, lines));
     }
+    if call.function.name == READ_PLAN_TOOL_NAME {
+        if state
+            .metadata
+            .as_ref()
+            .is_some_and(|meta| meta.outcome.is_success())
+        {
+            return None;
+        }
+        let header = FoldHeader::single("read_plan".into(), native_header_status(call, state));
+        lines.push(header.expanded());
+        render_tool_diagnostic(state, lines);
+        return Some(header);
+    }
+    if [CREATE_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME].contains(&call.function.name.as_str()) {
+        return Some(render_plan_draft_call(call, state, lines, wrap_width));
+    }
     if call.function.name == SUBMIT_PLAN_TOOL_NAME {
         return Some(render_submit_plan_call(call, state, lines));
     }
@@ -1360,7 +1377,14 @@ fn render_submit_plan_call(
         || tool_call_failed(state)
         || state.status == ToolCallStatus::Interrupted;
     let header = FoldHeader::single(
-        format!("submit_plan · {}", submit_plan_title(state)),
+        if state.status == ToolCallStatus::Executing {
+            "submit_plan".into()
+        } else {
+            plan_tool_title(state).map_or_else(
+                || "submit_plan".into(),
+                |title| format!("submit_plan · {title}"),
+            )
+        },
         native_header_status(call, state),
     );
     lines.push(header.expanded());
@@ -1373,10 +1397,101 @@ fn render_submit_plan_call(
     header
 }
 
-fn submit_plan_title(state: &ToolCallState) -> String {
-    tool_argument(state, "title")
+fn plan_tool_title(state: &ToolCallState) -> Option<String> {
+    state
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.detail.as_ref())
+        .and_then(zevria_foundation::ToolResultDetail::plan_draft)
+        .map(|detail| detail.title.clone())
+        .or_else(|| tool_argument(state, "title"))
+        .or_else(|| {
+            tool_argument(state, "markdown").and_then(|text| {
+                zevria_workflow::derived_title(&text)
+                    .ok()
+                    .map(str::to_owned)
+            })
+        })
         .and_then(|title| compact_single_line(&title, MAX_SUBMIT_PLAN_TITLE_GRAPHEMES))
-        .unwrap_or_else(|| "<invalid arguments>".to_string())
+}
+
+fn render_plan_draft_call(
+    call: &ToolCall,
+    state: &ToolCallState,
+    lines: &mut Vec<Line<'static>>,
+    wrap_width: u16,
+) -> FoldHeader {
+    let create = call.function.name == CREATE_PLAN_TOOL_NAME;
+    let count = state
+        .arguments
+        .as_ref()
+        .and_then(|args| args.get("edits"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let label = if create {
+        format!(
+            "create_plan · {}",
+            plan_tool_title(state).unwrap_or_else(|| "<invalid arguments>".into())
+        )
+    } else {
+        format!("update_plan · {count} edits")
+    };
+    let header = FoldHeader::single(label, native_header_status(call, state));
+    lines.push(header.expanded());
+    let failed = tool_call_denied(state)
+        || tool_call_failed(state)
+        || state.status == ToolCallStatus::Interrupted;
+    if failed {
+        render_tool_diagnostic(state, lines);
+        return header;
+    }
+    let detail = state
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.detail.as_ref())
+        .and_then(zevria_foundation::ToolResultDetail::plan_draft);
+    if create {
+        if let Some(markdown) = tool_argument(state, "markdown") {
+            let preview: String = markdown.chars().take(4096).collect();
+            lines.extend(
+                crate::markdown::markdown_lines(
+                    &preview,
+                    Style::default(),
+                    usize::from(wrap_width),
+                )
+                .into_iter()
+                .take(24),
+            );
+            if markdown.len() > preview.len() || markdown.lines().count() > 24 {
+                lines.push(Line::styled(
+                    "… draft preview truncated",
+                    Style::default().fg(theme().text.muted),
+                ));
+            }
+        }
+    } else if let Some(change) = detail.and_then(|detail| detail.change.as_ref()) {
+        let output = zevria_foundation::FileChangeOutput {
+            path: "plan-draft.md".into(),
+            change: change.clone(),
+        };
+        let summary = crate::diff_render::summarize_file_change(&output);
+        lines.extend(crate::diff_render::render_file_change_summary(&summary));
+        lines.extend(crate::diff_render::render_file_change_body(
+            &output,
+            wrap_width,
+            crate::diff_render::DiffRenderPolicy::Bounded {
+                max_rows: crate::diff_render::MAX_EDIT_RENDERED_DIFF_LINES,
+            },
+            crate::diff_render::DiffRowBackgrounds::Enabled,
+        ));
+    }
+    if let Some(path) = detail.and_then(|detail| detail.projection.as_ref()) {
+        lines.push(Line::styled(
+            path.display().to_string(),
+            Style::default().fg(theme().text.muted),
+        ));
+    }
+    header
 }
 
 fn compact_single_line(text: &str, max_graphemes: usize) -> Option<String> {

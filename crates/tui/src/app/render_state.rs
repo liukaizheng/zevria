@@ -91,6 +91,7 @@ pub(crate) struct PlanDialogView<'a> {
     pub(crate) artifact: &'a zevria_workflow::PlanArtifact,
     pub(crate) state: PlanDialogState,
     pub(crate) decision_pending: bool,
+    pub(crate) unsubmitted_draft: bool,
 }
 
 /// Disjoint render borrows assembled inside the façade so sibling modules do
@@ -197,6 +198,7 @@ impl App {
                 artifact,
                 state,
                 decision_pending: session.is_busy(),
+                unsubmitted_draft: workflow.has_unsubmitted_draft(),
             })
         });
         let pending_manual = session.operation_kind() == Some(OperationKind::ManualCompaction)

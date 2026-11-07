@@ -51,14 +51,7 @@ pub(super) fn render_plan_surface(
         usize::from(layout.prompt.width.saturating_sub(2)),
     );
     let inner_area = zevria_tui_widgets::overlay::modal(frame, layout.prompt, title, hints);
-    let viewport = {
-        let viewport = parts.view.plan_viewport_mut();
-        viewport.reconcile(choices.len(), usize::from(inner_area.height));
-        viewport.reveal(RowRange::from_start_len(selected_index, 1));
-        viewport.clone()
-    };
-    let visible = viewport.visible_range();
-    let rows = choices[visible.start()..visible.end()]
+    let mut all_rows = choices
         .iter()
         .map(|(row_choice, label)| {
             let mut row = Line::raw(truncate_display_width(label, usize::from(inner_area.width)));
@@ -67,6 +60,24 @@ pub(super) fn render_plan_surface(
             }
             row
         })
+        .collect::<Vec<_>>();
+    if recovering && dialog.unsubmitted_draft {
+        all_rows.push(Line::styled(
+            "Unsubmitted draft changes are not included.",
+            Style::default().fg(theme().text.muted),
+        ));
+    }
+    let viewport = {
+        let viewport = parts.view.plan_viewport_mut();
+        viewport.reconcile(all_rows.len(), usize::from(inner_area.height));
+        viewport.reveal(RowRange::from_start_len(selected_index, 1));
+        viewport.clone()
+    };
+    let visible = viewport.visible_range();
+    let rows = all_rows
+        .into_iter()
+        .skip(visible.start())
+        .take(visible.end() - visible.start())
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(rows), inner_area);
     if selected_index >= visible.start() && selected_index < visible.end() {

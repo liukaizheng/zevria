@@ -169,6 +169,7 @@ fn paste_requires_the_visible_composer_to_be_editable() {
     recovery.restore_plan_state(PlanWorkflowState::Planning {
         id: artifact.version.id,
         previous: Some(artifact),
+        draft: None,
     });
     assert!(recovery.open_plan_recovery_for_test());
     assert_eq!(
@@ -1190,6 +1191,7 @@ fn v_does_not_steal_plan_review_or_recovery_input() {
             app.restore_plan_state(PlanWorkflowState::Planning {
                 id: artifact.version.id,
                 previous: Some(artifact),
+                draft: None,
             });
             assert!(app.open_plan_recovery_for_test());
         } else {

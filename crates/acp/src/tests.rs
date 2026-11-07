@@ -780,6 +780,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                         state: PlanWorkflowState::Planning {
                                             id: expected.id,
                                             previous: Some(artifact),
+                                            draft: None,
                                         },
                                     })
                                     .await;
@@ -1028,6 +1029,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                             state: PlanWorkflowState::Planning {
                                                 id: artifact.version.id,
                                                 previous: Some(artifact),
+                                                draft: None,
                                             },
                                         })
                                         .await;

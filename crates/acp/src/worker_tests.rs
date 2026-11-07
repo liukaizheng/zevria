@@ -112,6 +112,27 @@ impl SessionRuntimeFactory for WorkerFactory {
                                 .unwrap();
                                 continue;
                             }
+                            if text == zevria_content::UserPrompt::from_text("draft only") {
+                                for sequence in [1, 2] {
+                                    tx.send(SessionEvent::PlanStateChanged {
+                                        state: PlanWorkflowState::Planning {
+                                            id: artifact.version.id,
+                                            previous: None,
+                                            draft: Some(zevria_workflow::PlanDraft {
+                                                target: artifact.version,
+                                                sequence,
+                                                markdown: format!(
+                                                    "{}\nUNSUBMITTED_DRAFT",
+                                                    artifact.markdown
+                                                ),
+                                                source_turn_id: turn_id,
+                                            }),
+                                        },
+                                    })
+                                    .await
+                                    .unwrap();
+                                }
+                            }
                             let terminal = SessionEvent::TurnCompleted {
                                 attempt_id: None,
                                 turn_id,
@@ -198,6 +219,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                                 state: PlanWorkflowState::Planning {
                                     id: artifact.version.id,
                                     previous: Some(artifact.clone()),
+                                    draft: None,
                                 },
                             })
                             .await
@@ -619,6 +641,96 @@ async fn worker_plan_capability_is_required_for_negotiation_and_restoration_with
     )
     .await;
     assert_eq!(shutdowns.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn worker_draft_updates_never_publish_plan_proof() {
+    let (updates, _) = exercise(
+        WorkerFactory::new(false),
+        true,
+        false,
+        None,
+        |connection, workspace| async move {
+            connection
+                .send_request(NewSessionRequest::new(workspace))
+                .block_task()
+                .await?;
+            connection
+                .send_request(SetSessionModeRequest::new("worker", "plan"))
+                .block_task()
+                .await?;
+            let response = connection
+                .send_request(PromptRequest::new("worker", vec!["draft only".into()]))
+                .block_task()
+                .await?;
+            assert_eq!(response.stop_reason, StopReason::EndTurn);
+            connection
+                .send_request(CloseSessionRequest::new("worker"))
+                .block_task()
+                .await?;
+            Ok(())
+        },
+    )
+    .await;
+    assert!(
+        !updates
+            .iter()
+            .any(|update| matches!(update.update, AcpSessionUpdate::PlanUpdate(_)))
+    );
+}
+
+#[tokio::test]
+async fn restored_planning_with_a_newer_draft_republishes_only_the_retained_artifact() {
+    let mut factory = WorkerFactory::new(true);
+    let expected = factory.artifact.clone();
+    Arc::get_mut(&mut factory).unwrap().initial_plan = PlanWorkflowState::Planning {
+        id: expected.version.id,
+        previous: Some(expected.clone()),
+        draft: Some(zevria_workflow::PlanDraft {
+            target: PlanVersion {
+                revision: 2,
+                ..expected.version
+            },
+            sequence: 7,
+            markdown: "# New unsubmitted worker proposal\nDo not publish this.".into(),
+            source_turn_id: TurnId::new(8),
+        }),
+    };
+    let commands = factory.commands.clone();
+    let (updates, _) = exercise(
+        factory,
+        true,
+        false,
+        None,
+        |connection, workspace| async move {
+            connection
+                .send_request(LoadSessionRequest::new("worker", workspace))
+                .block_task()
+                .await?;
+            connection
+                .send_request(CloseSessionRequest::new("worker"))
+                .block_task()
+                .await?;
+            Ok(())
+        },
+    )
+    .await;
+    let proofs = updates
+        .iter()
+        .filter_map(|update| match &update.update {
+            AcpSessionUpdate::PlanUpdate(plan) => Some(serde_json::to_value(plan).unwrap()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0]["plan"]["content"], expected.markdown);
+    assert!(
+        !commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| matches!(command, SessionCommand::Turn(_)))
+    );
 }
 
 #[tokio::test]

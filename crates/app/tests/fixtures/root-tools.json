@@ -678,25 +678,120 @@
     }
   },
   {
-    "name": "submit_plan",
-    "description": "Submit the complete canonical Plan artifact for explicit user approval.\n\nUse this only when planning is complete. The title must contain 3–8 words. Markdown must begin with exactly `# <title>` and contain nonempty `## Goal`, `## Decisions`, `## Implementation`, `## Validation`, and `## Risks` sections. The configured Markdown limit is 131072 bytes. After this tool accepts the artifact, make no more tool calls and provide only a short final confirmation.",
+    "name": "create_plan",
+    "description": "Save the initial Plan draft in engine storage; it persists across turns, restarts and context compaction and is not submitted. `markdown` must begin with exactly `# <title>` (one line, 3–8 words); other sections may be incomplete; limit 131072 bytes. Fails when a draft or a submitted plan under revision already exists unless `replace` is true; prefer update_plan for changes.",
     "parameters": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "title": {
-          "type": "string"
-        },
         "markdown": {
           "type": "string"
+        },
+        "replace": {
+          "type": "boolean"
         }
       },
       "required": [
-        "title",
-        "markdown"
+        "markdown",
+        "replace"
       ],
-      "title": "SubmitPlanArgs",
+      "title": "CreatePlanArgs",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "update_plan",
+    "description": "Revise the stored Plan working copy with 1–32 atomic, ordered edits. `replace` uses literal old_string/new_string matching: exactly one match unless replace_all is true; old_string must not be empty. `replace_section` replaces the body under one exact ATX heading line of level 2 or deeper, outside fenced code, up to the next heading of the same or higher level; the heading line is kept. Any failure changes nothing; identical results are errors. The result must begin with exactly `# <title>` (one line, 3–8 words) and fit 131072 bytes; other sections may be incomplete. Call read_plan after a match failure to get the exact stored text.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "edits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanEdit"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "edits"
+      ],
+      "title": "UpdatePlanArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "PlanEdit": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "old_string": {
+                  "type": "string"
+                },
+                "new_string": {
+                  "type": "string"
+                },
+                "replace_all": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "replace"
+                }
+              },
+              "required": [
+                "type",
+                "old_string",
+                "new_string",
+                "replace_all"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "heading": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "replace_section"
+                }
+              },
+              "required": [
+                "type",
+                "heading",
+                "content"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "read_plan",
+    "description": "Return the exact stored Plan draft (or the submitted plan under revision) with its draft number.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "submit_plan",
+    "description": "Submit the stored Plan draft unchanged; takes no arguments.\n\nUse this only when planning is complete. The title must contain 3–8 words. Markdown must begin with exactly `# <title>` and contain nonempty `## Goal`, `## Decisions`, `## Implementation`, `## Validation`, and `## Risks` sections. The configured Markdown limit is 131072 bytes. Fix the stored draft with update_plan first if validation fails. After this tool accepts the artifact, make no more tool calls and provide only a short final confirmation.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
     }
   }
 ]

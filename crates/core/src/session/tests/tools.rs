@@ -8,6 +8,9 @@ async fn ensemble_plan_gate_denies_out_of_order_calls_and_keeps_progress_recover
             calls: command_calls.clone(),
         })
         .tool(ReconcileReportsStubTool)
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
         .tool(SubmitPlanStubTool)
         .run();
     let policy = TurnPolicy::new(
@@ -22,6 +25,7 @@ async fn ensemble_plan_gate_denies_out_of_order_calls_and_keeps_progress_recover
         false,
     );
     let (_directory, transcript) = test_transcript();
+    let plan_id = PlanId::new();
     let engine = SessionEngine::new(
         ScriptedProvider::new([]),
         tools,
@@ -29,14 +33,20 @@ async fn ensemble_plan_gate_denies_out_of_order_calls_and_keeps_progress_recover
         transcript,
         Arc::new(SkillCatalog::default()),
     )
+    .unwrap()
+    .with_fixture(vec![
+        TranscriptItem::Plan(PlanRecord::Started { id: plan_id }),
+        saved_plan_record(
+            plan_id,
+            &valid_plan_markdown("Ordered gate plan", "Respect every durable gate stage."),
+        ),
+    ])
     .unwrap();
     let turn = TurnContext::new(TurnId::new(77), SessionMode::Plan, CancellationToken::new());
     let mut gate = PlanSubmissionGate::ensemble(ReportReconciliationCatalog::default());
-    let title = "Ordered gate plan";
-    let markdown = valid_plan_markdown(title, "Respect every durable gate stage.");
     let call_batch = |message: Message| assistant_tool_calls(&message);
 
-    let premature_submit = call_batch(submit_plan_call(title, &markdown));
+    let premature_submit = call_batch(submit_plan_call());
     let batch = {
         let scope = ToolExecutionScope::new(&engine, SessionMode::Plan, &policy, &turn, &gate);
         execute_tool_calls(&scope, &premature_submit, ActiveSkills::default(), &gate).await
@@ -76,7 +86,7 @@ async fn ensemble_plan_gate_denies_out_of_order_calls_and_keeps_progress_recover
             .inspection_completed
     );
 
-    let submit_before_reconciliation = call_batch(submit_plan_call(title, &markdown));
+    let submit_before_reconciliation = call_batch(submit_plan_call());
     let batch = {
         let scope = ToolExecutionScope::new(&engine, SessionMode::Plan, &policy, &turn, &gate);
         execute_tool_calls(
@@ -120,7 +130,7 @@ async fn ensemble_plan_gate_denies_out_of_order_calls_and_keeps_progress_recover
     };
     assert_eq!(batch.metadata[0].outcome, ToolCallOutcome::Denied);
 
-    let valid_submit = call_batch(submit_plan_call(title, &markdown));
+    let valid_submit = call_batch(submit_plan_call());
     let batch = {
         let scope = ToolExecutionScope::new(&engine, SessionMode::Plan, &policy, &turn, &gate);
         execute_tool_calls(&scope, &valid_submit, ActiveSkills::default(), &gate).await
@@ -139,6 +149,9 @@ async fn ensemble_plan_question_gate_rejects_same_batch_and_malformed_attempts()
         .tool(QuestionStubTool {
             requester: questions.requester,
         })
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
         .tool(SubmitPlanStubTool)
         .run();
     let policy = TurnPolicy::new(
@@ -153,6 +166,7 @@ async fn ensemble_plan_question_gate_rejects_same_batch_and_malformed_attempts()
         false,
     );
     let (_directory, transcript) = test_transcript();
+    let plan_id = PlanId::new();
     let engine = SessionEngine::new(
         ScriptedProvider::new([]),
         tools,
@@ -160,6 +174,14 @@ async fn ensemble_plan_question_gate_rejects_same_batch_and_malformed_attempts()
         transcript,
         Arc::new(SkillCatalog::default()),
     )
+    .unwrap()
+    .with_fixture(vec![
+        TranscriptItem::Plan(PlanRecord::Started { id: plan_id }),
+        saved_plan_record(
+            plan_id,
+            &valid_plan_markdown("Ordered gate plan", "Respect every durable gate stage."),
+        ),
+    ])
     .unwrap();
     let turn = TurnContext::new(TurnId::new(78), SessionMode::Plan, CancellationToken::new());
     let mut gate = PlanSubmissionGate::ensemble(ReportReconciliationCatalog::default());
@@ -176,12 +198,10 @@ async fn ensemble_plan_question_gate_rejects_same_batch_and_malformed_attempts()
     gate.apply_batch(&batch);
     assert!(gate.ensemble.as_ref().expect("gate").requires_question());
 
-    let title = "Question gated plan";
-    let markdown = valid_plan_markdown(title, "Wait for the question result.");
     let mixed = assistant_tool_calls(&Message::Assistant(
         rig_core::message::AssistantMessage::new(vec![
             named_tool_call("same-batch-question", QUESTION_TOOL_NAME, json!({})),
-            match submit_plan_call(title, &markdown) {
+            match submit_plan_call() {
                 Message::Assistant(rig_core::message::AssistantMessage { mut content, .. }) => {
                     content.remove(0)
                 }

@@ -75,7 +75,14 @@ impl App {
             LowerSurface::None
         } else if plan_approval {
             LowerSurface::Plan {
-                requested_height: 5,
+                requested_height: if parts
+                    .plan_dialog
+                    .is_some_and(|dialog| dialog.state.recovering() && dialog.unsubmitted_draft)
+                {
+                    6
+                } else {
+                    5
+                },
             }
         } else {
             let requested_height = composer_layout

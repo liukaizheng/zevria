@@ -147,6 +147,9 @@ async fn private_registries_have_exact_tools_and_independent_structured_roots() 
             "launch_subtasks",
             "skill",
             "skill_read",
+            "create_plan",
+            "update_plan",
+            "read_plan",
             "submit_plan",
             "reconcile_reports",
         ] {
@@ -219,6 +222,9 @@ fn builder_directive_and_permissions_are_fixed_in_all_modes() {
             "launch_subtasks",
             "skill",
             "skill_read",
+            "create_plan",
+            "update_plan",
+            "read_plan",
             "submit_plan",
             "reconcile_reports",
         ] {

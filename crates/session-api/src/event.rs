@@ -150,15 +150,18 @@ pub enum SessionEvent {
         handoff: PlanHandoff,
     },
     /// Authoritative Plan workflow snapshot after a live transition, not startup
-    /// readiness. Hosts seed restored state from `SessionEngine::plan_state`;
+    /// readiness. Draft saves also emit this immediately after ToolResults.
+    /// Hosts seed restored state from `SessionEngine::plan_state`;
     /// frontends never infer it from assistant messages or turn completion.
     PlanStateChanged {
         state: PlanWorkflowState,
     },
     /// The transcript remains canonical, but its convenience Markdown
-    /// projection could not be written at a Ready transition.
+    /// projection could not be written after a draft save or publication.
+    /// Draft warnings are deduplicated per plan until a later write succeeds.
     PlanProjectionWarning {
         version: PlanVersion,
+        draft: Option<u32>,
         path: PathBuf,
         error: String,
     },

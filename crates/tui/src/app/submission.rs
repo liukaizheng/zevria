@@ -224,8 +224,11 @@ impl App {
             self.conversation.push_plan_artifact(artifact.clone());
         }
         let ready = matches!(state, zevria_workflow::PlanWorkflowState::Ready { .. });
+        let draft_only = self.workflow.is_draft_update(&state);
         let changed = self.workflow.apply_snapshot(state);
-        self.session.settle_plan_state(self.workflow.snapshot());
+        if !draft_only {
+            self.session.settle_plan_state(self.workflow.snapshot());
+        }
         if ready && changed {
             self.composer.close_edit_group();
             self.session.set_next_mode(SessionMode::Plan);

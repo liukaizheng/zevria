@@ -119,7 +119,7 @@ async fn dispatch_retains_details_with_partial_and_cancellation_precedence() {
         else {
             unreachable!()
         };
-        let slot = dispatch_tool_call(&tools, &call, &turn, None, None).await;
+        let slot = dispatch_tool_call(&tools, &call, &turn, None, None, None).await;
         assert_eq!(slot.metadata.outcome, expected);
         assert_eq!(slot.metadata.detail, detail);
         assert_eq!(slot.metadata.id, "detail-call");

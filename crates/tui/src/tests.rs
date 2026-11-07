@@ -28,6 +28,8 @@ mod input_contract_tests;
 mod item_spacing_tests;
 #[path = "mode_tests.rs"]
 mod mode_tests;
+#[path = "plan_draft_tests.rs"]
+mod plan_draft_tests;
 #[path = "selection_tests.rs"]
 mod selection_tests;
 #[path = "skill_tests.rs"]

@@ -31,6 +31,10 @@ use crate::stream::assistant_reasoning_text;
 const DIAGNOSTIC_MAX_CHARS: usize = 4_096;
 
 #[cfg(test)]
+#[path = "plan_projection_tests.rs"]
+mod plan_tests;
+
+#[cfg(test)]
 #[path = "subtask_batch_tests.rs"]
 mod subtask_batch_tests;
 
@@ -306,6 +310,18 @@ pub(crate) fn project_tool_results(
                 .kind(known.map(|known| known.kind))
                 .raw_output(output.and_then(|output| output.raw.clone()));
 
+            if let Some(detail) = metadata
+                .detail
+                .as_ref()
+                .and_then(zevria_foundation::ToolResultDetail::plan_draft)
+            {
+                if let Some(path) = &detail.projection {
+                    fields = fields.locations(vec![ToolCallLocation::new(path.clone())]);
+                }
+                if ["create_plan", "submit_plan"].contains(&metadata.tool_name.as_str()) {
+                    fields = fields.title(format!("{}: {}", metadata.tool_name, detail.title));
+                }
+            }
             let mut content = Vec::new();
             if let Some(output) = output
                 && !output.text.is_empty()
@@ -499,7 +515,8 @@ fn tool_kind(name: &str, arguments: &Value) -> ToolKind {
         }
         "delete" => ToolKind::Delete,
         "launch_subtasks" => ToolKind::Think,
-        "task" | "reconcile_reports" | "question" | "submit_plan" | "skill" => ToolKind::Think,
+        "task" | "reconcile_reports" | "question" | "create_plan" | "update_plan" | "read_plan"
+        | "submit_plan" | "skill" => ToolKind::Think,
         _ if name.contains("read") => ToolKind::Read,
         _ if name.contains("search") || name.contains("find") => ToolKind::Search,
         _ => ToolKind::Other,
@@ -507,6 +524,16 @@ fn tool_kind(name: &str, arguments: &Value) -> ToolKind {
 }
 
 fn tool_title(name: &str, arguments: &Value) -> String {
+    if name == "create_plan" {
+        return arguments
+            .get("markdown")
+            .and_then(Value::as_str)
+            .and_then(|markdown| zevria_workflow::derived_title(markdown).ok())
+            .map_or_else(
+                || name.to_owned(),
+                |title| format!("{name}: {}", bounded(title, 120)),
+            );
+    }
     let detail = ["file_path", "path", "title", "command", "name"]
         .into_iter()
         .find_map(|key| arguments.get(key).and_then(Value::as_str))

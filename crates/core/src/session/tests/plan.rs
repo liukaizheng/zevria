@@ -107,7 +107,7 @@ async fn plan_recovery_materializes_an_accepted_candidate_after_a_durable_final_
             RECONCILE_REPORTS_TOOL_NAME,
             "reconciliation accepted",
         ),
-        TranscriptItem::Message(submit_plan_call(title, &markdown)),
+        TranscriptItem::Message(create_and_submit_plan_call(title, &markdown)),
         TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
             message: Message::User {
@@ -127,6 +127,7 @@ async fn plan_recovery_materializes_an_accepted_candidate_after_a_durable_final_
                 detail: None,
             }],
         },
+        saved_plan_record(plan_id, &markdown),
         TranscriptItem::Message(final_message.clone()),
     ];
     let items = with_explicit_fixture_confirmations(items);
@@ -249,7 +250,7 @@ async fn plan_recovery_with_a_published_artifact_only_adds_the_completion_marker
             RECONCILE_REPORTS_TOOL_NAME,
             "reconciliation accepted",
         ),
-        TranscriptItem::Message(submit_plan_call(title, &markdown)),
+        TranscriptItem::Message(create_and_submit_plan_call(title, &markdown)),
         TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
             message: Message::User {
@@ -663,12 +664,17 @@ async fn identical_titles_in_different_sessions_have_distinct_projections() {
         (second_transcript, second_session),
     ] {
         let provider = ScriptedProvider::new([
-            Ok(submit_plan_call(title, &markdown)),
+            Ok(create_and_submit_plan_call(title, &markdown)),
             Ok(Message::assistant("Ready.")),
         ]);
         let mut engine = SessionEngine::new(
             provider,
-            ToolServer::new().tool(SubmitPlanStubTool).run(),
+            ToolServer::new()
+                .tool(CreatePlanStubTool)
+                .tool(UpdatePlanStubTool)
+                .tool(ReadPlanStubTool)
+                .tool(SubmitPlanStubTool)
+                .run(),
             plan_submission_policies(),
             transcript,
             Arc::new(SkillCatalog::default()),
@@ -796,10 +802,15 @@ async fn plan_projection_failures_preserve_ready_approval() {
     let title = "Durable approval workflow";
     let markdown = valid_plan_markdown(title, "Keep transcript authority.");
     let provider = ScriptedProvider::new([
-        Ok(submit_plan_call(title, &markdown)),
+        Ok(create_and_submit_plan_call(title, &markdown)),
         Ok(Message::assistant("Ready.")),
     ]);
-    let tools = ToolServer::new().tool(SubmitPlanStubTool).run();
+    let tools = ToolServer::new()
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
+        .tool(SubmitPlanStubTool)
+        .run();
     let (_directory, transcript) = test_transcript();
     let workspace = tempfile::tempdir().expect("workspace");
     // A file occupies the plans-directory path, so create_dir_all fails.
@@ -853,7 +864,12 @@ async fn plan_projection_failures_preserve_ready_approval() {
         .unwrap();
     let warning = emitted
         .iter()
-        .position(|event| matches!(event, SessionEvent::PlanProjectionWarning { .. }))
+        .position(|event| {
+            matches!(
+                event,
+                SessionEvent::PlanProjectionWarning { draft: None, .. }
+            )
+        })
         .unwrap();
     assert!(completed < ready && ready < warning);
 
@@ -891,10 +907,15 @@ async fn provider_failure_after_submit_plan_leaves_workflow_planning() {
     let title = "Durable approval workflow";
     let markdown = valid_plan_markdown(title, "Do not commit early.");
     let provider = ScriptedProvider::new([
-        Ok(submit_plan_call(title, &markdown)),
+        Ok(create_and_submit_plan_call(title, &markdown)),
         Err(anyhow::anyhow!("provider failed after acceptance")),
     ]);
-    let tools = ToolServer::new().tool(SubmitPlanStubTool).run();
+    let tools = ToolServer::new()
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
+        .tool(SubmitPlanStubTool)
+        .run();
     let (_directory, transcript) = test_transcript();
     let mut engine = SessionEngine::new(
         provider,
@@ -942,10 +963,15 @@ async fn cancellation_after_submit_plan_acceptance_never_commits_ready() {
     let markdown = valid_plan_markdown(title, "Cancellation keeps planning open.");
     let cancelled = Arc::new(AtomicBool::new(false));
     let provider = FirstResponseThenPendingProvider {
-        first: Some(submit_plan_call(title, &markdown)),
+        first: Some(create_and_submit_plan_call(title, &markdown)),
         cancelled: cancelled.clone(),
     };
-    let tools = ToolServer::new().tool(SubmitPlanStubTool).run();
+    let tools = ToolServer::new()
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
+        .tool(SubmitPlanStubTool)
+        .run();
     let (_directory, transcript) = test_transcript();
     let transcript_path = transcript.path().to_path_buf();
     let engine = SessionEngine::new(
@@ -1043,20 +1069,22 @@ async fn duplicate_plan_submission_is_denied_after_first_acceptance() {
         Ok(Message::Assistant(
             rig_core::message::AssistantMessage::new(vec![
                 named_tool_call(
-                    "submit-one",
-                    SUBMIT_PLAN_TOOL_NAME,
-                    json!({"title": title, "markdown": markdown}),
+                    "create-plan",
+                    CREATE_PLAN_TOOL_NAME,
+                    json!({"markdown": markdown, "replace": false}),
                 ),
-                named_tool_call(
-                    "submit-two",
-                    SUBMIT_PLAN_TOOL_NAME,
-                    json!({"title": title, "markdown": markdown}),
-                ),
+                named_tool_call("submit-one", SUBMIT_PLAN_TOOL_NAME, json!({})),
+                named_tool_call("submit-two", SUBMIT_PLAN_TOOL_NAME, json!({})),
             ]),
         )),
         Ok(Message::assistant("Ready.")),
     ]);
-    let tools = ToolServer::new().tool(SubmitPlanStubTool).run();
+    let tools = ToolServer::new()
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
+        .tool(SubmitPlanStubTool)
+        .run();
     let (_directory, transcript) = test_transcript();
     let mut engine = SessionEngine::new(
         provider,
@@ -1103,7 +1131,11 @@ async fn duplicate_plan_submission_is_denied_after_first_acceptance() {
         .expect("tool result outcomes");
     assert_eq!(
         outcomes,
-        [ToolCallOutcome::Success, ToolCallOutcome::Denied]
+        [
+            ToolCallOutcome::Success,
+            ToolCallOutcome::Success,
+            ToolCallOutcome::Denied
+        ]
     );
 }
 
@@ -1461,16 +1493,21 @@ async fn fresh_session_starts_only_from_a_canonical_typed_handoff() {
 
 #[tokio::test]
 async fn direct_build_abandons_planning_but_ready_rejects_direct_submission() {
+    let markdown = valid_plan_markdown(
+        "Unsubmitted abandoned plan draft",
+        "Discard this working copy.",
+    );
     let provider = ScriptedProvider::new([
+        Ok(create_plan_call(&markdown)),
         Ok(Message::assistant("Still planning.")),
         Ok(Message::assistant("Built directly.")),
     ]);
-    let tools = ToolServer::new().run();
+    let tools = ToolServer::new().tool(CreatePlanStubTool).run();
     let (_directory, transcript) = test_transcript();
     let mut engine = SessionEngine::new(
         provider,
         tools,
-        test_policies(),
+        plan_submission_policies(),
         transcript,
         Arc::new(SkillCatalog::default()),
     )
@@ -1489,7 +1526,7 @@ async fn direct_build_abandons_planning_but_ready_rejects_direct_submission() {
         .unwrap();
     assert!(matches!(
         engine.plan_state().unwrap(),
-        PlanWorkflowState::Planning { .. }
+        PlanWorkflowState::Planning { draft: Some(_), .. }
     ));
     engine
         .handle_command(
@@ -1546,11 +1583,16 @@ async fn editing_earlier_prompt_truncates_later_plan_records_and_recomputes_stat
     let markdown = valid_plan_markdown(title, "This will be invalidated.");
     let provider = ScriptedProvider::new([
         Ok(Message::assistant("Initial answer.")),
-        Ok(submit_plan_call(title, &markdown)),
+        Ok(create_and_submit_plan_call(title, &markdown)),
         Ok(Message::assistant("Ready.")),
         Ok(Message::assistant("Revised initial answer.")),
     ]);
-    let tools = ToolServer::new().tool(SubmitPlanStubTool).run();
+    let tools = ToolServer::new()
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
+        .tool(SubmitPlanStubTool)
+        .run();
     let (_directory, transcript) = test_transcript();
     let mut engine = SessionEngine::new(
         provider,
@@ -1620,12 +1662,17 @@ async fn plan_revision_retains_id_path_and_increments_revision() {
     let second_title = "Retitled durable workflow";
     let second = valid_plan_markdown(second_title, "Second version.");
     let provider = ScriptedProvider::new([
-        Ok(submit_plan_call(first_title, &first)),
+        Ok(create_and_submit_plan_call(first_title, &first)),
         Ok(Message::assistant("Ready one.")),
-        Ok(submit_plan_call(second_title, &second)),
+        Ok(create_and_submit_plan_call(second_title, &second)),
         Ok(Message::assistant("Ready two.")),
     ]);
-    let tools = ToolServer::new().tool(SubmitPlanStubTool).run();
+    let tools = ToolServer::new()
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
+        .tool(SubmitPlanStubTool)
+        .run();
     let (_directory, transcript) = test_transcript();
     let workspace = tempfile::tempdir().expect("workspace");
     let plans_dir = workspace.path().join("plans");

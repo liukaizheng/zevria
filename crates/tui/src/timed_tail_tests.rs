@@ -1191,6 +1191,7 @@ fn pending_plan_decisions_hide_the_tail_and_settlement_does_not_leak_time() {
             PlanWorkflowState::Planning {
                 id: artifact.version.id,
                 previous: Some(artifact),
+                draft: None,
             }
         };
         reduce_at(

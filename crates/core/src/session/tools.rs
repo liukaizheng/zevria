@@ -32,6 +32,7 @@ pub(super) struct ToolResultBatch {
     pub(super) message: Message,
     pub(super) metadata: Vec<ToolResultMetadata>,
     pub(super) candidate: Option<PlanCandidate>,
+    pub(super) drafts: Vec<PlanDraft>,
     pub(super) reconciliation: Option<ValidatedReportReconciliation>,
     pub(super) question_disposition: Option<QuestionTerminalDisposition>,
     pub(super) inspection_attempted: bool,
@@ -43,6 +44,7 @@ pub(super) struct ToolCallSlot {
     pub(super) result: UserContent,
     pub(super) metadata: ToolResultMetadata,
     pub(super) candidate: Option<PlanCandidate>,
+    pub(super) draft: Option<PlanDraft>,
     pub(super) reconciliation: Option<ValidatedReportReconciliation>,
     pub(super) question_disposition: Option<QuestionTerminalDisposition>,
     pub(super) skill_application: Option<zevria_instructions::skill::SkillToolApplication>,
@@ -99,6 +101,7 @@ pub(super) async fn dispatch_tool_call(
     turn: &TurnContext,
     reconciliation_catalog: Option<&ReportReconciliationCatalog>,
     skill_context: Option<&zevria_instructions::skill::SkillContext>,
+    plan_scope: Option<&PlanDraftScope>,
 ) -> ToolCallSlot {
     let arguments = tool_arguments_for_dispatch(&call.function);
     // Per-call context carries the assistant call id into the tool, so tools
@@ -114,6 +117,9 @@ pub(super) async fn dispatch_tool_call(
     }
     if let Some(catalog) = reconciliation_catalog {
         context.insert_scope(catalog.clone());
+    }
+    if let Some(scope) = plan_scope {
+        context.insert_scope(scope.clone());
     }
     let catalog = tools.snapshot();
     let execution = match catalog.get(call.function.name.as_str()) {
@@ -158,6 +164,14 @@ pub(super) async fn dispatch_tool_call(
                 .expect("published Plan candidates must validate")
         })
         .flatten();
+    let draft = (execution.is_success()
+        && [CREATE_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME].contains(&call.function.name.as_str()))
+    .then(|| {
+        context
+            .result::<PlanDraft>()
+            .expect("published Plan drafts must decode")
+    })
+    .flatten();
     let reconciliation = (execution.is_success()
         && call.function.name == RECONCILE_REPORTS_TOOL_NAME)
         .then(|| {
@@ -190,6 +204,7 @@ pub(super) async fn dispatch_tool_call(
             detail,
         },
         candidate,
+        draft,
         reconciliation,
         question_disposition,
         skill_application: None,
@@ -208,12 +223,14 @@ pub(super) struct ToolExecutionScope<'a> {
     pub(super) input_token_limit: u64,
     pub(super) turn: &'a TurnContext,
     pub(super) reconciliation_catalog: Option<&'a ReportReconciliationCatalog>,
+    pub(super) planning: Option<PlanWorkflowState>,
 }
 
 pub(super) async fn execute_ordinary_tool_call(
     scope: &ToolExecutionScope<'_>,
     call: &ToolCall,
     active: &mut ActiveSkills,
+    plan_scope: Option<&PlanDraftScope>,
 ) -> ToolCallSlot {
     if scope.turn.is_cancelled() {
         return cancelled_slot(call);
@@ -239,6 +256,7 @@ pub(super) async fn execute_ordinary_tool_call(
             scope.turn,
             scope.reconciliation_catalog,
             skill_context.as_ref(),
+            plan_scope,
         )
         .await;
     }
@@ -408,7 +426,7 @@ pub(super) async fn execute_tool_calls(
         || submission_gate.candidate_accepted()
         || calls
             .iter()
-            .any(|call| call.function.name == SUBMIT_PLAN_TOOL_NAME)
+            .any(|call| PLAN_AUTHORING_TOOL_NAMES.contains(&call.function.name.as_str()))
     {
         BatchPolicy::Serialized {
             gate: submission_gate,
@@ -422,16 +440,80 @@ pub(super) async fn execute_tool_calls(
         let mut candidate = None;
         let mut active = active_skills;
         let mut slots = Vec::with_capacity(calls.len());
+        let mut prospective = scope.planning.clone();
+        let mut edit_failed = false;
         for call in calls {
-            let slot = if scope.turn.is_cancelled() {
+            let draft_scope = prospective
+                .as_ref()
+                .and_then(|state| state.draft_scope(scope.turn.id));
+            let mut slot = if scope.turn.is_cancelled() {
                 cancelled_slot(call)
             } else if accepted {
                 candidate_locked_slot(call)
             } else if let Some(reason) = ensemble_gate_decision(call, &shape, gate) {
                 ensemble_gate_denied_slot(call, reason)
+            } else if call.function.name == SUBMIT_PLAN_TOOL_NAME && edit_failed {
+                ToolCallSlot::local_diagnostic(call, ToolCallOutcome::Denied, "status: denied\nreason: ", "submit_plan cannot follow a failed create_plan or update_plan in the same response; call read_plan and fix the draft first".into())
             } else {
-                execute_ordinary_tool_call(scope, call, &mut active).await
+                execute_ordinary_tool_call(scope, call, &mut active, draft_scope.as_ref()).await
             };
+            if let Some(draft) = &slot.draft {
+                let validated = prospective
+                    .clone()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Plan draft was returned without a Planning scope")
+                    })
+                    .and_then(|state| {
+                        apply_plan_record(
+                            state,
+                            &PlanRecord::DraftSaved {
+                                draft: draft.clone(),
+                            },
+                        )
+                    });
+                match validated {
+                    Ok(state) => prospective = Some(state),
+                    Err(error) => {
+                        slot = ToolCallSlot::local_diagnostic(
+                            call,
+                            ToolCallOutcome::Error,
+                            "status: error\nerror: ",
+                            error.to_string(),
+                        )
+                    }
+                }
+            } else if slot.metadata.outcome.is_success()
+                && [CREATE_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME]
+                    .contains(&call.function.name.as_str())
+            {
+                slot = ToolCallSlot::local_diagnostic(
+                    call,
+                    ToolCallOutcome::Error,
+                    "status: error\nerror: ",
+                    "Plan authoring tool did not return a stored draft".into(),
+                );
+            }
+            if call.function.name == SUBMIT_PLAN_TOOL_NAME
+                && slot.metadata.outcome.is_success()
+                && !slot.candidate.as_ref().is_some_and(|candidate| {
+                    prospective
+                        .as_ref()
+                        .and_then(PlanWorkflowState::working_copy)
+                        .is_some_and(|copy| copy.markdown() == candidate.markdown())
+                })
+            {
+                slot = ToolCallSlot::local_diagnostic(
+                    call,
+                    ToolCallOutcome::Error,
+                    "status: error\nerror: ",
+                    "submitted candidate must match the stored Plan working copy unchanged".into(),
+                );
+            }
+            if [CREATE_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME].contains(&call.function.name.as_str())
+                && !slot.metadata.outcome.is_success()
+            {
+                edit_failed = true;
+            }
             if let Some(submitted) = &slot.candidate {
                 accepted = true;
                 candidate = Some(submitted.clone());
@@ -456,6 +538,7 @@ pub(super) async fn execute_tool_calls(
                         scope.turn,
                         scope.reconciliation_catalog,
                         None,
+                        None,
                     )
                     .await
                 } else {
@@ -471,7 +554,7 @@ pub(super) async fn execute_tool_calls(
             if is_launch(call) {
                 continue;
             }
-            let slot = execute_ordinary_tool_call(scope, call, &mut active).await;
+            let slot = execute_ordinary_tool_call(scope, call, &mut active, None).await;
             completed.push((index, slot));
         }
         completed
@@ -497,7 +580,11 @@ pub(super) fn assemble_tool_result_batch(
     let mut question_disposition = None;
     let mut inspection_attempted = false;
     let mut skill_applications = Vec::new();
+    let mut drafts = Vec::new();
     for slot in slots {
+        if let Some(draft) = slot.draft {
+            drafts.push(draft);
+        }
         if candidate.is_none() {
             candidate = slot.candidate;
         }
@@ -523,6 +610,7 @@ pub(super) fn assemble_tool_result_batch(
         message: Message::User { content: results },
         metadata,
         candidate,
+        drafts,
         reconciliation,
         question_disposition,
         inspection_attempted,
@@ -564,6 +652,7 @@ impl ToolCallSlot {
                 detail: None,
             },
             candidate: None,
+            draft: None,
             reconciliation: None,
             question_disposition: None,
             skill_application: None,
@@ -590,6 +679,12 @@ impl<'a> ToolExecutionScope<'a> {
             input_token_limit: engine.context_policy(policy.model_role).input_token_limit,
             turn,
             reconciliation_catalog: gate.reconciliation_catalog(),
+            planning: match (mode, engine.plan_state()) {
+                (SessionMode::Plan, Ok(state @ PlanWorkflowState::Planning { .. })) => {
+                    Some(state.clone())
+                }
+                _ => None,
+            },
         }
     }
 }

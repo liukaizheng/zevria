@@ -2144,6 +2144,7 @@ impl ConversationState {
                         self.push_plan_handoff(handoff, turn);
                     }
                     PlanRecord::Started { .. }
+                    | PlanRecord::DraftSaved { .. }
                     | PlanRecord::RevisionRequested { .. }
                     | PlanRecord::Resolved { .. } => {}
                 },

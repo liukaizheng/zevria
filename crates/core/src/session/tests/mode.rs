@@ -185,7 +185,7 @@ async fn failed_mode_save_keeps_selection_history_and_pending_accounting() {
     ));
 }
 
-fn published_history(artifact: &PlanArtifact) -> Vec<TranscriptItem> {
+pub(super) fn published_history(artifact: &PlanArtifact) -> Vec<TranscriptItem> {
     let mut start = ensemble_start_fixture(
         "published-mode",
         EnsembleWorkflow::Plan,

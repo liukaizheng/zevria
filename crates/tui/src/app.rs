@@ -1117,11 +1117,12 @@ impl App {
             SessionEvent::PlanStateChanged { state } => self.apply_plan_snapshot(state),
             SessionEvent::PlanProjectionWarning {
                 version,
+                draft,
                 path,
                 error,
             } => self.conversation.push_error(format!(
-                "Plan {version} remains available, but its projection at {} could not be written: {error}",
-                path.display()
+                "Plan {version}{} remains available, but its projection at {} could not be written: {error}",
+                draft.map_or_else(String::new, |draft| format!(" draft {draft}")), path.display()
             )),
             SessionEvent::AssistantStreamUpdated { turn_id, snapshot } => {
                 if !self.session.preview_progress(turn_id) { return effects; }

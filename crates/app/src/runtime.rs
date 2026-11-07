@@ -13,10 +13,12 @@ use zevria_core::SessionEngine;
 use zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME;
 use zevria_foundation::ModelRole;
 use zevria_foundation::QUESTION_TOOL_NAME;
-use zevria_foundation::SUBMIT_PLAN_TOOL_NAME;
 use zevria_foundation::SessionMode;
 use zevria_foundation::SessionPolicies;
 use zevria_foundation::TASK_TOOL_NAME;
+use zevria_foundation::{
+    CREATE_PLAN_TOOL_NAME, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+};
 use zevria_foundation::{TurnPolicy, WorkspaceContract};
 use zevria_instructions::FixedSkillRoots;
 use zevria_instructions::SkillCatalog;
@@ -36,8 +38,9 @@ use zevria_session_api::question_channels;
 use zevria_session_api::session_event_channel;
 use zevria_session_api::subtask_channels_with_capacity;
 use zevria_tools::{
-    CommandLimits, CommandTool, DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool,
-    ReconcileReportsTool, SkillReadTool, SkillTool, SubmitPlanTool, TaskTool, WriteTool,
+    CommandLimits, CommandTool, CreatePlanTool, DeleteTool, EditTool, LaunchSubtasksTool,
+    QuestionTool, ReadPlanTool, ReconcileReportsTool, SkillReadTool, SkillTool, SubmitPlanTool,
+    TaskTool, UpdatePlanTool, WriteTool,
 };
 use zevria_transcript::agent_runs_dir;
 use zevria_transcript::transcript;
@@ -110,6 +113,9 @@ pub(crate) fn build_tools(
     Ok(server
         .tool(ReconcileReportsTool)
         .tool(QuestionTool::new(questions))
+        .tool(CreatePlanTool::new(max_plan_artifact_bytes))
+        .tool(UpdatePlanTool::new(max_plan_artifact_bytes))
+        .tool(ReadPlanTool)
         .tool(SubmitPlanTool::new(max_plan_artifact_bytes))
         .run())
 }
@@ -182,7 +188,15 @@ pub(crate) fn build_session_policies(plan: zevria_workflow::config::PlanConfig) 
         plan_tools.extend(zevria_foundation::SKILL_TOOL_NAMES.map(str::to_string));
     }
     plan_tools.push(QUESTION_TOOL_NAME.to_string());
-    plan_tools.push(SUBMIT_PLAN_TOOL_NAME.to_string());
+    plan_tools.extend(
+        [
+            CREATE_PLAN_TOOL_NAME,
+            UPDATE_PLAN_TOOL_NAME,
+            READ_PLAN_TOOL_NAME,
+            SUBMIT_PLAN_TOOL_NAME,
+        ]
+        .map(str::to_string),
+    );
     SessionPolicies::new(
         TurnPolicy::new(
             BUILD_MODE_INSTRUCTIONS,
@@ -223,6 +237,9 @@ pub(crate) fn worker_policies() -> SessionPolicies {
                 zevria_foundation::WEB_SEARCH_TOOL_NAME.into(),
                 "command".into(),
                 QUESTION_TOOL_NAME.into(),
+                CREATE_PLAN_TOOL_NAME.into(),
+                UPDATE_PLAN_TOOL_NAME.into(),
+                READ_PLAN_TOOL_NAME.into(),
                 SUBMIT_PLAN_TOOL_NAME.into(),
             ]),
             ModelRole::Plan,
@@ -241,6 +258,9 @@ fn worker_tools(
     Ok(ToolServer::new()
         .tool(command_tool(workspace.to_path_buf(), config.command)?)
         .tool(QuestionTool::new(questions))
+        .tool(CreatePlanTool::new(config.session.plan.max_artifact_bytes))
+        .tool(UpdatePlanTool::new(config.session.plan.max_artifact_bytes))
+        .tool(ReadPlanTool)
         .tool(SubmitPlanTool::new(config.session.plan.max_artifact_bytes))
         .run())
 }
@@ -1094,7 +1114,14 @@ mod tests {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            ["command", "question", "submit_plan"]
+            [
+                "command",
+                "question",
+                "create_plan",
+                "update_plan",
+                "read_plan",
+                "submit_plan"
+            ]
         );
         let policies = worker_policies();
         for (mode, role, expected) in [
@@ -1106,7 +1133,15 @@ mod tests {
             (
                 zevria_foundation::SessionMode::Plan,
                 ModelRole::Plan,
-                vec!["web_search", "command", "question", "submit_plan"],
+                vec![
+                    "web_search",
+                    "command",
+                    "question",
+                    "create_plan",
+                    "update_plan",
+                    "read_plan",
+                    "submit_plan",
+                ],
             ),
         ] {
             let policy = policies.policy(mode);
@@ -1136,7 +1171,7 @@ mod tests {
                 assert_eq!(policy.scope, "worker:plan");
                 assert!(policy.instructions.contains("Only host `/confirm`"));
                 assert!(policy.instructions.contains(
-                    "adapter publishes accepted proposals on the structured ACP Plan channel"
+                    "adapter publishes only Ready artifacts on the structured ACP Plan channel"
                 ));
             } else {
                 assert_eq!(policy.scope, "worker:review");

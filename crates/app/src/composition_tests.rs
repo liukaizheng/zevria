@@ -4,9 +4,12 @@ use zevria_foundation::ModelRole;
 use zevria_foundation::QUESTION_TOOL_NAME;
 use zevria_foundation::RECONCILE_REPORTS_TOOL_NAME;
 use zevria_foundation::SKILL_TOOL_NAME;
-use zevria_foundation::SUBMIT_PLAN_TOOL_NAME;
 use zevria_foundation::SessionMode;
 use zevria_foundation::TASK_TOOL_NAME;
+use zevria_foundation::{
+    CREATE_PLAN_TOOL_NAME, PLAN_AUTHORING_TOOL_NAMES, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
+    UPDATE_PLAN_TOOL_NAME,
+};
 use zevria_instructions::prompts::BUILD_MODE_INSTRUCTIONS;
 use zevria_instructions::prompts::PLAN_MODE_INSTRUCTIONS;
 use zevria_instructions::skill::workspace_skills_dir;
@@ -16,8 +19,9 @@ use zevria_session_api::question_channels;
 use zevria_session_api::session_event_channel;
 use zevria_session_api::subtask_channels;
 use zevria_tools::{
-    CommandTool, DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool, ReconcileReportsTool,
-    SkillTool, SubmitPlanTool, TaskTool, WriteTool,
+    CommandTool, CreatePlanTool, DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool,
+    ReadPlanTool, ReconcileReportsTool, SkillTool, SubmitPlanTool, TaskTool, UpdatePlanTool,
+    WriteTool,
 };
 
 use crate::config::CommandConfig;
@@ -67,6 +71,9 @@ async fn production_registry_pins_names_order_and_schemas() {
             "skill_read",
             "reconcile_reports",
             "question",
+            "create_plan",
+            "update_plan",
+            "read_plan",
             "submit_plan",
         ]
     );
@@ -103,6 +110,9 @@ async fn production_registry_pins_names_order_and_schemas() {
         zevria_tools::SkillReadTool.parameters(),
         ReconcileReportsTool.parameters(),
         QuestionTool::new(test_question_requester()).parameters(),
+        CreatePlanTool::new(131_072).parameters(),
+        UpdatePlanTool::new(131_072).parameters(),
+        ReadPlanTool.parameters(),
         SubmitPlanTool::new(131_072).parameters(),
     ];
     assert_eq!(
@@ -176,8 +186,19 @@ async fn production_registry_pins_names_order_and_schemas() {
                 serde_json::json!(false)
             ),
             (
+                "create_plan",
+                serde_json::json!(["markdown", "replace"]),
+                serde_json::json!(false)
+            ),
+            (
+                "update_plan",
+                serde_json::json!(["edits"]),
+                serde_json::json!(false)
+            ),
+            ("read_plan", serde_json::json!([]), serde_json::json!(false)),
+            (
                 "submit_plan",
-                serde_json::json!(["title", "markdown"]),
+                serde_json::json!([]),
                 serde_json::json!(false)
             ),
         ]
@@ -247,6 +268,9 @@ async fn explore_registry_is_command_only_and_uses_configured_limits() {
         SKILL_TOOL_NAME,
         RECONCILE_REPORTS_TOOL_NAME,
         SUBMIT_PLAN_TOOL_NAME,
+        CREATE_PLAN_TOOL_NAME,
+        UPDATE_PLAN_TOOL_NAME,
+        READ_PLAN_TOOL_NAME,
         LAUNCH_SUBTASKS_TOOL_NAME,
         QUESTION_TOOL_NAME,
         TASK_TOOL_NAME,
@@ -291,7 +315,9 @@ fn production_policies_pin_mode_directives_and_plan_tool_access() {
     assert!(build.allows_tool("write"));
     assert!(build.allows_tool("skill"));
     assert!(build.skills_enabled);
-    assert!(!build.allows_tool("submit_plan"));
+    for name in PLAN_AUTHORING_TOOL_NAMES {
+        assert!(!build.allows_tool(name));
+    }
     assert!(!build.allows_tool(RECONCILE_REPORTS_TOOL_NAME));
     assert!(build.orchestration);
     assert_eq!(
@@ -317,6 +343,9 @@ fn production_policies_pin_mode_directives_and_plan_tool_access() {
                 "skill".to_string(),
                 "skill_read".to_string(),
                 "question".to_string(),
+                "create_plan".to_string(),
+                "update_plan".to_string(),
+                "read_plan".to_string(),
                 "submit_plan".to_string(),
             ][..]
         )
@@ -348,6 +377,9 @@ fn plan_configuration_can_only_remove_optional_capabilities() {
                 "command".to_string(),
                 "web_search".to_string(),
                 "question".to_string(),
+                "create_plan".to_string(),
+                "update_plan".to_string(),
+                "read_plan".to_string(),
                 "submit_plan".to_string(),
             ][..]
         )

@@ -5219,7 +5219,7 @@ fn submit_plan_tool_calls_render_compact_rows_for_both_argument_encodings() {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("submit_plan · Durable approval workflow ◐"));
+        assert!(rendered.contains("submit_plan ◐"));
         assert!(!rendered.contains("submit_plan("));
         assert_eq!(rendered.matches("◆").count(), 1);
         assert!(!rendered.contains("## Implementation"));
@@ -5296,7 +5296,11 @@ fn submit_plan_tool_call_lifecycle_uses_semantic_labels_and_colors() {
             .collect::<String>();
         assert_eq!(
             row_text,
-            format!("◆ submit_plan · Durable approval workflow {expected_status}")
+            if status == ToolCallStatus::Executing {
+                format!("◆ submit_plan {expected_status}")
+            } else {
+                format!("◆ submit_plan · Durable approval workflow {expected_status}")
+            }
         );
         assert_eq!(row.spans.last().unwrap().style.fg, Some(expected_color));
     }
@@ -5369,10 +5373,7 @@ fn submit_plan_titles_are_normalized_bounded_and_safe() {
     let grapheme = "🧑🏽‍💻";
     let oversized = grapheme.repeat(81);
     let cases = vec![
-        (
-            json!({"markdown": "SECRET_PLAN_BODY"}),
-            "<invalid arguments>".to_string(),
-        ),
+        (json!({"markdown": "SECRET_PLAN_BODY"}), String::new()),
         (
             json!({
                 "title": "  Broken\n  title\twith whitespace  ",
@@ -5398,9 +5399,15 @@ fn submit_plan_titles_are_normalized_bounded_and_safe() {
         )]);
         let states = vec![Some(crate::app::ToolCallState {
             arguments: None,
-            status: ToolCallStatus::Executing,
+            status: ToolCallStatus::Finished,
             result: None,
-            metadata: None,
+            metadata: Some(file_metadata(
+                &format!("submit-plan-title-{index}"),
+                None,
+                SUBMIT_PLAN_TOOL_NAME,
+                ToolCallOutcome::Success,
+                Vec::new(),
+            )),
             subtasks: Default::default(),
         })];
         let mut lines = Vec::new();
@@ -5412,7 +5419,14 @@ fn submit_plan_titles_are_normalized_bounded_and_safe() {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert_eq!(row_text, format!("◆ submit_plan · {expected_title} ◐"));
+        assert_eq!(
+            row_text,
+            if expected_title.is_empty() {
+                "◆ submit_plan ✓".into()
+            } else {
+                format!("◆ submit_plan · {expected_title} ✓")
+            }
+        );
         assert!(!row_text.contains("SECRET_PLAN_BODY"));
     }
 }

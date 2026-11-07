@@ -1273,6 +1273,7 @@ impl LiveSession {
             }
             SessionEvent::PlanProjectionWarning {
                 version,
+                draft,
                 path,
                 error,
             } => {
@@ -1280,7 +1281,8 @@ impl LiveSession {
                     None,
                     "plan-projection",
                     format!(
-                        "Plan {version} remains durable, but {} could not be projected: {error}",
+                        "Plan {version}{} remains durable, but {} could not be projected: {error}",
+                        draft.map_or_else(String::new, |draft| format!(" draft {draft}")),
                         path.display()
                     ),
                 ))?;
@@ -1439,9 +1441,10 @@ impl LiveSession {
         let mut mode_changed = false;
         {
             let mut state = self.state.lock().expect("ACP session state poisoned");
+            let entering_planning = !matches!(state.plan, PlanWorkflowState::Planning { .. });
             state.plan = plan.clone();
             match &plan {
-                PlanWorkflowState::Planning { .. } => {
+                PlanWorkflowState::Planning { .. } if entering_planning => {
                     if let Some(pending) = &mut state.pending {
                         match std::mem::replace(&mut pending.phase, PromptPhase::Normal) {
                             PromptPhase::WaitingForRevision { command: input } => {
@@ -1478,7 +1481,9 @@ impl LiveSession {
                     }
                     complete = Some(Ok(StopReason::EndTurn));
                 }
-                PlanWorkflowState::Idle | PlanWorkflowState::Resolved { .. } => {}
+                PlanWorkflowState::Idle
+                | PlanWorkflowState::Resolved { .. }
+                | PlanWorkflowState::Planning { .. } => {}
             }
         }
         if mode_changed {

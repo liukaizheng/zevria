@@ -511,7 +511,11 @@ impl PresentedTool {
     pub(crate) fn primary_copy(&self) -> String {
         match self {
             Self::Native { call, state } => {
-                if call.function.name == SUBMIT_PLAN_TOOL_NAME
+                if [
+                    zevria_foundation::CREATE_PLAN_TOOL_NAME,
+                    SUBMIT_PLAN_TOOL_NAME,
+                ]
+                .contains(&call.function.name.as_str())
                     && let Some(markdown) = tool_argument(state, "markdown")
                 {
                     markdown

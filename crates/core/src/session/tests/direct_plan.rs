@@ -510,7 +510,7 @@ async fn two_selected_workers_with_one_abandoned_still_use_all_root_synthesis_ga
             "reconciliation",
             no_disagreement_reconciliation(),
         )),
-        Ok(submit_plan_call(title, &markdown)),
+        Ok(create_and_submit_plan_call(title, &markdown)),
         Ok(Message::assistant("Synthesized.")),
     ]);
     let requests = provider.requests.clone();
@@ -529,6 +529,9 @@ async fn two_selected_workers_with_one_abandoned_still_use_all_root_synthesis_ga
                 calls: calls.clone(),
             })
             .tool(ReconcileReportsStubTool)
+            .tool(CreatePlanStubTool)
+            .tool(UpdatePlanStubTool)
+            .tool(ReadPlanStubTool)
             .tool(SubmitPlanStubTool)
             .run(),
         plan_submission_policies(),

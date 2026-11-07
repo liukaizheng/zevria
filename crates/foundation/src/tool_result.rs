@@ -54,6 +54,19 @@ pub struct FileChangeOutput {
     pub change: FileChange,
 }
 
+/// Display-only evidence of a stored Plan working copy. This is engine state,
+/// not a workspace mutation, even when a convenience Markdown mirror exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDraftDetail {
+    pub title: String,
+    pub target_revision: u32,
+    pub sequence: Option<u32>,
+    pub bytes: usize,
+    pub change: Option<FileChange>,
+    pub projection: Option<PathBuf>,
+}
+
 /// Cloneable Rig *call* extension carrying the assistant tool-call id into a
 /// dispatched tool. Tools that announce work to the frontend (the subtask
 /// tool) read it to correlate their events with the pending call row.
@@ -126,6 +139,7 @@ impl ToolCallOutcome {
 pub enum ToolResultDetail {
     /// Captured mutations, including any that survive a failed edit.
     FileChanges(Vec<FileChangeOutput>),
+    PlanDraft(PlanDraftDetail),
     /// Input-ordered terminal slots, retaining every accepted child identity.
     Subtasks(Vec<SubtaskEntryMetadata>),
     /// Terminal root-question semantics, including frontend errors. Malformed
@@ -138,6 +152,13 @@ impl rig_core::tool::ContextValue for ToolResultDetail {
 }
 
 impl ToolResultDetail {
+    pub fn plan_draft(&self) -> Option<&PlanDraftDetail> {
+        match self {
+            Self::PlanDraft(draft) => Some(draft),
+            _ => None,
+        }
+    }
+
     pub fn file_changes(&self) -> &[FileChangeOutput] {
         match self {
             Self::FileChanges(changes) => changes,

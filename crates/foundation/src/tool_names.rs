@@ -10,5 +10,14 @@ pub const SKILL_TOOL_NAMES: [&str; 2] = [SKILL_TOOL_NAME, SKILL_READ_TOOL_NAME];
 pub const QUESTION_TOOL_NAME: &str = "question";
 pub const LAUNCH_SUBTASKS_TOOL_NAME: &str = "launch_subtasks";
 pub const TASK_TOOL_NAME: &str = "task";
+pub const CREATE_PLAN_TOOL_NAME: &str = "create_plan";
+pub const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
+pub const READ_PLAN_TOOL_NAME: &str = "read_plan";
 pub const SUBMIT_PLAN_TOOL_NAME: &str = "submit_plan";
+pub const PLAN_AUTHORING_TOOL_NAMES: [&str; 4] = [
+    CREATE_PLAN_TOOL_NAME,
+    UPDATE_PLAN_TOOL_NAME,
+    READ_PLAN_TOOL_NAME,
+    SUBMIT_PLAN_TOOL_NAME,
+];
 pub const RECONCILE_REPORTS_TOOL_NAME: &str = "reconcile_reports";

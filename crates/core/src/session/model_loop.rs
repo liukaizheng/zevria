@@ -373,18 +373,40 @@ impl<P: ModelProvider> SessionEngine<P> {
                 &effective_turn,
                 &submission_gate,
             );
-            let batch = execute_tool_calls(
+            let mut batch = execute_tool_calls(
                 &scope,
                 &calls,
                 self.active_skills()?.clone(),
                 &submission_gate,
             )
             .await;
+            let previous_plan = self.plan_state()?.clone();
+            if let Some(first) = batch.drafts.first() {
+                let path = self.plan_projection_path(
+                    first.target.id,
+                    derived_title(&first.markdown).expect("validated draft"),
+                );
+                for metadata in &mut batch.metadata {
+                    if [CREATE_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME]
+                        .contains(&metadata.tool_name.as_str())
+                        && let Some(ToolResultDetail::PlanDraft(detail)) = &mut metadata.detail
+                    {
+                        detail.projection = path.clone();
+                    }
+                }
+            }
             let mut records = vec![TranscriptItem::ToolResults {
                 message: batch.message.clone(),
                 metadata: batch.metadata.clone(),
                 skill_applications: batch.skill_applications.clone(),
             }];
+            records.extend(
+                batch
+                    .drafts
+                    .iter()
+                    .cloned()
+                    .map(|draft| TranscriptItem::Plan(PlanRecord::DraftSaved { draft })),
+            );
             let mut source = self.conversation.items().to_vec();
             source.extend(records.iter().cloned());
             let active = replay_active_skills(&source)?;
@@ -403,6 +425,11 @@ impl<P: ModelProvider> SessionEngine<P> {
                     metadata: batch.metadata,
                 })
                 .await;
+            self.emit_plan_state_if_changed(previous_plan, progress.events())
+                .await?;
+            if let Some(draft) = batch.drafts.last() {
+                self.project_plan_draft(draft, progress.events()).await;
+            }
             if progress.turn().is_cancelled() {
                 return Err(anyhow::anyhow!("turn cancelled").into());
             }
@@ -588,14 +615,17 @@ impl<P: ModelProvider> SessionEngine<P> {
                 self.persistence_failed(&error, events).await?;
             }
         }
-        let warning = ready.and_then(|(_, artifact)| {
-            self.project_plan(&artifact).err().map(|(path, error)| {
-                SessionEvent::PlanProjectionWarning {
-                    version: artifact.version,
-                    path,
-                    error,
-                }
-            })
+        let warning = ready.and_then(|(_, artifact)| match self.project_plan(&artifact) {
+            Ok(()) => {
+                self.plan_projection_warnings.remove(&artifact.version.id);
+                None
+            }
+            Err((path, error)) => Some(SessionEvent::PlanProjectionWarning {
+                version: artifact.version,
+                draft: None,
+                path,
+                error,
+            }),
         });
         let _ = events.send(terminal).await;
         self.emit_plan_state_if_changed(previous, events).await?;

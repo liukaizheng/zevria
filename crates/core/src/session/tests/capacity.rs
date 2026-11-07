@@ -99,13 +99,18 @@ async fn provider_failure_after_submit_plan_leaves_workflow_planning() {
     let title = "Durable approval workflow";
     let markdown = valid_plan_markdown(title, "Do not commit without a final response.");
     let provider = ScriptedProvider::new([
-        Ok(submit_plan_call(title, &markdown)),
+        Ok(create_and_submit_plan_call(title, &markdown)),
         Err(anyhow::anyhow!(
             "scripted failure before the final Plan response"
         )),
     ]);
     let requests = provider.requests.clone();
-    let tools = ToolServer::new().tool(SubmitPlanStubTool).run();
+    let tools = ToolServer::new()
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
+        .tool(SubmitPlanStubTool)
+        .run();
     let (_directory, transcript) = test_transcript();
     let mut engine = SessionEngine::new(
         provider,

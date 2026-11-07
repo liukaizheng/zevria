@@ -510,6 +510,7 @@ fn prompt_caption_prefix_flags_multiline_and_tiny_collapse_are_rendered() {
     retained.restore_plan_state(PlanWorkflowState::Planning {
         id: artifact.version.id,
         previous: Some(artifact),
+        draft: None,
     });
     let rendered = rendered_text(&mut retained, 100, 20);
     assert!(rendered.contains("plan retained"));

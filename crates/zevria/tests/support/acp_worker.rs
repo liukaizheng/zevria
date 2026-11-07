@@ -16,7 +16,6 @@ use std::{
 };
 use zevria_transcript::transcript;
 
-const TITLE: &str = "Inspect The Worker Fixture";
 const MARKDOWN: &str = "# Inspect The Worker Fixture\n\n## Goal\nInspect source.txt.  \n\n## Decisions\n- Preserve compatibility.\n\n## Implementation\n1. Leave the source unchanged.\n\n## Validation\n- Inspect the persisted proof.\n\n## Risks\n- Behavioral shell restrictions are not a sandbox.\n";
 
 pub(super) struct ResponsesFixture {
@@ -151,20 +150,17 @@ impl ResponsesFixture {
                         json!({"questions":[{"id":"compatibility", "header":"Compatibility", "question":"Which compatibility policy should be retained?", "options":[{"label":"Preserve", "description":"Keep the public API."},{"label":"Simplify", "description":"Remove legacy behavior."}]}]}),
                     ),
                     ("plan-fixture", 2) => function(
-                        "submit",
-                        "submit_plan",
-                        json!({"title":TITLE,"markdown":MARKDOWN}),
+                        "create",
+                        "create_plan",
+                        json!({"markdown":MARKDOWN,"replace":false}),
                     ),
-                    ("plan-fixture", 3) => message("Independent Plan proposal published."),
-                    ("plan-fixture", 4) => {
+                    ("plan-fixture", 3) => function("submit", "submit_plan", json!({})),
+                    ("plan-fixture", 4) => message("Independent Plan proposal published."),
+                    ("plan-fixture", 5) => {
                         message("Prose-only feedback discussion; no new plan publication.")
                     }
-                    ("plan-fixture", 5) => function(
-                        "resubmit",
-                        "submit_plan",
-                        json!({"title":TITLE,"markdown":MARKDOWN}),
-                    ),
-                    ("plan-fixture", 6) => message("Revised proposal published."),
+                    ("plan-fixture", 6) => function("resubmit", "submit_plan", json!({})),
+                    ("plan-fixture", 7) => message("Revised proposal published."),
                     ("review-fixture", 1) => message(
                         "No actionable defects found in source.txt. Validation gap: this limited source inspection did not run builds or tests.",
                     ),
@@ -210,7 +206,7 @@ fn inspection_response(
     scratch: &mut BTreeMap<String, inspection::Scratch>,
 ) -> Value {
     let plan = model == "inspection-plan-fixture";
-    let phase = step % if plan { 11 } else { 10 };
+    let phase = step % if plan { 12 } else { 10 };
     let id = format!("investigate-{step}");
     let command = match phase {
         0 => fixture.read_command(),
@@ -245,13 +241,20 @@ fn inspection_response(
             );
         }
         9 if plan => {
-            return function(
-                &id,
-                "submit_plan",
-                json!({"title":TITLE,"markdown":MARKDOWN}),
-            );
+            return if step == 9 {
+                function(
+                    &id,
+                    "create_plan",
+                    json!({"markdown":MARKDOWN,"replace":false}),
+                )
+            } else {
+                function(&id, "read_plan", json!({}))
+            };
         }
-        9 | 10 => {
+        10 if plan => {
+            return function(&id, "submit_plan", json!({}));
+        }
+        9..=11 => {
             return message(
                 "Investigated external diagnostic and scratch build/test; original source unchanged.",
             );
@@ -384,7 +387,7 @@ fn actual_worker_external_reads_and_private_scratch_survive_plan_review_load_and
         );
         rpc.notifications.clear();
         successful(rpc.request("session/prompt", json!({"sessionId":plan,"prompt":[{"type":"text","text":format!("Feedback after {method}: independently recheck the external diagnostic, fetch the controlled fixture into newly owned scratch, rerun validation, and republish the complete plan.")}]})));
-        assert_inspection_notifications(&rpc, &plan, (round + 1) * 11);
+        assert_inspection_notifications(&rpc, &plan, (round + 1) * 12);
         successful(rpc.request("session/close", json!({"sessionId":plan})));
     }
     let mut rpc = start_rpc();
@@ -433,7 +436,7 @@ fn actual_worker_external_reads_and_private_scratch_survive_plan_review_load_and
         )));
     }
     let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.len(), 53);
+    assert_eq!(requests.len(), 56);
     for request in requests.iter() {
         let authoritative = request["instructions"].as_str().unwrap();
         assert!(authoritative.starts_with("Zevria engine instructions."));
@@ -491,28 +494,28 @@ fn actual_worker_external_reads_and_private_scratch_survive_plan_review_load_and
         }
     }
     assert!(requests[0]["prompt_cache_key"].is_string());
-    for index in [11, 22] {
+    for index in [12, 24] {
         assert_eq!(
             requests[index]["prompt_cache_key"], requests[0]["prompt_cache_key"],
             "same session/profile cache identity after resume"
         );
     }
     assert_eq!(
-        requests[33]["prompt_cache_key"],
-        requests[43]["prompt_cache_key"]
+        requests[36]["prompt_cache_key"],
+        requests[46]["prompt_cache_key"]
     );
     assert_ne!(
         requests[0]["prompt_cache_key"],
-        requests[33]["prompt_cache_key"]
+        requests[36]["prompt_cache_key"]
     );
-    assert!(requests[11]["input"].to_string().contains(OLD));
+    assert!(requests[12]["input"].to_string().contains(OLD));
     assert!(
-        requests[11]["input"]
+        requests[12]["input"]
             .to_string()
             .contains("Feedback after session/load")
     );
     assert!(
-        requests[22]["input"]
+        requests[24]["input"]
             .to_string()
             .contains("Feedback after session/resume")
     );
@@ -576,7 +579,11 @@ fn fresh_native_worker_and_parent_synthesis_inspection_smoke() {
         files.root.path().join("engine-logs").to_str().unwrap()
     ));
     std::fs::write(&worker_config, worker).unwrap();
-    let parent_config = files.home.join("parent.toml");
+    // Configs use sibling models.jsonc catalogs. Keep the parent catalog from
+    // replacing the worker's differently named fixture profiles.
+    let parent_config_dir = files.home.join("parent-config");
+    std::fs::create_dir(&parent_config_dir).unwrap();
+    let parent_config = parent_config_dir.join("parent.toml");
     config_with_models(
         &parent_config,
         &provider.url,
@@ -638,13 +645,15 @@ ZEVRIA_CONFIG = {:?}
         .find(|request| request["model"] == "synthesis-review-fixture")
         .unwrap();
     assert!(
-        parent["input"]
-            .to_string()
+        parent["instructions"]
+            .as_str()
+            .unwrap()
             .contains("independently inspect the current repository")
     );
     assert!(
-        parent["input"]
-            .to_string()
+        parent["instructions"]
+            .as_str()
+            .unwrap()
             .contains("source-read-only with temporary investigative execution")
     );
     assert_eq!(parent["tools"].as_array().unwrap().len(), 1);
@@ -854,7 +863,7 @@ fn actual_worker_routes_models_questions_and_proof_and_recovers_without_mutating
     let records =
         transcript::load(&worker_dir.join(format!("{}.jsonl", plan_id.as_str().unwrap()))).unwrap();
     assert!(records.iter().any(|item| matches!(item, transcript::TranscriptItem::Plan(zevria_workflow::PlanRecord::Ready { artifact }) if artifact.markdown == MARKDOWN)));
-    for tool in ["command", "question", "submit_plan"] {
+    for tool in ["command", "question", "create_plan", "submit_plan"] {
         assert!(records.iter().any(|item| matches!(item,
             transcript::TranscriptItem::ToolResults { metadata, .. }
                 if metadata.iter().any(|result| result.tool_name == tool && result.outcome == zevria_foundation::ToolCallOutcome::Success)
@@ -866,9 +875,9 @@ fn actual_worker_routes_models_questions_and_proof_and_recovers_without_mutating
         "ZEVRIA_CONFIG is inherited without credential copying"
     );
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 9);
-    assert!(requests[4]["input"].to_string().contains("continue"));
-    assert!(requests[4]["input"].to_string().contains("Preserve"));
+    assert_eq!(requests.len(), 10);
+    assert!(requests[5]["input"].to_string().contains("continue"));
+    assert!(requests[5]["input"].to_string().contains("Preserve"));
     assert!(
         requests[1]["input"]
             .to_string()
@@ -884,7 +893,14 @@ fn actual_worker_routes_models_questions_and_proof_and_recovers_without_mutating
             .collect::<Vec<_>>();
         tools.sort();
         let expected = if request["model"] == "plan-fixture" {
-            vec!["command", "question", "submit_plan"]
+            vec![
+                "command",
+                "create_plan",
+                "question",
+                "read_plan",
+                "submit_plan",
+                "update_plan",
+            ]
         } else {
             vec!["command", "question"]
         };

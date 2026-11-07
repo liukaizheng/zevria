@@ -16,6 +16,8 @@ mod inline_search_tests;
 mod models;
 #[path = "outage_tests.rs"]
 mod outages;
+#[path = "plan_draft_tests.rs"]
+mod plan_drafts;
 #[path = "prompt_cache_tests.rs"]
 mod prompt_cache_options;
 #[path = "resume_wire_tests.rs"]

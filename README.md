@@ -505,7 +505,7 @@ for limits and lifecycle details.
 | Command | Workflow |
 | --- | --- |
 | `/build` | Implement in the current workspace, with optional read-only Explore subtasks. |
-| `/plan` | Investigate and prepare a submitted plan for approval, without implementing it. |
+| `/plan` | Investigate, iteratively save and edit a plan draft, then submit it for approval without implementing it. |
 
 Ordinary Build may use Explore but cannot launch Builders. `/orchestrate <prompt>`
 requires at least two distinct accepted children together in one `launch_subtasks`

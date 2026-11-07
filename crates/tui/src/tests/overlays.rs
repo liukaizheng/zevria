@@ -357,6 +357,7 @@ fn plan_revision_is_a_versioned_engine_decision_and_failures_do_not_open_approva
             state: PlanWorkflowState::Planning {
                 id: expected.id,
                 previous: Some(artifact),
+                draft: None,
             },
         });
         assert!(matches!(
@@ -451,6 +452,7 @@ fn escaped_plan_approval_reopens_with_p_and_keeps_revision_drafts_explicit() {
         state: PlanWorkflowState::Planning {
             id: expected.id,
             previous: Some(artifact),
+            draft: None,
         },
     });
 
@@ -505,6 +507,7 @@ fn plan_review_can_reopen_while_busy_but_cannot_dispatch_another_decision() {
     let state = PlanWorkflowState::Planning {
         id: artifact.version.id,
         previous: Some(artifact),
+        draft: None,
     };
 
     let mut insert = App::new();
@@ -543,6 +546,7 @@ fn revision_state_reopens_input_and_partial_completion_stays_planning() {
         state: PlanWorkflowState::Planning {
             id: artifact.version.id,
             previous: Some(artifact),
+            draft: None,
         },
     });
     assert_eq!(app.next_mode(), SessionMode::Plan);
@@ -613,6 +617,7 @@ fn resumed_ready_plan_is_deduplicated_and_copyable() {
         state: PlanWorkflowState::Planning {
             id: artifact.version.id,
             previous: Some(artifact.clone()),
+            draft: None,
         },
     });
     rendered_text(&mut app, 120, 30);
@@ -650,10 +655,12 @@ fn plan_restoration_matrix_seeds_ui_without_turns_and_accepts_live_transitions()
         PlanWorkflowState::Planning {
             id: artifact.version.id,
             previous: None,
+            draft: None,
         },
         PlanWorkflowState::Planning {
             id: artifact.version.id,
             previous: Some(artifact.clone()),
+            draft: None,
         },
         PlanWorkflowState::Ready {
             artifact: artifact.clone(),
@@ -764,6 +771,7 @@ fn plan_restoration_matrix_seeds_ui_without_turns_and_accepts_live_transitions()
             state: PlanWorkflowState::Planning {
                 id: revised.version.id,
                 previous: Some(revised.clone()),
+                draft: None,
             },
         });
         assert!(!app.is_busy());
@@ -817,6 +825,7 @@ fn direct_plan_snapshot_preserves_composer_lock_and_settles_matching_operations(
     app.restore_plan_state(PlanWorkflowState::Planning {
         id: artifact.version.id,
         previous: Some(artifact),
+        draft: None,
     });
     assert!(!app.is_busy());
     assert_eq!(app.active_turn_id(), None);
@@ -1504,6 +1513,7 @@ fn semantic_status_precedence_covers_focus_activity_plan_and_warnings() {
         state: PlanWorkflowState::Planning {
             id: artifact.version.id,
             previous: Some(artifact),
+            draft: None,
         },
     });
     assert!(submitted.open_plan_recovery_for_test());
@@ -2084,6 +2094,7 @@ fn model_management_gate_requires_idle_root_without_plan_dialog_or_recall() {
     recovery.restore_plan_state(PlanWorkflowState::Planning {
         id: artifact.version.id,
         previous: Some(artifact),
+        draft: None,
     });
     assert!(recovery.open_plan_recovery_for_test());
     assert_eq!(recovery.begin_model_management(), None);
@@ -2715,6 +2726,7 @@ fn plan_implementation_commands_target_the_retained_submitted_version() {
                 state: PlanWorkflowState::Planning {
                     id: expected.id,
                     previous: Some(artifact.clone()),
+                    draft: None,
                 },
             });
             assert!(rendered_text(&mut app, 120, 20).contains("p plan choices"));

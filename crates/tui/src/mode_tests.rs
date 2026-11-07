@@ -409,10 +409,12 @@ fn artifact_snapshots_retain_selection_and_only_ready_is_modal() {
             PlanWorkflowState::Planning {
                 id: artifact.version.id,
                 previous: None,
+                draft: None,
             },
             PlanWorkflowState::Planning {
                 id: artifact.version.id,
                 previous: Some(artifact.clone()),
+                draft: None,
             },
             PlanWorkflowState::Published {
                 artifact: artifact.clone(),

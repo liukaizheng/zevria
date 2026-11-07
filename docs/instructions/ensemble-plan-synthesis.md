@@ -6,6 +6,8 @@ An optional host-derived baseline flag delegates foundation plus preference auth
 
 The engine enforces this stage order and reconstructs it on recovery: at least one terminal command inspection attempt, one accepted `reconcile_reports` declaration, exactly one question only if that declaration requires it, then `submit_plan`.
 
+Write the synthesized plan into engine storage with `create_plan` (use `replace: true` for an explicit restart when a working copy exists) and refine it with targeted `update_plan` edits at any stage. Use `read_plan` for the exact stored text. Draft saves do not advance the enforced stage order; `submit_plan` publishes the stored draft unchanged.
+
 After inspection, reconcile even when reports agree or no disagreements remain. Declare all material disagreements and account exactly once for every captured decision ID and accepted-but-unavailable marker from ReportsReady. A later accepted reconciliation supersedes the prior declaration.
 
 Apply a valid recorded decision without asking the same question again. Conflicting captured choices, applicable unavailable-answer markers, and remaining viable preference forks not settled by valid baseline precedence require the root question. Apply its answer, or disclose a conservative unresolved assumption if it is dismissed, unavailable, or rejected as an invalid frontend response. Do not repeat a terminal question or fabricate a selection; malformed model arguments do not count as the question attempt.

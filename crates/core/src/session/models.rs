@@ -706,6 +706,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             &mut replacement,
             latest_successful_task_snapshot(self.conversation.items()).as_ref(),
         );
+        append_plan_context(
+            &mut replacement,
+            self.plan_state()?.checkpoint_context().as_deref(),
+        );
         anyhow::ensure!(
             self.selection_fits(
                 destination,

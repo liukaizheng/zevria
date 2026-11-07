@@ -153,11 +153,28 @@ async fn confirmed_capacity_conversion_uses_large_source_not_small_destination()
             )
             .await;
         });
-        let history = vec![TranscriptItem::Message(Message::user(
-            "long input ".repeat(1000),
-        ))];
+        let plan_id = zevria_workflow::PlanId::new();
+        let history = vec![
+            TranscriptItem::Message(Message::user("long input ".repeat(1000))),
+            TranscriptItem::Plan(zevria_workflow::PlanRecord::Started { id: plan_id }),
+            TranscriptItem::Plan(zevria_workflow::PlanRecord::DraftSaved {
+                draft: zevria_workflow::PlanDraft {
+                    target: zevria_workflow::PlanVersion {
+                        id: plan_id,
+                        revision: 1,
+                    },
+                    sequence: 1,
+                    markdown:
+                        "# Exact portable plan draft\r\n\r\n## Goal\r\nPreserve these bytes.  "
+                            .into(),
+                    source_turn_id: zevria_foundation::TurnId::new(1),
+                },
+            }),
+        ];
         let settings = Arc::new(Settings::default());
         let (_directory, mut engine) = engine(a.clone(), b.clone(), history, settings.clone());
+        let plan_context =
+            Message::user(engine.plan_state().unwrap().checkpoint_context().unwrap());
         let Result::ConfirmationRequired(preview) = manage(
             &mut engine,
             Request::Select {
@@ -190,6 +207,24 @@ async fn confirmed_capacity_conversion_uses_large_source_not_small_destination()
         assert_eq!(
             settings.save_calls.load(Ordering::Relaxed),
             usize::from(scope == Scope::SessionAndDefault)
+        );
+        let checkpoint = engine
+            .conversation()
+            .items()
+            .iter()
+            .find_map(|item| match item {
+                TranscriptItem::Compaction(checkpoint) => Some(checkpoint),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            checkpoint
+                .replacement_history
+                .last()
+                .unwrap()
+                .as_borrowed()
+                .message_ref(),
+            Some(&plan_context)
         );
         server.await.unwrap();
     }

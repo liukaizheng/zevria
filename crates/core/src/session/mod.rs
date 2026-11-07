@@ -5,7 +5,7 @@
 //! connected here through Rig's shared tool server and session events.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -24,7 +24,6 @@ use tokio_util::sync::CancellationToken;
 
 use zevria_foundation::RECONCILE_REPORTS_TOOL_NAME;
 use zevria_foundation::SKILL_TOOL_NAME;
-use zevria_foundation::SUBMIT_PLAN_TOOL_NAME;
 use zevria_foundation::config::ModelContextPolicy;
 use zevria_foundation::config::ModelProfileRef;
 use zevria_foundation::question::QUESTION_TOOL_NAME;
@@ -42,6 +41,10 @@ use zevria_foundation::tool_result::ToolCallOutcome;
 use zevria_foundation::tool_result::ToolCancelled;
 use zevria_foundation::tool_result::ToolResultDetail;
 use zevria_foundation::tool_result::ToolResultMetadata;
+use zevria_foundation::{
+    CREATE_PLAN_TOOL_NAME, PLAN_AUTHORING_TOOL_NAMES, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
+    UPDATE_PLAN_TOOL_NAME,
+};
 use zevria_instructions::prompts::{
     ENSEMBLE_PLAN_SYNTHESIS_INSTRUCTIONS, ENSEMBLE_REVIEW_SYNTHESIS_INSTRUCTIONS,
 };
@@ -88,7 +91,6 @@ use zevria_workflow::ensemble_review::*;
 use zevria_workflow::plan::DirectWorkerPlan;
 use zevria_workflow::plan::MAX_PLAN_ARTIFACT_BYTES;
 use zevria_workflow::plan::PlanArtifact;
-use zevria_workflow::plan::PlanCandidate;
 use zevria_workflow::plan::PlanDecision;
 use zevria_workflow::plan::PlanHandoff;
 use zevria_workflow::plan::PlanId;
@@ -99,6 +101,7 @@ use zevria_workflow::plan::PlanVersion;
 use zevria_workflow::plan::PlanWorkflowState;
 use zevria_workflow::plan::apply_plan_record;
 use zevria_workflow::plan::replay_plan_state;
+use zevria_workflow::plan::{PlanCandidate, PlanDraft, PlanDraftScope, derived_title};
 
 #[cfg(test)]
 use zevria_workflow::ensemble::AgentUserDecisionAnswer;
@@ -137,6 +140,7 @@ pub struct SessionEngine<P> {
     skills: SkillState,
     capabilities: RootCapabilities,
     next_turn_id: u64,
+    plan_projection_warnings: HashSet<PlanId>,
 }
 
 impl<P: ModelProvider> SessionEngine<P> {
@@ -172,6 +176,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             context: ContextState::default(),
             capabilities: RootCapabilities::default(),
             next_turn_id: 1,
+            plan_projection_warnings: HashSet::new(),
         };
         engine.reestimate_context_usage();
         Ok(engine)

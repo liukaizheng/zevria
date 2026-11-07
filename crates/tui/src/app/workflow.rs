@@ -121,10 +121,34 @@ impl WorkflowState {
         }
     }
 
+    pub(crate) fn has_unsubmitted_draft(&self) -> bool {
+        matches!(
+            &self.snapshot,
+            PlanWorkflowState::Planning {
+                previous: Some(_),
+                draft: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Only a working-copy change in the same revision cycle is draft-only.
+    /// Rewinds can replace Planning with a different retained artifact or id.
+    pub(crate) fn is_draft_update(&self, snapshot: &PlanWorkflowState) -> bool {
+        matches!((&self.snapshot, snapshot), (
+            PlanWorkflowState::Planning { id: old_id, previous: old_previous, .. },
+            PlanWorkflowState::Planning { id, previous, .. },
+        ) if old_id == id && old_previous == previous)
+    }
+
     /// Identical authority does not reset local visibility or selection.
     pub(crate) fn apply_snapshot(&mut self, snapshot: PlanWorkflowState) -> bool {
         if self.snapshot == snapshot {
             return false;
+        }
+        if self.is_draft_update(&snapshot) {
+            self.snapshot = snapshot;
+            return true;
         }
         let old_version = self.submitted_artifact().map(|artifact| artifact.version);
         let new_version = match &snapshot {
@@ -346,6 +370,7 @@ mod tests {
         state.apply_snapshot(PlanWorkflowState::Planning {
             id: artifact.version.id,
             previous: Some(artifact),
+            draft: None,
         });
         assert_eq!(state.dialog(), None);
         assert!(state.open_review());

@@ -54,6 +54,9 @@ async fn production_synthesis_overlays_include_shared_inspection_once_without_ex
                 "command",
                 "reconcile_reports",
                 "question",
+                "create_plan",
+                "update_plan",
+                "read_plan",
                 "submit_plan",
             ],
             EnsembleWorkflow::Review => vec!["command", "web_search"],
@@ -243,7 +246,7 @@ async fn prompt_edits_can_become_fresh_plan_or_review_ensembles() {
                     "prompt-edit-reconciliation",
                     no_disagreement_reconciliation(),
                 )),
-                Ok(submit_plan_call(title, &markdown)),
+                Ok(create_and_submit_plan_call(title, &markdown)),
                 Ok(Message::assistant("Plan submitted.")),
             ],
             EnsembleWorkflow::Review => {
@@ -259,6 +262,9 @@ async fn prompt_edits_can_become_fresh_plan_or_review_ensembles() {
                     calls: command_calls.clone(),
                 })
                 .tool(ReconcileReportsStubTool)
+                .tool(CreatePlanStubTool)
+                .tool(UpdatePlanStubTool)
+                .tool(ReadPlanStubTool)
                 .tool(SubmitPlanStubTool)
                 .run(),
             EnsembleWorkflow::Review => ToolServer::new().run(),
@@ -661,7 +667,7 @@ async fn ensemble_edit_workflow_gating_replays_only_the_retained_plan_prefix() {
 
     assert!(matches!(
         engine.plan_state().unwrap(),
-        PlanWorkflowState::Planning { id, previous: None } if *id == plan_id
+        PlanWorkflowState::Planning { id, previous: None, .. } if *id == plan_id
     ));
     assert!(
         engine
@@ -1198,7 +1204,7 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
                 "plan-reconciliation",
                 no_disagreement_reconciliation(),
             )),
-            Ok(submit_plan_call(title, &markdown)),
+            Ok(create_and_submit_plan_call(title, &markdown)),
             Ok(Message::assistant("Plan submitted.")),
         ]);
         let requests = provider.requests.clone();
@@ -1215,6 +1221,9 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
                     calls: command_calls.clone(),
                 })
                 .tool(ReconcileReportsStubTool)
+                .tool(CreatePlanStubTool)
+                .tool(UpdatePlanStubTool)
+                .tool(ReadPlanStubTool)
                 .tool(SubmitPlanStubTool)
                 .run(),
             plan_submission_policies(),
@@ -1253,6 +1262,9 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
                         "command".to_string(),
                         RECONCILE_REPORTS_TOOL_NAME.to_string(),
                         QUESTION_TOOL_NAME.to_string(),
+                        CREATE_PLAN_TOOL_NAME.to_string(),
+                        UPDATE_PLAN_TOOL_NAME.to_string(),
+                        READ_PLAN_TOOL_NAME.to_string(),
                         SUBMIT_PLAN_TOOL_NAME.to_string()
                     ])
                 );
@@ -1273,7 +1285,7 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
             assert!(instructions.contains("authoritative user choices"));
             assert!(instructions.contains("command inspection attempt"));
             assert!(instructions.contains("accepted `reconcile_reports` declaration"));
-            assert!(instructions.contains("\"tools\":[\"web_search\",\"command\",\"reconcile_reports\",\"question\",\"submit_plan\"]"));
+            assert!(instructions.contains("\"tools\":[\"web_search\",\"command\",\"reconcile_reports\",\"question\",\"create_plan\",\"update_plan\",\"read_plan\",\"submit_plan\"]"));
             assert!(instructions.contains("reconcile even when reports agree"));
             assert!(instructions.contains("Apply a valid recorded decision without asking"));
             assert!(instructions.contains("require the root question"));
@@ -1347,7 +1359,7 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
             [
                 "command",
                 RECONCILE_REPORTS_TOOL_NAME,
-                SUBMIT_PLAN_TOOL_NAME,
+                CREATE_PLAN_TOOL_NAME,
             ]
         );
         assert!(reports_ready < intermediate_tools[0].0);
@@ -1427,7 +1439,7 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
                 json!({}),
             )]),
         )),
-        Ok(submit_plan_call(title, &markdown)),
+        Ok(create_and_submit_plan_call(title, &markdown)),
         Ok(Message::assistant(
             "Plan submitted after the user's decision.",
         )),
@@ -1449,6 +1461,9 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
             requester: questions.requester,
         })
         .tool(ReconcileReportsStubTool)
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
         .tool(SubmitPlanStubTool)
         .run();
     let engine = SessionEngine::new(
@@ -1609,6 +1624,9 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
                         "command".to_string(),
                         RECONCILE_REPORTS_TOOL_NAME.to_string(),
                         QUESTION_TOOL_NAME.to_string(),
+                        CREATE_PLAN_TOOL_NAME.to_string(),
+                        UPDATE_PLAN_TOOL_NAME.to_string(),
+                        READ_PLAN_TOOL_NAME.to_string(),
                         SUBMIT_PLAN_TOOL_NAME.to_string(),
                     ])
         }));
@@ -2085,7 +2103,7 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
             RECONCILE_REPORTS_TOOL_NAME,
             "reconciliation accepted",
         ),
-        TranscriptItem::Message(submit_plan_call(title, &markdown)),
+        TranscriptItem::Message(create_and_submit_plan_call(title, &markdown)),
         TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
             message: Message::User {
@@ -2105,6 +2123,7 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
                 detail: None,
             }],
         },
+        saved_plan_record(plan_id, &markdown),
     ];
     let items = with_explicit_fixture_confirmations(items);
     let recovery = latest_ensemble_recovery(items.iter().filter_map(|item| match item {
@@ -2155,6 +2174,9 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
                 "command".to_string(),
                 RECONCILE_REPORTS_TOOL_NAME.to_string(),
                 QUESTION_TOOL_NAME.to_string(),
+                CREATE_PLAN_TOOL_NAME.to_string(),
+                UPDATE_PLAN_TOOL_NAME.to_string(),
+                READ_PLAN_TOOL_NAME.to_string(),
                 SUBMIT_PLAN_TOOL_NAME.to_string()
             ])
         );

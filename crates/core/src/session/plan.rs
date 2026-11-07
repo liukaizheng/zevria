@@ -41,7 +41,7 @@ pub(super) fn workflow_transition_for_mode(
             SessionMode::Build,
         )
         | (PlanWorkflowState::Idle, SessionMode::Build) => Ok(None),
-        (PlanWorkflowState::Planning { id, previous }, SessionMode::Build) => {
+        (PlanWorkflowState::Planning { id, previous, .. }, SessionMode::Build) => {
             Ok(Some(PlanRecord::Resolved {
                 id: *id,
                 artifact: previous.clone(),
@@ -69,26 +69,18 @@ pub(super) enum PendingPlanGateCall {
     },
     SubmitPlan {
         allowed: bool,
-        candidate: Option<PlanCandidate>,
     },
 }
 
 /// Reconstruct every durable Ensemble Plan submission stage from the tail
 /// after the latest matching ReportsReady record. Assistant arguments establish
-/// typed candidates/declarations; correlated result metadata proves which calls
+/// typed declarations; Plan records retain working copies, and correlated result metadata proves which calls
 /// Zevria accepted and records terminal question semantics without rereading
 /// child logs or parsing worker prose.
 pub(super) fn plan_submission_gate_after_reports(
     items: &[TranscriptItem],
     run_id: &EnsembleRunId,
 ) -> Result<Option<PlanSubmissionGate>, zevria_workflow::ReportReconciliationError> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct SubmitPlanArguments {
-        title: String,
-        markdown: String,
-    }
-
     let Some((reports_index, catalog)) =
         items
             .iter()
@@ -109,6 +101,7 @@ pub(super) fn plan_submission_gate_after_reports(
     };
     let mut gate = PlanSubmissionGate::ensemble(catalog?);
     let mut pending = HashMap::<String, PendingPlanGateCall>::new();
+    let mut submit_accepted = false;
 
     for item in &items[reports_index.saturating_add(1)..] {
         if let Some(message) = item.message() {
@@ -141,26 +134,16 @@ pub(super) fn plan_submission_gate_after_reports(
                             && ensemble.requires_question()
                             && ensemble.question_disposition.is_none(),
                     }),
-                    SUBMIT_PLAN_TOOL_NAME => {
-                        let arguments = tool_arguments_for_dispatch(&call.function);
-                        let candidate = serde_json::from_str::<SubmitPlanArguments>(&arguments)
-                            .ok()
-                            .and_then(|arguments| {
-                                PlanCandidate::validate(
-                                    arguments.title,
-                                    arguments.markdown,
-                                    MAX_PLAN_ARTIFACT_BYTES,
-                                )
-                                .ok()
-                            });
-                        Some(PendingPlanGateCall::SubmitPlan {
-                            allowed: !contains_reconciliation
-                                && !contains_question
-                                && ensemble.can_submit()
-                                && gate.candidate.is_none(),
-                            candidate,
-                        })
-                    }
+                    SUBMIT_PLAN_TOOL_NAME => Some(PendingPlanGateCall::SubmitPlan {
+                        allowed: !contains_reconciliation
+                            && !contains_question
+                            && ensemble.can_submit()
+                            && !submit_accepted
+                            // Recognize only the stored-draft signature. Never
+                            // recover legacy one-shot content from arguments,
+                            // or mistake its retained revision for its candidate.
+                            && call.function.arguments_value().as_object().is_some_and(|arguments| arguments.is_empty()),
+                    }),
                     _ => None,
                 };
                 if let Some(pending_call) = pending_call {
@@ -212,17 +195,37 @@ pub(super) fn plan_submission_gate_after_reports(
                         .expect("recovered gate state")
                         .question_disposition = result.question_disposition();
                 }
-                PendingPlanGateCall::SubmitPlan {
-                    allowed: true,
-                    candidate: Some(candidate),
-                } if result.tool_name == SUBMIT_PLAN_TOOL_NAME && result.outcome.is_success() => {
-                    gate.candidate = Some(candidate);
+                PendingPlanGateCall::SubmitPlan { allowed: true }
+                    if result.tool_name == SUBMIT_PLAN_TOOL_NAME && result.outcome.is_success() =>
+                {
+                    submit_accepted = true;
                 }
                 PendingPlanGateCall::Reconciliation { .. }
                 | PendingPlanGateCall::Question { .. }
                 | PendingPlanGateCall::SubmitPlan { .. }
                 | PendingPlanGateCall::Command => {}
             }
+        }
+    }
+    if submit_accepted {
+        // DraftSaved follows ToolResults within the same atomic commit, so
+        // derive only after replaying the entire tail. The accepted-call lock
+        // prevents later authoring calls from changing this working copy.
+        if let Ok(state) = replay_plan_state(items.iter().filter_map(|item| match item {
+            TranscriptItem::Plan(record) => Some(record),
+            _ => None,
+        })) {
+            let markdown = state
+                .working_copy()
+                .map(|copy| copy.markdown().to_owned())
+                .or_else(|| match &state {
+                    PlanWorkflowState::Ready { artifact }
+                    | PlanWorkflowState::Published { artifact } => Some(artifact.markdown.clone()),
+                    _ => None,
+                });
+            gate.candidate = markdown.and_then(|markdown| {
+                PlanCandidate::from_markdown(markdown, MAX_PLAN_ARTIFACT_BYTES).ok()
+            });
         }
     }
     Ok(Some(gate))
@@ -331,32 +334,55 @@ pub(super) fn ensemble_plan_terminal_error(gate: &PlanSubmissionGate) -> Option<
 }
 
 impl<P: ModelProvider> SessionEngine<P> {
-    /// Project a newly committed artifact. Direct worker Markdown is byte-exact.
-    /// Restoration never repairs projections or reads manual edits as workflow input.
-    pub(super) fn project_plan(&self, artifact: &PlanArtifact) -> Result<(), (PathBuf, String)> {
-        let Some(root) = &self.capabilities.plans_dir else {
-            return Ok(());
-        };
+    /// A write-only convenience path, stable from the thread's first saved title.
+    pub(super) fn plan_projection_path(&self, id: PlanId, fallback_title: &str) -> Option<PathBuf> {
+        let root = self.capabilities.plans_dir.as_ref()?;
         let first_title = self
             .conversation
             .items()
             .iter()
             .find_map(|item| match item {
+                TranscriptItem::Plan(PlanRecord::DraftSaved { draft }) if draft.target.id == id => {
+                    derived_title(&draft.markdown).ok()
+                }
                 TranscriptItem::Plan(
                     PlanRecord::Ready { artifact: earlier }
                     | PlanRecord::Published {
                         artifact: earlier, ..
                     },
-                ) if earlier.version.id == artifact.version.id => Some(earlier.title.as_str()),
+                ) if earlier.version.id == id => Some(earlier.title.as_str()),
                 _ => None,
             })
-            .unwrap_or(&artifact.title);
-        let directory = root.join(self.conversation.session_id());
-        let path = directory.join(format!(
+            .unwrap_or(fallback_title);
+        Some(root.join(self.conversation.session_id()).join(format!(
             "{}-{}.md",
-            artifact.version.id,
+            id,
             slug_words(first_title).unwrap_or_else(|| "plan".to_string())
-        ));
+        )))
+    }
+
+    fn project_plan_text(
+        &self,
+        id: PlanId,
+        title: &str,
+        markdown: &str,
+        exact: bool,
+    ) -> Result<(), (PathBuf, String)> {
+        let Some(path) = self.plan_projection_path(id, title) else {
+            return Ok(());
+        };
+        let mut markdown = markdown.to_owned();
+        if !exact && !markdown.ends_with('\n') {
+            markdown.push('\n');
+        }
+        std::fs::create_dir_all(path.parent().expect("plan directory"))
+            .map_err(anyhow::Error::from)
+            .and_then(|()| zevria_foundation::atomic_file::replace(&path, markdown.as_bytes()))
+            .map_err(|error| (path, error.to_string()))
+    }
+
+    /// Restoration never repairs projections or imports manual edits.
+    pub(super) fn project_plan(&self, artifact: &PlanArtifact) -> Result<(), (PathBuf, String)> {
         let direct = self.conversation.items().iter().any(|item| {
             matches!(item,
                 TranscriptItem::Plan(PlanRecord::Published {
@@ -365,14 +391,36 @@ impl<P: ModelProvider> SessionEngine<P> {
                 }) if published.version == artifact.version
             )
         });
-        let mut markdown = artifact.markdown.clone();
-        if !direct && !markdown.ends_with('\n') {
-            markdown.push('\n');
+        self.project_plan_text(
+            artifact.version.id,
+            &artifact.title,
+            &artifact.markdown,
+            direct,
+        )
+    }
+
+    pub(super) async fn project_plan_draft(
+        &mut self,
+        draft: &PlanDraft,
+        events: &SessionEventSender,
+    ) {
+        let title = derived_title(&draft.markdown).expect("persisted draft title");
+        match self.project_plan_text(draft.target.id, title, &draft.markdown, false) {
+            Ok(()) => {
+                self.plan_projection_warnings.remove(&draft.target.id);
+            }
+            Err((path, error)) if self.plan_projection_warnings.insert(draft.target.id) => {
+                let _ = events
+                    .send(SessionEvent::PlanProjectionWarning {
+                        version: draft.target,
+                        draft: Some(draft.sequence),
+                        path,
+                        error,
+                    })
+                    .await;
+            }
+            Err(_) => {}
         }
-        let result = std::fs::create_dir_all(&directory)
-            .map_err(anyhow::Error::from)
-            .and_then(|()| zevria_foundation::atomic_file::replace(&path, markdown.as_bytes()));
-        result.map_err(|error| (path, error.to_string()))
     }
 
     // Awaited lifecycle helpers keep the engine's exclusive borrow so their
@@ -395,7 +443,7 @@ impl<P: ModelProvider> SessionEngine<P> {
 
 impl<P: ModelProvider> SessionEngine<P> {
     pub(super) fn next_plan_version(&self) -> anyhow::Result<PlanVersion> {
-        let PlanWorkflowState::Planning { id, previous } = self.plan_state()? else {
+        let PlanWorkflowState::Planning { id, previous, .. } = self.plan_state()? else {
             anyhow::bail!("Plan publication completed outside an active Planning workflow");
         };
         Ok(PlanVersion {

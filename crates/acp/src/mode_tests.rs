@@ -565,6 +565,7 @@ async fn retained_plan_snapshots_and_turn_modes_do_not_erase_explicit_selection(
         PlanWorkflowState::Planning {
             id: plan.version.id,
             previous: None,
+            draft: None,
         },
         async move |live, _commands| {
             assert_eq!(live.mode(), SessionMode::Build);
@@ -572,6 +573,7 @@ async fn retained_plan_snapshots_and_turn_modes_do_not_erase_explicit_selection(
                 PlanWorkflowState::Planning {
                     id: plan.version.id,
                     previous: Some(plan.clone()),
+                    draft: None,
                 },
                 PlanWorkflowState::Published {
                     artifact: plan.clone(),

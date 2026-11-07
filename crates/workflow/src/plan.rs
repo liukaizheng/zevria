@@ -12,6 +12,14 @@ use uuid::Uuid;
 
 use crate::{AgentRunId, EnsembleRunId, TurnId, WorkerPlanRevision};
 
+#[path = "plan_draft.rs"]
+mod draft;
+pub use draft::*;
+
+#[cfg(test)]
+#[path = "plan_draft_tests.rs"]
+mod draft_tests;
+
 /// The production ceiling for a canonical Plan artifact.
 pub const MAX_PLAN_ARTIFACT_BYTES: usize = 128 * 1024;
 
@@ -88,6 +96,8 @@ pub enum PlanWorkflowState {
     Planning {
         id: PlanId,
         previous: Option<PlanArtifact>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft: Option<PlanDraft>,
     },
     Ready {
         artifact: PlanArtifact,
@@ -187,24 +197,30 @@ impl PlanCandidate {
         markdown: String,
         max_artifact_bytes: usize,
     ) -> Result<Self, PlanValidationError> {
-        validate_title(&title)?;
-        let max_artifact_bytes = max_artifact_bytes.min(MAX_PLAN_ARTIFACT_BYTES);
-        if markdown.len() > max_artifact_bytes {
+        let candidate = Self::from_markdown(markdown, max_artifact_bytes)?;
+        if candidate.title != title {
             return Err(PlanValidationError(format!(
-                "markdown is {} bytes; the configured limit is {max_artifact_bytes} bytes",
-                markdown.len()
+                "markdown must begin with exactly `# {title}`"
             )));
         }
-        let expected_heading = format!("# {title}");
-        if markdown.lines().next() != Some(expected_heading.as_str()) {
+        Ok(candidate)
+    }
+
+    pub fn from_markdown(
+        markdown: String,
+        max_artifact_bytes: usize,
+    ) -> Result<Self, PlanValidationError> {
+        let problems = submission_problems(&markdown, max_artifact_bytes);
+        if !problems.is_empty() {
             return Err(PlanValidationError(format!(
-                "markdown must begin with exactly `{expected_heading}`"
+                "Plan submission check failed: {}. Change the stored draft with update_plan first",
+                problems.join("; ")
             )));
         }
-        for heading in ["Goal", "Decisions", "Implementation", "Validation", "Risks"] {
-            validate_nonempty_section(&markdown, heading)?;
-        }
-        Ok(Self { title, markdown })
+        Ok(Self {
+            title: derived_title(&markdown)?.to_owned(),
+            markdown,
+        })
     }
 
     pub fn title(&self) -> &str {
@@ -337,7 +353,7 @@ fn validate_nonempty_section(markdown: &str, heading: &str) -> Result<(), PlanVa
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanValidationError(String);
+pub struct PlanValidationError(pub String);
 
 impl fmt::Display for PlanValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -353,6 +369,9 @@ impl std::error::Error for PlanValidationError {}
 pub enum PlanRecord {
     Started {
         id: PlanId,
+    },
+    DraftSaved {
+        draft: PlanDraft,
     },
     Ready {
         artifact: PlanArtifact,
@@ -380,6 +399,7 @@ impl PlanRecord {
         match self {
             Self::Handoff { handoff } => Some(&handoff.prompt),
             Self::Started { .. }
+            | Self::DraftSaved { .. }
             | Self::Ready { .. }
             | Self::Published { .. }
             | Self::RevisionRequested { .. }
@@ -414,13 +434,43 @@ pub fn apply_plan_record(
             | PlanWorkflowState::Resolved { .. } => Ok(PlanWorkflowState::Planning {
                 id: *id,
                 previous: None,
+                draft: None,
             }),
             PlanWorkflowState::Planning { .. } | PlanWorkflowState::Ready { .. } => {
                 anyhow::bail!("Plan Started record does not follow Idle or Resolved state")
             }
         },
+        PlanRecord::DraftSaved { draft } => {
+            let Some(scope) = state.draft_scope(draft.source_turn_id) else {
+                anyhow::bail!(
+                    "Plan DraftSaved record does not follow Planning state or exceeds the sequence limit"
+                );
+            };
+            anyhow::ensure!(
+                draft.target == scope.target,
+                "Plan draft target does not match the active plan's next revision"
+            );
+            anyhow::ensure!(
+                draft.sequence == scope.next_sequence,
+                "Plan draft sequence does not follow the previous draft"
+            );
+            validate_draft_markdown(&draft.markdown, MAX_PLAN_ARTIFACT_BYTES)?;
+            let PlanWorkflowState::Planning { id, previous, .. } = state else {
+                unreachable!()
+            };
+            Ok(PlanWorkflowState::Planning {
+                id,
+                previous,
+                draft: Some(draft.clone()),
+            })
+        }
         PlanRecord::Ready { artifact } | PlanRecord::Published { artifact, .. } => {
-            let PlanWorkflowState::Planning { id, previous } = &state else {
+            let PlanWorkflowState::Planning {
+                id,
+                previous,
+                draft,
+            } = &state
+            else {
                 anyhow::bail!("Plan Ready record does not follow Planning state");
             };
             if *id != artifact.version.id {
@@ -446,6 +496,12 @@ pub fn apply_plan_record(
                     "direct worker publication title differs from its Markdown metadata"
                 );
             } else {
+                if let Some(draft) = draft {
+                    anyhow::ensure!(
+                        draft.target == artifact.version && draft.markdown == artifact.markdown,
+                        "Plan artifact differs from the cycle's saved draft"
+                    );
+                }
                 PlanCandidate::validate(
                     artifact.title.clone(),
                     artifact.markdown.clone(),
@@ -474,6 +530,7 @@ pub fn apply_plan_record(
             Ok(PlanWorkflowState::Planning {
                 id: artifact.version.id,
                 previous: Some(artifact.clone()),
+                draft: None,
             })
         }
         PlanRecord::Resolved {
@@ -485,6 +542,7 @@ pub fn apply_plan_record(
                 let PlanWorkflowState::Planning {
                     id: active,
                     previous,
+                    ..
                 } = state
                 else {
                     anyhow::bail!("Plan abandonment does not follow Planning state");
@@ -506,6 +564,7 @@ pub fn apply_plan_record(
                 PlanWorkflowState::Planning {
                     id: active,
                     previous: Some(previous),
+                    ..
                 } if active == id => previous,
                 PlanWorkflowState::Idle
                 | PlanWorkflowState::Planning { .. }
@@ -745,7 +804,8 @@ mod tests {
             replay_plan_state(&records).expect("valid replay"),
             PlanWorkflowState::Planning {
                 id,
-                previous: Some(first)
+                previous: Some(first),
+                draft: None,
             }
         );
     }

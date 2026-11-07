@@ -318,7 +318,7 @@ async fn captured_insert_decision_resolves_incident_without_duplicate_root_quest
             "incident-reconciliation",
             reconciliation,
         )),
-        Ok(submit_plan_call(title, &markdown)),
+        Ok(create_and_submit_plan_call(title, &markdown)),
         Ok(Message::assistant(
             "Plan submitted from the captured decision.",
         )),
@@ -341,6 +341,9 @@ async fn captured_insert_decision_resolves_incident_without_duplicate_root_quest
                 calls: command_calls.clone(),
             })
             .tool(ReconcileReportsStubTool)
+            .tool(CreatePlanStubTool)
+            .tool(UpdatePlanStubTool)
+            .tool(ReadPlanStubTool)
             .tool(SubmitPlanStubTool)
             .run(),
         plan_submission_policies(),
@@ -403,7 +406,7 @@ async fn captured_insert_decision_resolves_incident_without_duplicate_root_quest
         vec![
             "command".to_string(),
             RECONCILE_REPORTS_TOOL_NAME.to_string(),
-            SUBMIT_PLAN_TOOL_NAME.to_string(),
+            CREATE_PLAN_TOOL_NAME.to_string(),
         ]
     );
 }
@@ -910,10 +913,15 @@ async fn valid_submission_commits_ready_after_completion_and_projects_markdown()
     let title = "Refactor approval workflow";
     let markdown = valid_plan_markdown(title, "Make Plan durable.");
     let provider = ScriptedProvider::new([
-        Ok(submit_plan_call(title, &markdown)),
+        Ok(create_and_submit_plan_call(title, &markdown)),
         Ok(Message::assistant("Plan ready for approval.")),
     ]);
-    let tools = ToolServer::new().tool(SubmitPlanStubTool).run();
+    let tools = ToolServer::new()
+        .tool(CreatePlanStubTool)
+        .tool(UpdatePlanStubTool)
+        .tool(ReadPlanStubTool)
+        .tool(SubmitPlanStubTool)
+        .run();
     let (_directory, transcript) = test_transcript();
     let workspace = tempfile::tempdir().expect("workspace");
     let plans_dir = workspace.path().join("plans");
