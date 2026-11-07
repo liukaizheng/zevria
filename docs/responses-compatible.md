@@ -139,8 +139,8 @@ Offline skill operations may read incomplete `[modes]` without loading a catalog
 
 Put this document in `models.jsonc`. Comments and trailing commas are accepted;
 other JSON5/loose syntax is not. `base_url` is the exact Responses endpoint, not a
-host root or `/chat/completions`. API keys are literal values, with no environment
-lookup. Optional `compaction.url` and `input_token_count.url` can name explicit
+host root or `/chat/completions`. API keys are literal strings or explicit local
+command objects; strings have no interpolation or environment lookup. Optional `compaction.url` and `input_token_count.url` can name explicit
 auxiliary endpoints; `additional_params` can hold gateway-specific fields.
 
 ```jsonc
@@ -214,7 +214,7 @@ The same wire model ID may exist under different providers. A provider's
 catalog. Valid unreferenced providers and models are legal and remain lazy—they
 are never connected merely because they are declared.
 
-Required provider fields are `base_url`, literal `api_key`,
+Required provider fields are `base_url`, `api_key` (literal string or command object),
 `supports_websockets`, and a nonempty `models` object. Every model requires:
 
 - `context_window_tokens` greater than zero;
@@ -389,7 +389,8 @@ Configuration uses strict unknown-field rejection. Loading fails for:
 - missing required provider, model, or mode fields, or duplicate JSONC property
   names (including escaped-equivalent names);
 - malformed endpoints or schemes other than HTTP(S)/WS(S);
-- blank literal credentials;
+- blank or invalid HTTP-header literal credentials;
+- malformed credential commands, zero helper timeouts, or unrepresentable durations;
 - invalid or transport-owned session-routing header names;
 - zero context windows, input ceilings, or request timeouts;
 - input ceilings larger than their physical context windows;
@@ -408,8 +409,78 @@ keys are redacted from Rust debug output, diagnostics, and logs. Startup logs
 include one line per mode with only mode, provider key, model ID, and a
 sanitized endpoint URL; URL user-info, query, and fragment are omitted.
 
-The `models.jsonc` file itself contains literal secrets. Protect it with filesystem
-permissions and secret-management practices appropriate to the host.
+The `models.jsonc` file can contain literal secrets or commands executed with your
+privileges. Protect it with filesystem permissions and secret-management practices
+appropriate to the host.
+
+### Command-provided API keys
+
+Every provider in either protocol can obtain its key from an explicitly configured,
+non-interactive local helper instead of storing a literal secret:
+
+```jsonc
+"api_key": {
+  "command": "auth",
+  "args": ["--key"],
+  "timeout_seconds": 30,
+  "refresh_interval_seconds": 300
+}
+```
+
+- `command` is required: a nonblank program name on PATH, an absolute path, or a
+  relative path containing a separator, resolved against the directory containing
+  `models.jsonc`. `args` defaults to `[]`; its entries are passed directly, without
+  shell interpretation. Pipelines require an explicit shell, for example
+  `"command": "sh", "args": ["-c", "your pipeline"]`.
+- `timeout_seconds` defaults to 30 and must be positive. `refresh_interval_seconds`
+  defaults to 300; zero runs the helper for every authenticated HTTP request or
+  WebSocket handshake. Unknown object fields and other JSON types are rejected.
+  Strings are **always literal keys**, never commands or interpolated values.
+- The helper inherits Zevria's environment and runs with the absolute
+  `models.jsonc` directory as its working directory, independent of the workspace.
+  This also governs tools such as `npx`, `uv run`, and `python -m`. No per-helper
+  environment map is supported. Stdin is closed: helpers must not prompt or need
+  a TTY. Stdout and stderr are captured and capped at 64 KiB each. Timeout and turn
+  cancellation kill the process tree, including children that have not detached.
+- Stdout must be UTF-8. A leading BOM and surrounding whitespace are removed;
+  the remaining value must be nonempty, single-line, and a valid HTTP header
+  value. JSON with expiry metadata is not supported. Only the key goes into the
+  `Authorization` or `x-api-key` header; it never enters the request body.
+- Execution is lazy: parsing/validation, revision checks, router construction,
+  and `/model` preparation never run the helper. An HTTP request, token count,
+  compaction call, or WebSocket handshake resolves it when authentication is
+  needed. Its runtime is bounded by the helper timeout, not charged to connect,
+  request-start, token-count, or compaction deadlines; the existing Connecting
+  status remains in effect during completion authentication.
+- One in-memory cache belongs to each provider entry per loaded configuration.
+  All of its models, root/model-switch routers, and Explore/Builder children share
+  it. Concurrent callers serialize helper execution and reuse a cached key within
+  the interval. Each new/resumed session reloads the file with an empty cache;
+  separate processes, including ensemble workers, have independent caches.
+- HTTP **401 only** discards the rejected command key, refreshes once, and repeats
+  the same exchange with the same prepared body and `prompt_cache_key`. Concurrent
+  stale rejections cannot invalidate a replacement key. A second 401 is terminal;
+  403 does not refresh, so choose an interval shorter than the key's lifetime for
+  gateways that return 403 on expiry. This refresh is inside the HTTP exchange or
+  handshake: it consumes no recovery attempt or WebSocket fallback budget and
+  emits no `TurnRetrying` event. Literal-key 401s remain terminal.
+- Healthy WebSockets authenticate only at handshakes. Expiry does not close an
+  open socket, rerun the helper for incremental messages, or alter continuation
+  state. In-band WebSocket errors do not trigger this credential refresh policy.
+  Key rotation needs **no `models.jsonc` edit and no restart**.
+- A missing program, nonzero exit, timeout, excessive output, or invalid stdout
+  stops the request immediately: no network send, recovery retry, or HTTP fallback
+  for that failed authentication. Errors identify `providers.<key>.api_key`, the
+  program, exit status when available, and a bounded stderr excerpt with URLs
+  removed. They do not include args or stdout; helpers must keep stderr free of
+  secrets too. Debug output redacts literals, arguments, leases, and cached keys.
+  Generated keys stay in memory and are never persisted in transcripts or logs;
+  logs record only provider/program/timing and rejection request IDs.
+
+**Security:** configuring a helper authorizes arbitrary local execution with
+Zevria's privileges, not a sandbox. Only configure helpers you trust in your
+user-owned `models.jsonc`. On Windows, executables resolve on PATH; `.cmd` and
+`.ps1` helpers require explicit `cmd.exe /C` or `powershell -File` invocation.
 
 ## Protocol requirement
 
@@ -417,7 +488,7 @@ For an HTTP profile Zevria sends:
 
 ```text
 POST <providers.<key>.base_url>
-Authorization: Bearer <providers.<key>.api_key>
+Authorization: Bearer <resolved providers.<key>.api_key>
 Accept: text/event-stream
 ```
 

@@ -10,6 +10,7 @@ pub use anthropic::AnthropicProvider;
 mod cache_diagnostics;
 mod config;
 mod connection;
+mod credential;
 mod http;
 mod prompt_cache;
 mod protocol;
@@ -39,12 +40,13 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 pub use cache_diagnostics::CacheDiagnosticContext;
 pub use config::{
     AnthropicAuth, AnthropicEndpoint, AnthropicModelConfig, AnthropicProviderConfig,
-    InputTokenCountConfig, LiteralApiKey, ModeAssignments, ModelAssignment, ModelConfig,
-    ModelRouting, NetworkConfig, ProfileProtocol, ProviderConfig, ProviderEndpoint,
-    RemoteCompactionConfig, ResolvedModelProfile, ResponsesCompatibilityConfig,
-    ResponsesProviderConfig, deserialize_provider_catalog,
+    InputTokenCountConfig, ModeAssignments, ModelAssignment, ModelConfig, ModelRouting,
+    NetworkConfig, ProfileProtocol, ProviderConfig, ProviderEndpoint, RemoteCompactionConfig,
+    ResolvedModelProfile, ResponsesCompatibilityConfig, ResponsesProviderConfig,
+    deserialize_provider_catalog,
 };
 pub use connection::OpenAiProvider;
+pub use credential::{ApiKeyCommand, ApiKeySource, LiteralApiKey};
 pub use router::{ProviderRouter, ProviderRouterFactory};
 
 #[cfg(test)]

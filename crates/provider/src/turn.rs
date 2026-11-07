@@ -39,6 +39,7 @@ use crate::{
         ContinuationState, HttpFallback, OpenAiProvider, OpenAiTransport, is_http_upgrade_required,
         log_identifier, response_request_id, retryable_connect_error,
     },
+    credential::{authenticated, http_unauthorized, rejected_after_refresh},
     protocol::websocket_message_to_text,
     replay::ReplaySource,
     websocket_session::{OpenAiWebSocketInbound, OpenAiWebSocketTerminalCategory},
@@ -536,20 +537,27 @@ async fn count_full_input_tokens(
     );
 
     let log_url = crate::connection::redacted_url_for_logging(url.as_str());
-    let response = openai
-        .http
-        .post(url)
-        .bearer_auth(&openai.api_key)
-        .timeout(openai.input_token_count_timeout)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "OpenAI input-token request to {log_url} failed: {}",
-                error.without_url()
-            )
-        })?;
+    let response = authenticated(
+        &openai.api_key,
+        &openai.profile.provider,
+        |lease| {
+            openai
+                .http
+                .post(url.clone())
+                .bearer_auth(lease.expose())
+                .timeout(openai.input_token_count_timeout)
+                .json(&body)
+                .send()
+        },
+        http_unauthorized,
+    )
+    .await?
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "OpenAI input-token request to {log_url} failed: {}",
+            error.without_url()
+        )
+    })?;
     let status = response.status();
     if matches!(status.as_u16(), 404 | 405 | 501) {
         openai.input_token_count_unsupported = true;
@@ -558,8 +566,15 @@ async fn count_full_input_tokens(
     }
     if !status.is_success() {
         let detail = bounded_http_error_body(response).await;
-        anyhow::bail!(
+        let error = anyhow::anyhow!(
             "OpenAI input-token request to {log_url} failed with HTTP {status}: {detail}"
+        );
+        return Err(
+            if status == reqwest::StatusCode::UNAUTHORIZED && openai.api_key.is_refreshable() {
+                error.context(rejected_after_refresh(&openai.profile.provider))
+            } else {
+                error
+            },
         );
     }
     let value: serde_json::Value = response.json().await.map_err(|error| {
@@ -618,19 +633,40 @@ async fn run_remote_compaction(
         )),
     );
 
-    let response = openai
-        .maintenance_http
-        .post(url.clone())
-        .bearer_auth(&openai.api_key)
-        .timeout(openai.compaction_timeout)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| anyhow::anyhow!("OpenAI compaction request to {url} failed: {error}"))?;
+    let log_url = crate::connection::redacted_url_for_logging(url.as_str());
+    let response = authenticated(
+        &openai.api_key,
+        &openai.profile.provider,
+        |lease| {
+            openai
+                .maintenance_http
+                .post(url.clone())
+                .bearer_auth(lease.expose())
+                .timeout(openai.compaction_timeout)
+                .json(&body)
+                .send()
+        },
+        http_unauthorized,
+    )
+    .await?
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "OpenAI compaction request to {log_url} failed: {}",
+            error.without_url()
+        )
+    })?;
     let status = response.status();
     if !status.is_success() {
         let detail = bounded_http_error_body(response).await;
-        anyhow::bail!("OpenAI compaction request failed with HTTP {status}: {detail}");
+        let error =
+            anyhow::anyhow!("OpenAI compaction request failed with HTTP {status}: {detail}");
+        return Err(
+            if status == reqwest::StatusCode::UNAUTHORIZED && openai.api_key.is_refreshable() {
+                error.context(rejected_after_refresh(&openai.profile.provider))
+            } else {
+                error
+            },
+        );
     }
     let value: serde_json::Value = response
         .json()
@@ -1535,17 +1571,20 @@ async fn run_http_model_request_inner(
     let request = openai
         .http
         .post(openai.responses_url.clone())
-        .bearer_auth(&openai.api_key)
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .json(&body);
     #[cfg(feature = "cache-diagnostics")]
-    let request = {
-        let request = request.build().map_err(|error| {
-            HttpAttemptError::retryable(
-                "request_error",
-                anyhow::Error::new(error.without_url()).context("OpenAI HTTP request failed"),
-            )
-        })?;
+    {
+        let diagnostic_request = request
+            .try_clone()
+            .expect("JSON request is cloneable")
+            .build()
+            .map_err(|error| {
+                HttpAttemptError::retryable(
+                    "request_error",
+                    anyhow::Error::new(error.without_url()).context("OpenAI HTTP request failed"),
+                )
+            })?;
         crate::cache_diagnostics::transmission(
             prepared,
             openai,
@@ -1556,27 +1595,37 @@ async fn run_http_model_request_inner(
                 openai,
                 request_attempt,
             )),
-            request.body().and_then(reqwest::Body::as_bytes),
+            diagnostic_request.body().and_then(reqwest::Body::as_bytes),
         );
-        openai.http.execute(request)
-    };
-    #[cfg(not(feature = "cache-diagnostics"))]
-    let request = request.send();
-    let response = match attempt_progress
-        .request_start(policy, request_start_deadline, request)
-        .await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            return Err(HttpAttemptError::retryable(
-                "request_error",
-                anyhow::Error::new(error.without_url()).context("OpenAI HTTP request failed"),
-            ));
-        }
-        Err(error) => {
-            return Err(HttpAttemptError::retryable("request_timeout", error));
-        }
-    };
+    }
+    let response = authenticated(
+        &openai.api_key,
+        &openai.profile.provider,
+        |lease| {
+            let request = request
+                .try_clone()
+                .expect("JSON request is cloneable")
+                .bearer_auth(lease.expose())
+                .send();
+            async move {
+                match attempt_progress
+                    .request_start(policy, request_start_deadline, request)
+                    .await
+                {
+                    Ok(Ok(response)) => Ok(response),
+                    Ok(Err(error)) => Err(HttpAttemptError::retryable(
+                        "request_error",
+                        anyhow::Error::new(error.without_url())
+                            .context("OpenAI HTTP request failed"),
+                    )),
+                    Err(error) => Err(HttpAttemptError::retryable("request_timeout", error)),
+                }
+            }
+        },
+        http_unauthorized,
+    )
+    .await
+    .map_err(HttpAttemptError::terminal)??;
 
     let upstream_request_id = response_request_id(response.headers());
     let status = response.status();
@@ -1609,6 +1658,17 @@ async fn run_http_model_request_inner(
             });
         let error = CompletionError::from_http_response(status, detail)
             .with_provider_request_id(upstream_request_id.clone());
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let error = anyhow::Error::from(error);
+            return Err(HttpAttemptError::Terminal {
+                error: if openai.api_key.is_refreshable() {
+                    error.context(rejected_after_refresh(&openai.profile.provider))
+                } else {
+                    error
+                },
+                upstream_request_id,
+            });
+        }
         if size_rejection {
             return Err(HttpAttemptError::Terminal {
                 error: classify_input_size(true, error.into()),

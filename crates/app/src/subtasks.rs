@@ -497,7 +497,7 @@ mod tests {
     ) -> SubtaskSupervisorConfig {
         let provider = ProviderConfig::Responses(zevria_provider::ResponsesProviderConfig {
             base_url,
-            api_key: LiteralApiKey::new("test-key"),
+            api_key: LiteralApiKey::new("test-key").into(),
             supports_websockets: true,
             // Offline-child fixtures must not wait through the production outage window.
             network: zevria_provider::NetworkConfig {

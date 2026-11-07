@@ -65,7 +65,8 @@ In addition to ordinary model requests, Zevria can make these requests:
 Your configured API key is sent for authentication to the model, token-counting,
 and remote-compaction endpoints that are used. Separately configured supporting
 endpoints can be on different hosts. Only configure endpoints you trust with
-both your content and credentials.
+both your content and credentials. Authentication keys are sent only in the
+`Authorization` or `x-api-key` header, not in the prompt or request body.
 
 Requests also contain model settings and tool definitions, and may contain
 response IDs, prompt-cache identifiers, or a configured session-ID header. Normal
@@ -86,6 +87,20 @@ Zevria process. Commands can read files outside the workspace, access inherited
 environment variables, and contact external services. Tool output can enter the
 model context and saved history. **Zevria does not provide an operating-system
 sandbox.** Plan and Explore restrictions are not security isolation.
+
+An explicitly configured `api_key` command in your user-owned `models.jsonc`
+also runs a local program with Zevria's privileges and inherited environment. It
+runs directly without a shell, with closed stdin and the `models.jsonc` directory
+as its working directory. Only configure trusted, non-interactive helpers: they
+can read local files or contact external services, and are not sandboxed. Their
+stdout supplies the authentication key; stdout/stderr and runtime are bounded,
+and timeout/cancellation kills the process tree. Zevria holds generated keys only
+in memory, sharing a timed cache within the session and refreshing once on HTTP
+401. It never writes those keys or helper stdout to transcripts or logs. Errors
+can include a bounded, URL-scrubbed stderr excerpt, so helpers must not print
+secrets to stderr. Arguments are omitted from Debug output and errors but remain
+part of the helper configuration on disk. See
+[command-provided API keys](docs/responses-compatible.md#command-provided-api-keys).
 
 Ensemble workflows launch configured ACP agents as local subprocesses. Workers
 can receive task input, workspace information, supported image attachments, and
@@ -111,7 +126,7 @@ resume, recovery, and troubleshooting. Common locations are:
 
 | Location | Information it can contain |
 | --- | --- |
-| `~/.zevria/config.toml` and `~/.zevria/models.jsonc` | Settings, provider endpoints, and literal API credentials. `ZEVRIA_CONFIG` selects another configuration file and its sibling `models.jsonc`. |
+| `~/.zevria/config.toml` and `~/.zevria/models.jsonc` | Settings, provider endpoints, and literal API credentials or local credential-helper commands/arguments (not generated keys). `ZEVRIA_CONFIG` selects another configuration file and its sibling `models.jsonc`. |
 | `<workspace>/.zevria/sessions/` | Root conversation history, submitted images, skill activation records, tool calls and results, model settings, and provider replay data. |
 | `<workspace>/.zevria/subsessions/` and `ensemble-sessions/` | Histories of delegated subtasks and native ensemble workers. |
 | `<workspace>/.zevria/agent-runs/` and `plans/` | Ensemble evidence, worker journals and diagnostics, and generated plans. |

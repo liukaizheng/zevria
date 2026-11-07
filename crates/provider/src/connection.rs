@@ -15,6 +15,9 @@ use zevria_model::openai::ReasoningSummaryLevel;
 
 use crate::{
     config::{InputTokenCountConfig, ResolvedModelProfile, ResponsesCompatibilityConfig},
+    credential::{
+        ApiKeyCommandError, ApiKeySource, Unauthorized, authenticated, rejected_after_refresh,
+    },
     websocket_session::OpenAiWebSocketSession,
 };
 
@@ -197,10 +200,13 @@ pub(crate) struct ContinuationState {
 
 /// Everything needed to (re)establish the OpenAI Responses websocket. The base
 /// URL and headers are captured once at startup so the adapter can rebuild the
-/// connection after the server drops an idle socket.
+/// connection after the server drops an idle socket. Authentication is resolved
+/// only at handshake time; key expiry never interrupts a healthy socket.
 pub(crate) struct OpenAiWebSocketConfig {
     pub(crate) url: String,
     pub(crate) headers: HeaderMap,
+    pub(crate) api_key: ApiKeySource,
+    pub(crate) provider: String,
     pub(crate) connect_timeout: std::time::Duration,
 }
 
@@ -213,18 +219,40 @@ impl OpenAiWebSocketConfig {
     pub(crate) async fn connect(&self) -> anyhow::Result<OpenAiWebSocketConnection> {
         let log_url = redacted_url_for_logging(&self.url);
         tracing::debug!(url = %log_url, "connecting to the OpenAI websocket");
-        let mut request = self.url.as_str().into_client_request()?;
-        for (name, value) in &self.headers {
-            request.headers_mut().insert(name, value.clone());
-        }
-        let (socket, response) = tokio::time::timeout(self.connect_timeout, connect_async(request))
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "connecting to the OpenAI websocket timed out after {}s",
-                    self.connect_timeout.as_secs()
-                )
-            })??;
+        let (socket, response) = authenticated(
+            &self.api_key,
+            &self.provider,
+            |lease| async move {
+                let mut request = self.url.as_str().into_client_request()?;
+                for (name, value) in &self.headers {
+                    request.headers_mut().insert(name, value.clone());
+                }
+                let mut authorization = HeaderValue::from_str(&format!("Bearer {}", lease.expose()))?;
+                authorization.set_sensitive(true);
+                request.headers_mut().insert("authorization", authorization);
+                tokio::time::timeout(self.connect_timeout, connect_async(request))
+                    .await
+                    .map_err(|_| anyhow::anyhow!(
+                        "connecting to the OpenAI websocket timed out after {}s",
+                        self.connect_timeout.as_secs()
+                    ))?
+                    .map_err(anyhow::Error::from)
+            },
+            |result| {
+                match result.as_ref().err()?.downcast_ref::<WebSocketError>()? {
+                    WebSocketError::Http(response) if response.status() == StatusCode::UNAUTHORIZED => {
+                        Some(Unauthorized { upstream_request_id: response_request_id(response.headers()) })
+                    }
+                    _ => None,
+                }
+            },
+        ).await?.map_err(|error| {
+            if self.api_key.is_refreshable() && matches!(error.downcast_ref::<WebSocketError>(),
+                Some(WebSocketError::Http(response)) if response.status() == StatusCode::UNAUTHORIZED)
+            {
+                error.context(rejected_after_refresh(&self.provider))
+            } else { error }
+        })?;
         let websocket_connection_request_id = response_request_id(response.headers());
         tracing::info!(
             url = %log_url,
@@ -248,6 +276,9 @@ pub(crate) fn is_http_upgrade_required(error: &anyhow::Error) -> bool {
 
 /// Authentication and invalid routing/configuration are not recovery signals.
 pub(crate) fn retryable_connect_error(error: &anyhow::Error) -> bool {
+    if error.is::<ApiKeyCommandError>() {
+        return false;
+    }
     match error.downcast_ref::<WebSocketError>() {
         Some(WebSocketError::Http(response)) => response.status().is_server_error(),
         Some(WebSocketError::Url(_) | WebSocketError::HttpFormat(_)) => false,
@@ -351,7 +382,7 @@ pub struct OpenAiProvider {
     pub(crate) input_token_count_url: Option<reqwest::Url>,
     pub(crate) input_token_count_timeout: std::time::Duration,
     pub(crate) input_token_count_unsupported: bool,
-    pub(crate) api_key: String,
+    pub(crate) api_key: ApiKeySource,
     pub(crate) http: reqwest::Client,
     /// Token counting/remote compaction retain their own request deadlines.
     pub(crate) maintenance_http: reqwest::Client,
@@ -377,12 +408,7 @@ impl OpenAiProvider {
         validate_prompt_cache_key(endpoint.compatibility.send_prompt_cache_key, cache_key)?;
         let session_headers = session_routing_headers(profile, session_id)?;
         let endpoints = OpenAiResponseEndpoints::parse(&endpoint.base_url)?;
-        HeaderValue::from_str(&format!("Bearer {}", endpoint.api_key())).map_err(|_| {
-            anyhow::anyhow!(
-                "profile {} has an invalid credential header",
-                profile.profile
-            )
-        })?;
+        endpoint.api_key().validate(&profile.profile.provider)?;
         resolve_input_token_count_url(&endpoints.http, &endpoint.input_token_count)?;
         if let Some(url) = &endpoint.compaction.url {
             reqwest::Url::parse(url)?;
@@ -464,14 +490,11 @@ impl OpenAiProvider {
             .connect_timeout(recovery.connect_timeout)
             .default_headers(session_headers.clone())
             .build()?;
-        let mut websocket_headers = HeaderMap::new();
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", endpoint.api_key()))?;
-        authorization.set_sensitive(true);
-        websocket_headers.insert("authorization", authorization);
-        websocket_headers.extend(session_headers);
         let websocket_config = OpenAiWebSocketConfig {
             url: endpoints.websocket.to_string(),
-            headers: websocket_headers,
+            headers: session_headers,
+            api_key: endpoint.api_key().clone(),
+            provider: profile.profile.provider.clone(),
             connect_timeout: recovery.connect_timeout,
         };
         let websocket_log_url = redacted_url_for_logging(&websocket_config.url);
@@ -600,7 +623,7 @@ impl OpenAiProvider {
                 endpoint.input_token_count.request_timeout_seconds,
             ),
             input_token_count_unsupported: false,
-            api_key: endpoint.api_key().to_string(),
+            api_key: endpoint.api_key().clone(),
             http,
             maintenance_http,
         })

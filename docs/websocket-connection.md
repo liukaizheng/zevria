@@ -24,7 +24,8 @@ ProviderRouter
 Each `OpenAiProvider` is a fixed single-profile runtime containing:
 
 - one exact wire model ID and model-specific reasoning settings;
-- one endpoint, literal credential, compatibility policy, and additional map;
+- one endpoint, shared literal-or-command credential source, compatibility policy,
+  and additional map;
 - an optional provider-specific session-routing header, shared by its HTTP and
   WebSocket transports;
 - one 64-character SHA-256 prompt-cache key derived from length-delimited
@@ -34,7 +35,15 @@ Each `OpenAiProvider` is a fixed single-profile runtime containing:
 - the selected model's physical context window and hard input ceiling, with the
   latter used for remote-compaction trimming.
 
-Constructing a root or child router performs no network I/O. A slot initializes
+Credential sources resolve only at HTTP exchanges and WebSocket handshakes;
+healthy sockets never reacquire credentials for incremental messages. Command
+keys share a timed single-flight cache across a provider's models and root/child
+routers. A handshake 401 refreshes once inside that handshake without consuming
+recovery/fallback budget; helper failures are terminal, never fallback signals.
+The prepared body and prompt-cache key are unchanged. See
+[command-provided API keys](responses-compatible.md#command-provided-api-keys).
+
+Constructing a root or child router performs no network I/O or helper execution. A slot initializes
 on its first completion, exact input-token count, or eligible remote-compaction
 request. An unavailable Plan profile therefore does not block startup or poison
 an unrelated Build profile.

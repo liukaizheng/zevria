@@ -6,6 +6,8 @@ mod bounded_recovery;
 mod cache_diagnostic_lifecycle;
 #[path = "cache_diagnostics/probe.rs"]
 mod cache_preparation_probe;
+#[path = "credential_wire_tests.rs"]
+mod command_credentials;
 #[path = "directive_wire_tests.rs"]
 mod directive_wire;
 #[path = "inline_search_tests.rs"]
@@ -384,7 +386,7 @@ fn resolved_profile(
         protocol: ProfileProtocol::Responses {
             endpoint: ProviderEndpoint {
                 base_url,
-                api_key: LiteralApiKey::new(api_key),
+                api_key: LiteralApiKey::new(api_key).into(),
                 supports_websockets,
                 network: NetworkConfig::default(),
                 session_id_header: None,
@@ -633,6 +635,8 @@ fn test_session_with_pump(
                 connect_timeout: std::time::Duration::from_secs(1),
                 url: url.to_string(),
                 headers: HeaderMap::new(),
+                api_key: ApiKeySource::literal("test-key"),
+                provider: "test-provider".into(),
             },
             socket_generation: 0,
             websocket_connection_request_id: None,
@@ -649,7 +653,7 @@ fn test_session_with_pump(
         input_token_count_url: None,
         input_token_count_timeout: std::time::Duration::from_secs(30),
         input_token_count_unsupported: false,
-        api_key: "test-key".to_string(),
+        api_key: ApiKeySource::literal("test-key"),
         http: reqwest::Client::new(),
         maintenance_http: reqwest::Client::new(),
     }
@@ -1120,12 +1124,12 @@ async fn initial_and_replacement_handshakes_use_only_configured_headers() {
         let _ = server_released.await;
     });
 
-    let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("Bearer test-key"));
     let config = OpenAiWebSocketConfig {
         connect_timeout: std::time::Duration::from_secs(1),
         url: format!("ws://{address}"),
-        headers,
+        headers: HeaderMap::new(),
+        api_key: ApiKeySource::literal("test-key"),
+        provider: "test-provider".into(),
     };
     let connection = config
         .connect()
@@ -1495,7 +1499,7 @@ async fn configured_remote_compaction_posts_ordered_input_and_preserves_opaque_o
         ))
         .expect("remote URL"),
     );
-    openai.api_key = "remote-secret".to_string();
+    openai.api_key = ApiKeySource::literal("remote-secret");
     let parts = RequestParts {
         prompt: Message::user("compact this"),
         history: vec![Message::assistant("earlier answer")],
@@ -4580,6 +4584,8 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
                 connect_timeout: std::time::Duration::from_secs(1),
                 url: url.clone(),
                 headers: HeaderMap::new(),
+                api_key: ApiKeySource::literal("test-key"),
+                provider: "test-provider".into(),
             },
             socket_generation: 0,
             websocket_connection_request_id: None,
@@ -4599,7 +4605,7 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         input_token_count_url: None,
         input_token_count_timeout: std::time::Duration::from_secs(30),
         input_token_count_unsupported: false,
-        api_key: "test-key".to_string(),
+        api_key: ApiKeySource::literal("test-key"),
         http: reqwest::Client::new(),
         maintenance_http: reqwest::Client::new(),
     };

@@ -1,4 +1,4 @@
-//! Bounded dependency probes; no configuration, terminal, or global environment changes.
+//! Bounded subprocess execution; no terminal or global environment changes.
 use std::{
     process::{Output, Stdio},
     time::Duration,
@@ -49,6 +49,9 @@ impl Drop for ProcessTree {
     }
 }
 
+/// Run a non-interactive process with bounded runtime and stdout/stderr capture.
+/// Each stream is capped independently. The whole process tree is killed on
+/// completion, timeout, output overflow, or cancellation of this future.
 pub async fn bounded_output(
     command: &mut Command,
     timeout: Duration,
@@ -65,23 +68,27 @@ pub async fn bounded_output(
         let read = async |stream: tokio::process::ChildStdout| {
             let mut bytes = Vec::new();
             stream.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
-            Ok::<_, std::io::Error>(bytes)
+            anyhow::ensure!(
+                bytes.len() <= cap,
+                "process exceeded its {cap}-byte output limit"
+            );
+            Ok::<_, anyhow::Error>(bytes)
         };
         let err = async {
             let mut bytes = Vec::new();
             stderr.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
-            Ok::<_, std::io::Error>(bytes)
+            anyhow::ensure!(
+                bytes.len() <= cap,
+                "process exceeded its {cap}-byte output limit"
+            );
+            Ok::<_, anyhow::Error>(bytes)
         };
         let wait = async {
             let status = child.wait().await;
             tree.kill();
-            status
+            status.map_err(anyhow::Error::from)
         };
         let (status, stdout, stderr) = tokio::try_join!(wait, read(stdout), err)?;
-        anyhow::ensure!(
-            stdout.len() <= cap && stderr.len() <= cap,
-            "dependency probe exceeded its {cap}-byte output limit"
-        );
         Ok(Output {
             status,
             stdout,
@@ -93,10 +100,7 @@ pub async fn bounded_output(
         Err(_) => {
             tree.kill();
             let _ = child.kill().await;
-            anyhow::bail!(
-                "dependency probe timed out after {} seconds",
-                timeout.as_secs()
-            )
+            anyhow::bail!("process timed out after {} seconds", timeout.as_secs())
         }
     }
 }

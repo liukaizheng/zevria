@@ -3,6 +3,10 @@
 use crate::{
     AnthropicAuth, AnthropicEndpoint, AnthropicModelConfig, ProfileProtocol, ResolvedModelProfile,
     connection::{resolve_input_token_count_url_with_suffix, session_routing_headers},
+    credential::{
+        ApiKeyLease, authenticated, http_unauthorized, rejected_after_refresh,
+        response_unauthorized,
+    },
     http::{bounded_http_error_body, retry_hint},
     recovery::{
         AttemptFailure, AttemptProgress, Decision, ProgressClock, Recovery, RecoveryPolicy,
@@ -71,21 +75,6 @@ impl AnthropicProvider {
             "/count_tokens",
         )?;
         let mut headers = session_routing_headers(profile, session_id)?;
-        let (name, auth) = match endpoint.auth {
-            AnthropicAuth::ApiKey => ("x-api-key", endpoint.api_key.expose().to_owned()),
-            AnthropicAuth::Bearer => (
-                "authorization",
-                format!("Bearer {}", endpoint.api_key.expose()),
-            ),
-        };
-        let mut auth = HeaderValue::from_str(&auth).map_err(|_| {
-            anyhow::anyhow!(
-                "profile {} has an invalid credential header",
-                profile.profile
-            )
-        })?;
-        auth.set_sensitive(true);
-        headers.insert(name, auth);
         headers.insert("anthropic-version", HeaderValue::from_static("2026-10-21"));
         headers.insert("content-type", HeaderValue::from_static("application/json"));
         headers.insert("accept", HeaderValue::from_static("text/event-stream"));
@@ -156,6 +145,20 @@ impl AnthropicProvider {
             },
         )
     }
+    fn authenticated_request(
+        &self,
+        url: reqwest::Url,
+        lease: &ApiKeyLease,
+    ) -> reqwest::RequestBuilder {
+        let (name, value) = match self.endpoint.auth {
+            AnthropicAuth::ApiKey => ("x-api-key", lease.expose().to_owned()),
+            AnthropicAuth::Bearer => ("authorization", format!("Bearer {}", lease.expose())),
+        };
+        let mut value = HeaderValue::from_str(&value).expect("validated API key lease");
+        value.set_sensitive(true);
+        self.http.post(url).header(name, value)
+    }
+
     async fn attempt(
         &self,
         prepared: &PreparedRequest,
@@ -163,33 +166,53 @@ impl AnthropicProvider {
         request_start_deadline: Duration,
     ) -> Result<(FinishedMessage, Option<String>), (ApiError, Option<String>)> {
         progress.status(NetworkStatus::Connecting).await;
-        let response = progress
-            .request_start(
-                &self.recovery,
-                request_start_deadline,
-                self.http.post(self.url.clone()).json(&prepared.body).send(),
+        let response = authenticated(
+            &self.endpoint.api_key,
+            &self.profile.provider,
+            |lease| async move {
+                progress
+                    .request_start(
+                        &self.recovery,
+                        request_start_deadline,
+                        self.authenticated_request(self.url.clone(), &lease)
+                            .json(&prepared.body)
+                            .send(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        (
+                            ApiError::with_source(
+                                ErrorKind::Retryable("request_start_timeout"),
+                                "Anthropic request-start deadline expired before response headers",
+                                error,
+                            ),
+                            None,
+                        )
+                    })?
+                    .map_err(|error| {
+                        (
+                            ApiError::with_source(
+                                ErrorKind::Retryable("transport"),
+                                "Anthropic HTTP request failed",
+                                error.without_url(),
+                            ),
+                            None,
+                        )
+                    })
+            },
+            http_unauthorized,
+        )
+        .await
+        .map_err(|error| {
+            (
+                ApiError::with_source(
+                    ErrorKind::Terminal,
+                    "Anthropic credential helper failed",
+                    error,
+                ),
+                None,
             )
-            .await
-            .map_err(|error| {
-                (
-                    ApiError::with_source(
-                        ErrorKind::Retryable("request_start_timeout"),
-                        "Anthropic request-start deadline expired before response headers",
-                        error,
-                    ),
-                    None,
-                )
-            })?
-            .map_err(|e| {
-                (
-                    ApiError::with_source(
-                        ErrorKind::Retryable("transport"),
-                        "Anthropic HTTP request failed",
-                        e.without_url(),
-                    ),
-                    None,
-                )
-            })?;
+        })??;
         let request_id = response
             .headers()
             .get("request-id")
@@ -205,16 +228,25 @@ impl AnthropicProvider {
             )
             .await
             .unwrap_or_else(|_| "<error body timed out>".into());
-            return Err((
-                zevria_anthropic::error::classify(
-                    status,
-                    &detail,
-                    None,
-                    hint.delay,
-                    hint.should_retry,
-                ),
-                request_id,
-            ));
+            let mut error = zevria_anthropic::error::classify(
+                status,
+                &detail,
+                None,
+                hint.delay,
+                hint.should_retry,
+            );
+            if status == 401 {
+                error.kind = ErrorKind::Terminal;
+                error.retry_after = None;
+                if self.endpoint.api_key.is_refreshable() {
+                    error.message = format!(
+                        "{}: {}",
+                        rejected_after_refresh(&self.profile.provider),
+                        error.message
+                    );
+                }
+            }
+            return Err((error, request_id));
         }
         progress.status(NetworkStatus::AwaitingResponse).await;
         let mut events = response.bytes_stream().eventsource();
@@ -425,49 +457,76 @@ impl ModelProvider for AnthropicProvider {
                 return Ok(InputTokenCount::Unsupported);
             };
             let body = body::count_tokens_body(&self.prepare(&request)?.body);
-            tokio::time::timeout(
-                Duration::from_secs(self.endpoint.input_token_count.request_timeout_seconds),
-                async {
-                    let response = self
-                        .http
-                        .post(url)
+            let timeout =
+                Duration::from_secs(self.endpoint.input_token_count.request_timeout_seconds);
+            let (response, deadline) = authenticated(
+                &self.endpoint.api_key,
+                &self.profile.provider,
+                |lease| {
+                    let request = self
+                        .authenticated_request(url.clone(), &lease)
                         .header("accept", "application/json")
                         .json(&body)
-                        .send()
-                        .await
-                        .map_err(reqwest::Error::without_url)?;
-                    if matches!(response.status().as_u16(), 404 | 405 | 501) {
-                        self.count_unsupported = true;
-                        return Ok(InputTokenCount::Unsupported);
+                        .send();
+                    async move {
+                        let deadline = tokio::time::Instant::now() + timeout;
+                        let response = tokio::time::timeout_at(deadline, request)
+                            .await
+                            .map_err(|_| {
+                                anyhow::anyhow!("Anthropic count_tokens request timed out")
+                            })?
+                            .map_err(reqwest::Error::without_url)?;
+                        Ok::<_, anyhow::Error>((response, deadline))
                     }
-                    if !response.status().is_success() {
-                        let status = response.status().as_u16();
-                        let request_id = response
-                            .headers()
-                            .get("request-id")
-                            .and_then(|id| id.to_str().ok())
-                            .map(str::to_owned);
-                        let detail = bounded_http_error_body(response).await;
-                        let error = zevria_anthropic::error::classify(
-                            status,
-                            &detail,
-                            request_id.as_deref(),
-                            None,
-                            None,
-                        );
-                        if error.kind == ErrorKind::InputTooLarge {
-                            return Err(ModelInputTooLarge::new(error).into());
-                        }
-                        return Err(error.into());
-                    }
-                    let value: Value = response.json().await?;
-                    Ok(InputTokenCount::Exact(
-                        value["input_tokens"].as_u64().ok_or_else(|| {
-                            anyhow::anyhow!("Anthropic count_tokens response omitted input_tokens")
-                        })?,
-                    ))
+                },
+                |result| {
+                    result
+                        .as_ref()
+                        .ok()
+                        .and_then(|(response, _)| response_unauthorized(response))
                 },
             )
+            .await??;
+            tokio::time::timeout_at(deadline, async {
+                if matches!(response.status().as_u16(), 404 | 405 | 501) {
+                    self.count_unsupported = true;
+                    return Ok(InputTokenCount::Unsupported);
+                }
+                if !response.status().is_success() {
+                    let status = response.status().as_u16();
+                    let request_id = response
+                        .headers()
+                        .get("request-id")
+                        .and_then(|id| id.to_str().ok())
+                        .map(str::to_owned);
+                    let detail = bounded_http_error_body(response).await;
+                    let mut error = zevria_anthropic::error::classify(
+                        status,
+                        &detail,
+                        request_id.as_deref(),
+                        None,
+                        None,
+                    );
+                    if status == 401 && self.endpoint.api_key.is_refreshable() {
+                        error.kind = ErrorKind::Terminal;
+                        error.message = format!(
+                            "{}: {}",
+                            rejected_after_refresh(&self.profile.provider),
+                            error.message
+                        );
+                    }
+                    if error.kind == ErrorKind::InputTooLarge {
+                        return Err(ModelInputTooLarge::new(error).into());
+                    }
+                    return Err(error.into());
+                }
+                let value: Value = response.json().await?;
+                Ok(InputTokenCount::Exact(
+                    value["input_tokens"].as_u64().ok_or_else(|| {
+                        anyhow::anyhow!("Anthropic count_tokens response omitted input_tokens")
+                    })?,
+                ))
+            })
             .await
             .map_err(|_| anyhow::anyhow!("Anthropic count_tokens request timed out"))?
         })

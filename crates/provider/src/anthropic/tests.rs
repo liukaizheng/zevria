@@ -1,4 +1,6 @@
 use super::*;
+#[path = "credential_tests.rs"]
+mod command_credentials;
 #[path = "integration_tests.rs"]
 mod integration;
 #[path = "outage_tests.rs"]

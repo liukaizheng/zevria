@@ -1,6 +1,8 @@
 use super::*;
 #[path = "anthropic_config_tests.rs"]
 mod anthropic;
+#[path = "credential_config_tests.rs"]
+mod command_credentials;
 use std::sync::{Mutex, OnceLock};
 
 const REQUIRED_CONFIG: &str = r#"[modes]
@@ -516,6 +518,8 @@ fn first_run_creates_both_private_skeletons_and_missing_models_alone_stops() {
             .contains(&models_path.display().to_string())
     );
     assert!(DEFAULT_MODELS.contains("replace-with-api-key"));
+    assert!(DEFAULT_MODELS.contains(r#""command": "auth", "args": ["--key"]"#));
+    assert!(DEFAULT_MODELS.contains(r#""timeout_seconds": 30, "refresh_interval_seconds": 300"#));
     assert!(DEFAULT_MODELS.contains("x-opencode-session"));
     assert!(DEFAULT_MODELS.contains("\"reasoning_levels\""));
     std::fs::write(

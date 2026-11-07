@@ -1,6 +1,8 @@
 //! Strict provider-owned Responses and Anthropic Messages configuration.
 
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, path::Path};
+
+use crate::credential::ApiKeySource;
 
 use reqwest::header::HeaderName;
 use serde::{Deserialize, Serialize};
@@ -10,31 +12,6 @@ use zevria_foundation::{ModelRole, ReasoningLevel};
 use zevria_model::openai::ReasoningSummaryLevel;
 use zevria_responses::WebSearchConfig;
 
-/// Literal API credential from the configuration file.
-///
-/// Zevria deliberately performs no environment interpolation or provider-key
-/// lookup. Debug output is always redacted; only request construction inside
-/// this crate can access the underlying value.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LiteralApiKey(String);
-
-impl LiteralApiKey {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for LiteralApiKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("<redacted>")
-    }
-}
-
 /// One Responses-compatible endpoint and its complete model catalog.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,7 +19,7 @@ pub struct ResponsesProviderConfig {
     /// Exact full Responses endpoint. HTTP and WebSocket pairing changes only
     /// this URL's scheme.
     pub base_url: String,
-    pub api_key: LiteralApiKey,
+    pub api_key: ApiKeySource,
     /// Prefer WebSocket before sticky HTTP fallback.
     pub supports_websockets: bool,
     /// Completion transport deadlines and the shared recovery budget.
@@ -93,10 +70,7 @@ impl fmt::Debug for ResponsesProviderConfig {
 impl ResponsesProviderConfig {
     fn validate(&self, provider: &str, auto_trigger_percent: u64) -> anyhow::Result<()> {
         validate_responses_url(&self.base_url, &format!("providers.{provider}.base_url"))?;
-        validate_nonblank(
-            self.api_key.expose(),
-            &format!("providers.{provider}.api_key"),
-        )?;
+        self.api_key.validate(provider)?;
         if self.models.is_empty() {
             anyhow::bail!("providers.{provider}.models must define at least one model");
         }
@@ -177,6 +151,15 @@ impl From<ResponsesProviderConfig> for ProviderConfig {
     }
 }
 impl ProviderConfig {
+    /// Bind a freshly loaded catalog before any routing clones are made.
+    pub fn set_config_directory(&mut self, directory: &Path) {
+        let source = match self {
+            Self::Responses(config) => &mut config.api_key,
+            Self::Anthropic(config) => &mut config.api_key,
+        };
+        *source = source.with_config_directory(directory);
+    }
+
     fn validate(&self, provider: &str, percent: u64) -> anyhow::Result<()> {
         match self {
             Self::Responses(config) => config.validate(provider, percent),
@@ -653,7 +636,7 @@ pub(crate) fn parse_session_id_header(
 #[derive(Clone)]
 pub struct ProviderEndpoint {
     pub base_url: String,
-    pub(crate) api_key: LiteralApiKey,
+    pub(crate) api_key: ApiKeySource,
     pub supports_websockets: bool,
     pub network: NetworkConfig,
     /// Optional provider-specific header carrying the persistent conversation ID.
@@ -666,8 +649,8 @@ pub struct ProviderEndpoint {
 }
 
 impl ProviderEndpoint {
-    pub(crate) fn api_key(&self) -> &str {
-        self.api_key.expose()
+    pub(crate) fn api_key(&self) -> &ApiKeySource {
+        &self.api_key
     }
 
     pub fn redacted_base_url(&self) -> String {
@@ -895,7 +878,7 @@ mod tests {
     fn provider(base_url: &str, key: &str) -> ResponsesProviderConfig {
         ResponsesProviderConfig {
             base_url: base_url.to_string(),
-            api_key: LiteralApiKey::new(key),
+            api_key: ApiKeySource::literal(key),
             supports_websockets: true,
             network: Default::default(),
             session_id_header: None,

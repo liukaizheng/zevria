@@ -1290,7 +1290,7 @@ the catalog is never rewritten by model management. `toml_edit` preserves assign
 comments and value decoration in both inline and ordinary TOML tables.
 
 Provider keys and model IDs are exact, case-sensitive durable identities. A
-provider owns endpoint, literal credential, transport capability,
+provider owns endpoint, literal-or-command credential source, transport capability,
 compatibility flags, exact-count policy, additional request parameters, and a
 model catalog. Responses can configure remote compaction. A model owns its physical
 context window, optional hard input-cost ceiling, retained-user budget and supported
@@ -1301,6 +1301,20 @@ models configure required `max_output_tokens`, `thinking_display` and optional
 and model-level `reasoning_level` are obsolete and rejected, without migration.
 There is no built-in provider catalog, field-wise provider merge, model alias,
 environment credential override, or legacy `[openai]` migration.
+
+Provider `credential.rs` owns strict credential parsing, redacted handles, and a
+single-flight `Arc`/async-mutex cache per loaded provider entry. App parsing binds
+helpers to the absolute `models.jsonc` directory before routing clones are made.
+Validation, routing, `/model` preparation, and revisions never execute helpers.
+Keys are resolved only for authenticated HTTP exchanges and WebSocket handshakes,
+not socket messages. One 401 refresh repeats the same prepared body within that
+exchange, outside transport deadlines and recovery accounting; helper failures
+are terminal, including during preconnect. All models and root/child factories
+share the entry's cache, while new/resumed sessions reload empty caches and
+ensemble subprocesses own independent caches. No credential or refresh state
+changes the cacheable prompt prefix, session/provider/model cache key, or healthy
+WebSocket continuation. See the
+[credential contract](responses-compatible.md#command-provided-api-keys).
 
 `ModelRouting` resolves all five required assignments (including `builder`, with
 no Build/Explore fallback; existing configurations must migrate) and the complete selectable catalog

@@ -14,7 +14,7 @@ pub enum AnthropicAuth {
 #[serde(deny_unknown_fields)]
 pub struct AnthropicProviderConfig {
     pub base_url: String,
-    pub api_key: LiteralApiKey,
+    pub api_key: ApiKeySource,
     #[serde(default)]
     pub auth: AnthropicAuth,
     #[serde(default)]
@@ -90,7 +90,7 @@ impl AnthropicModelConfig {
 #[derive(Clone)]
 pub struct AnthropicEndpoint {
     pub base_url: String,
-    pub(crate) api_key: LiteralApiKey,
+    pub(crate) api_key: ApiKeySource,
     pub auth: AnthropicAuth,
     pub network: NetworkConfig,
     pub session_id_header: Option<String>,
@@ -107,10 +107,7 @@ impl AnthropicEndpoint {
             matches!(url.scheme(), "http" | "https"),
             "providers.{provider}.base_url must use http or https"
         );
-        validate_nonblank(
-            self.api_key.expose(),
-            &format!("providers.{provider}.api_key"),
-        )?;
+        self.api_key.validate(provider)?;
         parse_session_id_header(provider, self.session_id_header.as_deref())?;
         self.network.validate(provider)?;
         self.input_token_count.validate(provider)?;

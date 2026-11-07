@@ -119,8 +119,10 @@ pub(crate) const DEFAULT_MODELS: &str = r#"// Zevria model configuration. JSON w
   //     "protocol": "openai.responses", // optional; this is the default
   //     // Exact full Responses endpoint; HTTP/WebSocket pairing changes only scheme.
   //     "base_url": "https://api.openai.com/v1/responses",
-  //     // Literal credential only; no environment interpolation.
+  //     // Literal string (no interpolation), or an explicit non-interactive helper:
   //     "api_key": "replace-with-api-key",
+  //     // "api_key": { "command": "auth", "args": ["--key"],
+  //     //   "timeout_seconds": 30, "refresh_interval_seconds": 300 },
   //     "supports_websockets": true,
   //     // Optional provider-specific routing header (OpenCode Go example):
   //     // "session_id_header": "x-opencode-session",
@@ -409,7 +411,16 @@ fn parse_models(text: &str, path: &Path) -> anyhow::Result<ModelsFile> {
         }
         let value: serde_json::Value =
             jsonc_parser::parse_to_serde_value(text, &MODELS_PARSE_OPTIONS)?;
-        Ok(serde_json::from_value(value)?)
+        let mut models: ModelsFile = serde_json::from_value(value)?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let directory = std::path::absolute(parent)?;
+        for provider in models.providers.values_mut() {
+            provider.set_config_directory(&directory);
+        }
+        Ok(models)
     })()
     .with_context(|| format!("failed to parse models configuration at {}", path.display()))
 }

@@ -210,8 +210,12 @@ Important configuration details:
 - `base_url` is the **full endpoint**, such as `/v1/responses` or `/v1/messages`,
   not a host root.
 - A model's object key is its exact upstream model ID, not a local alias.
-- API keys are literal values in `models.jsonc`; there is no environment-variable
-  interpolation or API-key environment override. Keep this file private.
+- `api_key` in `models.jsonc` accepts a literal string or an explicit local helper
+  such as `{ "command": "auth", "args": ["--key"], "refresh_interval_seconds": 300 }`.
+  Helpers run lazily without a shell; their trimmed stdout supplies the key.
+  Short-lived keys rotate without a restart, with one refresh on HTTP 401.
+  There is no string interpolation or API-key environment override. Keep this
+  file private and configure only non-interactive helpers you trust.
 - JSONC supports comments and trailing commas. Provider compatibility flags,
   WebSocket support, token counting, and hosted search are endpoint-specific.
 - `ZEVRIA_CONFIG=/path/to/config.toml` selects that TOML file **and the sibling
@@ -221,6 +225,22 @@ Important configuration details:
   call-count cap. Repeated tool continuations can increase runtime and cost until
   completion, cancellation, or another failure; transport retries and context
   capacity remain independently bounded.
+
+For example, replace a provider's literal `api_key` with:
+
+```jsonc
+"api_key": {
+  "command": "auth",
+  "args": ["--key"],
+  "timeout_seconds": 30,
+  "refresh_interval_seconds": 300
+}
+```
+
+This works for both protocols. The helper inherits Zevria's environment and runs
+from the `models.jsonc` directory, not the workspace. See
+[command-provided API keys](docs/responses-compatible.md#command-provided-api-keys)
+for caching, failure handling, and platform details.
 
 See [Responses-compatible providers](docs/responses-compatible.md) or
 [native Claude / Anthropic Messages](docs/anthropic-messages.md) for protocol

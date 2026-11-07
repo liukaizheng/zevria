@@ -139,10 +139,23 @@ builder = { provider = "primary", model = "your-model-id", reasoning_level = "hi
 - `protocol` 可以是 `openai.responses`（省略时的默认值）或 `anthropic.messages`；配置结构和兼容性标志按协议严格验证。
 - `base_url` 必须是**完整的端点**（如 `/v1/responses` 或 `/v1/messages`），而不是主机根地址。
 - 模型对象的键必须是上游的确切模型 ID，不是本地别名。
-- API 密钥以字面值保存在 `models.jsonc` 中；不支持环境变量插值或通过 API 密钥环境变量覆盖。请妥善保护此文件。
+- `models.jsonc` 中的 `api_key` 支持字面值字符串，或显式配置的本地辅助程序，例如 `{ "command": "auth", "args": ["--key"], "refresh_interval_seconds": 300 }`。辅助程序按需运行，不经过 shell，其去除首尾空白后的标准输出就是密钥。短期密钥可自动轮换，无需重启；HTTP 401 会触发一次刷新。不支持字符串插值或 API 密钥环境变量覆盖。请妥善保护此文件，只配置可信且无需交互的辅助程序。
 - JSONC 支持注释和尾随逗号。Provider 兼容性标志、WebSocket 支持、令牌计数和托管搜索均取决于具体端点。
 - `ZEVRIA_CONFIG=/path/to/config.toml` 会选择该 TOML 文件**以及同目录下的 `/path/to/models.jsonc`**，不会更改工作区或技能目录。
 - `session.max_model_calls` 已移除。请从现有配置中删除；严格解析会将它视为未知字段并拒绝加载。没有替代的调用次数上限。在任务完成、取消或发生其他错误之前，反复调用工具可能增加运行时间和费用；传输重试与上下文容量仍分别受限。
+
+例如，可将 provider 的字面值 `api_key` 替换为：
+
+```jsonc
+"api_key": {
+  "command": "auth",
+  "args": ["--key"],
+  "timeout_seconds": 30,
+  "refresh_interval_seconds": 300
+}
+```
+
+两种协议均支持此形式。辅助程序继承 Zevria 的环境，工作目录是 `models.jsonc` 所在目录，而不是项目工作区。缓存、失败处理和平台细节请参阅[命令提供的 API 密钥](docs/responses-compatible.md#command-provided-api-keys)。
 
 完整配置约定、网关兼容性、thinking 和缓存设置，请参阅 [Responses 兼容 Provider](docs/responses-compatible.md) 或[原生 Claude / Anthropic Messages](docs/anthropic-messages.md)。生成的 Claude 示例启用了拒绝回退；此 provider 与通过 ACP 运行 Claude Code 的 `claude` ensemble agent 相互独立。配置完成后，请在项目工作区中再次运行 `zevria`。
 

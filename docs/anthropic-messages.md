@@ -69,7 +69,11 @@ strict: Responses-only `supports_websockets`, `compaction`, `web_search`, and
 `context_window_tokens - max_output_tokens`; an explicit limit cannot exceed that
 ceiling. Context, retained-user budget, reasoning-set uniqueness, network and
 session-header validators also apply. `none` and `minimal` are rejected for
-Messages models. Credentials are literal; no environment interpolation occurs.
+Messages models. Credentials accept a literal string (without interpolation) or
+an explicit non-interactive `api_key` command object. The shared
+[command-provided API key contract](responses-compatible.md#command-provided-api-keys)
+also applies to Messages, including lazy execution, timed caching, and one
+refresh-and-repeat on HTTP 401 without a recovery attempt or restart.
 `base_url` must be a full HTTP(S) Messages endpoint, not just a host root.
 
 Gateway-specific `additional_params` are allowed except Zevria-owned fields:
@@ -85,7 +89,9 @@ The adapter uses raw HTTP, not an SDK or a Responses translation gateway:
 - counting: `POST {base_url}/count_tokens`, unless explicitly overridden;
 - headers: `anthropic-version: 2026-10-21`, `content-type: application/json`,
   `accept: text/event-stream`, and `x-api-key` by default;
-- `auth: "bearer"` instead sends `authorization: Bearer <api_key>`;
+- `auth: "bearer"` instead sends `authorization: Bearer <resolved api_key>`;
+  both modes apply a sensitive auth header on each exchange, not in client
+  defaults, so completion and `count_tokens` requests observe rotated keys;
 - an optional configured session header carries the persistent conversation ID;
   authentication and transport headers cannot be overridden through this option;
 - `anthropic-beta` is the deduplicated union of `beta_headers` and implied betas.
