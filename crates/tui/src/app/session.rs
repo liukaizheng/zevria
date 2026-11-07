@@ -121,7 +121,6 @@ struct NetworkNotice {
     status: zevria_session_api::event::NetworkStatus,
     transport: zevria_session_api::event::NetworkTransport,
     attempt: usize,
-    max_attempts: usize,
     received_at: Instant,
 }
 
@@ -142,7 +141,7 @@ pub(crate) enum TurnTail {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RetryNotice {
     pub(crate) attempt: usize,
-    pub(crate) max_attempts: usize,
+    pub(crate) retrying_for: Duration,
     pub(crate) error: String,
     pub(crate) retry_after: Duration,
     pub(crate) received_at: Instant,
@@ -156,6 +155,13 @@ pub(crate) enum RetryCountdown {
 }
 
 impl RetryNotice {
+    pub(crate) fn recovery_remaining(&self, now: Instant) -> Duration {
+        // retrying_for is sampled at the *next start*, not at receipt.
+        self.retrying_for
+            .saturating_add(self.retry_after)
+            .saturating_sub(now.saturating_duration_since(self.received_at))
+    }
+
     pub(crate) fn countdown(&self, now: Instant) -> RetryCountdown {
         if self.retry_after.is_zero() {
             return RetryCountdown::Immediate;
@@ -768,7 +774,6 @@ impl SessionState {
         id: TurnId,
         call: usize,
         attempt: usize,
-        max_attempts: usize,
         transport: zevria_session_api::event::NetworkTransport,
         status: zevria_session_api::event::NetworkStatus,
     ) -> bool {
@@ -791,7 +796,6 @@ impl SessionState {
                 status,
                 transport,
                 attempt,
-                max_attempts,
                 received_at: self.observed_at,
             })
         };
@@ -818,7 +822,11 @@ impl SessionState {
             {
                 return None;
             }
-            NetworkStatus::Quiet { idle_for, retry_in } => {
+            NetworkStatus::Quiet {
+                idle_for,
+                retry_in,
+                will_retry,
+            } => {
                 let elapsed = self
                     .observed_at
                     .saturating_duration_since(notice.received_at);
@@ -826,8 +834,8 @@ impl SessionState {
                 (
                     format!(
                         "No response progress for {}s · {} in {}m {}s",
-                        (idle_for + elapsed).as_secs(),
-                        if notice.attempt < notice.max_attempts {
+                        idle_for.saturating_add(elapsed).as_secs(),
+                        if will_retry {
                             "automatic retry"
                         } else {
                             "request will stop"
@@ -843,13 +851,7 @@ impl SessionState {
             NetworkStatus::AwaitingResponse => (format!("Awaiting {transport} response"), false),
             NetworkStatus::ProgressResumed => return None,
         };
-        Some((
-            format!(
-                "{message} · attempt {}/{}",
-                notice.attempt, notice.max_attempts
-            ),
-            warning,
-        ))
+        Some((format!("{message} · attempt {}", notice.attempt), warning))
     }
 
     /// Snapshots may repeat or arrive after a non-fencing network warning.
@@ -866,8 +868,8 @@ impl SessionState {
         &mut self,
         id: TurnId,
         attempt: usize,
-        max_attempts: usize,
         retry_after: Duration,
+        retrying_for: Duration,
         error: String,
     ) -> bool {
         if let SessionActivity::Active(active) = &mut self.activity {
@@ -879,9 +881,9 @@ impl SessionState {
             id,
             TurnTail::Retrying(RetryNotice {
                 attempt,
-                max_attempts,
                 error,
                 retry_after,
+                retrying_for,
                 received_at: self.observed_at,
             }),
         )
@@ -1189,8 +1191,8 @@ mod tests {
         assert!(state.retry(
             TURN,
             1,
-            3,
             Duration::from_millis(500),
+            Duration::from_secs(280),
             "offline".to_string()
         ));
         assert!(state.progress(TURN));
@@ -1232,7 +1234,13 @@ mod tests {
         state.observe_clock(start + Duration::from_secs(6));
         assert!(state.progress(TURN));
         state.observe_clock(start + Duration::from_secs(7));
-        assert!(state.retry(TURN, 1, 5, Duration::from_secs(4), "offline".into()));
+        assert!(state.retry(
+            TURN,
+            1,
+            Duration::from_secs(4),
+            Duration::from_secs(280),
+            "offline".into()
+        ));
         state.observe_clock(start + Duration::from_secs(8));
         assert!(state.stream(TURN, Message::assistant("resumed")));
         state.observe_clock(start + Duration::from_secs(9));
@@ -1274,12 +1282,24 @@ mod tests {
         let mut state = SessionState::default();
         let start = state.observed_at();
         state.begin_operation(OperationKind::Submit, SessionMode::Build, ModelRole::Build);
-        assert!(!state.retry(TURN, 1, 5, Duration::ZERO, "not started".into()));
+        assert!(!state.retry(
+            TURN,
+            1,
+            Duration::ZERO,
+            Duration::from_secs(280),
+            "not started".into()
+        ));
         state
             .start_turn(TURN, SessionMode::Build, ModelRole::Build)
             .unwrap();
         state.observe_clock(start + Duration::from_secs(12));
-        state.retry(TURN, 1, 5, Duration::ZERO, "immediate".into());
+        state.retry(
+            TURN,
+            1,
+            Duration::ZERO,
+            Duration::from_secs(280),
+            "immediate".into(),
+        );
         let notice = |state: &SessionState| {
             let SessionActivity::Active(ActiveOperation {
                 phase: ActivePhase::Running(TurnTail::Retrying(notice)),
@@ -1294,7 +1314,13 @@ mod tests {
             notice(&state).countdown(state.observed_at()),
             RetryCountdown::Immediate
         );
-        state.retry(TURN, 2, 5, Duration::from_millis(1500), "backoff".into());
+        state.retry(
+            TURN,
+            2,
+            Duration::from_millis(1500),
+            Duration::from_secs(280),
+            "backoff".into(),
+        );
         let received = state.observed_at();
         assert_eq!(
             notice(&state).countdown(received),
@@ -1317,7 +1343,13 @@ mod tests {
         );
         let old = notice(&state);
         let stale = TurnId::new(99);
-        assert!(!state.retry(stale, 3, 5, Duration::MAX, "stale".into()));
+        assert!(!state.retry(
+            stale,
+            3,
+            Duration::MAX,
+            Duration::from_secs(280),
+            "stale".into()
+        ));
         assert!(!state.stream(stale, Message::assistant("stale")));
         assert!(!state.progress(stale));
         assert!(!state.clear_stream(stale));
@@ -1334,7 +1366,13 @@ mod tests {
         );
         assert_eq!(notice(&state), old);
         assert_eq!(state.elapsed(), Some(Duration::from_secs(14)));
-        state.retry(TURN, 3, 5, Duration::from_secs(4), "new attempt".into());
+        state.retry(
+            TURN,
+            3,
+            Duration::from_secs(4),
+            Duration::from_secs(280),
+            "new attempt".into(),
+        );
         assert_eq!(
             notice(&state).countdown(state.observed_at()),
             RetryCountdown::Pending(Duration::from_secs(4))
@@ -1343,8 +1381,8 @@ mod tests {
         state.retry(
             TURN,
             4,
-            5,
             Duration::MAX,
+            Duration::from_secs(280),
             "no instant addition overflow".into(),
         );
         assert_eq!(
@@ -1362,7 +1400,13 @@ mod tests {
         state
             .compaction_started(TURN, CompactionTrigger::AutomaticMidTurn, ModelRole::Build)
             .unwrap();
-        assert!(!state.retry(TURN, 5, 5, Duration::ZERO, "suppressed compaction".into()));
+        assert!(!state.retry(
+            TURN,
+            5,
+            Duration::ZERO,
+            Duration::from_secs(280),
+            "suppressed compaction".into()
+        ));
         assert_eq!(state.elapsed(), Some(Duration::from_secs(14)));
     }
 

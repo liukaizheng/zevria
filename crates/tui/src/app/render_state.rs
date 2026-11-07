@@ -46,6 +46,7 @@ pub(crate) enum ConversationTail<'a> {
     Retrying {
         notice: &'a RetryNotice,
         countdown: RetryCountdown,
+        retrying_for: Duration,
         elapsed: Duration,
     },
 }
@@ -231,6 +232,7 @@ impl App {
                         ConversationTail::Retrying {
                             notice,
                             countdown: notice.countdown(session.observed_at()),
+                            retrying_for: notice.recovery_remaining(session.observed_at()),
                             elapsed,
                         }
                     }
@@ -304,8 +306,8 @@ impl App {
                         Some(format!("{role_name} · Streaming"))
                     }
                     ActivePhase::Running(TurnTail::Retrying(notice)) => Some(format!(
-                        "{role_name} · Reconnecting {}/{}",
-                        notice.attempt, notice.max_attempts
+                        "{role_name} · Reconnecting · attempt {}",
+                        notice.attempt
                     )),
                 },
             }

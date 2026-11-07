@@ -1469,13 +1469,13 @@ fn semantic_status_precedence_covers_focus_activity_plan_and_warnings() {
         call: 1,
         turn_id: TEST_TURN_ID,
         attempt: 2,
-        max_attempts: 4,
+        retrying_for: std::time::Duration::from_secs(280),
         retry_after: std::time::Duration::from_millis(500),
         error: "offline".to_string(),
     });
     assert_eq!(
         waiting.status_for_test().primary,
-        "Build · Reconnecting 2/4"
+        "Build · Reconnecting · attempt 2"
     );
 
     let mut compacting = App::new();

@@ -1,6 +1,9 @@
 use super::*;
 #[path = "integration_tests.rs"]
 mod integration;
+#[path = "outage_tests.rs"]
+mod outages;
+use crate::tests::receive_http_request;
 #[path = "local_summary_tests.rs"]
 mod local_summary;
 use crate::AnthropicProvider;

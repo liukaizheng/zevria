@@ -445,7 +445,7 @@ fn transcript_entry_and_tail_accents_follow_semantic_colors() {
         call: 1,
         turn_id: TEST_TURN_ID,
         attempt: 2,
-        max_attempts: 4,
+        retrying_for: std::time::Duration::from_secs(280),
         retry_after: std::time::Duration::from_millis(500),
         error: "offline".to_string(),
     });
@@ -1252,7 +1252,7 @@ fn timer_only_tails_reuse_one_blank_history_gap_without_a_leading_gap() {
             call: 1,
             turn_id: TEST_TURN_ID,
             attempt: 2,
-            max_attempts: 4,
+            retrying_for: std::time::Duration::from_secs(280),
             retry_after: std::time::Duration::from_secs(4),
             error: "offline".to_string(),
         }),
@@ -1469,7 +1469,7 @@ fn wrapped_tail_boundaries_project_correctly_when_scrolled_or_bottom_followed() 
             call: 1,
             turn_id: TEST_TURN_ID,
             attempt: 2,
-            max_attempts: 5,
+            retrying_for: std::time::Duration::from_secs(280),
             retry_after: std::time::Duration::from_secs(4),
             error: "**literal error** with enough words to wrap\nlast error row".into(),
         },
@@ -1519,7 +1519,7 @@ fn wrapped_tail_boundaries_project_correctly_when_scrolled_or_bottom_followed() 
                 let status_text = status_text.split_whitespace().collect::<Vec<_>>().join(" ");
                 assert_eq!(
                     status_text,
-                    "◐ ⚠ reconnecting (attempt 2/5) · next attempt in 4s · 0s request interrupted: **literal error** with enough words to wrap last error row"
+                    "◐ ⚠ reconnecting (attempt 2) · next attempt in 4s · retrying up to 4m 44s · 0s request interrupted: **literal error** with enough words to wrap last error row"
                 );
             }
             for height in [1, 4, 8, 12, 20] {

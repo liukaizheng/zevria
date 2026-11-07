@@ -203,7 +203,6 @@ pub enum SessionEvent {
         turn_id: TurnId,
         call: usize,
         attempt: usize,
-        max_attempts: usize,
         transport: NetworkTransport,
         status: NetworkStatus,
     },
@@ -213,10 +212,12 @@ pub enum SessionEvent {
     TurnRetrying {
         turn_id: TurnId,
         call: usize,
+        /// The upcoming attempt, including the initial request as attempt 1.
         attempt: usize,
-        max_attempts: usize,
         /// Delay before the next recovery attempt; zero means immediate reconnect.
         retry_after: std::time::Duration,
+        /// Recovery time remaining when the upcoming attempt starts.
+        retrying_for: std::time::Duration,
         error: String,
     },
     /// A subtask launch was queued; emitted by the launcher before the
@@ -969,6 +970,8 @@ pub enum NetworkStatus {
     Quiet {
         idle_for: std::time::Duration,
         retry_in: std::time::Duration,
+        /// Whether recovery can schedule another attempt after this deadline.
+        will_retry: bool,
     },
     ProgressResumed,
 }
@@ -1058,7 +1061,6 @@ impl ProgressReporter {
     pub async fn network_status(
         &self,
         attempt: usize,
-        max_attempts: usize,
         transport: NetworkTransport,
         status: NetworkStatus,
     ) {
@@ -1069,7 +1071,6 @@ impl ProgressReporter {
                     turn_id: self.turn.id,
                     call: self.call,
                     attempt,
-                    max_attempts,
                     transport,
                     status,
                 })
@@ -1204,12 +1205,12 @@ impl ProgressReporter {
     }
 
     /// Announce that the provider is recovering from a lost connection and
-    /// the turn is being retried, not failed.
+    /// the turn is being retried, not failed. `attempt` is the upcoming attempt.
     pub async fn retrying(
         &self,
         attempt: usize,
-        max_attempts: usize,
         retry_after: std::time::Duration,
+        retrying_for: std::time::Duration,
         error: String,
     ) {
         if self.suppressed {
@@ -1221,8 +1222,8 @@ impl ProgressReporter {
                 turn_id: self.turn.id,
                 call: self.call,
                 attempt,
-                max_attempts,
                 retry_after,
+                retrying_for,
                 error,
             })
             .await;

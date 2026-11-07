@@ -12,6 +12,8 @@ mod directive_wire;
 mod inline_search_tests;
 #[path = "model_tests.rs"]
 mod models;
+#[path = "outage_tests.rs"]
+mod outages;
 #[path = "prompt_cache_tests.rs"]
 mod prompt_cache_options;
 #[path = "resume_wire_tests.rs"]
@@ -640,6 +642,7 @@ fn test_session_with_pump(
         },
         responses_url: endpoints.http,
         transport: OpenAiTransport::WebSocket,
+        http_fallback: None,
         recovery: RecoveryPolicy::default(),
         compaction_url: None,
         compaction_timeout: std::time::Duration::from_secs(300),
@@ -4586,6 +4589,7 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         },
         responses_url,
         transport: OpenAiTransport::WebSocket,
+        http_fallback: None,
         recovery: RecoveryPolicy {
             response_idle_timeout: std::time::Duration::from_millis(80),
             ..fast_recovery_policy(4)
@@ -4998,6 +5002,7 @@ async fn recovery_followup(
 fn fast_recovery_policy(max_attempts: usize) -> RecoveryPolicy {
     RecoveryPolicy {
         max_attempts,
+        recovery_window: std::time::Duration::from_secs(5),
         connect_timeout: std::time::Duration::from_secs(1),
         stall_warning: std::time::Duration::from_millis(5),
         backoff_base: std::time::Duration::from_millis(10),
@@ -5598,12 +5603,12 @@ async fn turn_survives_repeated_drops_within_the_recovery_budget() {
     while let Ok(update) = events.try_recv() {
         if let SessionUpdate::Lifecycle(zevria_session_api::SessionEvent::TurnRetrying {
             attempt,
-            max_attempts,
+            retrying_for,
             retry_after,
             ..
         }) = update
         {
-            assert_eq!(max_attempts, 5);
+            assert!(retrying_for <= std::time::Duration::from_secs(5));
             retry_attempts.push((attempt, retry_after));
         }
     }
@@ -6268,7 +6273,8 @@ async fn http_retries_server_errors_and_partial_stream_loss_with_identical_reque
             .contains(&retries[0].2)
     );
     assert!(
-        (std::time::Duration::from_millis(15)..=std::time::Duration::from_millis(20))
+        // Meaningful partial output resets exponential backoff.
+        (std::time::Duration::from_micros(7500)..=std::time::Duration::from_millis(10))
             .contains(&retries[1].2)
     );
 }

@@ -358,6 +358,11 @@ pub(crate) fn transport_fallback(openai: &mut OpenAiProvider) {
     connection(openai, "http_fallback");
 }
 
+pub(crate) fn transport_restored(openai: &mut OpenAiProvider) {
+    openai.cache_diagnostics.http_fallback = false;
+    connection(openai, "websocket_restored");
+}
+
 pub(crate) fn no_continuation_reason(openai: &OpenAiProvider) -> FullReason {
     if openai.ws.socket_generation > 0 {
         FullReason::Reconnect

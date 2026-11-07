@@ -63,21 +63,30 @@ use crate::stream::StreamSegments;
 fn retry_diagnostics_announce_rounded_delays_and_keep_the_existing_channel() {
     use std::time::Duration;
     for (delay, expected) in [
-        (Duration::ZERO, "Provider retry 2/5: offline"),
+        (
+            Duration::ZERO,
+            "Provider retry 2 (next attempt in 0s; retrying up to 4m 40s): offline",
+        ),
         (
             Duration::from_millis(500),
-            "Provider retry 2/5 (next attempt in 1s): offline",
+            "Provider retry 2 (next attempt in 1s; retrying up to 4m 40s): offline",
         ),
         (
             Duration::from_millis(1500),
-            "Provider retry 2/5 (next attempt in 2s): offline",
+            "Provider retry 2 (next attempt in 2s; retrying up to 4m 40s): offline",
         ),
         (
             Duration::from_secs(4),
-            "Provider retry 2/5 (next attempt in 4s): offline",
+            "Provider retry 2 (next attempt in 4s; retrying up to 4m 40s): offline",
         ),
     ] {
-        let update = crate::session::retry_diagnostic(TurnId::new(7), 2, 5, delay, "offline");
+        let update = crate::session::retry_diagnostic(
+            TurnId::new(7),
+            2,
+            delay,
+            Duration::from_secs(280),
+            "offline",
+        );
         let AcpSessionUpdate::AgentThoughtChunk(chunk) = update else {
             panic!("retry must use the existing thought diagnostic channel");
         };

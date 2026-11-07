@@ -327,7 +327,9 @@ pub struct NetworkConfig {
     pub request_start_timeout_seconds: u64,
     pub stall_warning_seconds: u64,
     pub response_idle_timeout_seconds: u64,
-    /// Includes the initial attempt, reconnect handshakes, and HTTP fallback.
+    /// Outage window for scheduling recovery; never interrupts useful work.
+    pub recovery_window_seconds: u64,
+    /// Absolute attempt cap, including the initial attempt, handshakes and fallback.
     pub max_attempts: usize,
 }
 
@@ -338,7 +340,8 @@ impl Default for NetworkConfig {
             request_start_timeout_seconds: 30,
             stall_warning_seconds: 30,
             response_idle_timeout_seconds: 180,
-            max_attempts: 4,
+            recovery_window_seconds: 300,
+            max_attempts: 30,
         }
     }
 }
@@ -353,6 +356,7 @@ impl NetworkConfig {
                 self.request_start_timeout_seconds,
             ),
             ("stall_warning_seconds", self.stall_warning_seconds),
+            ("recovery_window_seconds", self.recovery_window_seconds),
             (
                 "response_idle_timeout_seconds",
                 self.response_idle_timeout_seconds,
@@ -982,6 +986,8 @@ mod tests {
         value.as_object_mut().unwrap().remove("network");
         let omitted: ResponsesProviderConfig = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(omitted.network, NetworkConfig::default());
+        assert_eq!(omitted.network.max_attempts, 30);
+        assert_eq!(omitted.network.recovery_window_seconds, 300);
         value["network"] = json!({"response_idle_timeout_seconds":600});
         let partial: ResponsesProviderConfig = serde_json::from_value(value).unwrap();
         assert_eq!(partial.network.stall_warning_seconds, 30);
@@ -991,6 +997,7 @@ mod tests {
             "request_start_timeout_seconds",
             "stall_warning_seconds",
             "response_idle_timeout_seconds",
+            "recovery_window_seconds",
             "max_attempts",
         ] {
             let mut network = serde_json::to_value(NetworkConfig::default()).unwrap();
@@ -999,6 +1006,10 @@ mod tests {
             assert!(network.validate("test").is_err(), "{field}");
         }
         for network in [
+            NetworkConfig {
+                recovery_window_seconds: u64::MAX,
+                ..NetworkConfig::default()
+            },
             NetworkConfig {
                 connect_timeout_seconds: u64::MAX,
                 ..NetworkConfig::default()
@@ -1017,6 +1028,8 @@ mod tests {
         for invalid in [
             json!({"max_attempts":-1}),
             json!({"response_idle_timeout_seconds":0.5}),
+            json!({"recovery_window_seconds":-1}),
+            json!({"recovery_window_seconds":0.5}),
             json!({"unknown":3}),
         ] {
             assert!(serde_json::from_value::<NetworkConfig>(invalid).is_err());

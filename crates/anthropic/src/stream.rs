@@ -92,6 +92,7 @@ impl MessageAccumulator {
                 &serde_json::json!({"error":error}).to_string(),
                 None,
                 None,
+                None,
             ));
         }
         if self.stopped {

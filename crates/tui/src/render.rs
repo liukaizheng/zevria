@@ -358,6 +358,7 @@ fn operation_status_lines(tail: &ConversationTail<'_>) -> Vec<Line<'static>> {
         ConversationTail::Retrying {
             notice,
             countdown,
+            retrying_for,
             elapsed,
         } => {
             let delay = match countdown {
@@ -373,8 +374,10 @@ fn operation_status_lines(tail: &ConversationTail<'_>) -> Vec<Line<'static>> {
             (
                 elapsed,
                 format!(
-                    "⚠ reconnecting (attempt {}/{}) · {delay}",
-                    notice.attempt, notice.max_attempts
+                    "⚠ reconnecting (attempt {}) · {delay} · retrying up to {}m {}s",
+                    notice.attempt,
+                    retrying_for.as_secs() / 60,
+                    retrying_for.as_secs() % 60
                 ),
                 theme().feedback.warning,
             )

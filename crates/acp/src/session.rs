@@ -1138,7 +1138,6 @@ impl LiveSession {
                 turn_id,
                 call,
                 attempt,
-                max_attempts,
                 transport,
                 status,
             } => {
@@ -1173,18 +1172,22 @@ impl LiveSession {
                 if report {
                     let message = match status {
                         NetworkStatus::AttemptStarted => {
-                            format!("Starting {transport:?} attempt {attempt}/{max_attempts}")
+                            format!("Starting {transport:?} attempt {attempt}")
                         }
-                        NetworkStatus::Connecting => format!(
-                            "Connecting via {transport:?} · attempt {attempt}/{max_attempts}"
-                        ),
+                        NetworkStatus::Connecting => {
+                            format!("Connecting via {transport:?} · attempt {attempt}")
+                        }
                         NetworkStatus::AwaitingResponse => {
-                            format!("Awaiting response · attempt {attempt}/{max_attempts}")
+                            format!("Awaiting response · attempt {attempt}")
                         }
-                        NetworkStatus::Quiet { idle_for, retry_in } => format!(
-                            "No response progress for {}s · {} in {}m {}s · attempt {attempt}/{max_attempts}",
+                        NetworkStatus::Quiet {
+                            idle_for,
+                            retry_in,
+                            will_retry,
+                        } => format!(
+                            "No response progress for {}s · {} in {}m {}s · attempt {attempt}",
                             idle_for.as_secs(),
-                            if attempt < max_attempts {
+                            if will_retry {
                                 "automatic retry"
                             } else {
                                 "request will stop"
@@ -1205,8 +1208,8 @@ impl LiveSession {
                 turn_id,
                 call,
                 attempt,
-                max_attempts,
                 retry_after,
+                retrying_for,
                 error,
             } => {
                 {
@@ -1219,8 +1222,8 @@ impl LiveSession {
                 self.send_update(retry_diagnostic(
                     turn_id,
                     attempt,
-                    max_attempts,
                     retry_after,
+                    retrying_for,
                     &error,
                 ))?;
                 if let Some(streams) = self
@@ -1793,22 +1796,22 @@ pub(crate) fn mode_id(mode: SessionMode, profile: ExecutionProfile) -> &'static 
 pub(crate) fn retry_diagnostic(
     turn_id: TurnId,
     attempt: usize,
-    max_attempts: usize,
     retry_after: std::time::Duration,
+    retrying_for: std::time::Duration,
     error: &str,
 ) -> AcpSessionUpdate {
-    let delay = if retry_after.is_zero() {
-        String::new()
-    } else {
-        let seconds = retry_after
-            .as_secs()
-            .saturating_add(u64::from(retry_after.subsec_nanos() > 0));
-        format!(" (next attempt in {seconds}s)")
-    };
+    let seconds = retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() > 0));
+    let delay = format!(
+        " (next attempt in {seconds}s; retrying up to {}m {}s)",
+        retrying_for.as_secs() / 60,
+        retrying_for.as_secs() % 60
+    );
     diagnostic_update(
         Some(turn_id),
         "retry",
-        format!("Provider retry {attempt}/{max_attempts}{delay}: {error}"),
+        format!("Provider retry {attempt}{delay}: {error}"),
     )
 }
 

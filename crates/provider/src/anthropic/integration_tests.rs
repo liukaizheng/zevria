@@ -456,7 +456,7 @@ async fn idle_timeout_retries_without_partial_output_and_retry_after_is_bounded(
         .unwrap();
     assert!(!format!("{:?}", response.message()).contains("failed partial"));
     server.await.unwrap();
-    for delay in [0, 61] {
+    for delay in [0, 2] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -475,13 +475,18 @@ async fn idle_timeout_retries_without_partial_output_and_retry_after_is_bounded(
             }
         });
         let mut provider = runtime(&profile(url));
+        provider.recovery.recovery_window = std::time::Duration::from_millis(100);
         let result = provider
             .complete(request(&Message::user("rate")), discard_updates())
             .await;
         assert_eq!(result.is_ok(), delay == 0);
         if delay > 0 {
             let error = format!("{:#}", result.unwrap_err());
-            assert!(error.contains("60s"));
+            assert!(
+                error.contains("server requested a retry delay of 2s"),
+                "{error}"
+            );
+            assert!(error.contains("recovery_window_seconds"), "{error}");
             assert!(error.contains("req_rate"));
         }
         server.await.unwrap();

@@ -538,6 +538,16 @@ async fn websocket_to_http_fallback_retains_activity_and_search_definition() {
         )
         .await;
         socket.close(None).await.unwrap();
+        // A second WebSocket attempt is required even with a small cap.
+        let (mut handshake, _) = listener.accept().await.unwrap();
+        receive_http_headers(&mut handshake).await;
+        send_http_response(
+            &mut handshake,
+            "503 Service Unavailable",
+            "application/json",
+            "{}",
+        )
+        .await;
         let (mut http, _) = listener.accept().await.unwrap();
         let http_request = receive_http_json(&mut http).await.body;
         assert_eq!(ws["tools"], http_request["tools"]);
@@ -571,7 +581,7 @@ async fn websocket_to_http_fallback_retains_activity_and_search_definition() {
         &mut openai,
         &mut AttemptState::default(),
         &progress,
-        &fast_recovery_policy(2),
+        &fast_recovery_policy(3),
     )
     .await
     .unwrap();

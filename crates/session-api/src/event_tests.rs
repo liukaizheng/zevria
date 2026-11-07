@@ -9,10 +9,10 @@ async fn network_status_is_call_scoped_and_does_not_fence_unread_preview() {
     reporter
         .network_status(
             2,
-            4,
             NetworkTransport::Http,
             NetworkStatus::Quiet {
                 idle_for: std::time::Duration::from_secs(30),
+                will_retry: true,
                 retry_in: std::time::Duration::from_secs(150),
             },
         )
@@ -49,14 +49,21 @@ async fn retry_reporter_forwards_delay_and_silent_reporters_suppress_progress() 
     );
     let retry_after = std::time::Duration::from_millis(500);
     reporter.stream_updated(Message::assistant("stale preview"));
-    reporter.retrying(2, 5, retry_after, "offline".into()).await;
+    reporter
+        .retrying(
+            2,
+            retry_after,
+            std::time::Duration::from_secs(280),
+            "offline".into(),
+        )
+        .await;
     assert_eq!(
         receiver.try_recv(),
         Ok(SessionUpdate::Lifecycle(SessionEvent::TurnRetrying {
             call: 1,
             turn_id: turn.id,
             attempt: 2,
-            max_attempts: 5,
+            retrying_for: std::time::Duration::from_secs(280),
             retry_after,
             error: "offline".into(),
         }))
@@ -70,12 +77,16 @@ async fn retry_reporter_forwards_delay_and_silent_reporters_suppress_progress() 
         policy.for_role(ModelRole::Build),
     );
     silent
-        .retrying(1, 5, retry_after, "hidden summary retry".into())
+        .retrying(
+            1,
+            retry_after,
+            std::time::Duration::from_secs(280),
+            "hidden summary retry".into(),
+        )
         .await;
     silent
         .network_status(
             1,
-            4,
             crate::event::NetworkTransport::Http,
             crate::event::NetworkStatus::Connecting,
         )
@@ -478,7 +489,7 @@ async fn unread_root_lifecycle_events_fence_older_streams() {
             call: 1,
             turn_id,
             attempt: 1,
-            max_attempts: 3,
+            retrying_for: std::time::Duration::from_secs(280),
             retry_after: std::time::Duration::from_millis(500),
             error: "disconnected".to_string(),
         },

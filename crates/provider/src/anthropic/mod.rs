@@ -3,8 +3,11 @@
 use crate::{
     AnthropicAuth, AnthropicEndpoint, AnthropicModelConfig, ProfileProtocol, ResolvedModelProfile,
     connection::{resolve_input_token_count_url_with_suffix, session_routing_headers},
-    http::bounded_http_error_body,
-    recovery::{AttemptBudget, AttemptProgress, ProgressClock, RecoveryPolicy},
+    http::{bounded_http_error_body, retry_hint},
+    recovery::{
+        AttemptFailure, AttemptProgress, Decision, ProgressClock, Recovery, RecoveryPolicy,
+        failure_class,
+    },
 };
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
@@ -157,23 +160,36 @@ impl AnthropicProvider {
         &self,
         prepared: &PreparedRequest,
         progress: AttemptProgress<'_>,
+        request_start_deadline: Duration,
     ) -> Result<(FinishedMessage, Option<String>), (ApiError, Option<String>)> {
-        let retryable = |category, message: String| {
-            (ApiError::new(ErrorKind::Retryable(category), message), None)
-        };
         progress.status(NetworkStatus::Connecting).await;
-        let response = tokio::time::timeout(
-            self.recovery.send_timeout,
-            self.http.post(self.url.clone()).json(&prepared.body).send(),
-        )
-        .await
-        .map_err(|_| {
-            retryable(
-                "request_start_timeout",
-                "Anthropic request_start_timeout before response headers".into(),
+        let response = progress
+            .request_start(
+                &self.recovery,
+                request_start_deadline,
+                self.http.post(self.url.clone()).json(&prepared.body).send(),
             )
-        })?
-        .map_err(|e| retryable("transport", e.without_url().to_string()))?;
+            .await
+            .map_err(|error| {
+                (
+                    ApiError::with_source(
+                        ErrorKind::Retryable("request_start_timeout"),
+                        "Anthropic request-start deadline expired before response headers",
+                        error,
+                    ),
+                    None,
+                )
+            })?
+            .map_err(|e| {
+                (
+                    ApiError::with_source(
+                        ErrorKind::Retryable("transport"),
+                        "Anthropic HTTP request failed",
+                        e.without_url(),
+                    ),
+                    None,
+                )
+            })?;
         let request_id = response
             .headers()
             .get("request-id")
@@ -182,12 +198,7 @@ impl AnthropicProvider {
             .map(str::to_owned);
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(Duration::from_secs);
+            let hint = retry_hint(response.headers());
             let detail = tokio::time::timeout(
                 self.recovery.send_timeout,
                 bounded_http_error_body(response),
@@ -195,7 +206,13 @@ impl AnthropicProvider {
             .await
             .unwrap_or_else(|_| "<error body timed out>".into());
             return Err((
-                zevria_anthropic::error::classify(status, &detail, None, retry_after),
+                zevria_anthropic::error::classify(
+                    status,
+                    &detail,
+                    None,
+                    hint.delay,
+                    hint.should_retry,
+                ),
                 request_id,
             ));
         }
@@ -215,7 +232,20 @@ impl AnthropicProvider {
             };
             let event = event.map_err(|e| {
                 (
-                    ApiError::new(ErrorKind::Retryable("stream"), e.to_string()),
+                    match e {
+                        eventsource_stream::EventStreamError::Transport(error) => {
+                            ApiError::with_source(
+                                ErrorKind::Retryable("stream"),
+                                "Anthropic HTTP event stream failed",
+                                error.without_url(),
+                            )
+                        }
+                        error => ApiError::with_source(
+                            ErrorKind::Retryable("stream"),
+                            "Anthropic HTTP event stream failed",
+                            error,
+                        ),
+                    },
                     request_id.clone(),
                 )
             })?;
@@ -255,23 +285,27 @@ impl AnthropicProvider {
             .map(|finished| (finished, request_id.clone()))
             .map_err(|e| (e, request_id))
     }
+    #[tracing::instrument(skip_all, fields(profile = %self.profile))]
     async fn run(
         &mut self,
         request: ModelRequest<'_>,
         progress: ProgressReporter,
     ) -> anyhow::Result<ModelResponse> {
         let mut prepared = self.prepare(&request)?;
-        let mut budget = AttemptBudget::new(self.recovery.max_attempts);
+        let recovery = Recovery::new(&self.recovery);
         let mut stripped_retry = false;
-        while let Some(attempt) = budget.start() {
+        while let Some(plan) = recovery.start_attempt() {
             let attempt_progress = AttemptProgress {
                 reporter: &progress,
-                attempt,
-                max_attempts: self.recovery.max_attempts,
+                recovery: &recovery,
+                attempt: plan.attempt,
                 transport: NetworkTransport::Http,
             };
             attempt_progress.status(NetworkStatus::AttemptStarted).await;
-            match self.attempt(&prepared, attempt_progress).await {
+            match self
+                .attempt(&prepared, attempt_progress, plan.request_start_deadline)
+                .await
+            {
                 Ok((finished, _request_id)) => {
                     let usage = finished.usage.canonical();
                     let response = ModelResponse::from_replay(ProviderReplay::anthropic_messages(
@@ -287,22 +321,48 @@ impl AnthropicProvider {
                     progress.stream_cleared();
                     let kind = error.kind;
                     let delay = error.retry_after;
-                    // Core publishes Display, not the entire anyhow chain.
-                    // Keep the actionable failure (refusal category, eager-JSON
-                    // flag, etc.) visible alongside the upstream identifier.
-                    if let Some(id) = request_id {
+                    if let Some(id) = &request_id {
                         error.message.push_str(&format!(" (request-id: {id})"));
                     }
                     let error: anyhow::Error = error.into();
                     if kind == ErrorKind::InputTooLarge {
                         return Err(ModelInputTooLarge::new(error).into());
                     }
-                    if kind == ErrorKind::ThinkingBindingMismatch
-                        && !stripped_retry
-                        && budget.remaining() > 0
-                    {
+                    let strip_thinking =
+                        kind == ErrorKind::ThinkingBindingMismatch && !stripped_retry;
+                    let category = match kind {
+                        ErrorKind::Retryable(category) => category,
+                        _ if strip_thinking => "thinking_binding_mismatch",
+                        _ => return Err(error),
+                    };
+                    let last = AttemptFailure {
+                        category,
+                        class: failure_class(category),
+                        error,
+                        server_delay: if strip_thinking {
+                            Some(Duration::ZERO)
+                        } else {
+                            delay
+                        },
+                        upstream_request_id: request_id,
+                    };
+                    let decision = recovery.decide(&last);
+                    recovery.log_failure(&last, decision);
+                    let Decision::Retry {
+                        next_attempt,
+                        delay,
+                        retrying_for,
+                    } = decision
+                    else {
+                        let Decision::Exhausted(reason) = decision else {
+                            unreachable!()
+                        };
+                        return Err(recovery.exhausted_error(reason, last, &self.profile.provider));
+                    };
+                    if strip_thinking {
                         stripped_retry = true;
                         tracing::warn!(provider=%self.profile.provider, "Anthropic thinking binding mismatch; retrying once without historical thinking");
+                        // Existing one-time semantic repair, not transient recovery.
                         prepared.stripped_thinking_turns += prepared.body["messages"]
                             .as_array()
                             .expect("prepared messages")
@@ -326,38 +386,20 @@ impl AnthropicProvider {
                                 .as_array()
                                 .expect("prepared messages"),
                         )?;
-                        progress
-                            .retrying(
-                                attempt,
-                                self.recovery.max_attempts,
-                                Duration::ZERO,
-                                error.to_string(),
-                            )
-                            .await;
-                        continue;
                     }
-                    if !matches!(kind, ErrorKind::Retryable(_)) {
-                        return Err(error);
-                    }
-                    if budget.remaining() == 0 {
-                        let detail =
-                            format!("Anthropic request failed after {attempt} attempts: {error:#}");
-                        return Err(error.context(detail));
-                    }
-                    let delay = delay.unwrap_or_else(|| self.recovery.backoff(attempt));
                     progress
                         .retrying(
-                            attempt,
-                            self.recovery.max_attempts,
+                            next_attempt,
                             delay,
-                            error.to_string(),
+                            retrying_for,
+                            format!("{}: {:#}", last.category, last.error),
                         )
                         .await;
                     tokio::time::sleep(delay).await;
                 }
             }
         }
-        anyhow::bail!("Anthropic request attempt budget exhausted")
+        anyhow::bail!("completion recovery requires a positive attempt cap")
     }
 }
 impl ModelProvider for AnthropicProvider {
@@ -410,6 +452,7 @@ impl ModelProvider for AnthropicProvider {
                             status,
                             &detail,
                             request_id.as_deref(),
+                            None,
                             None,
                         );
                         if error.kind == ErrorKind::InputTooLarge {

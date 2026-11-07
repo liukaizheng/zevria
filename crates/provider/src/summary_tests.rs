@@ -13,7 +13,7 @@ fn size_event_cases() -> Vec<(Value, bool)> {
         ("context_length_exceeded", true),
         ("invalid_request_error", false),
         ("invalid_api_key", false),
-        ("rate_limit_exceeded", false),
+        ("insufficient_quota", false),
         ("max_output_tokens", false),
     ] {
         cases.push((json!({"type":"error", "error":{"code":code, "message":"context too large diagnostic"}}), expected));
@@ -33,6 +33,19 @@ fn size_event_cases() -> Vec<(Value, bool)> {
         event["response"]["error"] =
             json!({"code":"context_length_exceeded", "message":"structured terminal detail"});
         cases.push((event, status != "cancelled"));
+    }
+    // Only failed responses with transient codes retry, not incomplete or
+    // cancelled semantic outcomes that happen to carry the same code.
+    for (kind, status) in [
+        ("response.incomplete", "incomplete"),
+        ("response.done", "incomplete"),
+        ("response.done", "cancelled"),
+    ] {
+        let mut event = completed_event("resp_semantic", "msg_semantic", "");
+        event["type"] = json!(kind);
+        event["response"]["status"] = json!(status);
+        event["response"]["error"] = json!({"code":"server_error","message":"terminal outcome"});
+        cases.push((event, false));
     }
     for reason in ["context_length_exceeded", "max_output_tokens"] {
         let mut event = completed_event("resp_incomplete", "msg_incomplete", "");
@@ -111,7 +124,7 @@ async fn structured_http_and_sse_size_errors_preserve_status_details_and_request
         ("500 Internal Server Error", "context_too_large", true),
         ("400 Bad Request", "invalid_request_error", false),
         ("401 Unauthorized", "invalid_api_key", false),
-        ("429 Too Many Requests", "rate_limit_exceeded", false),
+        ("429 Too Many Requests", "insufficient_quota", false),
         ("400 Bad Request", "max_output_tokens", false),
     ] {
         cases.push((

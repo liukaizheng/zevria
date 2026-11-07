@@ -118,11 +118,7 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
                 .iter()
                 .filter(|u| matches!(
                     u,
-                    SessionUpdate::Lifecycle(SessionEvent::TurnRetrying {
-                        attempt: 2,
-                        max_attempts: 2,
-                        ..
-                    })
+                    SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { attempt: 2, .. })
                 ))
                 .count(),
             1

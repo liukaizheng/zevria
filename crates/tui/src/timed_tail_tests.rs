@@ -37,7 +37,7 @@ fn retry_event(attempt: usize, delay: Duration, error: &str) -> SessionEvent {
         call: 1,
         turn_id: TEST_TURN_ID,
         attempt,
-        max_attempts: 5,
+        retrying_for: std::time::Duration::from_secs(280),
         retry_after: delay,
         error: error.into(),
     }
@@ -52,10 +52,71 @@ fn network_event(
         turn_id: TEST_TURN_ID,
         call,
         attempt,
-        max_attempts: 4,
         transport: zevria_session_api::event::NetworkTransport::Http,
         status,
     }
+}
+
+#[test]
+fn quiet_warning_uses_controller_decision_even_on_the_first_attempt() {
+    use zevria_session_api::event::NetworkStatus;
+    for will_retry in [true, false] {
+        let mut app = App::new();
+        let now = Instant::now();
+        start_at(&mut app, now);
+        reduce_at(
+            &mut app,
+            network_event(
+                1,
+                1,
+                NetworkStatus::Quiet {
+                    idle_for: Duration::from_secs(30),
+                    retry_in: Duration::from_secs(5),
+                    will_retry,
+                },
+            ),
+            now,
+        );
+        let text = rendered_text(&mut app, 160, 20);
+        let wording = if will_retry {
+            "automatic retry"
+        } else {
+            "request will stop"
+        };
+        assert!(
+            text.contains(&format!("{wording} in 0m 5s · attempt 1")),
+            "{text}"
+        );
+        assert!(!text.contains("attempt 1/"));
+    }
+}
+
+#[test]
+fn recovery_window_countdown_uses_receipt_time_and_saturates() {
+    let mut app = App::new();
+    let now = Instant::now();
+    start_at(&mut app, now);
+    reduce_at(
+        &mut app,
+        retry_event(3, Duration::from_secs(4), "request_error: socket reset"),
+        now,
+    );
+    assert!(
+        rendered_text(&mut app, 180, 20)
+            .contains("attempt 3) · next attempt in 4s · retrying up to 4m 44s")
+    );
+    app.observe_clock(now + Duration::from_secs(7));
+    assert!(rendered_text(&mut app, 180, 20).contains("retrying up to 4m 37s"));
+    app.observe_clock(now + Duration::from_secs(500));
+    assert!(rendered_text(&mut app, 180, 20).contains("retrying up to 0m 0s"));
+    let notice = crate::app::RetryNotice {
+        attempt: 1,
+        error: String::new(),
+        retry_after: Duration::MAX,
+        retrying_for: Duration::MAX,
+        received_at: now,
+    };
+    assert_eq!(notice.recovery_remaining(now), Duration::MAX);
 }
 
 #[test]
@@ -69,7 +130,6 @@ fn routine_first_attempts_keep_the_ordinary_display_for_each_model_call() {
             turn_id: TEST_TURN_ID,
             call,
             attempt,
-            max_attempts: 4,
             transport,
             status,
         };
@@ -141,7 +201,6 @@ fn retry_attempts_still_show_transport_phases_and_clear_the_countdown() {
             turn_id: TEST_TURN_ID,
             call: 1,
             attempt: 2,
-            max_attempts: 4,
             transport,
             status,
         };
@@ -160,7 +219,7 @@ fn retry_attempts_still_show_transport_phases_and_clear_the_countdown() {
             assert!(app.retry_notice().is_none());
             assert_eq!(
                 app.render_parts().network_status,
-                Some((format!("{text} · attempt 2/4"), false))
+                Some((format!("{text} · attempt 2"), false))
             );
             let rendered = rendered_text(&mut app, 160, 20);
             assert!(rendered.contains(&text));
@@ -204,6 +263,7 @@ fn network_warning_preserves_preview_and_rejects_stale_call_attempt_and_turn_sta
     );
     let quiet = NetworkStatus::Quiet {
         idle_for: Duration::from_secs(30),
+        will_retry: true,
         retry_in: Duration::from_secs(150),
     };
     reduce_at(
@@ -325,6 +385,7 @@ fn child_network_warning_is_isolated_from_root_preview_and_cleared_on_completion
             1,
             NetworkStatus::Quiet {
                 idle_for: Duration::from_secs(30),
+                will_retry: true,
                 retry_in: Duration::from_secs(150),
             },
         ),
@@ -736,7 +797,9 @@ fn tools_keep_waiting_and_retry_tails_and_progress_replaces_the_notice() {
     );
     let text = rendered_rows(&mut app, 120, 16).join("\n");
     assert!(text.contains("slow tool ◐"));
-    assert!(text.contains("◐ ⚠ reconnecting (attempt 2/5) · next attempt in 4s · 13s"));
+    assert!(text.contains(
+        "◐ ⚠ reconnecting (attempt 2) · next attempt in 4s · retrying up to 4m 44s · 13s"
+    ));
     assert_eq!(
         text.matches("Assistant").count(),
         1,
@@ -887,7 +950,13 @@ fn retry_countdown_rounds_up_expires_without_recovery_and_uses_warning_style() {
         assert!(text.contains("second error line"));
         assert_spinner(&text, glyph);
         assert!(!text.contains("Assistant"));
-        assert!(text.contains(&format!("{wording} · {}s", 12 + millis / 1000)));
+        let seconds = (281_500u64.saturating_sub(millis)) / 1000;
+        assert!(text.contains(&format!(
+            "{wording} · retrying up to {}m {}s · {}s",
+            seconds / 60,
+            seconds % 60,
+            12 + millis / 1000
+        )));
         assert!(app.retry_notice().is_some());
     }
     assert!(matches!(
@@ -923,7 +992,7 @@ fn retry_countdown_rounds_up_expires_without_recovery_and_uses_warning_style() {
         received + Duration::from_secs(3),
     );
     let text = rendered_text(&mut app, 120, 14);
-    assert!(text.contains("attempt 3/5) · reconnecting now · 15s"));
+    assert!(text.contains("attempt 3) · reconnecting now · retrying up to 4m 40s · 15s"));
     assert!(!text.contains("literal error"));
     for (millis, glyph) in TIMED_FRAMES {
         app.observe_clock(received + Duration::from_secs(3) + Duration::from_millis(millis));
@@ -931,7 +1000,8 @@ fn retry_countdown_rounds_up_expires_without_recovery_and_uses_warning_style() {
         assert_spinner(&text, glyph);
         assert!(!text.contains("Assistant"));
         assert!(text.contains(&format!(
-            "attempt 3/5) · reconnecting now · {}s",
+            "attempt 3) · reconnecting now · retrying up to 4m {}s · {}s",
+            (280_000 - millis) / 1000 % 60,
             15 + millis / 1000
         )));
     }

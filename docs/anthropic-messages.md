@@ -151,8 +151,9 @@ back to an unchanged original prefix can restore its original thinking. New
 post-compaction responses bind to the new history and replay normally.
 
 A specific HTTP 400 saying thinking is “bound to a different conversation”
-triggers one WARN-logged retry with all historical thinking removed. It shares
-the normal attempt budget, recomputes the binding, and never repeats tool work.
+triggers one WARN-logged retry with all historical thinking removed (unless
+`x-should-retry: false` forbids it). It shares the recovery controller and attempt
+cap, recomputes the binding, and never repeats tool work.
 A second mismatch is terminal.
 
 For CI-style live checks, opt into `compatibility.strict_thinking_binding: true`.
@@ -214,13 +215,41 @@ thinking, client/server-tool calls and unknown blocks are dropped along with
 all fallback markers. Only post-boundary tool calls can execute. Check
 `served_model`, which may differ from the configured model.
 
-HTTP 429, 5xx/529, SSE overload/API errors, transport failures, idle timeouts,
-premature EOF and malformed tool JSON use the shared bounded recovery budget.
-429 respects numeric `retry-after` up to 60 seconds; a longer wait is terminal.
-Other retries use capped jittered backoff. HTTP 400/401 are terminal except the
-specific binding retry and input-capacity classification. HTTP 413 or a 400
-“prompt is too long” produces the typed `ModelInputTooLarge` marker. Upstream
-`request-id` is attached to errors. All failed-attempt previews are cleared.
+HTTP 408, 429, 5xx/529, SSE overload/API or `server_error`/`rate_limit_exceeded`
+errors, transport failures, idle timeouts, premature EOF and malformed tool JSON
+use the same `recovery.rs` controller as Responses: a **300-second outage window**
+from the first attempt or latest meaningful progress, **30-attempt absolute cap**,
+and **four interrupted-response cap**. The window schedules retries, never
+interrupts a running attempt or total useful work. Internal children and synthetic
+summaries inherit it; exact counts retain separate deadlines.
+
+Backoff begins at 0.5 seconds, caps at 15 seconds with 75–100% jitter, and resets
+after progress. `retry-after-ms` and numeric `Retry-After` (including decimal
+seconds) replace backoff for retryable failures, including 429, 503 and 529. A
+hint longer than the remaining window stops immediately with the requested delay;
+there is no fixed 60-second cutoff. Malformed and HTTP-date hints are ignored.
+`x-should-retry` overrides HTTP status defaults except typed input-size failures.
+HTTP 400/401 otherwise stay terminal except the existing one-time, zero-delay
+thinking-binding repair, which also passes through the controller. HTTP 413 or a
+400 “prompt is too long” remains typed `ModelInputTooLarge`.
+
+Local header timeouts escalate the next request-start deadline 30 → 60 → 120 →
+180 seconds, capped at the response idle timeout; longer header waits warn at the
+stall threshold. Quiet warnings carry controller-computed `will_retry`.
+`TurnRetrying.attempt` is the **upcoming attempt** (2, 3, …), with the exact delay
+and next-start window remainder; neither event exposes an attempt denominator.
+Upstream `request-id` and original transport source chains are retained (reqwest
+URLs removed). Retry details are `category: full chain`; final Display includes
+attempts/elapsed time, stop reason, full last cause and actionable advice for
+headers, idle timeout, connectivity/proxy, or provider unavailability. Shared WARN
+logs record each failure and exhausted recovery. See `responses-compatible.md`
+for the policy and classification table.
+
+Failed-attempt previews are cleared; partial tool calls never execute. Transient
+recovery reuses the immutable `PreparedRequest`, preserving byte-identical bodies,
+headers, instructions and cacheable prefix. Only the existing explicit
+thinking-binding semantic repair changes its prepared body; network metadata is
+never serialized.
 
 ## Mixing protocols and limitations
 

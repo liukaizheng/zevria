@@ -5638,7 +5638,7 @@ fn retry_notice_is_replaced_by_accepted_progress() {
         call: 1,
         turn_id,
         attempt: 2,
-        max_attempts: 4,
+        retrying_for: std::time::Duration::from_secs(280),
         retry_after: std::time::Duration::from_millis(500),
         error: "offline".to_string(),
     });

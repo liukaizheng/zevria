@@ -426,7 +426,7 @@ fn retries_backward_clocks_and_rejected_events_cannot_restart_or_rewind_a_call()
             call: 1,
             turn_id: TEST_TURN_ID,
             attempt: 1,
-            max_attempts: 3,
+            retrying_for: std::time::Duration::from_secs(280),
             retry_after: Duration::from_secs(20),
             error: "offline".into(),
         },
@@ -668,16 +668,16 @@ fn call_start_stream_tools_and_completion_share_headers_not_status_indices() {
             call: 1,
             turn_id: TEST_TURN_ID,
             attempt,
-            max_attempts: 4,
+            retrying_for: std::time::Duration::from_secs(280),
             retry_after: Duration::from_secs(4),
             error: "offline".into(),
         });
         assert_eq!(
             app.status_for_test().primary,
-            format!("Build · Reconnecting {attempt}/4")
+            format!("Build · Reconnecting · attempt {attempt}")
         );
         let text = rendered_text(&mut app, 160, 35);
-        assert!(text.contains(&format!("attempt {attempt}/4")));
+        assert!(text.contains(&format!("attempt {attempt}")));
         assert!(text.contains("request interrupted: offline"));
         assert_eq!(text.matches("● Assistant · #(1 - 1)").count(), 1);
     }

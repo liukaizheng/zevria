@@ -641,7 +641,11 @@ persisted/model-input data and selection/copy history.
 
 Retry status uses the same info-colored animated `StatusIcon::Running` glyph,
 followed by a warning glyph and warning-colored headline/elapsed text, for example
-`◐ ⚠ reconnecting (attempt 2/4) · next attempt in 1s · 12s`.
+`◐ ⚠ reconnecting (attempt 3) · next attempt in 4s · retrying up to 4m 41s · 12s`.
+The attempt is the upcoming attempt (without an attempt-cap denominator); the
+status bar shows `Reconnecting · attempt N`. A second receipt-time countdown
+shows the recovery window remaining. Quiet warnings use controller-computed
+`will_retry` for “automatic retry” versus “request will stop”.
 Plain muted connection-error lines wrap below it. Positive remaining delays
 round up to seconds, zero announced delay means `reconnecting now`, and an
 expired nonzero delay says it is waiting for the next attempt to start. A scoped
@@ -1341,18 +1345,31 @@ A failure or HTTP fallback in one slot cannot poison another slot.
 `ResolvedModelProfile` into every runtime, including model switches and internal
 Build/Explore children. Its optional, field-defaulted settings are
 `connect_timeout_seconds: 30`, `request_start_timeout_seconds: 30`,
-`stall_warning_seconds: 30`, `response_idle_timeout_seconds: 180`, and
-`max_attempts: 4`. Durations must be positive and representable, warning shorter
-than inactivity, and attempts positive. Provider `recovery.rs` owns the runtime
-policy, one attempt budget, monotonic progress clock, and capped jittered backoff;
+`stall_warning_seconds: 30`, `response_idle_timeout_seconds: 180`,
+`recovery_window_seconds: 300`, and `max_attempts: 30`. Durations must be positive
+and representable, warning shorter than inactivity, and attempts positive.
+Provider `recovery.rs` owns the shared Responses/Anthropic controller, runtime
+policy, monotonic progress clock, and capped jittered backoff;
 Responses protocol classification owns meaningful advancement and duplicate/
 prior-response filtering.
 
 Router initialization is local: its first completion's connection establishment
-is inside the same budget as dispatch and streaming. Four total attempts span
-WebSocket, failed handshakes, stale-ID full-input resends, and sticky HTTP fallback.
-At most one same-transport WebSocket recovery is allowed; remaining budget is
-reserved for HTTP when possible. HTTP 426 selects HTTP immediately. One progress
+shares the same controller as dispatch and streaming. Recovery schedules retries
+within a five-minute outage window measured from the later of the first attempt
+or last meaningful progress across attempts. The window never interrupts running
+attempts. Thirty attempts are an absolute cap; four failures after progress stop
+recovery to bound repeated partial-generation cost. Backoff starts at 0.5 seconds,
+caps at 15 seconds with 75–100% jitter, and resets its exponent on progress.
+Server millisecond or numeric delta-second hints replace backoff; hints beyond
+the remaining window stop immediately. HTTP headers initially have 30 seconds,
+escalating after local header timeouts to 60/120/180 (the idle cap). Longer header
+waits show quiet warnings. WebSocket write and connect defaults remain unchanged.
+
+WebSocket gets two attempts before fallback. HTTP 426 selects sticky HTTP
+immediately; other fallback becomes sticky only if its first HTTP attempt
+succeeds. If HTTP also fails retryably, fallback remains provisional for that
+request. The next request restores WebSocket with a fresh generation/full input,
+allowing one WebSocket attempt before fallback. One progress
 watchdog runs after request start, before the first event and throughout streaming:
 warn at 30 seconds of silence, abandon/finalize at 180. Arbitrary reads, keepalives,
 unknown metadata, duplicate statuses, and late prior-response events cannot keep
@@ -1368,7 +1385,13 @@ Remote work may repeat after disconnects. Instructions, tool order, input, routi
 headers, and cache keys are unchanged; network metadata never enters provider
 payloads or the cacheable prefix. Cancellation keeps the existing core select
 and interrupts connect, request start, streaming, warnings, and backoff. Exhaustion
-returns one actionable failure. Token counts and remote compaction retain their
+returns one actionable Display-complete failure with attempt count, elapsed time,
+stop reason, category/full cause chain and category-specific advice (header
+versus idle timeout, network/proxy or provider availability). Both adapters share
+WARN logging with bounded URL-redacted causes and recovery state. Responses HTTP
+408/429/5xx and in-stream transient codes retry; `insufficient_quota` and typed
+input-size failures remain terminal. Server retry overrides/hints apply across
+adapters; see `responses-compatible.md` for the classification table. Token counts and remote compaction retain their
 own bounded request deadlines; summaries inherit the completion watchdog. Local
 tools, approval waits, healthy parked sockets, and external ACP workers are not
 replayed or given these timers; external Review deadlines and unbounded Plan
@@ -2046,8 +2069,10 @@ active WebSocket generation, stops command process groups, cancels
 queued/running children, records completed work already observed locally, and
 emits exactly one `TurnCancelled` outcome. Completion networking defaults to a
 30-second quiet warning and a 180-second response-progress inactivity deadline,
-including mid-stream silence. Four total attempts share one budget across
-WebSocket and HTTP. Cancellation interrupts connection, request start, streaming,
+including mid-stream silence. One controller spans WebSocket and HTTP: a
+300-second outage window, 30-attempt absolute cap, and four-interrupted-response
+cap. Header timeouts escalate the next deadline up to the idle cap; the recovery
+window never interrupts an attempt already running. Cancellation interrupts connection, request start, streaming,
 warning, and backoff; a progressing stream still has no total duration limit.
 These timers never restart completed local tools or impose deadlines on approval
 waits or external ACP worker processes.

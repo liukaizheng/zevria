@@ -151,7 +151,8 @@ auxiliary endpoints; `additional_params` can hold gateway-specific fields.
         "request_start_timeout_seconds": 30,
         "stall_warning_seconds": 30,
         "response_idle_timeout_seconds": 180,
-        "max_attempts": 4
+        "recovery_window_seconds": 300,
+        "max_attempts": 30
       },
       "compatibility": {
         "send_reasoning": true,
@@ -482,7 +483,7 @@ Changing compatibility is a genuine request-property/input-shape boundary.
 `supports_websockets` is separate:
 
 - `true` enables best-effort Responses WebSocket use, reconnect, stale-ID full
-  replay, and profile-local sticky HTTP fallback;
+  replay, and profile-local HTTP fallback (provisional after a network outage);
 - `false` skips WebSocket entirely and sends complete history over HTTP/SSE.
 
 Zevria does not support alternate vendor socket dialects.
@@ -502,20 +503,59 @@ keepalives, unknown metadata, repeated statuses, and late prior-response events
 do not. A steadily progressing response can run longer than three minutes.
 Increase the idle threshold for unusually quiet reasoning models.
 
-Connection establishment and request start each have independent 30-second
-limits. HTTP request start ends at response headers; WebSocket request start
-ends when the socket write is acknowledged. There is no generic HTTP total-body
-timeout for completions. Exact token counts and remote compaction retain their
-separate bounded request timeouts, while synthetic summary completions inherit
-the watchdog (without normal UI progress).
+Connection establishment and request start initially have independent 30-second
+limits. HTTP request start ends at response headers; each local header timeout
+doubles the next header deadline, capped at the idle limit: **30 → 60 → 120 →
+180 → 180 seconds** by default. Longer header waits show the same quiet warning.
+WebSocket request start ends when the socket write is acknowledged. There is no
+HTTP total-body timeout. Exact token counts and remote compaction retain their
+separate deadlines; synthetic summaries inherit completion recovery and the
+watchdog (without normal UI progress).
 
-Four attempts **total**, including the initial attempt, cover connection,
-dispatch, and response consumption across both transports. Reconnect handshake
-failures and stale-ID resends consume that same budget. WebSocket gets at most
-one same-transport recovery before sticky HTTP fallback, reserving an HTTP attempt
-when possible; HTTP 426 falls back immediately. Bounded jittered exponential
-backoff is announced with the exact delay used. Cancellation interrupts all waits.
-Exhaustion returns one actionable failure, not an automatic restart of the turn.
+The shared controller schedules recovery within a **300-second outage window**
+(`recovery_window_seconds`). The clock starts at the first attempt or the last
+meaningful response progress, whichever is later. A retry is scheduled only if
+its delay fits in the remaining window. The window **never interrupts an attempt
+already running**: per-attempt silence timers still apply, and progressing work
+has no total duration limit. `max_attempts: 30` is an absolute per-request cap,
+including handshakes, stale-ID resends and fallback, not a separate budget per
+transport. Recovery also stops after the **fourth interrupted response** (an
+attempt that failed after progress), bounding repeated partial-generation cost.
+
+Backoff starts at 0.5 seconds, doubles for consecutive failures without progress,
+and caps at 15 seconds, with 75–100% jitter. Progress resets the exponent. The
+announced duration exactly matches the sleep. `retry-after-ms` or numeric
+`Retry-After` (integer or decimal delta-seconds) replaces backoff; a hint longer
+than the remaining window stops immediately and names the requested delay.
+Malformed hints and HTTP-date values are ignored. HTTP 409 is not retried by
+default. `x-should-retry: true/false` overrides default HTTP status policy, except
+that input-size rejection and Responses `insufficient_quota` stay terminal.
+
+| Failure | Policy / actionable hint |
+| --- | --- |
+| Local header timeout | Retry with an escalating header deadline; inspect `request_start_timeout_seconds` |
+| Response inactivity | Retry; inspect `response_idle_timeout_seconds` for quiet models |
+| Connect, request, stream loss or upstream disconnect prose | Retry; check the network or proxy |
+| HTTP 408, 429 (except `insufficient_quota`), 5xx | Retry; provider unavailable/rate limited; honor server hints |
+| In-stream `server_error` / `rate_limit_exceeded`, including `response.failed` | Retry on HTTP and WebSocket |
+| Structured input-size rejection, ordinary other 4xx, malformed events, other semantic failures | Terminal; input size remains typed `ModelInputTooLarge` |
+
+WebSocket gets two attempts before HTTP fallback (one after a re-probe). HTTP
+426 selects sticky HTTP immediately. Otherwise, fallback is sticky only if its
+**first HTTP attempt succeeds**. If that attempt also fails retryably, HTTP is
+provisional for the rest of this request; the next request re-probes WebSocket
+with a fresh generation and full input. A later HTTP success in that same request
+does not commit it. HTTP-only configuration never re-probes.
+
+Cancellation interrupts every wait. Exhaustion returns one self-contained
+Display error: attempts and elapsed time, stop reason (window, attempt cap,
+interrupted-response cap, or excessive server delay), `[category]: category: full
+cause chain`, and the category-specific hint. It names
+`providers.<name>.network.recovery_window_seconds`; reqwest URLs are removed and
+socket/DNS/TLS causes retained. Retry events carry `category: full cause chain`.
+Shared WARN logs include the category, attempt, elapsed time, upstream request ID,
+progress flag, next delay, header deadline, remaining window and bounded error
+detail. Recovery never restarts the entire turn.
 
 Healthy first attempts keep the ordinary running/streaming display, without
 connection-phase details or ACP network diagnostics. Those details appear only

@@ -499,7 +499,12 @@ mod tests {
             base_url,
             api_key: LiteralApiKey::new("test-key"),
             supports_websockets: true,
-            network: Default::default(),
+            // Offline-child fixtures must not wait through the production outage window.
+            network: zevria_provider::NetworkConfig {
+                recovery_window_seconds: 1,
+                max_attempts: 3,
+                ..Default::default()
+            },
             session_id_header: None,
             models: std::collections::BTreeMap::from([(
                 "gpt-test".to_string(),

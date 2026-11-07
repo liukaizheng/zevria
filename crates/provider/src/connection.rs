@@ -317,8 +317,14 @@ impl OpenAiParkedWebSocket {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HttpFallback {
+    Sticky(&'static str),
+    Provisional,
+}
+
 /// A live single-profile Responses runtime with an independent continuation
-/// chain and sticky transport state.
+/// chain and transport recovery state.
 pub struct OpenAiProvider {
     #[cfg(feature = "cache-diagnostics")]
     pub(crate) cache_diagnostics: crate::cache_diagnostics::DiagnosticState,
@@ -338,6 +344,7 @@ pub struct OpenAiProvider {
     pub(crate) ws: OpenAiParkedWebSocket,
     pub(crate) responses_url: reqwest::Url,
     pub(crate) transport: OpenAiTransport,
+    pub(crate) http_fallback: Option<HttpFallback>,
     pub(crate) recovery: crate::recovery::RecoveryPolicy,
     pub(crate) compaction_url: Option<reqwest::Url>,
     pub(crate) compaction_timeout: std::time::Duration,
@@ -576,6 +583,8 @@ impl OpenAiProvider {
             },
             responses_url: endpoints.http,
             transport,
+            http_fallback: (transport == OpenAiTransport::Http && endpoint.supports_websockets)
+                .then_some(HttpFallback::Sticky("websocket_upgrade_required")),
             recovery,
             compaction_url: endpoint
                 .compaction
@@ -636,6 +645,11 @@ impl OpenAiProvider {
             return;
         }
         self.transport = OpenAiTransport::Http;
+        self.http_fallback = Some(if reason == "websocket_retries_exhausted" {
+            HttpFallback::Provisional
+        } else {
+            HttpFallback::Sticky(reason)
+        });
         self.ws
             .session
             .terminate(crate::websocket_session::OpenAiWebSocketTerminalCategory::HttpFallback);
@@ -646,8 +660,9 @@ impl OpenAiProvider {
         let http_log_url = redacted_url_for_logging(self.responses_url.as_str());
         tracing::warn!(
             reason,
+            sticky = matches!(self.http_fallback, Some(HttpFallback::Sticky(_))),
             http_url = %http_log_url,
-            "OpenAI transport switched permanently to HTTP for this provider"
+            "OpenAI transport switched to HTTP for this provider"
         );
     }
 }

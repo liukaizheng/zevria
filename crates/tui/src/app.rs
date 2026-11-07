@@ -1267,19 +1267,19 @@ impl App {
                 self.conversation
                     .push_error("Turn cancelled".to_string());
             }
-            SessionEvent::NetworkStatus { turn_id, call, attempt, max_attempts, transport, status } => {
-                self.session.network_status(turn_id, call, attempt, max_attempts, transport, status);
+            SessionEvent::NetworkStatus { turn_id, call, attempt, transport, status } => {
+                self.session.network_status(turn_id, call, attempt, transport, status);
             }
             SessionEvent::TurnRetrying {
                 turn_id,
                 call,
                 attempt,
-                max_attempts,
                 retry_after,
+                retrying_for,
                 error,
             } => {
                 if self.session.accepts_network(turn_id, call, attempt) {
-                    self.session.retry(turn_id, attempt, max_attempts, retry_after, error);
+                    self.session.retry(turn_id, attempt, retry_after, retrying_for, error);
                 }
             }
         }

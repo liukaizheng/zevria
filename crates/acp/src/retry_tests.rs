@@ -88,7 +88,6 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                     turn_id,
                     call,
                     attempt,
-                    max_attempts: 5,
                     transport,
                     status,
                 };
@@ -109,6 +108,7 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                 })?;
                 let quiet = NetworkStatus::Quiet {
                     idle_for: Duration::from_secs(30),
+                    will_retry: index % 2 == 0,
                     retry_in: Duration::from_secs(150),
                 };
                 live.handle_event(status(1, 1, quiet.clone()))?;
@@ -123,7 +123,7 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                     call: 1,
                     turn_id,
                     attempt: 2,
-                    max_attempts: 5,
+                    retrying_for: std::time::Duration::from_secs(280),
                     retry_after: delay,
                     error: "offline".into(),
                 })?;
@@ -155,10 +155,10 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
     server.unwrap();
     let updates = updates.lock().unwrap();
     for (index, expected) in [
-        "Provider retry 2/5: offline",
-        "Provider retry 2/5 (next attempt in 1s): offline",
-        "Provider retry 2/5 (next attempt in 2s): offline",
-        "Provider retry 2/5 (next attempt in 4s): offline",
+        "Provider retry 2 (next attempt in 0s; retrying up to 4m 40s): offline",
+        "Provider retry 2 (next attempt in 1s; retrying up to 4m 40s): offline",
+        "Provider retry 2 (next attempt in 2s; retrying up to 4m 40s): offline",
+        "Provider retry 2 (next attempt in 4s; retrying up to 4m 40s): offline",
     ]
     .into_iter()
     .enumerate()
@@ -189,20 +189,23 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
         let ContentBlock::Text(warning) = &quiet.content else {
             panic!("text warning")
         };
-        assert!(
-            warning
-                .text
-                .contains("No response progress for 30s · automatic retry in 2m 30s")
-        );
+        assert!(warning.text.contains(&format!(
+            "No response progress for 30s · {} in 2m 30s · attempt 1",
+            if index % 2 == 0 {
+                "automatic retry"
+            } else {
+                "request will stop"
+            }
+        )));
         let transport = if index % 2 == 0 { "WebSocket" } else { "Http" };
         for (diagnostic, expected) in [
             (progress, "Response progress resumed".to_string()),
-            (started, format!("Starting {transport} attempt 2/5")),
+            (started, format!("Starting {transport} attempt 2")),
             (
                 connecting,
-                format!("Connecting via {transport} · attempt 2/5"),
+                format!("Connecting via {transport} · attempt 2"),
             ),
-            (awaiting, "Awaiting response · attempt 2/5".to_string()),
+            (awaiting, "Awaiting response · attempt 2".to_string()),
             (recovered, "Response progress resumed".to_string()),
         ] {
             let ContentBlock::Text(text) = &diagnostic.content else {

@@ -352,7 +352,8 @@ async fn baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_rese
         provider.ws.reconnect().await.unwrap();
         assert_eq!(inspect(&provider), before);
         assert!(provider.ws.continuation.is_none());
-        provider.switch_to_http("diagnostic_test");
+        provider.switch_to_http("websocket_upgrade_required");
+        assert!(matches!(provider.http_fallback, Some(crate::connection::HttpFallback::Sticky(_))));
         assert_eq!(inspect(&provider), before);
         let next = Message::user("next prompt");
         let replay = first.record().provider_replay().unwrap();

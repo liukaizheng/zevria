@@ -478,7 +478,7 @@ async fn configured_session_headers_cover_completion_count_and_remote_compaction
 }
 
 #[tokio::test]
-async fn session_headers_survive_websocket_recovery_http_retries_and_sticky_fallback() {
+async fn session_headers_survive_websocket_recovery_http_retries_and_provisional_fallback() {
     // Serialize against log-capturing tests: callsite interest is process-wide.
     let _log_guard = CAPTURED_LOG_TEST_LOCK.lock().await;
     for startup_426 in [true, false] {
@@ -502,7 +502,7 @@ async fn session_headers_survive_websocket_recovery_http_retries_and_sticky_fall
                     .await;
             } else {
                 // Lose both the initial and replacement sockets after receiving
-                // the immutable request, forcing sticky HTTP fallback.
+                // the immutable request, forcing a provisional HTTP fallback.
                 for _ in 0..2 {
                     let (stream, _) = listener.accept().await.unwrap();
                     let mut socket = accept_hdr_async(
@@ -515,7 +515,7 @@ async fn session_headers_survive_websocket_recovery_http_retries_and_sticky_fall
                 }
             }
             let mut http_requests = Vec::new();
-            for index in 0..3 {
+            for index in 0..if startup_426 { 3 } else { 2 } {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request = receive_http_json(&mut stream).await;
                 assert_routing_headers(&request.headers, Some("X-Conversation-ID"), SESSION_ID);
@@ -550,6 +550,29 @@ async fn session_headers_survive_websocket_recovery_http_retries_and_sticky_fall
                 }
                 http_requests.push(request);
             }
+            if !startup_426 {
+                // HTTP also failed, so the next request re-probes WebSocket
+                // with identical routing headers and complete local history.
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_hdr_async(
+                    stream,
+                    AssertSessionWebSocketHandshake(Some(("X-Conversation-ID", SESSION_ID))),
+                )
+                .await
+                .unwrap();
+                let reprobe = receive_json(&mut socket).await;
+                assert!(reprobe.get("previous_response_id").is_none());
+                assert!(
+                    reprobe["input"].as_array().unwrap().len()
+                        > websocket_requests[0]["input"].as_array().unwrap().len()
+                );
+                send_json(
+                    &mut socket,
+                    completed_event("restored", "restored_msg", "done"),
+                )
+                .await;
+                websocket_requests.push(reprobe);
+            }
             (websocket_requests, http_requests)
         });
         let mut provider = connect_profile(&profile, SESSION_ID).await;
@@ -562,12 +585,13 @@ async fn session_headers_survive_websocket_recovery_http_retries_and_sticky_fall
         session_turn(&mut provider, &mut state, "sticky HTTP followup")
             .await
             .unwrap();
-        assert!(provider.ws.continuation.is_none());
+        assert_eq!(provider.transport == OpenAiTransport::Http, startup_426);
+        assert_eq!(provider.ws.continuation.is_none(), startup_426);
         let (websocket, http) = server.await.unwrap();
-        assert_eq!(http.len(), 3, "initial HTTP attempt, retry, and followup");
+        assert_eq!(http.len(), if startup_426 { 3 } else { 2 });
         assert_eq!(http[0].body, http[1].body);
         if !startup_426 {
-            assert_eq!(websocket.len(), 2);
+            assert_eq!(websocket.len(), 3);
             assert_eq!(websocket[0], websocket[1]);
             assert_eq!(websocket[0]["input"], http[0].body["input"]);
         }
