@@ -1,4 +1,6 @@
 //! Headless tests exercise real native controls and production window content.
+#[path = "thread_tests.rs"]
+mod working_thread;
 use super::{theme, window::DesktopWindow};
 use crate::{actions, controller::SessionController};
 use gpui_kit::test::TestWindowExt as _;

@@ -1,6 +1,6 @@
 use super::{style, theme::palette, window::DesktopWindow};
 use gpui_kit::component::{
-    Disableable,
+    Disableable, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     input::{InputEvent, Textarea, TextareaState},
@@ -16,6 +16,10 @@ impl DesktopWindow {
         cx: &mut Context<Self>,
     ) {
         let Some((id, values)) = question else {
+            if !self.question_id.is_empty() {
+                self.composer
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }
             self.question_id.clear();
             self.question_inputs.clear();
             self.question_subscriptions.clear();
@@ -25,6 +29,7 @@ impl DesktopWindow {
             return;
         }
         self.question_id = id;
+        window.focus(&self.question_focus, cx);
         self.question_inputs.clear();
         self.question_subscriptions.clear();
         for (index, value) in values.into_iter().enumerate() {
@@ -215,10 +220,13 @@ impl DesktopWindow {
         }
         let count = form.request.questions.len();
         let mut dialog = style::sheet(cx)
-            .w(px((f32::from(window.viewport_size().width) - 64.).min(600.)))
+            .w_full()
+            .max_w(px(style::CONTENT))
             .max_h(px(
-                (f32::from(window.viewport_size().height) - 96.).max(180.)
+                (f32::from(window.viewport_size().height) * 0.55).max(180.)
             ))
+            .p(px(16.))
+            .track_focus(&self.question_focus)
             .child(
                 div()
                     .text_size(px(18.))
@@ -248,7 +256,10 @@ impl DesktopWindow {
             );
         }
         let answer_button = Button::new("answer-question")
-            .primary()
+            .custom(style::mode_button(
+                self.controller.read(cx).model.root.next_mode(),
+                cx,
+            ))
             .label(if pending {
                 "Sending…"
             } else if count == 1 {
@@ -257,11 +268,31 @@ impl DesktopWindow {
                 "Send answers"
             })
             .disabled(pending)
+            .tooltip("Send answer ⌘↩")
             .on_click(cx.listener(|this, _, _, cx| {
                 this.controller
                     .update(cx, |this, cx| this.answer_question(false, cx))
             }));
-        let mut buttons = div().flex().items_center().justify_end().gap(px(8.));
+        let cancelling = self.controller.read(cx).cancelling;
+        let mut buttons = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_end()
+            .gap(px(8.))
+            .child(
+                Button::new("stop-question-turn")
+                    .ghost()
+                    .small()
+                    .label(if cancelling { "Stopping" } else { "Stop" })
+                    .tooltip("Stop the current turn ⌘.")
+                    .disabled(cancelling)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.controller
+                            .update(cx, |controller, cx| controller.cancel(cx))
+                    })),
+            )
+            .child(div().flex_1());
         if form.request.dismissible {
             buttons = buttons.child(
                 Button::new("dismiss-question")
@@ -275,9 +306,33 @@ impl DesktopWindow {
             );
         }
         Some(
-            style::scrim(cx)
+            div()
                 .id("question-dialog")
-                .child(dialog.child(buttons.child(answer_button)))
+                .test_support()
+                .flex_shrink_0()
+                .px(px(16.))
+                .py(px(12.))
+                .child(
+                    style::Measure {
+                        compact: self.compact,
+                    }
+                    .row()
+                    .when(!self.compact, |row| {
+                        row.gap(px(8.)).child(
+                            style::Measure { compact: false }
+                                .gutter()
+                                .pt(px(8.))
+                                .child("Question"),
+                        )
+                    })
+                    .child(
+                        dialog.child(
+                            buttons
+                                .child(style::key_hint("cmd-enter", "Send answer", cx))
+                                .child(answer_button),
+                        ),
+                    ),
+                )
                 .into_any_element(),
         )
     }

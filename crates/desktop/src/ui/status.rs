@@ -44,13 +44,18 @@ pub struct StatusLine {
 impl StatusLine {
     pub fn new(model: &SessionModel, cancelling: bool) -> Self {
         let persistence_failed = model.session.persistence_error().is_some();
-        let activity = activity(
-            persistence_failed,
-            model.workflow.fresh_retry_version().is_some(),
-            model.workflow.dialog().is_some(),
-            cancelling,
-            model.tail(Instant::now()),
-        );
+        let activity = if model.is_busy() && !persistence_failed {
+            working_activity(model, cancelling)
+        } else {
+            activity(
+                persistence_failed,
+                model.workflow.fresh_retry_version().is_some(),
+                model.workflow.dialog().is_some(),
+                cancelling,
+                model.tail(Instant::now()),
+            )
+            .into()
+        };
         let role = model.display_role();
         let telemetry = model.session.telemetry(role);
         Self {
@@ -68,7 +73,7 @@ impl StatusLine {
                 ModelRole::Explore => "Explore",
             }
             .into(),
-            activity: activity.into(),
+            activity,
             persistence_failed,
             profile: telemetry
                 .authoritative_profile()
@@ -115,6 +120,96 @@ fn activity(
         ConversationTail::Retrying { .. } => "Reconnecting",
     }
 }
+/// One truthful vocabulary shared by the thread tip and status bar.
+pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
+    use zevria_presentation::{
+        blocks::{PresentationBlockKind, PresentedToolStatus},
+        conversation::HistoryEntry,
+    };
+    if cancelling {
+        return "Stopping".into();
+    }
+    match model.tail(Instant::now()) {
+        ConversationTail::Compacting { .. } => return "Compacting context".into(),
+        ConversationTail::Retrying {
+            notice,
+            retrying_for,
+            ..
+        } => {
+            return format!(
+                "Reconnecting (attempt {}, next try in {:.1} s)",
+                notice.attempt,
+                retrying_for.as_secs_f32()
+            );
+        }
+        ConversationTail::Streaming {
+            message: rig_core::message::Message::Assistant(message),
+            ..
+        } => {
+            for part in message.content.iter().rev() {
+                match part {
+                    rig_core::message::AssistantContent::Reasoning(reasoning)
+                        if zevria_content::reasoning::readable_parts(reasoning)
+                            .next()
+                            .is_some() =>
+                    {
+                        return "Thinking".into();
+                    }
+                    rig_core::message::AssistantContent::Text(text)
+                        if !text.text.trim().is_empty() =>
+                    {
+                        return "Writing".into();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    let header = model.session.call_header();
+    for entry in model.conversation.history().iter().rev() {
+        let HistoryEntry::Conversation(entry) = entry else {
+            continue;
+        };
+        if header.is_none() || entry.header != header {
+            continue;
+        }
+        for block in entry.blocks.iter().rev().filter(|b| b.visible(false)) {
+            match &block.kind {
+                PresentationBlockKind::Tool(tool)
+                    if match tool {
+                        zevria_presentation::blocks::PresentedTool::Native { state, .. } => {
+                            zevria_presentation::blocks::native_tool_status(state)
+                                == PresentedToolStatus::Running
+                        }
+                        zevria_presentation::blocks::PresentedTool::Acp(tool) => {
+                            tool.presented_status() == PresentedToolStatus::Running
+                        }
+                    } =>
+                {
+                    let name = match tool {
+                        zevria_presentation::blocks::PresentedTool::Native { call, .. } => {
+                            super::blocks::tool_label(call.function.name.as_str())
+                        }
+                        zevria_presentation::blocks::PresentedTool::Acp(tool) => &tool.title,
+                    };
+                    return format!("Running {}", name.to_lowercase());
+                }
+                PresentationBlockKind::Reasoning { parts }
+                    if parts.iter().any(|part| !part.trim().is_empty()) =>
+                {
+                    return "Thinking".into();
+                }
+                PresentationBlockKind::Text { text, .. } if !text.trim().is_empty() => {
+                    return "Writing".into();
+                }
+                _ => {}
+            }
+        }
+    }
+    "Waiting for the model".into()
+}
+
 pub fn compact_number(n: u64) -> String {
     if n < 1000 {
         return n.to_string();

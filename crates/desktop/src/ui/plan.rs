@@ -16,7 +16,7 @@ impl DesktopWindow {
         let dialog = model.workflow.dialog()?;
         let artifact = model.workflow.dialog_artifact()?;
         let busy = model.is_busy();
-        let markdown = artifact.markdown.clone();
+        let controller = self.controller.clone();
         let recovering = dialog.recovering();
         let (_, text) = self.plan.as_ref()?;
         let t = palette(cx);
@@ -26,10 +26,20 @@ impl DesktopWindow {
             .w(px(self.plan_width))
             .flex_shrink_0()
             .h_full()
+            .when(self.plan_overlay, |panel| {
+                panel
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .shadow_lg()
+                    .occlude()
+            })
             .min_h_0()
             .flex()
             .flex_col()
             .bg(t.surfaces.overlay)
+            .rounded(px(14.))
             .border_l_1()
             .border_color(tones(cx).hairline)
             .child(
@@ -63,9 +73,13 @@ impl DesktopWindow {
                                     "Copy plan as Markdown",
                                 )
                                 .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        markdown.clone(),
-                                    ))
+                                    if let Some(artifact) =
+                                        controller.read(cx).model.root.workflow.dialog_artifact()
+                                    {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            artifact.markdown.clone(),
+                                        ));
+                                    }
                                 }),
                             ),
                     )
@@ -78,11 +92,11 @@ impl DesktopWindow {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(artifact.title.clone()),
                     )
-                    .child(
-                        style::label()
-                            .text_color(t.text.muted)
-                            .child(format!("Revision {}", artifact.version.revision)),
-                    ),
+                    .child(style::tag(
+                        format!("Revision {}", artifact.version.revision),
+                        t.text.secondary,
+                        cx,
+                    )),
             )
             .child(
                 div()
@@ -111,8 +125,9 @@ impl DesktopWindow {
                     .border_color(tones(cx).hairline)
                     .child(
                         Button::new("plan-implement")
-                            .primary()
+                            .custom(style::mode_button(zevria_foundation::SessionMode::Plan, cx))
                             .label("Implement")
+                            .tooltip("Implement ⌘↩")
                             .disabled(busy)
                             .when(busy, |b| b.tooltip("Wait for the current turn to finish"))
                             .on_click(cx.listener(|this, _, _, cx| {

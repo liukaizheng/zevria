@@ -3,7 +3,7 @@ use super::theme::{palette, tones};
 use gpui_kit::base::text::TextViewStyle;
 use gpui_kit::component::{
     Sizable,
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonCustomVariant, ButtonVariants},
 };
 use gpui_kit::{prelude::*, *};
 use std::{sync::Arc, time::Instant};
@@ -12,7 +12,7 @@ use zevria_presentation::status_icon::StatusIcon;
 pub const SIDEBAR: f32 = 256.;
 pub const TITLE: f32 = 40.;
 pub const GUTTER: f32 = 96.;
-pub const GAP: f32 = 16.;
+pub const GAP: f32 = 24.;
 pub const CONTENT: f32 = 720.;
 pub const PROSE: f32 = 600.;
 pub const UI_FONT: &str = ".SystemUIFont";
@@ -38,7 +38,6 @@ impl Measure {
             } else {
                 GUTTER + GAP + CONTENT
             }))
-            .mx_auto()
             .min_w_0()
     }
     pub fn row(self) -> Div {
@@ -73,6 +72,64 @@ pub fn mono() -> Div {
         .font_family(MONO_FONT)
         .text_size(px(13.))
         .line_height(px(20.))
+}
+pub fn pencil() -> Div {
+    div()
+        .font_family(DOCUMENT_FONT)
+        .text_size(px(14.))
+        .line_height(px(23.))
+}
+pub fn focus_ring(cx: &App) -> Div {
+    div()
+        .absolute()
+        .top(px(-4.))
+        .bottom(px(-4.))
+        .left(px(-4.))
+        .right(px(-4.))
+        .border_2()
+        .border_color(tones(cx).focus)
+        .rounded(px(8.))
+}
+/// The line covers the entire block, including its vertical padding.
+pub fn thread_segment(dashed: bool, cx: &App) -> Div {
+    div()
+        .absolute()
+        .left(px(-16.))
+        .top_0()
+        .bottom_0()
+        .border_l_1()
+        .border_color(tones(cx).thread)
+        .when(dashed, |line| line.border_dashed())
+}
+pub fn thread_node(status: StatusIcon, ink: Hsla, cx: &App) -> Div {
+    thread_marker(status.glyph(frame(cx)), glyph_color(status, ink, cx), cx)
+}
+pub fn thread_marker(glyph: impl Into<SharedString>, ink: Hsla, cx: &App) -> Div {
+    div()
+        .absolute()
+        .left(px(-24.))
+        .top(px(8.))
+        .w(px(16.))
+        .flex()
+        .justify_center()
+        .bg(palette(cx).surfaces.canvas)
+        .child(
+            label()
+                .text_size(px(14.))
+                .text_color(ink)
+                .child(glyph.into()),
+        )
+}
+pub fn key_hint(key: &'static str, label: &'static str, cx: &App) -> Div {
+    meta()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .text_color(palette(cx).text.muted)
+        .child(gpui_kit::component::kbd::Kbd::new(
+            Keystroke::parse(key).expect("static desktop shortcut"),
+        ))
+        .child(label)
 }
 pub fn document() -> Div {
     div()
@@ -116,6 +173,20 @@ pub fn icon_button(
         .xsmall()
         .tooltip(name.clone())
         .accessibility_label(name)
+}
+pub fn mode_button(mode: zevria_foundation::SessionMode, cx: &App) -> ButtonCustomVariant {
+    let t = palette(cx);
+    let tones = tones(cx);
+    let (ink, interaction) = if mode == zevria_foundation::SessionMode::Build {
+        (t.workflow.build, tones.build)
+    } else {
+        (t.workflow.plan, tones.plan)
+    };
+    ButtonCustomVariant::new(cx)
+        .color(ink)
+        .foreground(t.surfaces.canvas)
+        .hover(interaction.hover)
+        .active(interaction.active)
 }
 pub fn sheet(cx: &App) -> Div {
     div()
@@ -195,7 +266,7 @@ pub fn markdown(cx: &App, is_document: bool) -> TextViewStyle {
         .with_code_block(
             StyleRefinement::default()
                 .bg(t.surfaces.panel)
-                .rounded(px(10.))
+                .rounded(px(8.))
                 .p(px(12.))
                 .font_family(MONO_FONT)
                 .text_size(px(13.))

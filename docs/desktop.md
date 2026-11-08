@@ -54,36 +54,100 @@ or log name.
 
 ## Design language
 
-The desktop's built-in default is **Zevria Graphite**: a warm graphite reading
-plane, recessed wells for the sidebar, input and literal output, and raised
-sheets for decisions. Build mint and Plan blue retain the TUI's mode families;
-success is a quiet ✓, while live work, failures and denials carry color. A named
-`[theme]` selection overrides the default in **both** frontends. The TUI default
-remains Zevria Dark. One immutable palette is used per process, with Kit's light
-or dark polarity following the palette, not the system appearance. There is no
-automatic light/dark switching. See [themes](themes.md).
+### One working thread, three voices
 
-The signature is an **editor gutter**, not a stack of chat cards. Hanging speaker
-labels appear once per turn; ○ ◐ ✓ ✗ ⊘ ◼ mark tool lifecycle at the same edge.
-Tool inputs, output and diffs expand into recessed wells. The composer is the
-next line on that same axis. Conversation prose stays within 600 px and tool
-expansions within 720 px. At a main-column width below 760 px, speaker labels
-move above the text and tool glyphs move inline. The sidebar auto-hides below a
-900 px window; **⌃⌘S** or **View → Toggle Sidebar** overrides that choice.
+The transcript is one left-aligned working thread, not message bubbles or a
+stack of cards. Its line and nodes record what happened, in provider order:
 
-For prose and controls, only macOS-bundled fonts are addressed: **SF Pro** (`.SystemUIFont`) for controls
-and conversation, **Charter** for Plan documents and handoffs, and **Menlo** for
-commands, paths, code and diffs. GPUI falls back when a font is unavailable. The
-explicit type scale is 11, 12, 14, 16, 18, 21, 24 and 36 px, with Menlo's optical
-13 px exception. Status numbers are tabular. Transparent native chrome joins the
-40 px draggable title strip to the window's three depth planes.
+- **Pencil:** a dashed thread, Charter 14/23 and readable pencil ink for
+  provider-supplied thinking. Charter 16/27 also marks Plan documents.
+- **Carbon:** lifecycle nodes and Menlo 13/20 for commands, paths, code, literal
+  output and diffs. Expanded tools use recessed 8 px wells, with input before
+  output and then the native diff. Output opens at 16 lines; **Show all N lines**
+  expands in the transcript rather than creating another output scroll trap.
+- **Ink:** the solid thread and SF Pro (`.SystemUIFont`) 16/26 for answers;
+  prompts use the same size with medium weight and a hanging **You** label.
+- **Signal:** Build mint and Plan blue mark live work, mode controls and Send.
+  A quiet ✓ means success, ✗ means failure, ⊘ means denied and ◼ means stopped
+  or interrupted. Shapes and words always accompany state colors.
+
+SF Pro, Charter and Menlo are public macOS-bundled font families, with native
+fallback. The type scale is 11, 12, 14, 16, 18, 21, 24 and 36 px, plus Menlo's
+13 px optical exception. Metadata uses tabular numerals. Prose/thinking measure
+600 px; expanded machine work measures 720 px. The 96 px gutter, thread and
+composer share one axis. Spacing follows a 4 px grid; turn boundaries add a
+32 px gap and a hairline. Tags, controls, carbon wells, the composer and decision
+sheets have distinct 4/6/8/12/14 px radii.
+
+The sidebar pins **This session**, using its first prompt, with subtasks nested
+beneath it. Earlier sessions are single-line titles with aligned relative times.
+Arrow keys navigate those rows; Enter opens one. Below a 900 px window the
+sidebar auto-hides; **⌃⌘S** overrides it. Below a 760 px main column the gutter
+labels move above content. A Plan sheet overlays instead of squeezing the main
+column below 560 px. The minimum window is 720×520.
+
+Questions **dock at the end of the thread in place of the composer**, without a
+scrim. The transcript stays scrollable, and the dock scrolls internally above
+55% of the window height. Drafts survive answering/dismissing. Only the
+app-level **Stop the current turn?** replacement confirmation remains modal.
+
+### Thinking is supplied text, not an invented explanation
+
+Only readable provider text creates a **Thinking** disclosure. Empty,
+encrypted-only, signature-only, redacted-only and unknown typed parts create
+neither a heading nor placeholder thoughts. Anthropic `thinking_display =
+"omitted"`, Responses `send_reasoning = false` and models without readable
+summaries can therefore show no section. The UI does not infer missing thoughts.
+
+- Live thinking starts **expanded**. Earlier thinking in the same running turn
+  stays open. At turn end, untouched sections fold to their first non-empty
+  supplied line (Markdown markers removed) and a supplied-text word count.
+- Explicit expand/collapse choices win through later deltas and tail-to-commit
+  identity transfer. Restored sessions start folded. Projection replacement
+  retires old view choices; the next turn never inherits a previous tail's fold.
+- Folding waits while you are scrolled away from the latest output, then applies
+  when tail following resumes. Interrupted and unsaved live sections stay open
+  so they explain the stop. Saved interrupted output is folded on restore.
+- For message-only streams such as Anthropic, a correlated Stop or failure keeps
+  the readable partial **in this window only**, labeled **Stopped, not saved to
+  this session**. It is not engine history, is not persisted and is absent after
+  restore. Responses interrupted attempts retain their existing persisted data.
+- Stop is a neutral **◼ Stopped** node, not a red error. Incomplete attempts say
+  **Stopped before the response finished** or **The response failed before it
+  finished**. Actual failures remain red. Copy payloads are unchanged.
+
+Thinking headers are full-width, at least 28 px tall, focusable native Button
+roles with an expanded state, the accessible name **Thinking**, and the preview
+as their description. Enter and Space activate them. Copy and text selection
+remain available; answer code fences also have a language label and Copy action.
+
+The thread's live tip and the status bar share one vocabulary: **Waiting for the
+model**, **Thinking**, **Writing**, **Running command** (or another tool name),
+**Reconnecting** with attempt/countdown, **Compacting context**, and **Stopping**.
+Opaque-only progress cannot be called thinking, so it remains waiting.
+
+### Appearance, focus and motion
+
+With no `[theme]` selector, Desktop follows the native macOS appearance live:
+**Zevria Graphite** in dark appearance and **Zevria Graphite Light** in light
+appearance. The light sibling is near-neutral paper, not cream: `#FBFAF8` plane,
+`#F2F0EC` wells, `#FFFFFF` sheets and `#221F1B` ink. Dark Graphite keeps its
+`#201E1B` plane and `#63DFB1` Build mint unchanged. A named theme pins one palette
+in **both** frontends; the TUI default remains Zevria Dark. See [themes](themes.md).
+
+Components consume semantic roles. Pencil, thread and focus tones are derived
+once per palette; pencil seeks APCA magnitude 75 between secondary and primary
+ink, thread seeks 3:1 against the plane, and focus uses the selection color.
+Reference palettes retain the shared 27-reference schema and validation contract.
+Native appearance changes update Kit, Markdown, syntax/diff colors and the
+color-keyed math raster inputs, without changing transcript or provider data.
 
 The only ambient motion is the shared ◐◓◑◒ work glyph on the existing 250 ms
-redraw clock. **Reduce Motion** freezes it at ◐ and makes Plan-sheet opening
-instant. Math uses embedded KaTeX fonts with native system fallback for missing
-glyphs; see [Math](#math). Icon controls have tooltips and accessible names; native controls retain
-visible focus rings. Question and replacement sheets use a translucent scrim so
-the conversation remains visible behind the decision.
+clock. **Reduce Motion** freezes it at ◐ and makes Plan-sheet opening instant;
+disclosures are instant in either setting. Focus uses a 2 px selection-ink ring
+with a 2 px offset. Icon controls have accessible names; thinking and tool
+headers expose their expanded state. GPUI Kit has no Increase Contrast signal,
+so that separate macOS preference is not implemented.
 
 ### Screenshot gallery
 
@@ -100,10 +164,14 @@ cargo test --locked -p zevria-desktop --features fixtures --test gallery
 
 PNGs are written to the repository's `target/desktop-gallery/`. The 1240×840 and
 720×840 logical viewports are captured at the native test renderer's 2× scale.
+Thinking-live, question-dock and Plan-overlay scenes also have dark/light
+720×520 minimum-window captures.
 The gallery covers configuration errors, no workspace, starting, stopping,
 failed/idle/empty sessions, working prose and tool loops with an expanded native
 diff, Plan review, questions, replacement confirmation and completions. Working
-scenes also render under a generated light palette. The `math` scene restores
+scenes, thinking-live, thinking-restored, thinking-interrupted, thinking-unsaved,
+code-heavy answers, docked questions and Plan review also render under Graphite
+Light. The `math` scene restores
 the shared Hölder proof fixture at 1240×3200 and 720×3200, plus a light-palette
 1240×3200 capture. It contains all 15 inline and 11 display formulas, including
 large delimiters, boxes and an aligned derivation with a 2 mm row gap.
@@ -265,6 +333,21 @@ parser boundary separately from the fully covered proof fixture.
   warnings; 250 ms clock updates run only while root work is pending/active.
 - Exact primary/output copy values remain available even when display is bounded.
 
+Additional keyboard controls have discoverable View/Session menu items:
+
+| Keys | Action |
+| --- | --- |
+| ⌥⌘→ / ⌥⌘← | Expand/collapse the focused thinking or tool block; from the composer, the latest thinking |
+| ⌥⇧⌘→ / ⌥⇧⌘← | Expand/collapse all thinking in the visible pane |
+| ⌥⌘↓ | Jump to latest and resume tail following |
+| ⌘↩ | Send the open question answer or implement the open Plan |
+| ⇧⌘M | Switch the next-turn Build/Plan mode |
+
+Shift-Tab remains reverse focus traversal. Esc belongs first to an open
+replacement confirmation, dismissible question, completion or Plan sheet;
+a non-dismissible question cannot be dismissed with Esc. **⌘.** and the Stop
+control still cancel the active root turn, including while a question is open.
+
 Supported shared grammar: ordinary text, `/orchestrate <prompt>`, `$skill [args]`,
 `/compact`, `/implement`, `/implement-fresh`, `/plan`, `/build`, `/new`, `/resume`.
 Model/reasoning, skill-management, worker-review and `/ensemble-*` commands retain
@@ -347,8 +430,15 @@ cacheable prompt prefixes remain under the existing regression tests.
   splices and remeasurement. Markdown state is retained and updated cumulatively;
   asynchronous parser and diff-completion notifications remeasure the correct row.
   Ordinary transcript text is not truncated by the tool-preview display bounds.
-  Turn-continuation flags participate in fingerprints; switching width class
-  remeasures every row so hanging labels and virtualized heights stay in sync.
+  Turn-continuation flags participate in structural fingerprints; clock-only
+  redraws do not scan history. Tail BlockData is cached per data update, plan
+  Markdown clones only when its version changes, and removed block views are
+  pruned. Tail keys include epoch, call header, kind and non-tool ordinal;
+  compatible commits retain both disclosure choice and Markdown entity. Pane
+  switches retain each pane's choices, parsing and scroll anchor; a projection
+  replacement retires them. Ambiguous/mismatched boundaries fall back to policy,
+  not another block's state.
+  Switching width class remeasures rows so labels and virtualized heights agree.
 - Desktop styling never enters request construction, tool registration, prompts
   or transcript envelopes. The provider's cacheable prompt prefix is unchanged.
 
@@ -419,6 +509,39 @@ unfiltered metadata can still fetch other platforms' crates. Cross-target
 inspection from a macOS host can also acquire GPUI/platform archives before
 narrowing the compilation graph; an offline failure there does not mean the
 non-macOS stub compiles GPUI.
+
+### Working-thread redesign validation
+
+Local validation used the low-disk Cargo settings above on macOS arm64. The
+implementation keeps the in-process host/session/presentation architecture;
+request construction, prompts, tool registration, replay and OpenAI
+canonicalization are unchanged.
+
+| Check | Result |
+| --- | --- |
+| Locked workspace tests | **2,675 passed, 0 failed, 5 ignored**, 60 suites |
+| Desktop unit suite | **74 passed**, including live/restored/interrupted thinking, retained identity, deferred folding, keyboard controls, root/child pane retention and question ownership |
+| Built-in theme contract | Graphite, Graphite Light and Zevria Dark pass contrast/CVD validation; derived tones and mode-control states are also tested |
+| Strict Desktop Clippy | Passed, default features and `fixtures`, all targets, no dependencies, `-D warnings` |
+| Strict content/theme Clippy | Passed |
+| `crate_boundaries` | **3 passed** |
+| Five independent default-feature prefix gates | Passed; nonempty discovered counts **1 / 2 / 1 / 1 / 1** |
+| Release desktop build and `--help` | Passed |
+| Opt-in Metal gallery | **59 PNGs** generated, including dark/light thinking and 720×520 question/Plan scenes |
+
+Strict all-target Clippy for the other two touched shared packages remains
+blocked by **six existing diagnostics in unchanged files**:
+`responses/src/accumulator.rs` (`large_enum_variant`, `let_and_return`),
+`responses/src/protocol.rs` (`collapsible_if`, `result_large_err`,
+`redundant_guards`) and `presentation/src/jobs.rs` (`collapsible_if`). A secondary
+check allowing those existing lint categories passes. No source lint policy was
+weakened and those unrelated files were not edited.
+
+Kit's public test context cannot retrieve the internal TestWindow needed by
+`simulate_appearance_change`; native tests exercise the same palette/highlighter
+adapter invoked by the installed window observer. **Real-provider sessions,
+macOS preference switching, VoiceOver and human visual acceptance are not
+claimed by these automated checks.** Use the manual checklist below.
 
 ### Historical pre-merge validation ledger
 
@@ -665,12 +788,32 @@ release:
 
 - [ ] First-run config error, Show config in Finder and Try again.
 - [ ] Drag the title strip; double-click to zoom; check traffic-light placement.
-- [ ] Toggle the sidebar with ⌃⌘S; resize to 720×520; inspect a generated light theme.
-- [ ] Tab through controls with visible focus; test Reduce Motion on and off.
+- [ ] Toggle the sidebar with ⌃⌘S; resize to 720×520; inspect Graphite Light and
+  a generated named theme. Change macOS appearance while streaming; the default
+  pair must switch live and a named theme must stay pinned.
+- [ ] Keyboard-only pass: sidebar arrows/Enter; Tab and reverse Shift-Tab;
+  Enter/Space on thinking; ⌥⌘→/←; expand/collapse-all; ⌥⌘↓; ⇧⌘M; ⌘↩ decisions.
+  Check every visible focus ring, including virtualized and narrow-window rows.
+- [ ] VoiceOver spot check: Thinking has its Button role, name, supplied preview
+  description and expanded state; Copy and Jump to latest have meaningful names.
+- [ ] Test Reduce Motion on and off: the live tip stays at ◐ and Plan opening is
+  instant when enabled.
 - [ ] Open workspace, new session, streamed Markdown and native command/edit rows.
-- [ ] Cancel during a provider stream; enter another turn afterwards.
+- [ ] Real Anthropic session: live thinking starts expanded; manual collapse
+  survives deltas and commit; Stop mid-thinking keeps the marked **unsaved**
+  partial before a neutral Stopped node. Restore and confirm it is absent.
+- [ ] Real Responses session: live summary thinking is visible, not Waiting;
+  Stop mid-thinking retains the persisted interrupted attempt. Restore and
+  reopen its folded supplied text. Test a model/config without readable thoughts:
+  no empty Thinking header or invented content should appear.
+- [ ] Complete a turn: untouched thinking folds; explicit choices persist.
+  Scroll up before completion and verify no jump/fold until Jump to latest.
+  Enter another turn and confirm it does not inherit the previous fold.
 - [ ] Plan → Ready → Implement; repeat with Implement in fresh session.
-- [ ] Text/select/Other/multi-select/optional questions; Answer and permitted Dismiss.
+- [ ] Text/select/Other/multi-select/optional questions in the dock: transcript
+  scroll stays available, ⌘↩ sends, Esc only dismisses when allowed, and the
+  composer's draft returns unchanged. At 720×520 inspect the Plan overlay and
+  question dock without obscured controls.
 - [ ] Launch and inspect a subtask; return to the root while it streams.
 - [ ] Resume from the sidebar and `--continue` (including no prior root).
 - [ ] Close/Cmd-Q while a turn is active, then resume cleanly.
@@ -717,15 +860,28 @@ No external provider credentials were exercised for this acceptance checklist.
   The shared model already supports transcript editing; restored images display.
 - One window and one live session; no tabs or concurrent-session UI.
 - No `.app` packaging, signing or notarization; no native Windows/Linux GUI.
-- No automatic light/dark switching, theme hot reload or full accessibility/
-  keyboard-navigation parity audit. Compact layout is covered down to a 720 px
-  window by native tests and the gallery; OS title-strip interactions, 720×520
-  operation and real-provider acceptance still need the manual checks above.
+- No theme-file hot reload or completed human accessibility/keyboard audit.
+  Default palettes follow macOS live; named palettes remain pinned. Compact
+  layout, question docks and Plan overlays are covered at 720×520 by native
+  tests; OS title-strip interactions and real-provider acceptance still need
+  the manual checks above.
   Large-session projection is off-thread; no real-provider GUI latency benchmark
   or human visual acceptance is claimed.
-- Tool input/output previews are capped at 24,000 characters, parsed diffs at
-  128 KiB, and add/delete previews at 1,000 source lines. Raw copy remains exact.
+- Tool input previews are capped at 24,000 characters; output initially shows
+  16 lines and can be expanded in place. Parsed diffs are capped at 128 KiB,
+  and add/delete diff previews at 1,000 source lines. Raw copy remains exact.
   Diff viewports follow the displayed line count, clamped to 120–420 px. Worker journals are host-loaded
   but individual worker panes are deliberately absent.
+- Message-only stopped/failed partials are deliberately unsaved window state:
+  restore cannot recover them. No supported Chat Completions `reasoning_content`
+  adapter is added here. The display whitelist does not change the residual
+  OpenAI canonical/replay `reasoning_texts` path, which is cache-prefix sensitive.
+- Two known projection/transport limitations remain out of scope: Responses
+  cancellation under channel backpressure can lose an already-read event, and
+  ordinary ACP projection can place the answer before joined thoughts. This
+  redesign does not change provider ordering or transport semantics.
+- Kit's public test context does not expose its internal native
+  `simulate_appearance_change` accessor. Automated tests exercise the exact
+  appearance adapter; a real macOS preference change remains a manual check.
 - Hosted macOS runner behavior and stable-toolchain GPUI builds remain subject
   to the shared CI run; local validation uses the toolchain recorded in the ledger.

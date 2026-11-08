@@ -47,6 +47,11 @@ mod native {
         Idle,
         Empty,
         Working,
+        ThinkingLive,
+        ThinkingRestored,
+        ThinkingInterrupted,
+        ThinkingUnsaved,
+        CodeHeavy,
         Plan,
         Question,
         Confirm,
@@ -65,6 +70,11 @@ mod native {
                 Self::Idle => "idle",
                 Self::Empty => "empty-session",
                 Self::Working => "working",
+                Self::ThinkingLive => "thinking-live",
+                Self::ThinkingRestored => "thinking-restored",
+                Self::ThinkingInterrupted => "thinking-interrupted",
+                Self::ThinkingUnsaved => "thinking-unsaved",
+                Self::CodeHeavy => "code-heavy-answer",
                 Self::Plan => "plan-review",
                 Self::Question => "question",
                 Self::Confirm => "replace-confirmation",
@@ -81,9 +91,7 @@ mod native {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/desktop-gallery")
             });
         std::fs::create_dir_all(&directory)?;
-        let light = zevria_theme::generate_theme("#F5EEDF".parse()?)?
-            .palette
-            .tokens();
+        let light = zevria_theme::ZEVRIA_GRAPHITE_LIGHT;
         for width in [1240., 720.] {
             for scene in [
                 Scene::Config,
@@ -94,6 +102,11 @@ mod native {
                 Scene::Idle,
                 Scene::Empty,
                 Scene::Working,
+                Scene::ThinkingLive,
+                Scene::ThinkingRestored,
+                Scene::ThinkingInterrupted,
+                Scene::ThinkingUnsaved,
+                Scene::CodeHeavy,
                 Scene::Plan,
                 Scene::Question,
                 Scene::Confirm,
@@ -107,13 +120,35 @@ mod native {
                     &directory.join(format!("{}-{}.png", scene.name(), width as u32)),
                 )?;
             }
-            capture(
+            for scene in [
                 Scene::Working,
-                width,
-                840.,
-                light,
-                &directory.join(format!("working-light-{}.png", width as u32)),
-            )?;
+                Scene::ThinkingLive,
+                Scene::ThinkingRestored,
+                Scene::ThinkingInterrupted,
+                Scene::ThinkingUnsaved,
+                Scene::CodeHeavy,
+                Scene::Question,
+                Scene::Plan,
+            ] {
+                capture(
+                    scene,
+                    width,
+                    840.,
+                    light,
+                    &directory.join(format!("{}-light-{}.png", scene.name(), width as u32)),
+                )?;
+            }
+        }
+        for scene in [Scene::ThinkingLive, Scene::Question, Scene::Plan] {
+            for (name, tokens) in [("dark", zevria_theme::ZEVRIA_GRAPHITE), ("light", light)] {
+                capture(
+                    scene,
+                    720.,
+                    520.,
+                    tokens,
+                    &directory.join(format!("{}-{name}-720x520.png", scene.name())),
+                )?;
+            }
         }
         for width in [1240., 720.] {
             capture(
@@ -210,6 +245,25 @@ mod native {
                     cx.notify();
                 });
             }
+            if scene == Scene::ThinkingRestored {
+                controller.update(cx, |c, cx| {
+                    c.model.root.conversation.restore(vec![
+                        zevria_transcript::transcript::TranscriptItem::Message(Message::user("Fix the failing transcript preview test.")),
+                        zevria_transcript::transcript::TranscriptItem::Message(thinking_message()),
+                        zevria_transcript::transcript::TranscriptItem::Message(Message::assistant("The preview now scans until it finds the prompt. The restore round-trip test passes.")),
+                    ]);
+                    cx.notify();
+                });
+            }
+            if scene == Scene::CodeHeavy {
+                controller.update(cx, |c, cx| {
+                    c.model.root.conversation.restore(vec![
+                        zevria_transcript::transcript::TranscriptItem::Message(Message::user("Show the preview fix and its regression test.")),
+                        zevria_transcript::transcript::TranscriptItem::Message(Message::assistant("## Restore the first readable prompt\n\nScan until the first user message instead of stopping at a fixed line count.\n\n```rust\nfn prompt_preview(items: &[TranscriptItem]) -> Option<&str> {\n    items.iter().find_map(|item| match item {\n        TranscriptItem::Message(Message::User { content }) => {\n            content.iter().find_map(readable_text)\n        }\n        _ => None,\n    })\n}\n```\n\n### Verify the boundary\n\n```sh\ncargo test -p zevria-transcript restore_roundtrip\ncargo test -p zevria-desktop\n```\n\n| Case | Expected |\n| --- | --- |\n| Metadata before the prompt | First readable prompt |\n| No user message | No preview |\n| Unicode prompt | Original text |")),
+                    ]);
+                    cx.notify();
+                });
+            }
             if scene == Scene::Math {
                 controller.update(cx, |c, cx| {
                     c.model.root.conversation.restore(vec![
@@ -251,6 +305,13 @@ mod native {
             Ok((window,controller))
         })?;
         settle(&mut cx, window)?;
+        if matches!(
+            scene,
+            Scene::ThinkingLive | Scene::ThinkingInterrupted | Scene::ThinkingUnsaved
+        ) {
+            cx.update(|cx| thinking_scene(scene, &controller, cx));
+            settle(&mut cx, window)?;
+        }
         if scene == Scene::Working {
             let key = controller.read_with(&cx, |c, _| {
                 let conversation = &c.model.root.conversation;
@@ -292,10 +353,42 @@ mod native {
         println!("{}", output.display());
         Ok(())
     }
+    fn thinking_message() -> Message {
+        Message::Assistant(AssistantMessage::new(vec![AssistantContent::Reasoning(
+            rig_core::message::Reasoning::new(
+                "The restored preview only scans sixteen lines, so metadata can hide the first prompt.\n\nI'll trace the transcript reader and use the first readable user message as the boundary. The new test should include a long metadata prefix and a Unicode prompt, without changing the persisted transcript.",
+            ),
+        )]))
+    }
+    fn thinking_scene(
+        scene: Scene,
+        controller: &Entity<SessionController>,
+        cx: &mut gpui_kit::App,
+    ) {
+        controller.update(cx, |c, cx| {
+            let turn_id = TurnId::new(31);
+            c.fixture_event(E::TurnStarted { turn_id, mode: SessionMode::Build, message: Message::user("Fix the failing transcript preview test.") }, cx);
+            c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
+            if scene == Scene::ThinkingInterrupted {
+                let mut attempt = zevria_content::ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("fixture", "fixture"));
+                attempt.presentation.push(zevria_content::AssistantPresentationPart {
+                    source: zevria_content::AssistantSourceAddress { output_index: 0, part: zevria_content::AssistantPartIdentity::Summary(0), item_id: None },
+                    content: zevria_content::AssistantPresentationContent::Reasoning { text: "The restored preview only scans sixteen lines. I was tracing the reader when the response stopped.".into() },
+                });
+                attempt.close(zevria_content::ResponseAttemptOutcome::Interrupted);
+                c.fixture_event(E::ResponseAttemptUpdated { turn_id, attempt }, cx);
+                c.fixture_event(E::TurnCancelled { turn_id }, cx);
+            } else {
+                c.fixture_event(E::AssistantStreamUpdated { turn_id, snapshot: zevria_content::AssistantStreamSnapshot { message: Some(thinking_message()), attempt: None } }, cx);
+                if scene == Scene::ThinkingUnsaved { c.fixture_event(E::TurnCancelled { turn_id }, cx); }
+            }
+        });
+    }
     fn working(controller: &Entity<SessionController>, cx: &mut gpui_kit::App) {
         controller.update(cx, |c,cx| {
             let turn_id = TurnId::new(8);
             c.fixture_event(E::TurnStarted { turn_id,mode: SessionMode::Build,message: Message::user("Fix the failing transcript preview test.") },cx);
+            c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
             c.fixture_event(E::Intermediate { turn_id,message: Message::assistant("I'll reproduce the failure, then trace the restored prompt."),attempt_id: None },cx);
             for (id,name,args) in [
                 ("command-ok","command",serde_json::json!({"command":"cargo test -p zevria-transcript"})),

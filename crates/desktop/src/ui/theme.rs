@@ -1,6 +1,6 @@
 //! The only desktop color boundary: shared tokens plus once-computed OKLab tones.
 use gpui_kit::component::{Colorize, Theme, ThemeMode};
-use gpui_kit::{App, Hsla, px, rgb};
+use gpui_kit::{App, Hsla, Window, WindowAppearance, px, rgb};
 use zevria_theme::{Rgb, ZevriaTheme};
 
 #[derive(Clone, Copy, Debug)]
@@ -10,6 +10,9 @@ pub struct Interaction {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Tones {
+    pub pencil: Hsla,
+    pub thread: Hsla,
+    pub focus: Hsla,
     pub hairline: Hsla,
     pub hover: Hsla,
     pub pressed: Hsla,
@@ -20,6 +23,7 @@ pub struct Tones {
     pub scrim: Hsla,
     pub drop_target: Hsla,
     pub build: Interaction,
+    pub plan: Interaction,
     pub danger: Interaction,
     pub success: Interaction,
     pub warning: Interaction,
@@ -29,20 +33,40 @@ pub struct Tones {
 impl Tones {
     fn new(t: ZevriaTheme<Hsla>) -> Self {
         let interaction = |ink: Hsla| Interaction {
-            hover: ink.mix_oklab(t.text.primary, 0.85),
-            active: ink.mix_oklab(t.surfaces.canvas, 0.88),
+            hover: seek(ink.mix_oklab(t.text.primary, 0.85), ink, |bg| {
+                contrast(t.surfaces.canvas, bg) >= 4.5
+            }),
+            active: seek(ink.mix_oklab(t.surfaces.canvas, 0.88), ink, |bg| {
+                contrast(t.surfaces.canvas, bg) >= 4.5
+            }),
         };
         Self {
+            pencil: seek(t.text.secondary, t.text.primary, |ink| {
+                apca(ink, t.surfaces.canvas).abs() >= 75.
+            }),
+            thread: seek(t.surfaces.border, t.surfaces.border_strong, |ink| {
+                contrast(ink, t.surfaces.canvas) >= 3.
+            }),
+            focus: t.surfaces.selection_background,
             hairline: t.surfaces.border.mix_oklab(t.surfaces.canvas, 0.55),
             hover: t.surfaces.overlay.mix_oklab(t.surfaces.border, 0.65),
             pressed: t.surfaces.overlay.mix_oklab(t.surfaces.border, 0.45),
-            build_tint: t.surfaces.panel.mix_oklab(t.workflow.build, 0.86),
-            plan_tint: t.surfaces.panel.mix_oklab(t.workflow.plan, 0.86),
+            build_tint: seek(
+                t.surfaces.panel.mix_oklab(t.workflow.build, 0.86),
+                t.surfaces.panel,
+                |bg| contrast(t.workflow.build, bg) >= 4.5,
+            ),
+            plan_tint: seek(
+                t.surfaces.panel.mix_oklab(t.workflow.plan, 0.86),
+                t.surfaces.panel,
+                |bg| contrast(t.workflow.plan, bg) >= 4.5,
+            ),
             list_active: t.surfaces.selection_background.alpha(0.14),
             selection: t.surfaces.selection_background.alpha(0.40),
             scrim: t.surfaces.canvas.alpha(0.72),
             drop_target: t.workflow.plan.alpha(0.12),
             build: interaction(t.workflow.build),
+            plan: interaction(t.workflow.plan),
             danger: interaction(t.feedback.error),
             success: interaction(t.feedback.success),
             warning: interaction(t.feedback.warning),
@@ -60,13 +84,52 @@ impl gpui_kit::Global for Palette {}
 pub fn color(Rgb(r, g, b): Rgb) -> Hsla {
     rgb((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)).into()
 }
-pub fn prepare(config: &zevria_host::Config) -> anyhow::Result<ZevriaTheme> {
+#[derive(Clone, Copy, Default)]
+pub enum Selection {
+    #[default]
+    System,
+    Named(ZevriaTheme),
+}
+impl gpui_kit::Global for Selection {}
+impl Selection {
+    pub fn tokens(self, appearance: WindowAppearance) -> ZevriaTheme {
+        match self {
+            Self::Named(tokens) => tokens,
+            Self::System => match appearance {
+                WindowAppearance::Light | WindowAppearance::VibrantLight => {
+                    zevria_theme::ZEVRIA_GRAPHITE_LIGHT
+                }
+                WindowAppearance::Dark | WindowAppearance::VibrantDark => {
+                    zevria_theme::ZEVRIA_GRAPHITE
+                }
+            },
+        }
+    }
+}
+pub fn select(selection: Selection, cx: &mut App) {
+    cx.set_global(selection);
+    // The first native window resolves the actual appearance before rendering.
+    apply(selection.tokens(WindowAppearance::Dark), cx);
+}
+pub fn follow_appearance(window: &mut Window, cx: &mut App) {
+    apply_appearance(window.appearance(), cx);
+}
+pub fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
+    if cx.has_global::<Selection>() {
+        let tokens = cx.global::<Selection>().tokens(appearance);
+        if !cx.has_global::<Palette>() || cx.global::<Palette>().tokens != tokens.map(color) {
+            apply(tokens, cx);
+            cx.refresh_windows();
+        }
+    }
+}
+pub fn prepare(config: &zevria_host::Config) -> anyhow::Result<Selection> {
     if let Some(selector) = config.theme() {
         let definition = zevria_host::theme_store::ThemeStore::global()?.load(&selector.name)?;
         zevria_theme::install_theme(&definition)?;
-        return Ok(*zevria_theme::theme());
+        return Ok(Selection::Named(*zevria_theme::theme()));
     }
-    Ok(zevria_theme::ZEVRIA_GRAPHITE)
+    Ok(Selection::System)
 }
 
 fn luminance(color: Hsla) -> f32 {
@@ -117,7 +180,7 @@ pub fn apply(tokens: ZevriaTheme, cx: &mut App) {
         c.warning = t.feedback.warning;
         c.info = t.feedback.info;
         c.link = t.content.link;
-        c.ring = t.surfaces.border_strong;
+        c.ring = tones.focus;
         c.selection = tones.selection;
         c.sidebar = t.surfaces.panel;
         c.sidebar_foreground = t.text.primary;
@@ -275,8 +338,46 @@ pub fn mode_is_dark(cx: &App) -> bool {
     Theme::global(cx).mode == ThemeMode::Dark
 }
 pub fn install(config: &zevria_host::Config, cx: &mut App) -> anyhow::Result<()> {
-    apply(prepare(config)?, cx);
+    select(prepare(config)?, cx);
     Ok(())
+}
+
+fn contrast(a: Hsla, b: Hsla) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+/// APCA-W3 0.0.98G-4g base equation, used only as a tone-selection constraint.
+/// Constants/equation: Myndex apca-w3, docs/APCA-W3-LaTeX.html (W3 license).
+fn apca(text: Hsla, background: Hsla) -> f32 {
+    let y = |color: Hsla| {
+        let c = color.to_rgb();
+        let y = 0.2126729 * c.r.powf(2.4) + 0.7151522 * c.g.powf(2.4) + 0.0721750 * c.b.powf(2.4);
+        if y < 0.022 {
+            y + (0.022 - y).powf(1.414)
+        } else {
+            y
+        }
+    };
+    let (text, background) = (y(text), y(background));
+    if (text - background).abs() < 0.0005 {
+        return 0.;
+    }
+    let raw = if background > text {
+        background.powf(0.56) - text.powf(0.57)
+    } else {
+        background.powf(0.65) - text.powf(0.62)
+    } * 1.14;
+    if raw.abs() < 0.1 {
+        0.
+    } else {
+        (raw - raw.signum() * 0.027) * 100.
+    }
+}
+fn seek(from: Hsla, to: Hsla, passes: impl Fn(Hsla) -> bool) -> Hsla {
+    (0..=100)
+        .map(|step| from.mix_oklab(to, 1. - step as f32 / 100.))
+        .find(|ink| passes(*ink))
+        .unwrap_or(to)
 }
 
 fn syntax_style(color: Hsla) -> gpui_kit::component::highlighter::ThemeStyle {
@@ -351,6 +452,64 @@ mod tests {
         for ink in [t.workflow.build, t.workflow.plan, t.feedback.error] {
             assert!(contrast(t.surfaces.canvas, ink) >= 4.5);
         }
+    }
+    #[test]
+    fn derived_reading_thread_and_focus_tones_meet_their_constraints() {
+        let generated = zevria_theme::generate_theme("#1E1E2E".parse().unwrap())
+            .unwrap()
+            .palette
+            .tokens();
+        for tokens in [
+            zevria_theme::ZEVRIA_GRAPHITE,
+            zevria_theme::ZEVRIA_GRAPHITE_LIGHT,
+            generated,
+        ] {
+            let t = tokens.map(color);
+            let tones = Tones::new(t);
+            assert!(apca(tones.pencil, t.surfaces.canvas).abs() >= 75.);
+            assert!(contrast(tones.thread, t.surfaces.canvas) >= 3.);
+            assert!(contrast(t.workflow.build, tones.build_tint) >= 4.5);
+            assert!(contrast(t.workflow.plan, tones.plan_tint) >= 4.5);
+            for interaction in [
+                tones.build,
+                tones.plan,
+                tones.danger,
+                tones.warning,
+                tones.success,
+                tones.info,
+            ] {
+                assert!(contrast(t.surfaces.canvas, interaction.hover) >= 4.5);
+                assert!(contrast(t.surfaces.canvas, interaction.active) >= 4.5);
+            }
+            for surface in [t.surfaces.canvas, t.surfaces.panel, t.surfaces.overlay] {
+                assert!(contrast(tones.pencil, surface) >= 4.5);
+                assert!(contrast(tones.focus, surface) >= 3.);
+                for text in [t.text.primary, t.text.secondary] {
+                    assert!(contrast(text, surface) >= 4.5);
+                }
+            }
+        }
+        let white = color(zevria_theme::Rgb(255, 255, 255));
+        let black = color(zevria_theme::Rgb(0, 0, 0));
+        assert!((apca(black, white) - 106.04).abs() < 0.02);
+        assert!((apca(white, black) + 107.88).abs() < 0.02);
+        assert_eq!(apca(white, white), 0.);
+    }
+    #[test]
+    fn system_selection_follows_appearance_but_named_palette_is_pinned() {
+        assert_eq!(
+            Selection::System.tokens(WindowAppearance::Dark),
+            zevria_theme::ZEVRIA_GRAPHITE
+        );
+        assert_eq!(
+            Selection::System.tokens(WindowAppearance::Light),
+            zevria_theme::ZEVRIA_GRAPHITE_LIGHT
+        );
+        let named = Selection::Named(zevria_theme::ZEVRIA_DARK);
+        assert_eq!(
+            named.tokens(WindowAppearance::Light),
+            named.tokens(WindowAppearance::Dark)
+        );
     }
     #[test]
     fn generated_light_palette_selects_light_mode() {

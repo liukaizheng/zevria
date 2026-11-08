@@ -4,7 +4,7 @@ pub mod composer;
 pub mod math;
 pub mod plan;
 pub mod question;
-pub mod rows;
+pub use crate::rows;
 pub mod screens;
 pub mod sidebar;
 pub mod status;

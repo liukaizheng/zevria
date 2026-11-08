@@ -355,13 +355,47 @@ pub const ZEVRIA_GRAPHITE: ZevriaTheme = ReferencePalette {
 }
 .tokens();
 
+/// Near-neutral paper sibling of Graphite. The reference schema and semantic
+/// aliases are identical; accent lightness is deliberately spread for CVD separation.
+pub const ZEVRIA_GRAPHITE_LIGHT: ZevriaTheme = ReferencePalette {
+    canvas: HexRgb(0xfb, 0xfa, 0xf8),
+    panel: HexRgb(0xf2, 0xf0, 0xec),
+    overlay: HexRgb(0xff, 0xff, 0xff),
+    border: HexRgb(0xd3, 0xd0, 0xcd),
+    border_strong: HexRgb(0x83, 0x80, 0x7b),
+    selection: HexRgb(0x22, 0x66, 0xa4),
+    text_primary: HexRgb(0x22, 0x1f, 0x1b),
+    text_secondary: HexRgb(0x45, 0x42, 0x3e),
+    text_muted: HexRgb(0x66, 0x63, 0x5e),
+    build: HexRgb(0x07, 0x55, 0x3e),
+    plan: HexRgb(0x02, 0x67, 0xc7),
+    review: HexRgb(0x90, 0x60, 0x1f),
+    explore: HexRgb(0x5f, 0x27, 0x9e),
+    you: HexRgb(0x24, 0x5e, 0x4a),
+    assistant: HexRgb(0x69, 0x47, 0x87),
+    system: HexRgb(0x78, 0x56, 0x29),
+    tools: HexRgb(0x14, 0x60, 0x71),
+    success: HexRgb(0x00, 0x48, 0x0e),
+    warning: HexRgb(0x86, 0x65, 0x32),
+    error: HexRgb(0x9b, 0x12, 0x48),
+    info: HexRgb(0x09, 0x6a, 0xcb),
+    diff_addition_background: HexRgb(0xee, 0xf6, 0xee),
+    diff_deletion_background: HexRgb(0xff, 0xf0, 0xf2),
+    syntax_keyword: HexRgb(0x70, 0x34, 0x90),
+    syntax_function: HexRgb(0x15, 0x5b, 0x78),
+    syntax_string: HexRgb(0x24, 0x5b, 0x2a),
+    syntax_constant: HexRgb(0x77, 0x50, 0x1c),
+}
+.tokens();
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const BUILT_INS: [(&str, ZevriaTheme); 2] = [
+    const BUILT_INS: [(&str, ZevriaTheme); 3] = [
         ("Zevria Dark", ZEVRIA_DARK),
         ("Zevria Graphite", ZEVRIA_GRAPHITE),
+        ("Zevria Graphite Light", ZEVRIA_GRAPHITE_LIGHT),
     ];
 
     #[test]

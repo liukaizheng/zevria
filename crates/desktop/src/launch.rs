@@ -11,7 +11,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     let workspace = cli.workspace()?;
     let mut config = zevria_host::Config::load().map_err(|e| format!("{e:#}"));
     let mut guard = None;
-    let mut tokens = zevria_theme::ZEVRIA_GRAPHITE;
+    let mut tokens = theme::Selection::System;
     if let Ok(loaded) = &config {
         match zevria_foundation::logging::init_named(loaded.log(), LOG_FILE).and_then(|log| {
             guard = Some(log);
@@ -27,7 +27,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
             gpui_kit::init(cx);
-            theme::apply(tokens, cx);
+            theme::select(tokens, cx);
             actions::install(cx);
             cx.set_global(runtime);
             if let Some(guard) = guard {

@@ -4,8 +4,12 @@ use super::{
     math, style,
     theme::{palette, tones},
 };
-use crate::controller::SessionController;
-use gpui_kit::base::text::TextView;
+use crate::{
+    controller::SessionController,
+    disclosure::{Phase, TailKind},
+};
+use gpui_kit::base::{AccordionTrigger, text::TextView};
+use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::{
     Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
@@ -15,6 +19,22 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::*, *};
 use std::sync::Arc;
 use zevria_presentation::{blocks::*, conversation::HistoryEntry, status_icon::StatusIcon};
+
+pub fn tool_label(name: &str) -> &str {
+    match name {
+        "command" | "command_status" | "command_terminate" => "Command",
+        "edit" => "Edit",
+        "write" => "Write",
+        "delete" => "Delete",
+        "read" | "skill_read" => "Read",
+        "web_search" => "Search",
+        "question" => "Question",
+        "create_plan" | "update_plan" | "read_plan" | "submit_plan" => "Plan draft",
+        "task" => "Tasks",
+        "launch_subtasks" => "Subtasks",
+        _ => name,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Speaker {
@@ -46,6 +66,7 @@ pub enum Gutter {
 pub enum NoticeLevel {
     Error,
     Warning,
+    Neutral,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentKind {
@@ -54,25 +75,13 @@ pub enum DocumentKind {
 }
 #[derive(Clone, Debug)]
 pub enum LiveTail {
-    Waiting {
-        elapsed: String,
-    },
-    Compacting {
-        elapsed: String,
-    },
-    Retrying {
-        attempt: usize,
-        remaining: String,
-        error: String,
-    },
+    Activity(String),
 }
 #[derive(Clone, Debug, Default)]
 pub struct ToolMeta {
     pub added: usize,
     pub removed: usize,
     pub background: bool,
-    /// The native Diff header already repeats this file-change-only summary.
-    pub diff_summary: bool,
 }
 #[derive(Clone, Debug)]
 pub enum BlockKind {
@@ -123,6 +132,10 @@ pub struct BlockData {
     pub image: Option<Arc<Image>>,
     pub changes: Vec<zevria_foundation::FileChangeOutput>,
     pub turn_boundary: bool,
+    pub expanded: bool,
+    pub phase: Phase,
+    pub source: Option<PresentationBlockId>,
+    pub header: Option<NativeHeader>,
 }
 fn bounded(text: &str) -> String {
     let mut value = text.chars().take(24_000).collect::<String>();
@@ -147,6 +160,10 @@ impl BlockData {
             image: None,
             changes: Vec::new(),
             turn_boundary: false,
+            expanded: false,
+            phase: Phase::Finished,
+            source: None,
+            header: None,
         }
     }
     fn block(epoch: &str, block: &PresentationBlock) -> Self {
@@ -159,6 +176,7 @@ impl BlockData {
             false,
         );
         data.revision = block.revision;
+        data.source = Some(block.id);
         data.secondary = block.secondary_copy();
         match &block.kind {
             PresentationBlockKind::Text { flavor, .. } => {
@@ -199,8 +217,8 @@ impl BlockData {
                         if let Some(metadata) = &state.metadata {
                             data.changes = metadata.file_changes().to_vec();
                             if !data.changes.is_empty() {
-                                data.body = tools::summary(&data.changes);
-                                data.plain = true;
+                                data.body = format!("```json\n{}\n```", bounded(&data.primary));
+                                data.plain = false;
                             }
                             if let Some(draft) =
                                 metadata.detail.as_ref().and_then(|d| d.plan_draft())
@@ -238,11 +256,6 @@ impl BlockData {
                             meta: ToolMeta {
                                 added,
                                 removed,
-                                diff_summary: state.metadata.as_ref().is_some_and(|m| {
-                                    !m.file_changes().is_empty()
-                                        && m.diagnostic.is_none()
-                                        && m.detail.as_ref().and_then(|d| d.plan_draft()).is_none()
-                                }),
                                 background: state.command_job.is_some()
                                     || state
                                         .arguments
@@ -321,6 +334,19 @@ impl BlockData {
             }
             PresentationBlockKind::Placeholder(_) => {
                 data.plain = true;
+                if let Some(outcome) = zevria_presentation::incomplete_response_outcome(&block.kind)
+                {
+                    data.kind = BlockKind::Notice {
+                        level: NoticeLevel::Warning,
+                    };
+                    data.body = if outcome == zevria_content::ResponseAttemptOutcome::Interrupted {
+                        "Stopped before the response finished"
+                    } else {
+                        "The response failed before it finished"
+                    }
+                    .into();
+                    data.gutter = Gutter::Glyph(StatusIcon::Interrupted);
+                }
             }
         }
         data
@@ -343,6 +369,16 @@ pub fn entry(
                 .filter(|b| b.visible(false))
                 .map(|b| BlockData::block(epoch, b))
                 .collect::<Vec<_>>();
+            let interrupted = entry
+                .blocks
+                .iter()
+                .any(|b| zevria_presentation::incomplete_response_outcome(&b.kind).is_some());
+            for block in &mut blocks {
+                block.header = entry.header;
+                if interrupted {
+                    block.phase = Phase::Interrupted;
+                }
+            }
             if let Some(first) = blocks.first_mut() {
                 if matches!(entry.header, Some(NativeHeader::Prompt(_))) {
                     first.gutter = Gutter::Label(if child { Speaker::Task } else { Speaker::You });
@@ -435,15 +471,31 @@ pub fn entry(
             ),
             true,
         )],
-        HistoryEntry::Error(e) => vec![BlockData::new(
-            key,
-            BlockKind::Notice {
-                level: NoticeLevel::Error,
-            },
-            Gutter::Glyph(StatusIcon::Failed),
-            e.clone(),
-            true,
-        )],
+        HistoryEntry::Error(e) => {
+            let mut notice = BlockData::new(
+                key,
+                BlockKind::Notice {
+                    level: if e == zevria_presentation::TURN_CANCELLED {
+                        NoticeLevel::Neutral
+                    } else {
+                        NoticeLevel::Error
+                    },
+                },
+                Gutter::Glyph(if e == zevria_presentation::TURN_CANCELLED {
+                    StatusIcon::Interrupted
+                } else {
+                    StatusIcon::Failed
+                }),
+                if e == zevria_presentation::TURN_CANCELLED {
+                    "Stopped".into()
+                } else {
+                    e.clone()
+                },
+                true,
+            );
+            notice.primary = e.clone();
+            vec![notice]
+        }
         HistoryEntry::CompactionDivider => vec![BlockData::new(
             key,
             BlockKind::Divider,
@@ -461,6 +513,32 @@ pub fn entry(
     }
     blocks
 }
+impl BlockData {
+    pub fn tail_kind(&self) -> Option<TailKind> {
+        match self.kind {
+            BlockKind::Tool { .. } | BlockKind::Subtask { .. } | BlockKind::Live(_) => None,
+            BlockKind::Reasoning => Some(TailKind::Thinking),
+            BlockKind::Prose {
+                role: PresentationRole::Assistant,
+                ..
+            } => Some(TailKind::Answer),
+            _ => Some(TailKind::Other),
+        }
+    }
+}
+#[derive(Clone)]
+pub struct DisclosureChanged {
+    pub key: String,
+    pub expanded: bool,
+}
+
+fn output_preview(text: &str, all: bool) -> String {
+    if all {
+        text.into()
+    } else {
+        text.lines().take(16).collect::<Vec<_>>().join("\n")
+    }
+}
 fn plain_html(text: &str) -> String {
     format!(
         "<p>{}</p>",
@@ -474,8 +552,8 @@ pub struct BlockView {
     data: BlockData,
     text: Entity<TextViewState>,
     output: Entity<TextViewState>,
-    expanded: bool,
     compact: bool,
+    show_all_output: bool,
     diff: Option<Entity<DiffState>>,
     diff_error: Option<String>,
     diff_task: Option<Task<()>>,
@@ -483,10 +561,44 @@ pub struct BlockView {
     _output: Subscription,
     _clock: Subscription,
     action_focus: [FocusHandle; 3],
+    disclosure_focus: FocusHandle,
     focus_subscriptions: Vec<Subscription>,
     controller: Entity<SessionController>,
 }
+impl EventEmitter<DisclosureChanged> for BlockView {}
 impl BlockView {
+    pub fn key(&self) -> &str {
+        &self.data.key
+    }
+    #[cfg(test)]
+    pub(super) fn text_id(&self) -> EntityId {
+        self.text.entity_id()
+    }
+    #[cfg(test)]
+    pub(super) fn disclosure_focus(&self) -> FocusHandle {
+        self.disclosure_focus.clone()
+    }
+    pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.disclosure_focus.contains_focused(window, cx)
+            || self
+                .action_focus
+                .iter()
+                .any(|f| f.contains_focused(window, cx))
+    }
+    pub fn disclose(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        if !self.data.collapsible {
+            return;
+        }
+        self.data.expanded = expanded;
+        cx.emit(DisclosureChanged {
+            key: self.data.key.clone(),
+            expanded,
+        });
+        if expanded {
+            self.prepare_diff(cx);
+        }
+        cx.notify();
+    }
     pub fn new(
         data: BlockData,
         controller: Entity<SessionController>,
@@ -502,7 +614,10 @@ impl BlockView {
         });
         let output = cx.new(|cx| {
             TextViewState::html(
-                &plain_html(&bounded(data.secondary.as_deref().unwrap_or_default())),
+                &plain_html(&output_preview(
+                    data.secondary.as_deref().unwrap_or_default(),
+                    false,
+                )),
                 cx,
             )
         });
@@ -512,7 +627,9 @@ impl BlockView {
             if matches!(
                 this.data.gutter,
                 Gutter::Live | Gutter::Glyph(StatusIcon::Running)
-            ) {
+            ) || (matches!(this.data.kind, BlockKind::Reasoning)
+                && this.data.phase == Phase::Live)
+            {
                 cx.notify();
             }
         });
@@ -520,8 +637,8 @@ impl BlockView {
             data,
             text,
             output,
-            expanded: false,
             compact,
+            show_all_output: false,
             diff: None,
             diff_error: None,
             diff_task: None,
@@ -529,6 +646,7 @@ impl BlockView {
             _output: watch_output,
             _clock: clock,
             action_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
+            disclosure_focus: cx.focus_handle(),
             focus_subscriptions: Vec::new(),
             controller,
         }
@@ -538,7 +656,20 @@ impl BlockView {
             self.compact = compact;
             cx.notify();
         }
-        if data.revision == self.data.revision {
+        let metadata_changed = data.expanded != self.data.expanded
+            || data.phase != self.data.phase
+            || data.key != self.data.key;
+        if data.revision == self.data.revision
+            && data.body == self.data.body
+            && data.secondary == self.data.secondary
+        {
+            self.data = data;
+            if metadata_changed {
+                if self.data.expanded {
+                    self.prepare_diff(cx);
+                }
+                cx.notify();
+            }
             return;
         }
         let body = if data.plain {
@@ -555,12 +686,15 @@ impl BlockView {
                 }
             });
             self._text = cx.observe(&self.text, |_, _, cx| cx.notify());
-        } else {
+        } else if data.body != self.data.body {
             self.text.update(cx, |text, cx| text.set_text(&body, cx));
         }
         self.output.update(cx, |text, cx| {
             text.set_text(
-                &plain_html(&bounded(data.secondary.as_deref().unwrap_or_default())),
+                &plain_html(&output_preview(
+                    data.secondary.as_deref().unwrap_or_default(),
+                    self.show_all_output,
+                )),
                 cx,
             )
         });
@@ -571,7 +705,7 @@ impl BlockView {
             self.diff_error = None;
             self.diff_task = None;
         }
-        if self.expanded {
+        if self.data.expanded {
             self.prepare_diff(cx);
         }
         cx.notify();
@@ -595,23 +729,49 @@ impl BlockView {
             });
         }));
     }
-    fn disclosure(&self, name: &'static str, cx: &mut Context<Self>) -> Button {
-        style::icon_button(
-            "expand",
-            if self.expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            },
-            name,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.expanded = !this.expanded;
-            if this.expanded {
-                this.prepare_diff(cx);
-            }
-            cx.notify();
-        }))
+    fn disclosure(
+        &self,
+        name: &'static str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AccordionTrigger {
+        let owner = cx.entity();
+        AccordionTrigger::new("expand")
+            .open(self.data.expanded)
+            .track_focus(&self.disclosure_focus)
+            .aria_label(name)
+            .relative()
+            .size(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|s| s.bg(tones(cx).hover))
+            .active(|s| s.bg(tones(cx).pressed))
+            .on_change(move |expanded, _, window, cx| {
+                owner.update(cx, |this, cx| {
+                    window.focus(&this.disclosure_focus, cx);
+                    this.disclose(expanded, cx);
+                })
+            })
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.disclose(!this.data.expanded, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                Icon::new(if self.data.expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .small(),
+            )
+            .when(self.disclosure_focus.is_focused(window), |trigger| {
+                trigger.child(style::focus_ring(cx))
+            })
     }
     fn actions(&self, window: &Window, _cx: &mut Context<Self>) -> Div {
         let primary = self.data.primary.clone();
@@ -665,6 +825,25 @@ impl BlockView {
         TextView::new(&self.text)
             .markdown_extensions(math::extensions())
             .style(style::markdown(cx, document))
+            .code_block_actions(|code, _, cx| {
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        style::meta()
+                            .text_color(palette(cx).text.muted)
+                            .child(code.lang().unwrap_or_default()),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Clipboard::new("copy-code")
+                            .value(code.code())
+                            .tooltip("Copy code")
+                            .accessibility_label("Copy code"),
+                    )
+            })
             .scrollable(false)
             .font_family(if document {
                 style::DOCUMENT_FONT
@@ -678,7 +857,11 @@ impl BlockView {
 impl Render for BlockView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.focus_subscriptions.is_empty() {
-            for handle in &self.action_focus {
+            for handle in self
+                .action_focus
+                .iter()
+                .chain(std::iter::once(&self.disclosure_focus))
+            {
                 self.focus_subscriptions
                     .push(cx.on_focus(handle, window, |_, _, cx| cx.notify()));
                 self.focus_subscriptions
@@ -700,24 +883,10 @@ impl Render for BlockView {
                     t.text.muted
                 })
                 .child(speaker.label()),
-            Gutter::Glyph(status) => gutter.child(style::status_glyph(status, ink, cx)),
-            Gutter::Live => gutter.child(style::status_glyph(StatusIcon::Running, ink, cx)),
+            Gutter::Glyph(_) | Gutter::Live => gutter,
         };
         if matches!(self.data.kind, BlockKind::Web) {
             gutter = gutter.child(Icon::new(IconName::Globe).small().text_color(t.text.muted));
-        }
-        if matches!(
-            self.data.kind,
-            BlockKind::Notice {
-                level: NoticeLevel::Warning
-            } | BlockKind::Live(LiveTail::Retrying { .. })
-        ) {
-            gutter = measure
-                .gutter()
-                .pt(px(5.))
-                .text_size(px(14.))
-                .text_color(t.feedback.warning)
-                .child("!");
         }
         let mut content = div()
             .flex_1()
@@ -725,10 +894,19 @@ impl Render for BlockView {
             .max_w(px(style::CONTENT))
             .flex()
             .flex_col()
+            .relative()
+            .py(px(4.))
             .gap(px(8.));
         match &self.data.kind {
             BlockKind::Prose { role, .. } => {
                 let prompt = *role == PresentationRole::User;
+                if self.data.phase == Phase::Unsaved {
+                    content = content.child(
+                        style::meta()
+                            .text_color(t.feedback.warning)
+                            .child("Stopped, not saved to this session"),
+                    );
+                }
                 content = content.max_w(px(style::PROSE)).child(
                     div()
                         .relative()
@@ -745,35 +923,103 @@ impl Render for BlockView {
                 );
             }
             BlockKind::Reasoning => {
-                content = content.child(
+                let preview = crate::disclosure::preview(&self.data.body);
+                let owner = cx.entity();
+                let mut header = AccordionTrigger::new("thinking-disclosure")
+                    .open(self.data.expanded)
+                    .track_focus(&self.disclosure_focus)
+                    .aria_label("Thinking")
+                    .aria_description(preview.clone())
+                    .relative()
+                    .w_full()
+                    .min_h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(|h| h.bg(tones(cx).hover))
+                    .active(|h| h.bg(tones(cx).pressed))
+                    .on_change(move |expanded, _, window, cx| {
+                        owner.update(cx, |this, cx| {
+                            window.focus(&this.disclosure_focus, cx);
+                            this.disclose(expanded, cx);
+                        })
+                    })
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.disclose(!this.data.expanded, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(
+                        Icon::new(if self.data.expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .small()
+                        .text_color(tones(cx).pencil),
+                    )
+                    .child(
+                        style::label()
+                            .text_color(tones(cx).pencil)
+                            .child("Thinking"),
+                    );
+                if self.data.phase == Phase::Live {
+                    header = header.child(style::status_glyph(StatusIcon::Running, ink, cx));
+                }
+                if self.data.phase == Phase::Unsaved {
+                    header = header.child(
+                        style::meta()
+                            .text_color(t.feedback.warning)
+                            .child("Stopped, not saved to this session"),
+                    );
+                }
+                if !self.data.expanded {
+                    header = header
+                        .child(
+                            style::pencil()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(tones(cx).pencil)
+                                .child(preview),
+                        )
+                        .child(
+                            style::meta()
+                                .flex_shrink_0()
+                                .text_color(t.text.muted)
+                                .child(format!(
+                                    "{} words",
+                                    self.data.body.split_whitespace().count()
+                                )),
+                        );
+                }
+                if self.disclosure_focus.is_focused(window) {
+                    header = header.child(style::focus_ring(cx));
+                }
+                content = content.max_w(px(style::PROSE)).child(
                     div()
+                        .group("log-block")
                         .flex()
                         .items_center()
-                        .gap(px(4.))
-                        .child(self.disclosure(
-                            if self.expanded {
-                                "Hide details"
-                            } else {
-                                "Show details"
-                            },
-                            cx,
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(14.))
-                                .line_height(px(20.))
-                                .italic()
-                                .text_color(t.text.muted)
-                                .child("Reasoning"),
-                        ),
+                        .gap(px(8.))
+                        .child(header)
+                        .child(self.actions(window, cx)),
                 );
-                if self.expanded {
+                if self.data.expanded {
                     content = content.child(
                         self.rich_text(false, cx)
+                            .style(
+                                style::markdown(cx, true)
+                                    .with_foreground(tones(cx).pencil)
+                                    .with_muted_foreground(tones(cx).pencil),
+                            )
+                            .font_family(style::DOCUMENT_FONT)
                             .text_size(px(14.))
-                            .line_height(px(22.))
-                            .text_color(t.text.secondary)
-                            .max_w(px(style::PROSE)),
+                            .line_height(px(23.))
+                            .text_color(tones(cx).pencil),
                     );
                 }
             }
@@ -792,15 +1038,15 @@ impl Render for BlockView {
                     .child(
                         style::label()
                             .text_color(t.text.secondary)
-                            .child(name.clone()),
+                            .child(tool_label(name).to_owned()),
                     )
-                    .child(
-                        style::mono()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(summary.clone()),
-                    );
+                    .child(style::mono().flex_1().min_w_0().truncate().child(
+                        if matches!(name.as_str(), "edit" | "write" | "read" | "delete") {
+                            super::sidebar::middle_path(summary, 64)
+                        } else {
+                            summary.clone()
+                        },
+                    ));
                 if meta.added > 0 {
                     row = row.child(
                         style::meta()
@@ -836,42 +1082,75 @@ impl Render for BlockView {
                     _ => {}
                 }
                 row = row.child(self.actions(window, cx)).child(self.disclosure(
-                    if self.expanded {
+                    if self.data.expanded {
                         "Hide details"
                     } else {
                         "Show details"
                     },
+                    window,
                     cx,
                 ));
                 content = content.child(row);
-                if self.expanded {
+                if self.data.expanded {
                     let mut well = div()
                         .w_full()
                         .p(px(12.))
-                        .rounded(px(10.))
+                        .rounded(px(8.))
                         .bg(t.surfaces.panel)
                         .flex()
                         .flex_col()
                         .gap(px(12.));
-                    // Remove the redundant path/count summary once the native
-                    // Diff header is visible. Diagnostics and plan-draft detail
-                    // remain visible, and all copy payloads stay exact.
-                    if self.diff.is_none() || !meta.diff_summary {
-                        well = well.child(
+                    well = well
+                        .child(style::label().text_color(t.text.muted).child("Input"))
+                        .child(
                             self.rich_text(false, cx)
-                                .text_size(px(14.))
-                                .line_height(px(22.)),
-                        );
-                    }
-                    if self.data.secondary.is_some() {
-                        well = well.child(
-                            TextView::new(&self.output)
-                                .style(style::markdown(cx, false))
-                                .scrollable(false)
                                 .font_family(style::MONO_FONT)
                                 .text_size(px(13.))
                                 .line_height(px(20.)),
                         );
+                    if !self.data.changes.is_empty() {
+                        well = well.child(
+                            style::meta()
+                                .text_color(t.text.secondary)
+                                .child(tools::summary(&self.data.changes)),
+                        );
+                    }
+                    if self.data.secondary.is_some() {
+                        well = well
+                            .child(style::label().text_color(t.text.muted).child("Output"))
+                            .child(
+                                TextView::new(&self.output)
+                                    .style(style::markdown(cx, false))
+                                    .scrollable(false)
+                                    .font_family(style::MONO_FONT)
+                                    .text_size(px(13.))
+                                    .line_height(px(20.)),
+                            );
+                    }
+                    if let Some(output) = &self.data.secondary {
+                        let lines = output.lines().count();
+                        if lines > 16 {
+                            well = well.child(
+                                Button::new("show-all-output")
+                                    .ghost()
+                                    .small()
+                                    .label(if self.show_all_output {
+                                        "Show less".into()
+                                    } else {
+                                        format!("Show all {lines} lines")
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_all_output = !this.show_all_output;
+                                        let body = plain_html(&output_preview(
+                                            this.data.secondary.as_deref().unwrap_or_default(),
+                                            this.show_all_output,
+                                        ));
+                                        this.output
+                                            .update(cx, |output, cx| output.set_text(&body, cx));
+                                        cx.notify();
+                                    })),
+                            );
+                        }
                     }
                     if let Some(diff) = &self.diff {
                         well = well.child(
@@ -966,20 +1245,19 @@ impl Render for BlockView {
                     ))
                     .child(
                         self.rich_text(true, cx)
-                            .when(!self.expanded, |v| v.max_lines(8)),
+                            .when(!self.data.expanded, |v| v.max_lines(8)),
                     )
                     .child(
                         Button::new("expand")
                             .ghost()
                             .small()
-                            .label(if self.expanded {
+                            .label(if self.data.expanded {
                                 "Show less"
                             } else {
                                 "Show full plan"
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.expanded = !this.expanded;
-                                cx.notify();
+                                this.disclose(!this.data.expanded, cx);
                             })),
                     );
             }
@@ -996,8 +1274,15 @@ impl Render for BlockView {
                             .border_color(tones(cx).hairline),
                     );
                 }
-                content =
-                    content.child(style::meta().text_color(t.text.muted).child(label.clone()));
+                let mut metadata = div().flex().items_center().gap(px(12.));
+                for segment in label.trim_matches(['[', ']']).split('·') {
+                    metadata = metadata.child(
+                        style::meta()
+                            .text_color(t.text.muted)
+                            .child(segment.trim().to_owned()),
+                    );
+                }
+                content = content.child(metadata);
             }
             BlockKind::Divider => {
                 content = content.child(
@@ -1020,57 +1305,23 @@ impl Render for BlockView {
                     self.rich_text(false, cx)
                         .text_size(px(14.))
                         .line_height(px(20.))
-                        .text_color(if *level == NoticeLevel::Error {
-                            t.feedback.error
-                        } else {
-                            t.feedback.warning
+                        .text_color(match level {
+                            NoticeLevel::Error => t.feedback.error,
+                            NoticeLevel::Warning => t.feedback.warning,
+                            NoticeLevel::Neutral => t.text.secondary,
                         }),
                 );
             }
-            BlockKind::Live(tail) => {
+            BlockKind::Live(_) => {
+                let controller = self.controller.read(cx);
                 content = content
                     .text_color(t.text.secondary)
                     .text_size(px(14.))
-                    .line_height(px(20.));
-                match tail {
-                    LiveTail::Waiting { elapsed } | LiveTail::Compacting { elapsed } => {
-                        content = content.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
-                                .child(if matches!(tail, LiveTail::Waiting { .. }) {
-                                    "Waiting for the model"
-                                } else {
-                                    "Compacting context"
-                                })
-                                .child(
-                                    style::meta()
-                                        .text_color(t.text.muted)
-                                        .child(elapsed.clone()),
-                                ),
-                        );
-                    }
-                    LiveTail::Retrying {
-                        attempt,
-                        remaining,
-                        error,
-                    } => {
-                        content = content
-                            .child(format!("Reconnecting, attempt {attempt}"))
-                            .child(
-                                style::meta()
-                                    .text_color(t.text.muted)
-                                    .child(format!("Next try in {remaining}")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(t.text.muted)
-                                    .child(error.clone()),
-                            );
-                    }
-                }
+                    .line_height(px(20.))
+                    .child(super::status::working_activity(
+                        controller.model.visible(),
+                        controller.cancelling,
+                    ));
             }
             BlockKind::Web | BlockKind::Ensemble => {
                 content = content.child(
@@ -1082,8 +1333,7 @@ impl Render for BlockView {
         }
         if matches!(
             self.data.kind,
-            BlockKind::Reasoning
-                | BlockKind::Image { .. }
+            BlockKind::Image { .. }
                 | BlockKind::Web
                 | BlockKind::Notice { .. }
                 | BlockKind::Ensemble
@@ -1096,22 +1346,52 @@ impl Render for BlockView {
                     .child(self.actions(window, cx)),
             );
         }
-        let compact_inline = self.compact
-            && (matches!(self.data.gutter, Gutter::Glyph(_) | Gutter::Live)
-                || matches!(self.data.kind, BlockKind::Web));
-        let show_gutter = !self.compact
-            || self.data.gutter != Gutter::None
-            || matches!(self.data.kind, BlockKind::Web);
+        let threaded = !matches!(
+            self.data.kind,
+            BlockKind::Prose {
+                role: PresentationRole::User,
+                ..
+            } | BlockKind::Divider
+        ) && !matches!(self.data.header, Some(NativeHeader::Prompt(_)));
+        if threaded {
+            content = content.child(style::thread_segment(
+                matches!(self.data.kind, BlockKind::Reasoning),
+                cx,
+            ));
+            let node = match self.data.gutter {
+                Gutter::Glyph(status) => Some(status),
+                Gutter::Live => Some(StatusIcon::Running),
+                _ => None,
+            };
+            if let Some(status) = node {
+                content = content.child(
+                    if matches!(
+                        self.data.kind,
+                        BlockKind::Notice {
+                            level: NoticeLevel::Neutral
+                        }
+                    ) {
+                        style::thread_marker("◼", t.text.secondary, cx)
+                    } else {
+                        style::thread_node(status, ink, cx)
+                    },
+                );
+            }
+        }
+        let show_gutter = !self.compact || matches!(self.data.gutter, Gutter::Label(_));
         measure
             .row()
             .id(self.data.key.clone())
             .test_support()
-            .when(compact_inline, |r| r.flex_row().gap(px(8.)))
             .when(self.data.turn_boundary, |r| r.pt(px(32.)))
             .when(show_gutter, |row| row.child(gutter))
-            .child(content.when(self.data.turn_boundary, |c| {
-                c.border_t_1().border_color(tones(cx).hairline).pt(px(16.))
-            }))
+            .child(
+                content
+                    .when(self.compact, |c| c.ml(px(16.)))
+                    .when(self.data.turn_boundary, |c| {
+                        c.border_t_1().border_color(tones(cx).hairline).pt(px(16.))
+                    }),
+            )
     }
 }
 

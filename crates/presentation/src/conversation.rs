@@ -937,15 +937,10 @@ impl ConversationState {
             desired.push((AttemptBlockKey::Part(output, part.source.part), kind));
         }
         flush(&mut pending, &mut desired);
-        let incomplete = match attempt.outcome {
-            zevria_content::ResponseAttemptOutcome::Failed => Some("failed"),
-            zevria_content::ResponseAttemptOutcome::Interrupted => Some("interrupted"),
-            _ => None,
-        };
-        if let Some(outcome) = incomplete {
+        if let Some(marker) = crate::blocks::incomplete_response_marker(attempt.outcome) {
             desired.push((
                 AttemptBlockKey::Incomplete,
-                PresentationBlockKind::Placeholder(format!("Incomplete response · {outcome}")),
+                PresentationBlockKind::Placeholder(marker.into()),
             ));
         }
         let HistoryEntry::Conversation(entry) = &mut self.history[state.history_index] else {

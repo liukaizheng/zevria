@@ -36,12 +36,16 @@ pub struct DesktopWindow {
     pub(super) completion_dismissed: Option<(String, usize)>,
     pub(super) completion_selected: usize,
     pub(super) sidebar_override: Option<bool>,
+    pub(super) sidebar_focus: Vec<FocusHandle>,
     pub(super) compact: bool,
     pub(super) plan_width: f32,
+    pub(super) plan_overlay: bool,
+    pub(super) question_focus: FocusHandle,
     picker: Option<Task<()>>,
     was_live: bool,
     _input: Subscription,
     _controller: Subscription,
+    _appearance: Subscription,
 }
 impl DesktopWindow {
     pub fn new(
@@ -49,6 +53,11 @@ impl DesktopWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        super::theme::follow_appearance(window, cx);
+        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
+            super::theme::follow_appearance(window, cx);
+            cx.notify();
+        });
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 10)
@@ -120,17 +129,22 @@ impl DesktopWindow {
             completion_dismissed: None,
             completion_selected: 0,
             sidebar_override: None,
+            sidebar_focus: Vec::new(),
             compact: false,
             plan_width: 400.,
+            plan_overlay: false,
+            question_focus: cx.focus_handle(),
             picker: None,
             was_live: false,
             _input: input,
             _controller: watch,
+            _appearance: appearance,
         };
         this.sync(window, cx);
         this
     }
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        super::theme::follow_appearance(window, cx);
         let controller = self.controller.read(cx);
         let draft = controller.draft.clone();
         let mode = controller.model.root.next_mode();
@@ -140,6 +154,11 @@ impl DesktopWindow {
             .root
             .workflow
             .dialog_artifact()
+            .filter(|a| {
+                self.plan
+                    .as_ref()
+                    .is_none_or(|(current, _)| *current != a.version)
+            })
             .map(|a| (a.version, a.markdown.clone()));
         let screen_error = controller
             .config_error
@@ -285,7 +304,10 @@ impl DesktopWindow {
             return;
         }
         let controller = self.controller.read(cx);
-        if controller.model.question.is_some() {
+        if let Some(question) = &controller.model.question {
+            if !question.request.dismissible {
+                return;
+            }
             self.controller
                 .update(cx, |this, cx| this.answer_question(true, cx));
             return;
@@ -309,6 +331,33 @@ impl DesktopWindow {
     }
 }
 impl DesktopWindow {
+    fn disclose(&mut self, expanded: bool, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let from_composer = self.composer.focus_handle(cx).contains_focused(window, cx);
+        self.transcript.update(cx, |view, cx| {
+            view.disclose(expanded, all, from_composer, window, cx)
+        });
+    }
+    fn confirm_decision(&mut self, cx: &mut Context<Self>) {
+        if self.pending_replace.is_some() {
+            return;
+        }
+        if self.controller.read(cx).model.question.is_some() {
+            self.controller
+                .update(cx, |controller, cx| controller.answer_question(false, cx));
+        } else if self
+            .controller
+            .read(cx)
+            .model
+            .root
+            .workflow
+            .dialog()
+            .is_some()
+        {
+            self.controller.update(cx, |controller, cx| {
+                controller.plan_decision(zevria_workflow::PlanDecision::ImplementCurrent, cx)
+            });
+        }
+    }
     pub(super) fn sidebar_visible(&self, width: f32) -> bool {
         self.sidebar_override.unwrap_or(width >= 900.)
     }
@@ -352,7 +401,7 @@ impl DesktopWindow {
                             })
                         })),
                 )
-                .child(style::label().text_color(t.text.muted).child("/"))
+                .child(style::label().text_color(t.text.muted).child("›"))
                 .child(div().min_w_0().truncate().text_size(px(14.)).child(format!(
                     "{}: {}",
                     style::kind_label(child.kind),
@@ -444,9 +493,15 @@ impl Render for DesktopWindow {
             .workflow
             .dialog()
             .is_some();
-        let compact = width
-            - if visible { style::SIDEBAR } else { 0. }
-            - if plan_open { self.plan_width } else { 0. }
+        let main_width = width - if visible { style::SIDEBAR } else { 0. };
+        self.plan_overlay = plan_open && main_width - self.plan_width < 560.;
+        self.plan_width = self.plan_width.min(main_width);
+        let compact = main_width
+            - if plan_open && !self.plan_overlay {
+                self.plan_width
+            } else {
+                0.
+            }
             < 760.;
         if compact != self.compact {
             self.compact = compact;
@@ -481,6 +536,44 @@ impl Render for DesktopWindow {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| this.cancel(cx)))
+            .on_action(cx.listener(|this, _: &actions::Stop, _, cx| {
+                this.controller
+                    .update(cx, |controller, cx| controller.cancel(cx));
+            }))
+            .on_action(cx.listener(|this, _: &actions::ExpandBlock, window, cx| {
+                this.disclose(true, false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::CollapseBlock, window, cx| {
+                this.disclose(false, false, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &actions::ExpandAllThinking, window, cx| {
+                    this.disclose(true, true, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::CollapseAllThinking, window, cx| {
+                    this.disclose(false, true, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &actions::JumpToLatest, _, cx| {
+                this.transcript
+                    .update(cx, |view, cx| view.jump_to_latest(cx))
+            }))
+            .on_action(
+                cx.listener(|this, _: &actions::ConfirmDecision, _, cx| this.confirm_decision(cx)),
+            )
+            .on_action(cx.listener(|this, _: &actions::ToggleMode, _, cx| {
+                let mode = if this.controller.read(cx).model.root.next_mode()
+                    == zevria_foundation::SessionMode::Build
+                {
+                    zevria_foundation::SessionMode::Plan
+                } else {
+                    zevria_foundation::SessionMode::Build
+                };
+                this.controller
+                    .update(cx, |controller, cx| controller.select_mode(mode, cx));
+            }))
             .on_action(cx.listener(|this, _: &actions::Submit, window, cx| this.submit(window, cx)))
             .on_action(cx.listener(|this, _: &actions::Complete, window, cx| {
                 this.accept_completion(window, cx)
@@ -505,22 +598,21 @@ impl Render for DesktopWindow {
                 .flex()
                 .flex_col()
                 .child(div().flex_1().min_h_0().child(self.transcript.clone()));
-            if self.controller.read(cx).model.selected_child.is_none() {
-                center = center.child(self.composer_view(cx));
+            if let Some(question) = self.question_dialog(window, cx) {
+                center = center.child(question);
+            } else if self.controller.read(cx).model.selected_child.is_none() {
+                center = center.child(self.composer_view(window, cx));
             }
             center = center.child(self.status_bar(cx));
-            let mut body = div().flex_1().min_h_0().flex();
+            let mut body = div().flex_1().min_h_0().flex().relative();
             if visible {
-                body = body.child(self.sidebar(cx));
+                body = body.child(self.sidebar(window, cx));
             }
             body = body.child(center);
             if let Some(plan) = self.plan_panel(cx) {
                 body = body.child(plan);
             }
             root = root.child(body);
-        }
-        if let Some(question) = self.question_dialog(window, cx) {
-            root = root.child(question);
         }
         if self.pending_replace.is_some() {
             root = root.child(self.confirm_replace(cx));

@@ -5,6 +5,7 @@ use crate::{
 };
 use gpui_kit::{Context, Subscription, Task};
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -45,6 +46,13 @@ pub struct SessionController {
     pub orchestrate: bool,
     pub cancelling: bool,
     pub show_sessions: bool,
+    /// Changes only with session data, never with the redraw clock.
+    pub projection_revision: u64,
+    /// Display-only partials. Never sent to the host or persisted.
+    pub unsaved_blocks: HashSet<(
+        zevria_presentation::blocks::ProjectionEpoch,
+        zevria_presentation::blocks::PresentationBlockId,
+    )>,
     draft_generation: u64,
     submitted: Option<SubmittedDraft>,
     running: Option<RunningSession>,
@@ -96,6 +104,8 @@ impl SessionController {
             orchestrate: false,
             cancelling: false,
             show_sessions: false,
+            projection_revision: 0,
+            unsaved_blocks: HashSet::new(),
             draft_generation: 0,
             submitted: None,
             running: None,
@@ -186,6 +196,8 @@ impl SessionController {
                     Ok(Ok((running, model))) => {
                         this.running = Some(running);
                         this.model = model;
+                        this.unsaved_blocks.clear();
+                        this.projection_revision = this.projection_revision.wrapping_add(1);
                         if this.quit_requested
                             || this.pending.is_some()
                             || this.phase == Phase::Stopping
@@ -453,6 +465,10 @@ impl SessionController {
         cx: &mut Context<Self>,
     ) -> Option<zevria_workflow::PlanHandoff> {
         self.model.observe_clock(Instant::now());
+        if let SessionUpdate::Lifecycle(event) = &update {
+            self.retain_unsaved_partial(event);
+        }
+        self.projection_revision = self.projection_revision.wrapping_add(1);
         let reduction = self.model.apply(update);
         if let Some(root) = reduction.root {
             self.apply_reduction(root);
@@ -472,6 +488,61 @@ impl SessionController {
             self.dispatch_job_continuation(cx);
         }
         reduction.fresh
+    }
+    fn retain_unsaved_partial(&mut self, event: &zevria_session_api::SessionEvent) {
+        use zevria_presentation::{
+            ConversationTail,
+            conversation::{HistoryEntry, ToolCallStatus},
+        };
+        use zevria_session_api::SessionEvent;
+        let (pane, event) = if let SessionEvent::SubtaskSession { id, event } = event {
+            let Some(child) = self.model.children.iter_mut().find(|child| &child.id == id) else {
+                return;
+            };
+            (&mut child.model, event.as_ref())
+        } else {
+            (&mut self.model.root, event)
+        };
+        let turn_id = match event {
+            SessionEvent::TurnCancelled { turn_id } | SessionEvent::TurnFailed { turn_id, .. } => {
+                *turn_id
+            }
+            _ => return,
+        };
+        if !pane.accepts_terminal(turn_id) {
+            return;
+        }
+        // Attempt-backed output lives in history, not this tail, and is already durable.
+        let ConversationTail::Streaming { message, .. } = pane.tail(Instant::now()) else {
+            return;
+        };
+        let Some(HistoryEntry::Conversation(preview)) =
+            HistoryEntry::from_message(message.clone(), ToolCallStatus::Finished)
+        else {
+            return;
+        };
+        if !preview
+            .blocks
+            .iter()
+            .any(|block| block.visible(false) && !block.primary_copy().trim().is_empty())
+        {
+            return;
+        }
+        let message = message.clone();
+        let before = pane.conversation.history().len();
+        pane.conversation.commit_response(
+            message,
+            None,
+            ToolCallStatus::Finished,
+            pane.session.call_header(),
+        );
+        let epoch = pane.conversation.epoch();
+        for entry in &pane.conversation.history()[before..] {
+            if let HistoryEntry::Conversation(entry) = entry {
+                self.unsaved_blocks
+                    .extend(entry.blocks.iter().map(|block| (epoch, block.id)));
+            }
+        }
     }
     fn dispatch_job_continuation(&mut self, cx: &mut Context<Self>) {
         if self.phase == Phase::Live
@@ -592,6 +663,7 @@ impl SessionController {
         }));
     }
     pub fn send(&mut self, command: SessionCommand, cx: &mut Context<Self>) {
+        self.projection_revision = self.projection_revision.wrapping_add(1);
         if self
             .command
             .as_ref()
@@ -737,7 +809,7 @@ impl SessionController {
                                 }
                             }
                         }
-                        crate::ui::theme::apply(tokens, cx);
+                        crate::ui::theme::select(tokens, cx);
                         this.config = Some(Arc::new(config));
                         this.config_error = None;
                         this.start_initial(false, cx);

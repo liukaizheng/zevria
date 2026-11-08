@@ -1,5 +1,5 @@
 use super::*;
-use std::time::Duration;
+use std::{io, time::Duration};
 
 #[tokio::test]
 async fn retry_hints_for_unavailable_and_overloaded_use_upcoming_attempts_and_identical_wire() {
@@ -90,10 +90,12 @@ async fn closed_port_exhaustion_has_the_shared_display_and_original_os_cause() {
     ] {
         assert!(display.contains(expected), "{display}");
     }
-    assert!(
-        display.to_ascii_lowercase().contains("connection refused"),
-        "{display}"
-    );
+    let socket_cause = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<io::Error>())
+        .expect("the original socket error must be preserved");
+    assert_eq!(socket_cause.kind(), io::ErrorKind::ConnectionRefused);
+    assert!(display.contains(&socket_cause.to_string()), "{display}");
     assert!(!display.contains("secret=hidden"));
     assert!(error.chain().any(|cause| cause.is::<reqwest::Error>()));
     let retry = std::iter::from_fn(|| events.try_recv().ok())
@@ -106,5 +108,5 @@ async fn closed_port_exhaustion_has_the_shared_display_and_original_os_cause() {
         .unwrap();
     assert_eq!(retry.0, 2);
     assert!(retry.1.starts_with("transport:"));
-    assert!(retry.1.to_ascii_lowercase().contains("connection refused"));
+    assert!(retry.1.contains(&socket_cause.to_string()), "{}", retry.1);
 }

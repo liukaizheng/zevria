@@ -50,7 +50,7 @@ pub fn validate_theme(definition: &ThemeDefinition) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_tokens(t: &ZevriaTheme) -> Result<(), ValidationError> {
+pub fn validate_tokens(t: &ZevriaTheme) -> Result<(), ValidationError> {
     let mut failures = Vec::new();
     let mut check = |left_name: &str, left, right_name: &str, right, minimum| {
         let actual = contrast(left, right);
@@ -258,6 +258,7 @@ mod tests {
     fn built_in_contract_and_actionable_pairs() {
         validate_tokens(&super::super::ZEVRIA_DARK).unwrap();
         validate_tokens(&super::super::ZEVRIA_GRAPHITE).unwrap();
+        validate_tokens(&super::super::ZEVRIA_GRAPHITE_LIGHT).unwrap();
         let mut broken = super::super::ZEVRIA_DARK;
         broken.text.primary = broken.surfaces.canvas;
         assert!(

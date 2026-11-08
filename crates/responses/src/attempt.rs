@@ -138,6 +138,18 @@ impl AttemptReducer {
 
     fn part(&mut self, output: u64, content: u64, part: &Value, authority: u8) {
         let kind = part.get("type").and_then(Value::as_str);
+        if kind == Some("summary_text") {
+            if let Some(text) = zevria_content::readable::readable_reasoning_value(part) {
+                self.reasoning(
+                    output,
+                    zevria_content::AssistantPartIdentity::Summary(content),
+                    text,
+                    false,
+                    authority,
+                );
+            }
+            return;
+        }
         let field = match kind {
             Some("output_text") => "text",
             Some("refusal") => "refusal",
@@ -523,7 +535,8 @@ impl AttemptReducer {
                     } else {
                         "content_index"
                     })
-                    .and_then(Value::as_u64);
+                    .and_then(Value::as_u64)
+                    .or_else(|| (!summary).then_some(0));
                 let done = kind.ends_with(".done");
                 if let (Some(output), Some(index), Some(text)) = (
                     output,
@@ -546,8 +559,7 @@ impl AttemptReducer {
                     event.get("summary_index").and_then(Value::as_u64),
                     event
                         .get("part")
-                        .and_then(|part| part.get("text"))
-                        .and_then(Value::as_str),
+                        .and_then(zevria_content::readable::readable_reasoning_value),
                 ) {
                     self.reasoning(
                         output,

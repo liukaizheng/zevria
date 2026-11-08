@@ -1,6 +1,10 @@
 //! Native in-process desktop frontend. Session semantics live in presentation;
 //! this package owns only desktop routing, interaction state and GPUI views.
 pub mod cli;
+#[path = "ui/disclosure.rs"]
+pub mod disclosure;
+#[path = "ui/rows.rs"]
+pub mod rows;
 pub mod session;
 
 #[cfg(target_os = "macos")]

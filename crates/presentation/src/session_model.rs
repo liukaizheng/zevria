@@ -419,7 +419,7 @@ impl SessionModel {
                 }
                 self.conversation.interrupt_executing_tool_calls();
                 self.conversation
-                    .push_error("Turn cancelled".to_string());
+                    .push_error(crate::blocks::TURN_CANCELLED.to_string());
             }
             SessionEvent::NetworkStatus { turn_id, call, attempt, transport, status } => {
                 self.session.network_status(turn_id, call, attempt, transport, status);

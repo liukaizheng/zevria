@@ -158,7 +158,8 @@ fn real_acp_unused_root_and_worker_sessions_stay_unsaved_through_eof() {
             assert!(created.get("error").is_none(), "{created}");
             let id = created["result"]["sessionId"].as_str().unwrap();
             let directory = if worker {
-                workspace.path().join(".zevria/ensemble-sessions")
+                zevria_foundation::runtime_paths::workspace_state_root(workspace.path())
+                    .join("ensemble-sessions")
             } else {
                 transcript::sessions_dir(workspace.path())
             };

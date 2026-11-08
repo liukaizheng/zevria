@@ -23,6 +23,104 @@ fn answer(state: &AttemptReducer) -> String {
     assert_eq!(text, indexed, "ordinary and indexed projections agree");
     text
 }
+#[test]
+fn message_and_attempt_reasoning_parity_for_compatible_event_shapes() {
+    use crate::{
+        accumulator::AssistantMessageAccumulator, protocol::parse_server_event,
+        wire::ResponsesWebSocketEvent,
+    };
+    use rig_core::message::{AssistantContent, Message};
+    for events in [
+        vec![
+            json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"r","delta":"Read "}),
+            json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"r","delta":"the source"}),
+            json!({"type":"response.reasoning_text.done","output_index":0,"item_id":"r","content_index":0,"text":"Read the source"}),
+        ],
+        vec![
+            json!({"type":"response.content_part.added","output_index":0,"item_id":"r","content_index":0,"part":{"type":"summary_text","text":"Read "}}),
+            json!({"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"r","summary_index":0,"delta":"the source"}),
+            json!({"type":"response.content_part.done","output_index":0,"item_id":"r","content_index":0,"part":{"type":"summary_text","text":"Read the source"}}),
+        ],
+    ] {
+        let mut attempt = state();
+        let mut message = AssistantMessageAccumulator::default();
+        for (sequence, mut event) in events.into_iter().enumerate() {
+            event["sequence_number"] = json!(sequence as u64);
+            attempt.ingest(&event);
+            let Some(ResponsesWebSocketEvent::Item(item)) =
+                parse_server_event(&event.to_string()).unwrap()
+            else {
+                panic!("expected item")
+            };
+            message.record_item(item).unwrap();
+            let Message::Assistant(assistant) =
+                message.streaming_message_with_attempt(&attempt).unwrap()
+            else {
+                panic!("expected assistant")
+            };
+            let readable = assistant
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    AssistantContent::Reasoning(reasoning) => Some(
+                        zevria_content::reasoning::readable_parts(reasoning)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let indexed = attempt
+                .attempt()
+                .presentation
+                .iter()
+                .filter_map(|part| match &part.content {
+                    Content::Reasoning { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(readable, indexed, "event: {event}");
+        }
+        let before = attempt.attempt().clone();
+        if before.presentation[0].source.part == Part::Content(0) {
+            attempt.ingest(&json!({"type":"response.reasoning_text.done","output_index":0,"text":"Read the source"}));
+            assert_eq!(
+                before,
+                *attempt.attempt(),
+                "missing done index defaults to zero"
+            );
+        }
+        attempt.ingest(
+            &json!({"type":"response.reasoning_text.delta","output_index":0,"delta":"stale"}),
+        );
+        // A done part must not be appended to by a late delta at that address.
+        if before.presentation[0].source.part == Part::Content(0) {
+            assert_eq!(before, *attempt.attempt());
+        }
+    }
+}
+
+#[test]
+fn opaque_reasoning_parts_with_text_fields_do_not_become_display_evidence() {
+    let mut state = state();
+    for kind in [
+        "unknown",
+        "signature",
+        "encrypted_content",
+        "redacted_thinking",
+    ] {
+        for event in [
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_part.done",
+            "response.content_part.added",
+            "response.content_part.done",
+        ] {
+            state.ingest(&json!({"type":event,"output_index":0,"content_index":0,"summary_index":0,"part":{"type":kind,"text":"secret"}}));
+        }
+    }
+    assert!(state.attempt().presentation.is_empty());
+}
+
 fn delta(text: &str, sequence: u64) -> Value {
     json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"sequence_number":sequence,"delta":text})
 }

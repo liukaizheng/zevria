@@ -61,14 +61,34 @@ transcripts. Headless ACP processes do not open theme files or initialize the
 renderer.
 
 Without a selector, the TUI uses the exact built-in **Zevria Dark** palette,
-including its `#282C34` canvas. Zevria Desktop uses **Zevria Graphite**: warm
-graphite planes (`#201E1B` canvas, `#191714` recessed wells, `#2A2724` raised
-sheets), paper-white text, Build mint and Plan blue. Both built-ins use the same
-27-reference semantic graph and pass the same contrast and CVD validation.
-A selected generated theme applies to **both frontends**; restart to activate it.
-The desktop follows that palette's light/dark polarity, not the system appearance.
-There is no automatic background detection, light/dark switching, hot reload, or
-ANSI/256-color fallback.
+including its `#282C34` canvas. **Desktop follows macOS appearance live**:
+
+| Default appearance | Plane / well / sheet | Primary / secondary / muted ink | Build / Plan |
+| --- | --- | --- | --- |
+| Zevria Graphite (dark) | `#201E1B` / `#191714` / `#2A2724` | `#ECE9E2` / `#C7C3BD` / `#A29E98` | `#63DFB1` / `#64A9F3` |
+| Zevria Graphite Light | `#FBFAF8` / `#F2F0EC` / `#FFFFFF` | `#221F1B` / `#45423E` / `#66635E` | `#07553E` / `#0267C7` |
+
+Graphite Light is near-neutral paper in Graphite's hue family, not warm cream.
+Its accent lightness is deliberately spread to maintain full-severity CVD
+separation; dark Graphite's reference colors, including Build mint, are unchanged.
+All three built-ins keep the same 27-reference semantic graph and pass the same
+rounded-RGB contrast and CVD validation. The default pair does not initialize or
+change the TUI's immutable theme.
+
+A named generated theme applies to **both frontends**; restart to activate a
+new selection or theme-file edit. It pins **one palette in both light and dark
+macOS appearances**. Resetting the selector restores the TUI's Zevria Dark
+fallback and Desktop's system-following pair on next launch. Only the built-in
+desktop pair switches live; there is no theme-file hot reload, terminal
+background detection, or ANSI/256-color fallback.
+
+The desktop derives pencil, thread and focus tones at its renderer boundary,
+without extending saved themes. Pencil seeks APCA magnitude 75 along the OKLab
+secondary-to-primary mix (falling back to primary if the palette cannot reach
+it); thread seeks 3:1 against the reading plane; the focus ring uses selection
+ink. A macOS appearance change refreshes Kit, Markdown, syntax/diff colors and
+color-keyed math rendering. Theme files, transcripts, prompts and provider
+requests are never rewritten by an appearance change.
 
 ## Collisions, retries, and failures
 

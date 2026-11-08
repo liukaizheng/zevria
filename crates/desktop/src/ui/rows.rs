@@ -19,6 +19,7 @@ pub fn is_assistant(entry: &HistoryEntry) -> bool {
 pub fn fingerprint(entry: &HistoryEntry, continues_turn: bool) -> u64 {
     let mut hash = DefaultHasher::new();
     continues_turn.hash(&mut hash);
+    std::mem::discriminant(entry).hash(&mut hash);
     match entry {
         HistoryEntry::Conversation(entry) => {
             entry.header.hash(&mut hash);
@@ -27,7 +28,41 @@ pub fn fingerprint(entry: &HistoryEntry, continues_turn: bool) -> u64 {
                 block.revision.hash(&mut hash);
             }
         }
-        _ => format!("{entry:?}").hash(&mut hash),
+        HistoryEntry::PlanArtifact(a) => {
+            a.version.hash(&mut hash);
+            a.title.hash(&mut hash);
+        }
+        HistoryEntry::PlanHandoff(h, header) => {
+            h.artifact.version.hash(&mut hash);
+            h.artifact.title.hash(&mut hash);
+            header.hash(&mut hash);
+        }
+        HistoryEntry::JobNotice(notice, header) => {
+            notice.text().hash(&mut hash);
+            header.hash(&mut hash);
+        }
+        HistoryEntry::Ensemble(e) => {
+            e.header.hash(&mut hash);
+            e.run_id.hash(&mut hash);
+            std::mem::discriminant(&e.workflow).hash(&mut hash);
+            for block in e.prompt.blocks() {
+                std::mem::discriminant(block).hash(&mut hash);
+                match block {
+                    zevria_content::PromptBlock::Text(text) => text.hash(&mut hash),
+                    zevria_content::PromptBlock::Image(image) => {
+                        image.mime_type().hash(&mut hash);
+                        image.dimensions().hash(&mut hash);
+                    }
+                }
+            }
+            for worker in &e.workers {
+                worker.descriptor.id.hash(&mut hash);
+                std::mem::discriminant(&worker.status).hash(&mut hash);
+                worker.failure.hash(&mut hash);
+            }
+        }
+        HistoryEntry::Error(error) => error.hash(&mut hash),
+        HistoryEntry::CompactionDivider => {}
     }
     hash.finish()
 }
@@ -96,14 +131,45 @@ mod tests {
         let b = fingerprint(&entry, true);
         assert_ne!(a, b);
         assert_eq!(compare(&[a], &[b]), RowChange::Remeasure(vec![0]));
-        let first = crate::ui::blocks::entry("epoch", 0, &entry, a, false, false);
-        let next = crate::ui::blocks::entry("epoch", 0, &entry, b, true, false);
-        assert_eq!(
-            first[0].gutter,
-            crate::ui::blocks::Gutter::Label(crate::ui::blocks::Speaker::Zevria)
-        );
-        assert_eq!(next[0].gutter, crate::ui::blocks::Gutter::None);
+        #[cfg(target_os = "macos")]
+        {
+            let first = crate::ui::blocks::entry("epoch", 0, &entry, a, false, false);
+            let next = crate::ui::blocks::entry("epoch", 0, &entry, b, true, false);
+            assert_eq!(
+                first[0].gutter,
+                crate::ui::blocks::Gutter::Label(crate::ui::blocks::Speaker::Zevria)
+            );
+            assert_eq!(next[0].gutter, crate::ui::blocks::Gutter::None);
+        }
     }
+    #[test]
+    fn structural_notices_and_versions_invalidate_without_debug_serialization() {
+        assert_ne!(
+            fingerprint(&HistoryEntry::Error("a".into()), false),
+            fingerprint(&HistoryEntry::Error("b".into()), false)
+        );
+        assert_ne!(
+            fingerprint(&HistoryEntry::CompactionDivider, false),
+            fingerprint(&HistoryEntry::Error(String::new()), false)
+        );
+        let artifact = zevria_workflow::PlanArtifact {
+            version: zevria_workflow::PlanVersion {
+                id: zevria_workflow::PlanId::new(),
+                revision: 1,
+            },
+            title: "Plan".into(),
+            markdown: "large document".repeat(1000),
+            source_turn_id: zevria_foundation::TurnId::new(1),
+        };
+        let before = fingerprint(&HistoryEntry::PlanArtifact(artifact.clone()), false);
+        let mut next = artifact;
+        next.version.revision += 1;
+        assert_ne!(
+            before,
+            fingerprint(&HistoryEntry::PlanArtifact(next), false)
+        );
+    }
+    #[cfg(target_os = "macos")]
     #[test]
     fn ordinary_transcript_text_is_not_subject_to_tool_preview_bounds() {
         let text = "x".repeat(32_000);

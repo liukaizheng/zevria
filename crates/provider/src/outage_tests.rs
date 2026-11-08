@@ -1,7 +1,7 @@
 //! Real transport outages and cache-prefix invariants, using only loopback IO.
 use super::*;
 use crate::connection::HttpFallback;
-use std::time::Duration;
+use std::{io, time::Duration};
 use zevria_model::ModelInputTooLarge;
 use zevria_session_api::event::NetworkStatus;
 
@@ -347,7 +347,10 @@ async fn exhausted_connectivity_display_keeps_socket_cause_and_actionable_settin
     drop(listener);
     let mut provider = connect_http_test_provider(url).await;
     provider.recovery = RecoveryPolicy {
-        recovery_window: Duration::from_millis(25),
+        // Exhaust after the first socket error, not a platform-dependent retry count.
+        recovery_window: Duration::ZERO,
+        // Windows can take over a second to report a refused loopback connection.
+        send_timeout: Duration::from_secs(10),
         ..fast_recovery_policy(30)
     };
     let error = provider
@@ -365,10 +368,12 @@ async fn exhausted_connectivity_display_keeps_socket_cause_and_actionable_settin
     ] {
         assert!(display.contains(expected), "{display}");
     }
-    assert!(
-        display.to_ascii_lowercase().contains("connection refused"),
-        "{display}"
-    );
+    let socket_cause = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<io::Error>())
+        .expect("the original socket error must be preserved");
+    assert_eq!(socket_cause.kind(), io::ErrorKind::ConnectionRefused);
+    assert!(display.contains(&socket_cause.to_string()), "{display}");
     assert!(!display.contains("not-for-errors"));
     assert!(error.chain().any(|cause| cause.is::<reqwest::Error>()));
 }

@@ -65,7 +65,11 @@ impl DesktopWindow {
                 .update(cx, |this, cx| this.edit_draft(replacement, cx));
         }
     }
-    pub(super) fn composer_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn composer_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = palette(cx);
         let tone = tones(cx);
         let controller = self.controller.read(cx);
@@ -76,6 +80,11 @@ impl DesktopWindow {
             && controller.model.question.is_none();
         let orchestrate = controller.orchestrate;
         let mode_disabled = !editable || busy;
+        let mode_ink = if mode == SessionMode::Build {
+            t.workflow.build
+        } else {
+            t.workflow.plan
+        };
         let cancelling = controller.cancelling;
         let recovery = controller.recovery.last().is_some();
         let measure = style::Measure {
@@ -200,11 +209,21 @@ impl DesktopWindow {
             .flex_col()
             .gap(px(12.))
             .bg(t.surfaces.panel)
-            .rounded(px(10.))
+            .rounded(px(12.))
             .border_1()
+            .border_l_2()
             .border_color(t.surfaces.border)
             .track_focus(&focus)
-            .focus(move |s| s.border_color(t.surfaces.border_strong))
+            .focus(move |s| s.border_color(tone.focus))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(12.))
+                    .bottom(px(12.))
+                    .w(px(2.))
+                    .bg(mode_ink),
+            )
             .px(px(14.))
             .py(px(12.))
             .child(
@@ -274,7 +293,11 @@ impl DesktopWindow {
             footer = footer.child(
                 Switch::new("orchestrate")
                     .small()
-                    .label("Orchestrate subtasks")
+                    .label(if self.compact {
+                        "Orchestrate"
+                    } else {
+                        "Orchestrate subtasks"
+                    })
                     .checked(orchestrate)
                     .disabled(mode_disabled)
                     .on_change(cx.listener(|this, value, _, cx| {
@@ -286,11 +309,10 @@ impl DesktopWindow {
             );
         }
         footer = footer.child(div().flex_1());
-        if !self.compact {
-            footer = footer.child(style::kbd_hint(
-                "Enter to send, Shift-Enter for a new line",
-                cx,
-            ));
+        if !self.compact && (focus.contains_focused(window, cx) || controller.draft.is_empty()) {
+            footer = footer
+                .child(style::key_hint("enter", "Send", cx))
+                .child(style::key_hint("shift-enter", "New line", cx));
         }
         if recovery {
             footer = footer.child(
@@ -313,11 +335,11 @@ impl DesktopWindow {
         if busy {
             footer = footer.child(
                 Button::new("stop")
-                    .danger()
                     .outline()
                     .small()
                     .icon(IconName::Square)
-                    .label(if cancelling { "Stopping…" } else { "Stop" })
+                    .label(if cancelling { "Stopping" } else { "Stop" })
+                    .tooltip("Stop ⌘.")
                     .disabled(cancelling)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |this, cx| this.cancel(cx))
@@ -326,14 +348,27 @@ impl DesktopWindow {
         } else {
             footer = footer.child(
                 Button::new("send")
-                    .primary()
+                    .custom(style::mode_button(mode, cx))
                     .small()
                     .label("Send")
                     .disabled(!editable)
+                    .when(!editable, |b| b.opacity(0.5))
                     .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
             );
         }
         field = field.child(footer);
+        if self.compact && (focus.contains_focused(window, cx) || controller.draft.is_empty()) {
+            field = field.child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(style::key_hint("enter", "Send", cx))
+                    .child(style::key_hint("shift-enter", "New line", cx)),
+            );
+        }
+        if focus.contains_focused(window, cx) {
+            field = field.child(style::focus_ring(cx));
+        }
         div()
             .px(px(16.))
             .pt(px(12.))
@@ -341,7 +376,7 @@ impl DesktopWindow {
             .child(
                 measure
                     .row()
-                    .when(!self.compact, |row| row.child(modes))
+                    .when(!self.compact, |row| row.gap(px(8.)).child(modes))
                     .child(field),
             )
             .into_any_element()

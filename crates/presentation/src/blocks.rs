@@ -22,6 +22,36 @@ use zevria_workflow::{
 
 use crate::status_icon::StatusIcon;
 
+/// Shared terminal notice; renderers may style a user stop without treating it as failure.
+pub const TURN_CANCELLED: &str = "Turn cancelled";
+
+pub(crate) fn incomplete_response_marker(
+    outcome: zevria_content::ResponseAttemptOutcome,
+) -> Option<&'static str> {
+    use zevria_content::ResponseAttemptOutcome;
+    match outcome {
+        ResponseAttemptOutcome::Failed => Some("Incomplete response · failed"),
+        ResponseAttemptOutcome::Interrupted => Some("Incomplete response · interrupted"),
+        _ => None,
+    }
+}
+
+/// Recognize display-only incomplete-attempt notices without duplicating their wire text.
+pub fn incomplete_response_outcome(
+    kind: &PresentationBlockKind,
+) -> Option<zevria_content::ResponseAttemptOutcome> {
+    use zevria_content::ResponseAttemptOutcome;
+    let PresentationBlockKind::Placeholder(text) = kind else {
+        return None;
+    };
+    [
+        ResponseAttemptOutcome::Failed,
+        ResponseAttemptOutcome::Interrupted,
+    ]
+    .into_iter()
+    .find(|outcome| incomplete_response_marker(*outcome) == Some(text.as_str()))
+}
+
 /// Yield only plaintext reasoning parts in their original source order.
 pub fn readable_reasoning_parts(reasoning: &Reasoning) -> impl Iterator<Item = &str> {
     zevria_content::reasoning::readable_parts(reasoning)
@@ -29,7 +59,7 @@ pub fn readable_reasoning_parts(reasoning: &Reasoning) -> impl Iterator<Item = &
 
 /// A complete projection replacement retires every ephemeral anchor even if
 /// the new source happens to reuse the same block and history positions.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ProjectionEpoch(u64);
 impl Default for ProjectionEpoch {
     fn default() -> Self {

@@ -78,10 +78,7 @@ pub fn readable_parts(reasoning: &Reasoning) -> impl Iterator<Item = &str> {
                 .into_iter()
                 .flatten()
             {
-                if let Some(text) = part
-                    .as_str()
-                    .or_else(|| part.get("text").and_then(Value::as_str))
-                {
+                if let Some(text) = crate::readable::readable_reasoning_value(part) {
                     parts.push(text);
                 }
             }
@@ -149,4 +146,52 @@ pub fn blocks(reasoning: &Reasoning) -> Vec<ReasoningContent> {
         blocks.push(ReasoningContent::Encrypted(data.into()));
     }
     blocks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readable_parts_whitelist_excludes_opaque_data_even_with_text_fields() {
+        let item = json!({
+            "type": "reasoning",
+            "encrypted_content": "ciphertext",
+            "summary": ["bare summary", {"type":"summary_text","text":"summary"},
+                {"type":"unknown","text":"opaque summary"}],
+            "content": [{"type":"reasoning_text","text":"thought","signature":"secret"},
+                {"type":"text","text":"plain"}, {"type":"signature","text":"signature"},
+                {"type":"encrypted_content","text":"encrypted"},
+                {"type":"redacted_thinking","text":"redacted","data":"secret"},
+                {"text":"untyped object"}, "bare content", {"type":"text","text":"  "}]
+        });
+        let AssistantContent::Reasoning(reasoning) =
+            AssistantContent::Reasoning(Reasoning::new("never fall back to canonical text"))
+                .with_native(item)
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            readable_parts(&reasoning).collect::<Vec<_>>(),
+            [
+                "bare summary",
+                "summary",
+                "thought",
+                "plain",
+                "bare content"
+            ]
+        );
+    }
+
+    #[test]
+    fn native_less_fallback_and_empty_filter_are_unchanged() {
+        assert_eq!(
+            readable_parts(&Reasoning::new("thinking")).collect::<Vec<_>>(),
+            ["thinking"]
+        );
+        assert!(readable_parts(&Reasoning::new("  ")).next().is_none());
+        let mut redacted = Reasoning::new("not readable");
+        redacted.redacted = true;
+        assert!(readable_parts(&redacted).next().is_none());
+    }
 }
