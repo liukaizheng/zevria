@@ -10980,7 +10980,7 @@ dependencies = [
 
 [[package]]
 name = "zevria"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
@@ -11011,7 +11011,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-acp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
@@ -11035,7 +11035,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-anthropic"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rig-core",
@@ -11050,7 +11050,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-content"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -11066,7 +11066,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -11092,7 +11092,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-desktop"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -11125,7 +11125,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-ensemble"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
@@ -11152,7 +11152,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-foundation"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -11173,7 +11173,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-host"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "jsonc-parser",
@@ -11207,7 +11207,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-instructions"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -11226,7 +11226,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-model"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rig-core",
@@ -11241,7 +11241,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-presentation"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rig-core",
@@ -11258,7 +11258,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-provider"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "eventsource-stream",
@@ -11292,7 +11292,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-responses"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rig-core",
@@ -11307,7 +11307,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-session-api"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -11325,7 +11325,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-theme"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "palette",
@@ -11337,7 +11337,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-tools"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "diffy",
@@ -11364,7 +11364,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-transcript"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rig-core",
@@ -11383,7 +11383,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-tui"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -11413,7 +11413,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-tui-input"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -11430,7 +11430,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-tui-widgets"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "diffy",
  "pulldown-cmark",
@@ -11445,7 +11445,7 @@ dependencies = [
 
 [[package]]
 name = "zevria-workflow"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "pulldown-cmark",
