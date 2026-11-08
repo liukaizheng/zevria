@@ -2252,7 +2252,44 @@ restores the foreground-only root registry and policies. At most eight finished
 background jobs are retained; completed foreground jobs are removed immediately.
 Each job keeps bounded head/tail capture, with 16 KiB per-stream model elision
 and independent, non-consuming 8 KiB frontend tails. UTF-8 fragments at the
-running model cursor are held until complete; discarded gaps are explicit.
+running model cursor are held until complete. Capture returns structured head,
+discarded-byte count, and tail segments; only the shared shell-result renderer
+turns those segments into model text. Each elided stream has exactly one marker:
+`[... N bytes omitted; narrow the command or redirect its output to a file to see them ...]`.
+Its count includes both capture-discarded bytes and model-time cuts. The renderer
+keeps at most 8 KiB each of head and tail at UTF-8 character boundaries, including
+when a small capture limit retains less than either half-budget.
+
+The shell tool family (`command`, `command_status`, `command_terminate`, and
+completion footers) uses one compact model-facing renderer. Headers are
+`key: value` lines ordered as applicable: `id`, `status`, `exit_code` or `signal`,
+`duration`, then `note`. A foreground exit reports only its exit code (or Unix
+signal number and known name) and duration, not a redundant success/failure
+status. Single-job reads and termination reports instead include the ID, human
+status phrase, and duration, without duplicating the exit facts. Duration is
+start-to-finish time, or elapsed time for a live job, in seconds to one decimal
+place. An immediate background acknowledgement includes ID, running status, and
+a usage note; a user-backgrounded foreground call also includes elapsed duration
+and output so far.
+
+Only non-empty streams appear, stdout first, as raw lossy UTF-8 inside
+`<stdout>…</stdout>` and `<stderr>…</stderr>` blocks. A newline is added before a
+closing tag if the content does not already end with one. With no output the
+header stands alone: no empty blocks or placeholders. Content is not escaped;
+a literal closing tag in command output can therefore resemble a block boundary.
+Timeout, user termination, and turn cancellation retain the core
+`status: error\nerror:` envelope; their command body adds only duration and
+streams, never a second status or an unavailable exit code. Tool success/error
+classification and the command-job sidecar are independent of this text.
+
+Job lists and the once-only `job updates:` footer use the same line shape:
+`{id} · {status phrase} · {duration} · {command preview}`. Previews collapse
+whitespace and are capped at 120 characters including a trailing `…` when cut.
+Status phrases are shared with the TUI jobs overlay and command badge, including
+`exited 0`, `killed by signal 9 (SIGKILL)`, `terminated by the agent`,
+`terminated by the user`, and `cancelled with the turn`; internal enum Debug
+names never enter these displays. Notices are drained once per finished job,
+without consuming its unread streams.
 
 Jobs are runtime-only and do not survive process restart or session replacement.
 Ordinary tool results persist their bytes (including once-only `job updates:`
@@ -2260,7 +2297,9 @@ completion footers) plus a display-only `ToolResultDetail::CommandJob` sidecar.
 `CommandJobUpdated` and `CommandControlResult` events are frontend-only,
 non-fencing, and never persisted or injected into core model input. No job IDs,
 counts, status, or output enter instructions or tool definitions: provider prompt
-prefixes stay static and history remains append-only.
+prefixes stay static and history remains append-only. Format changes affect only
+newly appended results; persisted results are never re-rendered or migrated, so
+resumed transcripts may intentionally mix old and new result formats.
 
 Session shutdown (`/new`, `/resume`, `/implement-fresh`, quit, or ACP close)
 closes registration before signalling the engine, joins the engine and child

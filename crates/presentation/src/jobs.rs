@@ -81,6 +81,7 @@ mod tests {
             done.status = CommandJobStatus::Exited {
                 code: Some(0),
                 success: true,
+                signal: None,
             };
             done.finished_at = Some(std::time::SystemTime::now());
             model.reduce(zevria_session_api::SessionEvent::CommandJobUpdated { job: done });

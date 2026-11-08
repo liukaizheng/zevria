@@ -363,14 +363,52 @@ fn background_command_badge_uses_sidecar_and_live_status_not_result_prose() {
         stdout_bytes: 0,
         stderr_bytes: 0,
     });
-    let mut lines = Vec::new();
-    layout_native_message(&message, Some(&[Some(state)]), &mut lines, 160, None);
-    let text = lines
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("background · job-abcdef · running"), "{text}");
+    let mut states = [Some(state)];
+    for (status, expected) in [
+        (CommandJobStatus::Running, "running"),
+        (
+            CommandJobStatus::Exited {
+                code: Some(0),
+                success: true,
+                signal: None,
+            },
+            "exited 0",
+        ),
+        (
+            CommandJobStatus::Terminated {
+                origin: zevria_foundation::TerminationOrigin::Model,
+            },
+            "terminated by the agent",
+        ),
+        #[cfg(unix)]
+        (
+            CommandJobStatus::Exited {
+                code: None,
+                success: false,
+                signal: Some(9),
+            },
+            "killed by signal 9 (SIGKILL)",
+        ),
+    ] {
+        states[0]
+            .as_mut()
+            .unwrap()
+            .command_job
+            .as_mut()
+            .unwrap()
+            .status = status;
+        let mut lines = Vec::new();
+        layout_native_message(&message, Some(&states), &mut lines, 160, None);
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(&format!("background · job-abcdef · {expected}")),
+            "{text}"
+        );
+    }
 }
 
 #[test]

@@ -74,7 +74,7 @@ mod tests {
         let fixture = inspection_fixture::Fixture::new();
         let tool = CommandTool::new(fixture.workspace.clone());
         let result = run(&tool, fixture.read_command()).await.unwrap();
-        assert!(result.contains("status: success"), "{result}");
+        assert!(result.contains("exit_code: 0"), "{result}");
         assert_eq!(
             result
                 .matches(inspection_fixture::DIAGNOSTIC.trim())
@@ -85,7 +85,7 @@ mod tests {
         let home = run(&tool, fixture.home_read_command()).await.unwrap();
         assert!(home.contains(inspection_fixture::DIAGNOSTIC));
         let missing = run(&tool, fixture.missing_command()).await.unwrap();
-        assert!(missing.contains("status: failure"));
+        assert!(missing.starts_with("exit_code: ") && !missing.starts_with("exit_code: 0\n"));
         assert!(missing.contains("missing-diagnostic"));
         fixture.assert_unchanged();
     }
@@ -108,7 +108,7 @@ mod tests {
             fixture.execute_command(&scratch.0),
         ] {
             let result = run(&tool, command).await.unwrap();
-            assert!(result.contains("status: success"), "{result}");
+            assert!(result.contains("exit_code: 0"), "{result}");
         }
         scratch.assert_results(&fixture);
         // A previous shell cd is not persistent, even while scratch exists.
@@ -130,7 +130,7 @@ mod tests {
         std::fs::write(directory.path().join("fixture.txt"), "first\nsecond\n").unwrap();
         let tool = CommandTool::new(directory.path().to_path_buf());
         let output = run(&tool, "rtk read fixture.txt && rtk sed -n '2p' fixture.txt && git --version && rustc --version && printf '%s' \"$USERPROFILE\"").await.unwrap();
-        assert!(output.contains("status: success"), "{output}");
+        assert!(output.contains("exit_code: 0"), "{output}");
         for expected in ["second", "git version", "rustc"] {
             assert!(output.contains(expected), "{output}");
         }
@@ -149,10 +149,9 @@ mod tests {
         .await
         .expect("command should run");
 
-        assert!(output.contains("status: success"));
-        assert!(output.contains("exit_code: 0"));
-        assert!(output.contains("stdout:\nhello stdout"));
-        assert!(output.contains("stderr:\nhello stderr"));
+        assert!(output.starts_with("exit_code: 0\nduration: "));
+        assert!(output.contains("<stdout>\nhello stdout\n</stdout>"));
+        assert!(output.contains("<stderr>\nhello stderr\n</stderr>"));
     }
 
     #[tokio::test]
@@ -174,8 +173,36 @@ mod tests {
             .await
             .expect("non-zero status should still be a result");
 
-        assert!(output.contains("status: failure"));
-        assert!(output.contains("exit_code: 7"));
+        assert!(output.starts_with("exit_code: 7\nduration: "));
+        assert!(!output.contains("status:"));
+        assert!(!output.contains("<stdout>"));
+        assert!(!output.contains("<stderr>"));
+    }
+
+    #[tokio::test]
+    async fn empty_output_has_only_exit_code_and_duration() {
+        let output = run(&CommandTool::new(PathBuf::from(".")), "true")
+            .await
+            .unwrap();
+        assert!(output.starts_with("exit_code: 0\nduration: "));
+        assert_eq!(output.lines().count(), 2);
+        assert!(!output.contains("<stdout>"));
+        assert!(!output.contains("<stderr>"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn signal_exit_is_a_normal_result_with_signal_information() {
+        let output = run(&CommandTool::new(PathBuf::from(".")), "kill -9 $$")
+            .await
+            .unwrap();
+        assert!(
+            output.starts_with("signal: 9 (SIGKILL)\nduration: "),
+            "{output}"
+        );
+        assert_eq!(output.lines().count(), 2);
+        assert!(!output.contains("exit_code:"));
+        assert!(!output.contains("status:"));
     }
 
     #[tokio::test]
@@ -196,40 +223,12 @@ mod tests {
         .expect("large-output command should run");
 
         let stdout = output
-            .split_once("stdout:\n")
-            .and_then(|(_, output)| output.split_once("\nstderr:\n"))
+            .split_once("<stdout>\n")
+            .and_then(|(_, output)| output.split_once("\n</stdout>"))
             .map(|(stdout, _)| stdout)
-            .expect("result should contain stdout and stderr sections");
+            .expect("result should contain a stdout block");
         assert_eq!(stdout.chars().count(), 5000);
         assert!(output.len() > 4096);
-    }
-
-    #[test]
-    fn elide_middle_returns_streams_within_the_limit_unchanged() {
-        let stream = "x".repeat(64);
-        let result = elide_middle(&stream, 64);
-        assert!(matches!(result, Cow::Borrowed(_)));
-        assert_eq!(result, stream);
-    }
-
-    #[test]
-    fn elide_middle_keeps_head_and_tail_and_reports_the_omission() {
-        let stream = format!("{}{}", "a".repeat(1000), "b".repeat(1000));
-        let result = elide_middle(&stream, 100);
-        assert!(result.starts_with(&"a".repeat(50)));
-        assert!(result.ends_with(&"b".repeat(50)));
-        assert!(result.contains("1900 bytes omitted"));
-    }
-
-    #[test]
-    fn elide_middle_respects_multibyte_character_boundaries() {
-        // Two bytes per character, with an odd budget landing mid-character on
-        // both sides of the elision.
-        let stream = "é".repeat(200);
-        let result = elide_middle(&stream, 99);
-        assert!(result.starts_with(&"é".repeat(24)));
-        assert!(result.ends_with(&"é".repeat(24)));
-        assert!(result.contains("304 bytes omitted"));
     }
 
     #[tokio::test]
@@ -241,15 +240,16 @@ mod tests {
         .await
         .expect("oversized-output command should run");
 
-        assert!(output.contains("status: success"));
+        assert!(output.contains("exit_code: 0"));
         assert!(output.contains("183616 bytes omitted"));
         assert!(
             output.len() < MAX_OUTPUT_STREAM_BYTES + 1024,
             "result should stay near the per-stream limit, got {} bytes",
             output.len()
         );
-        // The trailing stdout and the stderr section both survive the elision.
-        assert!(output.ends_with("\nstderr:\n"));
+        assert!(output.ends_with("\n</stdout>"));
+        assert!(!output.contains("<stderr>"));
+        assert_eq!(output.matches("bytes omitted;").count(), 1);
     }
 
     #[tokio::test]
@@ -277,58 +277,68 @@ mod tests {
         let padding = "x".repeat(RETAINED_BYTES / 2 - 4);
         assert_eq!(
             captured,
-            format!(
-                "HEAD{padding}\n[... {} bytes discarded while draining bounded command output ...]\n{padding}TAIL",
-                payload.len() - RETAINED_BYTES,
-            )
+            zevria_session_api::StreamText {
+                head: format!("HEAD{padding}"),
+                discarded: payload.len() - RETAINED_BYTES,
+                tail: format!("{padding}TAIL"),
+            }
         );
     }
 
     #[tokio::test]
     async fn configured_capture_limit_drains_but_does_not_retain_unbounded_output() {
-        let tool = CommandTool::with_limits(
-            PathBuf::from("."),
-            CommandLimits {
-                // This is a capture test, not a shell-startup benchmark. Leave
-                // headroom for loaded native Windows hosts; the in-memory test
-                // above exercises backpressure without subprocess startup.
-                timeout: Duration::from_secs(30),
-                capture_bytes: 4 * 1024,
-            },
-        )
-        .expect("valid limits");
-        // Shell builtins avoid starting an external output generator. Emit
-        // 256 KiB on EACH pipe in chunks, with distinct heads and tails.
-        let output = run(
-            &tool,
-            "printf OUT_HEAD; printf ERR_HEAD >&2; \
+        // Exercise capture-only elision and capture plus model elision.
+        for capture_bytes in [4 * 1024, 64 * 1024] {
+            let tool = CommandTool::with_limits(
+                PathBuf::from("."),
+                CommandLimits {
+                    // This is a capture test, not a shell-startup benchmark. Leave
+                    // headroom for loaded native Windows hosts; the in-memory test
+                    // above exercises backpressure without subprocess startup.
+                    timeout: Duration::from_secs(30),
+                    capture_bytes,
+                },
+            )
+            .expect("valid limits");
+            // Shell builtins avoid starting an external output generator. Emit
+            // 256 KiB on EACH pipe in chunks, with distinct heads and tails.
+            let output = run(
+                &tool,
+                "printf OUT_HEAD; printf ERR_HEAD >&2; \
              i=0; while [ \"$i\" -lt 64 ]; do \
                  printf '%4096s' ''; printf '%4096s' '' >&2; i=$((i + 1)); \
              done; printf OUT_TAIL; printf ERR_TAIL >&2",
-        )
-        .await
-        .expect("large-output command should complete without pipe deadlock");
+            )
+            .await
+            .expect("large-output command should complete without pipe deadlock");
 
-        let padding = " ".repeat(1024 - "OUT_HEAD".len());
-        let discarded = 64 * 4096 + "OUT_HEAD".len() + "OUT_TAIL".len() - 2048;
-        let expected_stream = |prefix| {
-            format!(
-                "{prefix}_HEAD{padding}\n[... {discarded} bytes discarded while draining bounded command output ...]\n{padding}{prefix}_TAIL"
-            )
-        };
-        assert_eq!(
-            output,
-            format!(
-                "status: success\nexit_code: 0\nstdout:\n{}\nstderr:\n{}",
-                expected_stream("OUT"),
-                expected_stream("ERR"),
-            )
-        );
-        assert!(
-            output.len() < 6 * 1024,
-            "bounded capture should stay close to its configured limit: {} bytes",
-            output.len()
-        );
+            let shown_half = (capture_bytes / 4).min(MAX_OUTPUT_STREAM_BYTES / 2);
+            let padding = " ".repeat(shown_half - "OUT_HEAD".len());
+            let omitted = 64 * 4096 + "OUT_HEAD".len() + "OUT_TAIL".len() - 2 * shown_half;
+            let expected_stream = |prefix| {
+                format!(
+                    "{prefix}_HEAD{padding}\n[... {omitted} bytes omitted; narrow the command or redirect its output to a file to see them ...]\n{padding}{prefix}_TAIL"
+                )
+            };
+            let (header, blocks) = output.split_once("\n<stdout>\n").unwrap();
+            let duration = header.strip_prefix("exit_code: 0\nduration: ").unwrap();
+            assert!(duration.trim_end_matches('s').parse::<f64>().unwrap() >= 0.0);
+            assert_eq!(
+                blocks,
+                format!(
+                    "{}\n</stdout>\n<stderr>\n{}\n</stderr>",
+                    expected_stream("OUT"),
+                    expected_stream("ERR"),
+                )
+            );
+            assert_eq!(output.matches("bytes omitted;").count(), 2);
+            assert!(!output.contains("discarded"));
+            assert!(
+                output.len() < 4 * shown_half + 1024,
+                "bounded capture should stay close to the smaller of capture and model limits: {} bytes",
+                output.len()
+            );
+        }
     }
 
     #[cfg(any(unix, windows))]
@@ -356,8 +366,10 @@ mod tests {
         let CommandError::Timeout { output, .. } = error else {
             panic!("expected timeout error, got {error:?}");
         };
-        assert!(output.contains("status: terminated"));
-        assert!(output.contains("stdout:\nstarted"));
+        assert!(output.starts_with("duration: "));
+        assert!(!output.contains("status:"));
+        assert!(!output.contains("exit_code:"));
+        assert!(output.contains("<stdout>\nstarted\n</stdout>"));
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!marker.exists(), "a timed-out descendant must not survive");
     }
@@ -393,6 +405,10 @@ mod tests {
             .expect("command worker should not panic");
         let error = result.expect_err("cancelled command is a tool error");
         assert!(matches!(error, CommandError::Cancelled { .. }));
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("command cancelled with the turn\nduration: "));
+        assert!(!rendered.contains("status:"));
+        assert!(!rendered.contains("exit_code:"));
         assert!(
             context
                 .result::<ToolCancelled>()

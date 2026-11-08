@@ -71,7 +71,7 @@ async fn model_termination_escalates_when_the_shell_ignores_sigterm() {
         )
         .await
         .unwrap();
-    assert!(result.contains("terminated (Model)"));
+    assert!(result.contains("status: terminated by the agent\nduration: "));
     let pid: i32 = std::fs::read_to_string(directory.path().join("pid"))
         .unwrap()
         .trim()

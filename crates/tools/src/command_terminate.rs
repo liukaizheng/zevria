@@ -1,7 +1,7 @@
 //! Stop one shell process tree, never the agent turn.
 use crate::{
-    command::CommandError,
-    command_status::{job_error, render_job, with_footer},
+    command::{CommandError, render},
+    command_status::{job_error, with_footer},
 };
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use schemars::{JsonSchema, schema_for};
@@ -51,7 +51,10 @@ impl Tool for CommandTerminateTool {
             if !job.wait_terminal(Duration::from_secs(5), &Default::default()).await {
                 return Err(CommandError::Job(format!("termination requested for {id}; cleanup is still in progress; use command_status to inspect it")));
             }
-            Ok(render_job(&self.jobs, &job))
+            let snapshot = job.snapshot();
+            let streams = job.take_unread();
+            self.jobs.mark_reported(&snapshot.id);
+            Ok(render::job_report(&snapshot, &streams, None))
         }.await;
         with_footer(result, &self.jobs, Some(&id))
     }

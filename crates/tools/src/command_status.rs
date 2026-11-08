@@ -1,10 +1,10 @@
 //! Incremental model-facing command job inspection.
-use crate::command::{CommandError, MAX_OUTPUT_STREAM_BYTES, elide_middle, job_footer};
+use crate::command::{CommandError, render};
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use zevria_foundation::{CommandJobId, CommandJobSnapshot, ToolCancelled};
+use zevria_foundation::{CommandJobId, ToolCancelled};
 use zevria_session_api::{CommandJobs, TurnContext};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -42,14 +42,7 @@ impl CommandStatusTool {
             }
             let mut lines = Vec::new();
             for job in jobs {
-                lines.push(format!(
-                    "{} · {:?} · {} · {}s · {}",
-                    job.id,
-                    job.mode,
-                    job.status,
-                    runtime(&job),
-                    job.command
-                ));
+                lines.push(render::job_line(&job));
                 if job.status.is_terminal() {
                     self.jobs.mark_reported(&job.id);
                 }
@@ -72,7 +65,12 @@ impl CommandStatusTool {
                 return Err(CommandError::Cancelled { output: "Status wait cancelled; the command job is still running or has completed independently.".into() });
             }
         }
-        Ok(render_job(&self.jobs, &job))
+        let snapshot = job.snapshot();
+        let streams = job.take_unread();
+        if snapshot.status.is_terminal() {
+            self.jobs.mark_reported(&snapshot.id);
+        }
+        Ok(render::job_report(&snapshot, &streams, None))
     }
 }
 impl Tool for CommandStatusTool {
@@ -115,44 +113,12 @@ impl Tool for CommandStatusTool {
 pub(crate) fn job_error(error: impl std::fmt::Display) -> CommandError {
     CommandError::Job(error.to_string())
 }
-pub(crate) fn runtime(job: &CommandJobSnapshot) -> u64 {
-    job.finished_at
-        .unwrap_or_else(std::time::SystemTime::now)
-        .duration_since(job.started_at)
-        .unwrap_or_default()
-        .as_secs()
-}
-pub(crate) fn render_job(jobs: &CommandJobs, handle: &zevria_session_api::JobHandle) -> String {
-    let job = handle.snapshot();
-    let (stdout, stderr) = handle.take_unread();
-    if job.status.is_terminal() {
-        jobs.mark_reported(&job.id);
-    }
-    let code = match &job.status {
-        zevria_foundation::CommandJobStatus::Exited { code, .. } => *code,
-        _ => None,
-    };
-    format!(
-        "id: {}\nmode: {}\nstatus: {}\nruntime: {}s\nexit_code: {}\nstdout:\n{}\nstderr:\n{}",
-        job.id,
-        if job.mode == zevria_foundation::CommandJobMode::Background {
-            "background"
-        } else {
-            "foreground"
-        },
-        job.status,
-        runtime(&job),
-        code.map_or_else(|| "unavailable".into(), |c| c.to_string()),
-        elide_middle(&stdout, MAX_OUTPUT_STREAM_BYTES),
-        elide_middle(&stderr, MAX_OUTPUT_STREAM_BYTES)
-    )
-}
 pub(crate) fn with_footer(
     result: Result<String, CommandError>,
     jobs: &CommandJobs,
     except: Option<&CommandJobId>,
 ) -> Result<String, CommandError> {
-    let footer = job_footer(jobs, except);
+    let footer = render::job_footer(&jobs.take_unreported_notices(except));
     match result {
         Ok(s) => Ok(format!("{s}{footer}")),
         Err(e) if footer.is_empty() => Err(e),

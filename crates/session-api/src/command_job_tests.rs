@@ -48,6 +48,7 @@ async fn registration_cancellation_rolls_back_and_terminal_state_precedes_backpr
             .finish(CommandJobStatus::Exited {
                 code: Some(0),
                 success: true,
+                signal: None,
             })
             .await;
     });
@@ -82,6 +83,7 @@ async fn unique_ids_survive_eviction_and_private_jobs_are_not_model_visible() {
         job.finish(CommandJobStatus::Exited {
             code: Some(0),
             success: true,
+            signal: None,
         })
         .await;
     }
@@ -112,15 +114,93 @@ async fn backgrounding_and_turn_cancellation_are_serialized() {
 }
 
 #[test]
+fn structured_streams_keep_gaps_and_unread_ranges_exact() {
+    assert!(StreamText::default().is_empty());
+    assert!(
+        !StreamText {
+            discarded: 1,
+            ..StreamText::default()
+        }
+        .is_empty()
+    );
+    let mut buffer = StreamBuffer::new(8);
+    buffer.append(b"HEAD123456TAIL");
+    assert_eq!(
+        buffer.take_unread(false),
+        StreamText {
+            head: "HEAD".into(),
+            discarded: 6,
+            tail: "TAIL".into()
+        }
+    );
+    buffer.append(&[b'x'; 100]);
+    assert_eq!(buffer.unread_len(), 100);
+    assert_eq!(
+        buffer.take_unread(false),
+        StreamText {
+            head: String::new(),
+            discarded: 96,
+            tail: "xxxx".into()
+        }
+    );
+    assert!(buffer.take_unread(false).is_empty());
+    assert_eq!(buffer.unread_len(), 0);
+    assert_eq!(
+        buffer.retained(),
+        StreamText {
+            head: "HEAD".into(),
+            discarded: 106,
+            tail: "xxxx".into()
+        }
+    );
+}
+
+#[test]
+fn contiguous_retained_utf8_and_gapped_running_holdback() {
+    let mut buffer = StreamBuffer::new(6);
+    buffer.append("ab€".as_bytes());
+    assert_eq!(
+        buffer.retained(),
+        StreamText {
+            head: "ab€".into(),
+            ..StreamText::default()
+        }
+    );
+    assert_eq!(buffer.take_unread(true), buffer.retained());
+    let mut buffer = StreamBuffer::new(8);
+    buffer.append(b"HEAD123456X\xe2\x82");
+    assert_eq!(
+        buffer.take_unread(true),
+        StreamText {
+            head: "HEAD".into(),
+            discarded: 5,
+            tail: "6X".into()
+        }
+    );
+    assert_eq!(buffer.unread_len(), 2);
+    buffer.append(&[0xac]);
+    assert_eq!(
+        buffer.take_unread(true),
+        StreamText {
+            head: "€".into(),
+            ..StreamText::default()
+        }
+    );
+    assert_eq!(buffer.unread_len(), 0);
+}
+
+#[test]
 fn incremental_utf8_and_lossy_frontend_tails_stay_bounded() {
     for limit in 32..64 {
         let mut buffer = StreamBuffer::new(limit);
         for byte in "head:你好:tail".bytes() {
             buffer.append(&[byte]);
             let text = buffer.take_unread(true);
+            assert_eq!(text.discarded, 0);
+            assert!(text.tail.is_empty());
             assert!(
-                !text.contains('\u{fffd}'),
-                "complete retained UTF-8 should never be replaced: {text}"
+                !text.head.contains('\u{fffd}') && !text.tail.contains('\u{fffd}'),
+                "complete retained UTF-8 should never be replaced: {text:?}"
             );
         }
         buffer.take_unread(false);

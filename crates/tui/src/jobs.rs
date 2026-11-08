@@ -395,6 +395,7 @@ mod tests {
         job.status = zevria_foundation::CommandJobStatus::Exited {
             code: Some(0),
             success: true,
+            signal: None,
         };
         overlay.event(&SessionEvent::CommandJobUpdated { job });
         overlay.event(&SessionEvent::CommandControlResult {

@@ -44,7 +44,16 @@ pub(super) fn spawn_job(
                     biased;
                     status = child.wait() => {
                         tree.kill_remaining();
-                        break match status { Ok(status) => CommandJobStatus::Exited { code: status.code(), success: status.success() }, Err(error) => CommandJobStatus::Failed { error: format!("failed while waiting for command: {error}") } };
+                        break match status {
+                            Ok(status) => {
+                                #[cfg(unix)]
+                                let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+                                #[cfg(not(unix))]
+                                let signal = None;
+                                CommandJobStatus::Exited { code: status.code(), success: status.success(), signal }
+                            }
+                            Err(error) => CommandJobStatus::Failed { error: format!("failed while waiting for command: {error}") },
+                        };
                     }
                     _ = termination.changed() => {},
                     _ = deadline.changed() => {},
@@ -87,13 +96,13 @@ async fn drain(
 pub(super) async fn capture_stream(
     mut stream: impl AsyncRead + Unpin,
     max: usize,
-) -> std::io::Result<String> {
+) -> std::io::Result<zevria_session_api::StreamText> {
     let mut buffer = zevria_session_api::StreamBuffer::new(max);
     let mut bytes = [0; 8192];
     loop {
         let n = stream.read(&mut bytes).await?;
         if n == 0 {
-            return Ok(buffer.render_retained());
+            return Ok(buffer.retained());
         }
         buffer.append(&bytes[..n]);
     }

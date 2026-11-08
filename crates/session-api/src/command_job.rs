@@ -24,6 +24,20 @@ pub struct CommandJobLimits {
     pub background_timeout: Option<Duration>,
 }
 
+/// Lossy UTF-8 segments with the raw byte count discarded between them.
+/// Keeping capture gaps structured lets the model renderer account for all elision.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamText {
+    pub head: String,
+    pub discarded: usize,
+    pub tail: String,
+}
+impl StreamText {
+    pub fn is_empty(&self) -> bool {
+        self.head.is_empty() && self.discarded == 0 && self.tail.is_empty()
+    }
+}
+
 /// Head/tail retention with absolute offsets, independent frontend/model readers.
 #[derive(Debug)]
 pub struct StreamBuffer {
@@ -64,18 +78,24 @@ impl StreamBuffer {
     pub fn unread_len(&self) -> usize {
         self.total.saturating_sub(self.cursor)
     }
-    pub fn render_retained(&self) -> String {
-        let mut result = String::from_utf8_lossy(&self.head).into_owned();
+    pub fn retained(&self) -> StreamText {
         let retained = self.head.len() + self.tail.len();
         if self.total > retained {
-            result.push_str(&gap(self.total - retained));
+            return StreamText {
+                head: String::from_utf8_lossy(&self.head).into_owned(),
+                discarded: self.total - retained,
+                tail: String::from_utf8_lossy(&self.tail.iter().copied().collect::<Vec<_>>())
+                    .into_owned(),
+            };
         }
-        result.push_str(&String::from_utf8_lossy(
-            &self.tail.iter().copied().collect::<Vec<_>>(),
-        ));
-        result
+        // Without a gap, decode together so a retention boundary cannot split UTF-8.
+        let bytes: Vec<_> = self.head.iter().chain(self.tail.iter()).copied().collect();
+        StreamText {
+            head: String::from_utf8_lossy(&bytes).into_owned(),
+            ..StreamText::default()
+        }
     }
-    pub fn take_unread(&mut self, running: bool) -> String {
+    pub fn take_unread(&mut self, running: bool) -> StreamText {
         let tail_start = self.total - self.tail.len();
         let mut bytes = Vec::new();
         if self.cursor < self.head.len() {
@@ -84,13 +104,15 @@ impl StreamBuffer {
         let gap_start = self.cursor.max(self.head.len());
         if tail_start > gap_start {
             // Decode segments independently at a discarded gap, as in retained output.
-            let mut result = String::from_utf8_lossy(&bytes).into_owned();
-            result.push_str(&gap(tail_start - gap_start));
+            let head = String::from_utf8_lossy(&bytes).into_owned();
             bytes = self.tail.iter().copied().collect();
             let end = utf8_end(&bytes, running);
-            result.push_str(&String::from_utf8_lossy(&bytes[..end]));
             self.cursor = tail_start + end;
-            return result;
+            return StreamText {
+                head,
+                discarded: tail_start - gap_start,
+                tail: String::from_utf8_lossy(&bytes[..end]).into_owned(),
+            };
         }
         bytes.extend(
             self.tail
@@ -101,7 +123,10 @@ impl StreamBuffer {
         let start = self.cursor;
         let end = utf8_end(&bytes, running);
         self.cursor = start + end;
-        String::from_utf8_lossy(&bytes[..end]).into_owned()
+        StreamText {
+            head: String::from_utf8_lossy(&bytes[..end]).into_owned(),
+            ..StreamText::default()
+        }
     }
     pub fn tail_preview(&self, max: usize) -> String {
         let mut bytes: Vec<u8> = if self.total > self.head.len() + self.tail.len() {
@@ -123,9 +148,6 @@ impl StreamBuffer {
         }
         text[start..].to_owned()
     }
-}
-fn gap(n: usize) -> String {
-    format!("\n[... {n} bytes discarded while draining bounded command output ...]\n")
 }
 fn utf8_end(bytes: &[u8], running: bool) -> usize {
     if running {
@@ -202,7 +224,7 @@ impl Job {
     fn snapshot(&self) -> CommandJobSnapshot {
         self.record.lock().unwrap().snapshot.clone()
     }
-    fn unread(&self) -> (String, String) {
+    fn unread(&self) -> (StreamText, StreamText) {
         let mut r = self.record.lock().unwrap();
         let running = !r.snapshot.status.is_terminal();
         (r.stdout.take_unread(running), r.stderr.take_unread(running))
@@ -373,7 +395,10 @@ impl CommandJobs {
     pub fn snapshot(&self, id: &CommandJobId) -> Result<CommandJobSnapshot, RegisterError> {
         Ok(self.get(id)?.snapshot())
     }
-    pub fn take_unread(&self, id: &CommandJobId) -> Result<(String, String), RegisterError> {
+    pub fn take_unread(
+        &self,
+        id: &CommandJobId,
+    ) -> Result<(StreamText, StreamText), RegisterError> {
         Ok(self.get(id)?.unread())
     }
     pub fn terminate(
@@ -591,12 +616,12 @@ impl JobHandle {
     pub fn snapshot(&self) -> CommandJobSnapshot {
         self.job.snapshot()
     }
-    pub fn take_unread(&self) -> (String, String) {
+    pub fn take_unread(&self) -> (StreamText, StreamText) {
         self.job.unread()
     }
-    pub fn retained(&self) -> (String, String) {
+    pub fn retained(&self) -> (StreamText, StreamText) {
         let r = self.job.record.lock().unwrap();
-        (r.stdout.render_retained(), r.stderr.render_retained())
+        (r.stdout.retained(), r.stderr.retained())
     }
     pub fn append(&self, stream: CommandStream, bytes: &[u8]) {
         let mut r = self.job.record.lock().unwrap();
@@ -721,21 +746,43 @@ mod tests {
     fn bounded_buffer_parity_cursor_gaps_utf8_and_frontend_independence() {
         let mut b = StreamBuffer::new(8);
         b.append(b"HEAD123456TAIL");
-        let expected = format!("HEAD{}TAIL", gap(6));
-        assert_eq!(b.render_retained(), expected);
+        let expected = StreamText {
+            head: "HEAD".into(),
+            discarded: 6,
+            tail: "TAIL".into(),
+        };
+        assert_eq!(b.retained(), expected);
         assert_eq!(b.take_unread(false), expected);
-        assert_eq!(b.take_unread(false), "");
+        assert!(b.take_unread(false).is_empty());
         b.append(b"END");
         assert_eq!(b.tail_preview(3), "END");
-        assert_eq!(b.take_unread(true), "END");
+        assert_eq!(
+            b.take_unread(true),
+            StreamText {
+                head: "END".into(),
+                ..StreamText::default()
+            }
+        );
         let mut b = StreamBuffer::new(64);
         b.append(&[0xe2, 0x82]);
-        assert_eq!(b.take_unread(true), "");
+        assert!(b.take_unread(true).is_empty());
         b.append(&[0xac]);
-        assert_eq!(b.take_unread(true), "€");
+        assert_eq!(
+            b.take_unread(true),
+            StreamText {
+                head: "€".into(),
+                ..StreamText::default()
+            }
+        );
         assert_eq!(b.unread_len(), 0);
         b.append(&[0xe2]);
-        assert_eq!(b.take_unread(false), "�");
+        assert_eq!(
+            b.take_unread(false),
+            StreamText {
+                head: "�".into(),
+                ..StreamText::default()
+            }
+        );
     }
     #[tokio::test]
     async fn controls_limits_eviction_notices_and_close() {
@@ -774,6 +821,7 @@ mod tests {
         next.finish(CommandJobStatus::Exited {
             code: Some(0),
             success: true,
+            signal: None,
         })
         .await;
         assert!(jobs.snapshot(&id).is_err());
@@ -805,6 +853,7 @@ mod tests {
             .finish(CommandJobStatus::Exited {
                 code: Some(0),
                 success: true,
+                signal: None,
             })
             .await;
         let mut states = Vec::new();

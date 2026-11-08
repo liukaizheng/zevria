@@ -1,6 +1,6 @@
 use super::*;
 use crate::{CommandStatusArgs, CommandStatusTool, CommandTerminateArgs, CommandTerminateTool};
-use zevria_foundation::{SessionMode, TurnId};
+use zevria_foundation::{CommandJobId, SessionMode, TurnId};
 use zevria_session_api::{CommandControl, CommandControlAction, CommandControlResult};
 fn jobs() -> CommandJobs {
     CommandJobs::new(
@@ -31,7 +31,12 @@ async fn start(tool: &CommandTool, command: &str) -> CommandJobId {
     .unwrap();
     let detail = context.result::<ToolResultDetail>().unwrap().unwrap();
     let id = detail.command_job().unwrap().id.clone();
-    assert!(result.contains(id.as_str()));
+    assert_eq!(
+        result,
+        format!(
+            "id: {id}\nstatus: running\nnote: started in the background; use command_status to read output or wait, and command_terminate to stop it"
+        )
+    );
     id
 }
 async fn status(jobs: &CommandJobs, id: &CommandJobId, wait: Option<u64>) -> String {
@@ -75,7 +80,11 @@ async fn background_returns_promptly_incremental_output_cap_and_footer_once() {
     );
     assert!(last.contains("second"));
     assert!(directory.path().join("done").exists());
-    assert!(!status(&jobs, &id, None).await.contains("second"));
+    let reread = status(&jobs, &id, None).await;
+    assert!(reread.starts_with(&format!("id: {id}\nstatus: exited 0\nduration: ")));
+    assert_eq!(reread.lines().count(), 3);
+    assert!(!reread.contains("<stdout>"));
+    assert!(!reread.contains("<stderr>"));
     let id2 = start(&tool, "printf update").await;
     jobs.wait_terminal(&id2, Duration::from_secs(5), &Default::default())
         .await
@@ -91,7 +100,8 @@ async fn background_returns_promptly_incremental_output_cap_and_footer_once() {
         .await
         .unwrap();
     assert!(result.contains("job updates:"));
-    assert!(result.contains(id2.as_str()));
+    assert!(result.contains(&format!("job updates:\n{id2} · exited 0 · ")));
+    assert!(result.ends_with(" · printf update"));
     let result = tool
         .call(
             &mut ToolContext::new(),
@@ -118,7 +128,18 @@ async fn terminate_and_shutdown_kill_descendants() {
         )
         .await
         .unwrap();
-    assert!(result.contains("terminated"));
+    assert!(result.starts_with(&format!(
+        "id: {id}\nstatus: terminated by the agent\nduration: "
+    )));
+    let already_finished = CommandTerminateTool::new(jobs.clone())
+        .call(
+            &mut ToolContext::new(),
+            CommandTerminateArgs { id: id.to_string() },
+        )
+        .await
+        .unwrap();
+    assert_eq!(already_finished, result);
+    assert_eq!(already_finished.lines().count(), 3);
     let id = start(&tool, "sleep 0.5; printf leak > leak").await;
     jobs.shutdown(Duration::from_secs(3)).await;
     assert!(jobs.snapshot(&id).unwrap().status.is_terminal());
@@ -176,14 +197,110 @@ async fn user_terminate_and_move_do_not_cancel_turn() {
             .unwrap();
         assert!(!token.is_cancelled());
         if move_it {
-            assert!(result.unwrap().contains("moved to the background"));
+            let result = result.unwrap();
+            assert!(result.starts_with(&format!("id: {id}\nstatus: running\nduration: ")));
+            assert!(result.contains("\nnote: the user moved this command to the background;"));
             assert!(context.result::<ToolResultDetail>().unwrap().is_some());
             assert!(status(&jobs, &id, Some(5)).await.contains("done"));
         } else {
-            assert!(matches!(result, Err(CommandError::Terminated { .. })));
+            let error = result.unwrap_err();
+            assert!(matches!(error, CommandError::Terminated { .. }));
+            let rendered = error.to_string();
+            assert!(rendered.starts_with("the user terminated this command\nduration: "));
+            assert!(!rendered.contains("status:"));
+            assert!(!rendered.contains("exit_code:"));
         }
     }
 }
+#[tokio::test]
+async fn lists_share_job_lines_and_do_not_consume_unread_streams() {
+    let jobs = jobs();
+    let command = format!("  rg\t-n\n{}   src  ", "é".repeat(150));
+    let job = jobs
+        .register(command, None, CommandJobMode::Background)
+        .await
+        .unwrap();
+    job.append(zevria_session_api::CommandStream::Stdout, b"still unread");
+    job.finish(CommandJobStatus::Exited {
+        code: Some(0),
+        success: true,
+        signal: None,
+    })
+    .await;
+    let list = CommandStatusTool::new(jobs.clone())
+        .call(
+            &mut ToolContext::new(),
+            CommandStatusArgs {
+                id: None,
+                wait_seconds: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.lines().count(), 1);
+    assert!(list.starts_with(&format!("{} · exited 0 · ", job.snapshot().id)));
+    let preview = list.rsplit_once(" · ").unwrap().1;
+    assert_eq!(preview.chars().count(), 120);
+    assert!(preview.starts_with("rg -n "));
+    assert!(preview.ends_with('…'));
+    assert!(!list.contains("Background"));
+    assert!(!list.contains("job updates:"));
+    let report = status(&jobs, &job.snapshot().id, None).await;
+    assert!(report.ends_with("\n<stdout>\nstill unread\n</stdout>"));
+    assert!(!report.contains("job updates:"));
+}
+
+#[tokio::test]
+async fn interrupted_error_keeps_its_variant_and_reports_notices_exactly_once() {
+    let jobs = CommandJobs::new(
+        CommandJobLimits {
+            foreground_timeout: Duration::from_millis(100),
+            ..jobs().limits()
+        },
+        None,
+    );
+    let finished = jobs
+        .register("printf update".into(), None, CommandJobMode::Background)
+        .await
+        .unwrap();
+    finished
+        .finish(CommandJobStatus::Exited {
+            code: Some(0),
+            success: true,
+            signal: None,
+        })
+        .await;
+    let tool = CommandTool::with_jobs(PathBuf::from("."), jobs.clone());
+    let error = tool
+        .call(
+            &mut ToolContext::new(),
+            CommandArgs {
+                command: "sleep 10".into(),
+                background: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CommandError::Timeout { .. }));
+    let rendered = error.to_string();
+    assert_eq!(rendered.matches("job updates:").count(), 1);
+    assert!(rendered.contains(&format!(
+        "\njob updates:\n{} · exited 0 · ",
+        finished.snapshot().id
+    )));
+    let next = CommandStatusTool::new(jobs)
+        .call(
+            &mut ToolContext::new(),
+            CommandStatusArgs {
+                id: None,
+                wait_seconds: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!next.contains("job updates:"));
+}
+
 #[tokio::test]
 async fn cancelling_status_wait_leaves_job_running_and_background_survives_turn() {
     let jobs = jobs();

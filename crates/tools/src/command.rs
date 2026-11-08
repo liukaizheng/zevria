@@ -2,41 +2,22 @@
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use zevria_foundation::{
-    CommandJobDetail, CommandJobDisposition, CommandJobId, CommandJobMode, CommandJobStatus,
-    TerminationOrigin, ToolCallId, ToolCancelled, ToolResultDetail,
+    CommandJobDetail, CommandJobDisposition, CommandJobMode, CommandJobStatus, TerminationOrigin,
+    ToolCallId, ToolCancelled, ToolResultDetail,
 };
 use zevria_session_api::{CommandJobLimits, CommandJobs, JobHandle, TurnContext};
+pub(crate) mod render;
 mod supervise;
+use render::MAX_OUTPUT_STREAM_BYTES;
 #[cfg(test)]
 use supervise::capture_stream;
 #[cfg(test)]
 use zevria_foundation::ToolContextRuntimeExt;
 
-pub(crate) const MAX_OUTPUT_STREAM_BYTES: usize = 16 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_CAPTURE_BYTES: usize = 1024 * 1024;
-
-pub(crate) fn elide_middle(stream: &str, max_bytes: usize) -> Cow<'_, str> {
-    if stream.len() <= max_bytes {
-        return Cow::Borrowed(stream);
-    }
-    let mut head_end = max_bytes / 2;
-    while !stream.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let mut tail_start = stream.len() - max_bytes / 2;
-    while !stream.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
-    let omitted_bytes = tail_start - head_end;
-    Cow::Owned(format!(
-        "{}\n[... {omitted_bytes} bytes omitted: the output exceeded the {max_bytes}-byte per-stream limit; rerun a narrower command (a more specific pattern, a path filter, or `head`) to see the omitted middle ...]\n{}",
-        &stream[..head_end],
-        &stream[tail_start..]
-    ))
-}
 
 /// Arguments accepted by the [`CommandTool`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -148,10 +129,7 @@ impl CommandTool {
         if mode == CommandJobMode::Background {
             guard.armed = false;
             attach_job(context, &job, CommandJobDisposition::StartedInBackground);
-            return Ok(format!(
-                "status: running\nid: {}\nmode: background\nUse command_status to read incremental output or wait, and command_terminate to stop this job.",
-                job.snapshot().id
-            ));
+            return Ok(render::background_start(&job.snapshot().id));
         }
         let mut changed = job.changes();
         let cancellation = context
@@ -163,10 +141,12 @@ impl CommandTool {
             if snapshot.status.is_terminal() {
                 guard.armed = false;
                 self.jobs.mark_reported(&snapshot.id);
-                let (stdout, stderr) = job.retained();
-                let output = render_output(&snapshot.status, &stdout, &stderr);
+                let streams = job.retained();
+                if matches!(snapshot.status, CommandJobStatus::Exited { .. }) {
+                    return Ok(render::foreground_result(&snapshot, &streams));
+                }
+                let output = render::interrupted_body(&snapshot, &streams);
                 return match snapshot.status {
-                    CommandJobStatus::Exited { .. } => Ok(output),
                     CommandJobStatus::TimedOut { seconds } => {
                         Err(CommandError::Timeout { seconds, output })
                     }
@@ -183,20 +163,17 @@ impl CommandTool {
                     }
                     CommandJobStatus::Terminated { .. } => Err(CommandError::Cancelled { output }),
                     CommandJobStatus::Failed { error } => Err(CommandError::Capture(error)),
-                    CommandJobStatus::Running => unreachable!(),
+                    CommandJobStatus::Running | CommandJobStatus::Exited { .. } => unreachable!(),
                 };
             }
             if snapshot.mode == CommandJobMode::Background {
                 guard.armed = false;
                 job.publish_mode_change().await;
                 attach_job(context, &job, CommandJobDisposition::MovedToBackground);
-                let (stdout, stderr) = job.take_unread();
-                return Ok(format!(
-                    "status: running\nid: {}\nmode: background\nmoved to the background by the user after {}s\nstdout:\n{}\nstderr:\n{}",
-                    snapshot.id,
-                    snapshot.started_at.elapsed().unwrap_or_default().as_secs(),
-                    elide_middle(&stdout, MAX_OUTPUT_STREAM_BYTES),
-                    elide_middle(&stderr, MAX_OUTPUT_STREAM_BYTES)
+                return Ok(render::job_report(
+                    &snapshot,
+                    &job.take_unread(),
+                    Some(render::MOVED_TO_BACKGROUND_NOTE),
                 ));
             }
             tokio::select! {
@@ -253,10 +230,13 @@ impl std::fmt::Display for CommandError {
             Self::Wait(e) => write!(f, "failed while waiting for command: {e}"),
             Self::Capture(e) => write!(f, "failed while capturing command output: {e}"),
             Self::Timeout { seconds, output } => {
-                write!(f, "command timed out after {seconds}s\n{output}")
+                write!(
+                    f,
+                    "command timed out after {seconds}s; its process tree was terminated\n{output}"
+                )
             }
-            Self::Cancelled { output } => write!(f, "command cancelled\n{output}"),
-            Self::Terminated { output } => write!(f, "command terminated by the user\n{output}"),
+            Self::Cancelled { output } => write!(f, "command cancelled with the turn\n{output}"),
+            Self::Terminated { output } => write!(f, "the user terminated this command\n{output}"),
         }
     }
 }
@@ -324,7 +304,7 @@ impl Tool for CommandTool {
             .ok()
             .flatten()
             .and_then(|detail| detail.command_job().map(|job| job.id.clone()));
-        let footer = job_footer(&self.jobs, own.as_ref());
+        let footer = render::job_footer(&self.jobs.take_unreported_notices(own.as_ref()));
         match result {
             Ok(mut output) => {
                 output.push_str(&footer);
@@ -344,33 +324,6 @@ impl Tool for CommandTool {
         }
     }
 }
-pub(crate) fn render_output(status: &CommandJobStatus, stdout: &str, stderr: &str) -> String {
-    let (state, code) = match status {
-        CommandJobStatus::Exited { code, success } => {
-            (if *success { "success" } else { "failure" }, *code)
-        }
-        _ => ("terminated", None),
-    };
-    let code = code.map_or_else(|| "unavailable".into(), |c| c.to_string());
-    format!(
-        "status: {state}\nexit_code: {code}\nstdout:\n{}\nstderr:\n{}",
-        elide_middle(stdout, MAX_OUTPUT_STREAM_BYTES),
-        elide_middle(stderr, MAX_OUTPUT_STREAM_BYTES)
-    )
-}
-pub(crate) fn job_footer(jobs: &CommandJobs, except: Option<&CommandJobId>) -> String {
-    let notices = jobs.take_unreported_notices(except);
-    if notices.is_empty() {
-        return String::new();
-    }
-    let lines = notices
-        .iter()
-        .map(|j| format!("{}: {}", j.id, j.status))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("\njob updates:\n{lines}")
-}
-
 #[cfg(test)]
 #[path = "command/edge_tests.rs"]
 mod edge_tests;
