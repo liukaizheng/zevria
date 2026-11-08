@@ -29,6 +29,10 @@ fn send_turn_action(
 ) -> anyhow::Result<()> {
     use zevria_session_api::TurnCommand;
     let (command, operation) = match action {
+        UiAction::ContinueAfterJobs { mode } => (
+            TurnCommand::ContinueAfterJobs { mode },
+            "the background job continuation",
+        ),
         UiAction::Submit {
             text,
             mode,
@@ -198,7 +202,7 @@ pub async fn run_ui(
                         Some(UiAction::SetMode { request_id, mode }) => {
                             views.send_mode_selection(commands, request_id, mode);
                         }
-                        Some(action @ (UiAction::Submit { .. }
+                        Some(action @ (UiAction::ContinueAfterJobs { .. } | UiAction::Submit { .. }
                             | UiAction::EditTranscript(_)
                             | UiAction::InvokeSkill { .. }
                             | UiAction::Compact { .. }

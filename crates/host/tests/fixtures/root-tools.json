@@ -1,7 +1,7 @@
 [
   {
     "name": "command",
-    "description": "Run a non-interactive shell command with Zevria's startup workspace as its working directory and return its exit status, stdout, and stderr. Commands execute with the application's permissions and are not sandboxed, read-only, or confined to the workspace. Foreground commands time out after 300 seconds. Captured output is bounded to 1048576 bytes total, and stdout/stderr are each elided in the middle beyond 16384 bytes before entering model history. Set background: true for long builds, test suites, or servers, not quick inspection commands. Background jobs return a job ID immediately; use command_status for incremental output and optional waiting, or command_terminate to stop one process tree. At most 8 background jobs can run. Jobs persist across turns and Ctrl+C but end with the session; there is no default background time limit. A user can move a foreground command to the background or terminate it without cancelling the turn. Descendants started using & or nohup in a foreground command are still terminated when its shell exits.",
+    "description": "Run a non-interactive shell command with Zevria's startup workspace as its working directory and return its exit status, stdout, and stderr. Commands execute with the application's permissions and are not sandboxed, read-only, or confined to the workspace. Foreground commands time out after 300 seconds. Captured output is bounded to 1048576 bytes total, and stdout/stderr are each elided in the middle beyond 16384 bytes before entering model history. Set background: true for long builds, test suites, or servers, not quick inspection commands. Background jobs return a job ID immediately; use command_status for incremental output and optional waiting, or command_terminate to stop one process tree. When a background job finishes, its final status and unread output are reported to you automatically before your next model request, so you do not need to poll; if you have already responded, an interactive session may resume you automatically to handle the result. At most 8 background jobs can run. Jobs persist across turns and Ctrl+C but end with the session; there is no default background time limit. A user can move a foreground command to the background or terminate it without cancelling the turn. Descendants started using & or nohup in a foreground command are still terminated when its shell exits.",
     "parameters": {
       "type": "object",
       "additionalProperties": false,
@@ -29,7 +29,7 @@
   },
   {
     "name": "command_status",
-    "description": "List this session's model-visible command jobs, or inspect one job and read stdout/stderr produced since the last model read. With an id, optionally wait up to 300 seconds for completion; waiting never stops the job and turn cancellation only cancels the wait. Jobs do not survive restarts. Frontend inspection does not consume model output.",
+    "description": "List this session's model-visible command jobs, or inspect one job and read stdout/stderr produced since the last model read. With an id, optionally wait up to 300 seconds for completion; waiting never stops the job and turn cancellation only cancels the wait. Finished jobs are reported automatically before your next model request; use this tool to read running output, wait, or list jobs. Jobs do not survive restarts. Frontend inspection does not consume model output.",
     "parameters": {
       "type": "object",
       "additionalProperties": false,

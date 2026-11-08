@@ -578,6 +578,15 @@ fn invalid_session_acp_command_and_ensemble_limits_fail_loading() {
 fn command_background_defaults_and_opt_out_are_valid() {
     let default = parse("").unwrap().command;
     assert_eq!(default.max_background_jobs, 8);
+    assert_eq!(default.max_automatic_continuations, 3);
+    assert_eq!(
+        parse("[command]\nmax_automatic_continuations=0")
+            .unwrap()
+            .command
+            .max_automatic_continuations,
+        0
+    );
+    assert!(parse("[command]\nmax_automatic_continuations=-1").is_err());
     assert_eq!(default.background_timeout_seconds, None);
     assert_eq!(
         parse("[command]\nmax_background_jobs=0")

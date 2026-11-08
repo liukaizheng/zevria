@@ -404,7 +404,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                 ControlCommand::CancelTurn { .. } | ControlCommand::Shutdown,
             ) => Ok(()),
             SessionCommand::Manage(ManagementCommand::SetMode { request_id, mode }) => {
-                self.manage_mode(request_id, mode, events).await
+                self.manage_mode(request_id, mode, events).await?;
+                self.refresh_continuation_offer(events).await;
+                Ok(())
             }
             SessionCommand::Manage(ManagementCommand::Models {
                 request_id,
@@ -434,6 +436,9 @@ impl<P: ModelProvider> SessionEngine<P> {
             .boxed()
             .await;
         self.exit_turn();
+        if result.is_ok() {
+            self.refresh_continuation_offer(events).await;
+        }
         if result.is_err() {
             events.stream_cleared(turn.id);
         }
@@ -514,6 +519,7 @@ mod turn;
 use turn::*;
 
 use zevria_transcript::SessionReplayError;
+mod job_notices;
 mod mode;
 mod models;
 mod runtime;

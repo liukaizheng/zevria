@@ -17,6 +17,7 @@ pub(crate) struct RequestReplayState {
 
 pub(crate) fn is_request_owner(item: &TranscriptItem) -> bool {
     crate::is_prompt_item(item)
+        || matches!(item, TranscriptItem::CommandJobNotice(notice) if notice.kind() == zevria_foundation::CommandJobNoticeKind::Continuation)
         || matches!(
             item,
             TranscriptItem::Plan(zevria_workflow::PlanRecord::Handoff { .. })

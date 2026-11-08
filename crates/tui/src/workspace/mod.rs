@@ -253,7 +253,9 @@ pub struct SessionViews {
 impl SessionViews {
     /// Root follow-ups drain independently of which pane owns input.
     pub(crate) fn dispatch_queued_root_work(&mut self) -> Option<UiAction> {
-        self.root.dispatch_next_queued()
+        self.root
+            .dispatch_next_queued()
+            .or_else(|| self.root.dispatch_job_continuation())
     }
 
     pub fn new(mut root: App, startup_workspace: PathBuf) -> Self {
@@ -366,6 +368,7 @@ impl SessionViews {
                 | TranscriptItem::Message(_)
                 | TranscriptItem::ProviderMessage(_)
                 | TranscriptItem::SkillInvocation(_)
+                | TranscriptItem::CommandJobNotice(_)
                 | TranscriptItem::Plan(_)
                 | TranscriptItem::Ensemble(_)
                 | TranscriptItem::Compaction(_)

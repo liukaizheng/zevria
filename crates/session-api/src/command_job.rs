@@ -1,6 +1,7 @@
 //! Session-owned bounded shell jobs. No live state here enters model instructions.
 use crate::{
     CommandControl, CommandControlAction, CommandControlResult, SessionEvent, SessionEventSender,
+    TurnId,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -39,7 +40,7 @@ impl StreamText {
 }
 
 /// Head/tail retention with absolute offsets, independent frontend/model readers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StreamBuffer {
     head: Vec<u8>,
     tail: VecDeque<u8>,
@@ -94,6 +95,12 @@ impl StreamBuffer {
             head: String::from_utf8_lossy(&bytes).into_owned(),
             ..StreamText::default()
         }
+    }
+    pub fn peek_unread(&self, running: bool) -> StreamText {
+        self.clone().take_unread(running)
+    }
+    pub fn consume_all(&mut self) {
+        self.cursor = self.total;
     }
     pub fn take_unread(&mut self, running: bool) -> StreamText {
         let tail_start = self.total - self.tail.len();
@@ -190,6 +197,7 @@ struct Inner {
     limits: CommandJobLimits,
     events: Option<SessionEventSender>,
     state: Mutex<State>,
+    completions_changed: watch::Sender<u64>,
 }
 #[derive(Default)]
 struct State {
@@ -198,7 +206,7 @@ struct State {
     // Never reuse an ID in this session, even after eviction.
     used_ids: HashSet<CommandJobId>,
     finished: VecDeque<CommandJobId>,
-    notices: VecDeque<CommandJobSnapshot>,
+    completions: VecDeque<Arc<Job>>,
 }
 struct Job {
     record: Mutex<Record>,
@@ -213,6 +221,9 @@ struct Record {
     stderr: StreamBuffer,
     started: Instant,
     model_owned: bool,
+    origin: Option<TurnId>,
+    // A status-only notice promises that command_status can still read output.
+    preserve_unread: bool,
     pending_mode: Option<CommandJobSnapshot>,
     supervisor: Option<AbortHandle>,
 }
@@ -263,6 +274,7 @@ impl CommandJobs {
             limits,
             events,
             state: Mutex::new(State::default()),
+            completions_changed: watch::channel(0).0,
         }))
     }
     pub fn private(mut limits: CommandJobLimits) -> Self {
@@ -286,6 +298,7 @@ impl CommandJobs {
         command: String,
         call_id: Option<String>,
         mode: CommandJobMode,
+        origin: Option<TurnId>,
     ) -> Result<JobHandle, RegisterError> {
         let job = {
             let mut s = self.0.state.lock().unwrap();
@@ -325,6 +338,8 @@ impl CommandJobs {
                     stderr: StreamBuffer::new(self.0.limits.capture_bytes / 2),
                     started: Instant::now(),
                     model_owned: mode == CommandJobMode::Background,
+                    origin,
+                    preserve_unread: false,
                     pending_mode: None,
                     supervisor: None,
                 }),
@@ -498,29 +513,73 @@ impl CommandJobs {
     ) -> Result<bool, RegisterError> {
         Ok(self.job(id)?.wait_terminal(timeout, cancellation).await)
     }
-    /// Drain notices atomically so concurrent tool results never duplicate them.
-    pub fn take_unreported_notices(
-        &self,
-        except: Option<&CommandJobId>,
-    ) -> Vec<CommandJobSnapshot> {
-        let mut s = self.0.state.lock().unwrap();
-        let mut keep = VecDeque::new();
-        let mut result = Vec::new();
-        while let Some(job) = s.notices.pop_front() {
-            if except == Some(&job.id) {
-                keep.push_back(job);
-            } else {
-                result.push(job);
+    /// Finish-order snapshots pin unread streams until a delivery is committed.
+    pub fn pending_completions(&self) -> Vec<PendingCompletion> {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .completions
+            .iter()
+            .map(|job| {
+                let r = job.record.lock().unwrap();
+                PendingCompletion {
+                    snapshot: r.snapshot.clone(),
+                    origin: r.origin,
+                    job: job.clone(),
+                }
+            })
+            .collect()
+    }
+    pub fn acknowledge_completions(&self, acknowledgements: &[(CommandJobId, bool)]) {
+        let mut state = self.0.state.lock().unwrap();
+        for (id, consumed) in acknowledgements {
+            if let Some(job) = state
+                .completions
+                .iter()
+                .find(|job| job.snapshot().id == *id)
+            {
+                let mut r = job.record.lock().unwrap();
+                if *consumed {
+                    r.stdout.consume_all();
+                    r.stderr.consume_all();
+                }
+                r.preserve_unread =
+                    !consumed && (r.stdout.unread_len() > 0 || r.stderr.unread_len() > 0);
             }
+            state.completions.retain(|job| job.snapshot().id != *id);
         }
-        s.notices = keep;
-        result
+        evict_finished(&mut state, self.0.limits.retained_finished);
+    }
+    pub fn completions_changed(&self) -> watch::Receiver<u64> {
+        self.0.completions_changed.subscribe()
+    }
+    pub fn running_model_jobs(&self) -> Vec<CommandJobSnapshot> {
+        self.list_model_jobs()
+            .into_iter()
+            .filter(|job| !job.status.is_terminal())
+            .collect()
     }
     pub fn mark_reported(&self, id: &CommandJobId) {
-        self.0.state.lock().unwrap().notices.retain(|j| &j.id != id);
+        let mut state = self.0.state.lock().unwrap();
+        state.completions.retain(|job| &job.snapshot().id != id);
+        if let Some(job) = state.jobs.get(id) {
+            job.record.lock().unwrap().preserve_unread = false;
+        }
+        evict_finished(&mut state, self.0.limits.retained_finished);
+    }
+    pub fn is_closed(&self) -> bool {
+        self.0.state.lock().unwrap().closed
     }
     pub fn close(&self) {
-        self.0.state.lock().unwrap().closed = true;
+        let mut state = self.0.state.lock().unwrap();
+        if !state.closed {
+            state.closed = true;
+            // Wake an idle listener so it can retire the closed registry.
+            self.0
+                .completions_changed
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
+        }
     }
     pub async fn shutdown(&self, grace: Duration) {
         self.close();
@@ -574,6 +633,40 @@ impl CommandJobs {
                 let _ = events.try_send(SessionEvent::CommandJobUpdated { job: snapshot });
             }
         }
+    }
+}
+
+/// A non-consuming delivery candidate. Its pinned job survives retention.
+#[derive(Clone)]
+pub struct PendingCompletion {
+    pub snapshot: CommandJobSnapshot,
+    pub origin: Option<TurnId>,
+    job: Arc<Job>,
+}
+impl PendingCompletion {
+    pub fn peek_unread(&self) -> (StreamText, StreamText) {
+        let r = self.job.record.lock().unwrap();
+        (r.stdout.peek_unread(false), r.stderr.peek_unread(false))
+    }
+    pub fn unread_bytes(&self) -> (usize, usize) {
+        let r = self.job.record.lock().unwrap();
+        (r.stdout.unread_len(), r.stderr.unread_len())
+    }
+}
+
+fn evict_finished(state: &mut State, limit: usize) {
+    while state.finished.len() > limit {
+        let Some(index) = state.finished.iter().position(|id| {
+            !state.completions.iter().any(|job| job.snapshot().id == *id)
+                && state
+                    .jobs
+                    .get(id)
+                    .is_none_or(|job| !job.record.lock().unwrap().preserve_unread)
+        }) else {
+            break;
+        };
+        let id = state.finished.remove(index).expect("existing finished job");
+        state.jobs.remove(&id);
     }
 }
 
@@ -675,6 +768,7 @@ impl JobHandle {
     }
     /// Launch failure rollback. The terminal event lets a frontend remove its running row.
     pub async fn launch_failed(&self, error: String) {
+        self.job.record.lock().unwrap().model_owned = false;
         self.finish(CommandJobStatus::Failed { error }).await;
         if let Some(registry) = self.registry.upgrade() {
             registry
@@ -703,13 +797,16 @@ impl JobHandle {
             drop(r);
             if let Some(s) = state.as_mut() {
                 if model_owned {
-                    s.notices.push_back(snapshot.clone());
-                    s.finished.push_back(snapshot.id.clone());
-                    while s.finished.len() > registry.as_ref().unwrap().limits.retained_finished {
-                        if let Some(id) = s.finished.pop_front() {
-                            s.jobs.remove(&id);
-                        }
+                    if !s.closed {
+                        s.completions.push_back(self.job.clone());
+                        registry
+                            .as_ref()
+                            .unwrap()
+                            .completions_changed
+                            .send_modify(|revision| *revision = revision.wrapping_add(1));
                     }
+                    s.finished.push_back(snapshot.id.clone());
+                    evict_finished(s, registry.as_ref().unwrap().limits.retained_finished);
                 } else {
                     s.jobs.remove(&snapshot.id);
                 }
@@ -726,6 +823,9 @@ impl JobHandle {
     }
 }
 
+#[cfg(test)]
+#[path = "command_completion_tests.rs"]
+mod completion_tests;
 #[cfg(test)]
 #[path = "command_job_tests.rs"]
 mod edge_tests;
@@ -788,7 +888,7 @@ mod tests {
     async fn controls_limits_eviction_notices_and_close() {
         let jobs = CommandJobs::new(limits(), None);
         let fg = jobs
-            .register("fg".into(), None, CommandJobMode::Foreground)
+            .register("fg".into(), None, CommandJobMode::Foreground, None)
             .await
             .unwrap();
         let id = fg.snapshot().id;
@@ -797,7 +897,7 @@ mod tests {
         );
         jobs.move_to_background(&id).unwrap();
         assert!(
-            jobs.register("over cap".into(), None, CommandJobMode::Background)
+            jobs.register("over cap".into(), None, CommandJobMode::Background, None)
                 .await
                 .is_err()
         );
@@ -811,10 +911,11 @@ mod tests {
             origin: TerminationOrigin::User,
         })
         .await;
-        assert_eq!(jobs.take_unreported_notices(None).len(), 1);
-        assert!(jobs.take_unreported_notices(None).is_empty());
+        assert_eq!(jobs.pending_completions().len(), 1);
+        jobs.acknowledge_completions(&[(id.clone(), true)]);
+        assert!(jobs.pending_completions().is_empty());
         let next = jobs
-            .register("next".into(), None, CommandJobMode::Background)
+            .register("next".into(), None, CommandJobMode::Background, None)
             .await
             .unwrap();
         assert_ne!(id, next.snapshot().id);
@@ -828,7 +929,7 @@ mod tests {
         assert_eq!(jobs.list_model_jobs().len(), 1);
         jobs.close();
         assert!(
-            jobs.register("closed".into(), None, CommandJobMode::Foreground)
+            jobs.register("closed".into(), None, CommandJobMode::Foreground, None)
                 .await
                 .is_err()
         );
@@ -845,7 +946,7 @@ mod tests {
         let (events, mut receiver) = crate::session_event_channel(8);
         let jobs = CommandJobs::new(limits(), Some(events));
         let handle = jobs
-            .register("test".into(), None, CommandJobMode::Foreground)
+            .register("test".into(), None, CommandJobMode::Foreground, None)
             .await
             .unwrap();
         jobs.move_to_background(&handle.snapshot().id).unwrap();
@@ -873,7 +974,7 @@ mod tests {
             ]
         );
         let handle = jobs
-            .register("shutdown".into(), None, CommandJobMode::Background)
+            .register("shutdown".into(), None, CommandJobMode::Background, None)
             .await
             .unwrap();
         jobs.shutdown(Duration::ZERO).await;

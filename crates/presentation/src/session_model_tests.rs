@@ -13,6 +13,162 @@ use zevria_session_api::{
 use zevria_workflow::{PlanArtifact, PlanDecision, PlanId, PlanVersion, PlanWorkflowState};
 const TURN: TurnId = TurnId::new(7);
 
+fn job_notice(
+    kind: zevria_foundation::CommandJobNoticeKind,
+) -> zevria_foundation::CommandJobNotice {
+    use zevria_foundation::*;
+    CommandJobNotice::new(
+        kind,
+        vec![CommandJobSnapshot {
+            id: CommandJobId::new("job-notice"),
+            call_id: None,
+            command: "test".into(),
+            mode: CommandJobMode::Background,
+            status: CommandJobStatus::Exited {
+                code: Some(1),
+                success: false,
+                signal: None,
+            },
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            finished_at: Some(std::time::SystemTime::UNIX_EPOCH),
+            stdout_bytes: 6,
+            stderr_bytes: 0,
+        }],
+        vec![],
+        "Command job update: full output for copy".into(),
+    )
+}
+
+#[test]
+fn job_continuation_admission_is_mode_tagged_quiescent_and_never_binds_to_submit() {
+    use zevria_foundation::CommandJobNoticeKind::Continuation;
+    let mut model = SessionModel::default();
+    assert!(model.continue_after_jobs().is_none());
+    model.reduce(E::JobContinuationChanged {
+        mode: Some(SessionMode::Plan),
+    });
+    assert!(model.continue_after_jobs().is_none());
+    model.reduce(E::JobContinuationChanged {
+        mode: Some(SessionMode::Build),
+    });
+    assert!(matches!(
+        model.continue_after_jobs(),
+        Some(zevria_session_api::TurnCommand::ContinueAfterJobs {
+            mode: SessionMode::Build
+        })
+    ));
+    assert!(model.continue_after_jobs().is_none());
+    let accepted = model.reduce(E::JobContinuationStarted {
+        turn_id: TURN,
+        mode: SessionMode::Build,
+        notice: job_notice(Continuation),
+    });
+    assert_eq!(accepted.accepted, Some(OperationKind::JobContinuation));
+    model.reduce(E::TurnCompleted {
+        turn_id: TURN,
+        message: Message::assistant("done"),
+        attempt_id: None,
+    });
+    model.reduce(E::JobContinuationChanged {
+        mode: Some(SessionMode::Build),
+    });
+    assert!(model.continue_after_jobs().is_none());
+    model.reduce(E::EngineIdle);
+    assert!(model.continue_after_jobs().is_some());
+    let rejected = model.reduce(E::TurnRejected {
+        turn_id: TurnId::new(8),
+        error: "stale".into(),
+    });
+    assert!(matches!(
+        rejected.settled,
+        Some((OperationKind::JobContinuation, Settlement::Rejected(_)))
+    ));
+    assert!(
+        !model
+            .conversation
+            .history()
+            .iter()
+            .any(|row| matches!(row, HistoryEntry::Error(_)))
+    );
+
+    let mut submit = pending();
+    let result = submit.reduce(E::JobContinuationStarted {
+        turn_id: TURN,
+        mode: SessionMode::Build,
+        notice: job_notice(Continuation),
+    });
+    assert_eq!(result.accepted, None);
+    assert_eq!(submit.session.operation_kind(), Some(OperationKind::Submit));
+    assert!(submit.conversation.history().is_empty());
+    submit.reduce(E::JobContinuationChanged {
+        mode: Some(SessionMode::Build),
+    });
+    assert!(submit.continue_after_jobs().is_none());
+    let mut management = SessionModel::default();
+    management.reduce(E::JobContinuationChanged {
+        mode: Some(SessionMode::Build),
+    });
+    assert!(management.begin_operation(
+        OperationKind::ModeManagement,
+        SessionMode::Build,
+        zevria_foundation::ModelRole::Build
+    ));
+    management.session.finish_mode_management();
+    assert!(
+        management.continue_after_jobs().is_some(),
+        "unchanged eligibility does not require another advertisement after idle management"
+    );
+    let mut ready = SessionModel::default();
+    ready.apply_plan_snapshot(PlanWorkflowState::Ready {
+        artifact: artifact(),
+    });
+    ready.reduce(E::JobContinuationChanged {
+        mode: Some(SessionMode::Plan),
+    });
+    assert!(ready.continue_after_jobs().is_none());
+}
+
+#[test]
+fn job_notice_rows_restore_copy_full_text_and_do_not_enter_recall_or_prompt_ordinals() {
+    use zevria_foundation::CommandJobNoticeKind::{Continuation, Update};
+    use zevria_transcript::TranscriptItem;
+    let mut model = SessionModel::default();
+    let continuation = job_notice(Continuation);
+    model.restore_transcript(vec![
+        TranscriptItem::Message(Message::user("first")),
+        TranscriptItem::CommandJobNotice(continuation.clone()),
+        TranscriptItem::CommandJobNotice(job_notice(Update)),
+        TranscriptItem::Message(Message::user("second")),
+    ]);
+    let rows = model.conversation.history();
+    assert!(matches!(rows[1], HistoryEntry::JobNotice(_, Some(_))));
+    assert!(matches!(rows[2], HistoryEntry::JobNotice(_, None)));
+    let selection = crate::conversation::Selection {
+        history_index: 1,
+        content_index: 0,
+    };
+    assert_eq!(
+        model.conversation.selected_plain_text(selection).as_deref(),
+        Some(continuation.text())
+    );
+    assert!(model.conversation.recallable_selection(selection).is_none());
+    let selection = crate::conversation::Selection {
+        history_index: 3,
+        content_index: 0,
+    };
+    assert!(matches!(
+        model.conversation.recallable_selection(selection),
+        Some((_, TranscriptEditTarget::PromptOrdinal(1)))
+    ));
+    model.conversation.commit_edit(0, false);
+    assert!(model.conversation.history().is_empty());
+    model.reduce(E::JobContinuationChanged {
+        mode: Some(SessionMode::Build),
+    });
+    model.restore_transcript(vec![]);
+    assert!(model.continue_after_jobs().is_none());
+}
+
 #[test]
 fn quiescence_requires_a_post_terminal_barrier_and_restore_resets_it() {
     use crate::session::SessionActivity;

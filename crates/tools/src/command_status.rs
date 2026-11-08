@@ -1,10 +1,11 @@
 //! Incremental model-facing command job inspection.
-use crate::command::{CommandError, render};
+use crate::command::CommandError;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use zevria_foundation::{CommandJobId, ToolCancelled};
+use zevria_session_api::command_render as render;
 use zevria_session_api::{CommandJobs, TurnContext};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -80,7 +81,7 @@ impl Tool for CommandStatusTool {
     type Output = String;
     fn description(&self) -> String {
         format!(
-            "List this session's model-visible command jobs, or inspect one job and read stdout/stderr produced since the last model read. With an id, optionally wait up to {} seconds for completion; waiting never stops the job and turn cancellation only cancels the wait. Jobs do not survive restarts. Frontend inspection does not consume model output.",
+            "List this session's model-visible command jobs, or inspect one job and read stdout/stderr produced since the last model read. With an id, optionally wait up to {} seconds for completion; waiting never stops the job and turn cancellation only cancels the wait. Finished jobs are reported automatically before your next model request; use this tool to read running output, wait, or list jobs. Jobs do not survive restarts. Frontend inspection does not consume model output.",
             self.jobs.limits().foreground_timeout.as_secs()
         )
     }
@@ -105,23 +106,9 @@ impl Tool for CommandStatusTool {
         context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<String, CommandError> {
-        let id = args.id.as_ref().map(CommandJobId::new);
-        let result = self.execute(context, args).await;
-        with_footer(result, &self.jobs, id.as_ref())
+        self.execute(context, args).await
     }
 }
 pub(crate) fn job_error(error: impl std::fmt::Display) -> CommandError {
     CommandError::Job(error.to_string())
-}
-pub(crate) fn with_footer(
-    result: Result<String, CommandError>,
-    jobs: &CommandJobs,
-    except: Option<&CommandJobId>,
-) -> Result<String, CommandError> {
-    let footer = render::job_footer(&jobs.take_unreported_notices(except));
-    match result {
-        Ok(s) => Ok(format!("{s}{footer}")),
-        Err(e) if footer.is_empty() => Err(e),
-        Err(e) => Err(CommandError::Job(format!("{e}{footer}"))),
-    }
 }

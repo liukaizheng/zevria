@@ -17,6 +17,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 mod command_jobs;
 #[path = "idle_notifications.rs"]
 mod idle_notifications;
+#[path = "job_continuations.rs"]
+mod job_continuations;
 #[path = "maintenance.rs"]
 mod maintenance;
 #[path = "mode_runtime.rs"]

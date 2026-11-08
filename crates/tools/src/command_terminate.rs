@@ -1,14 +1,11 @@
 //! Stop one shell process tree, never the agent turn.
-use crate::{
-    command::{CommandError, render},
-    command_status::{job_error, with_footer},
-};
+use crate::{command::CommandError, command_status::job_error};
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use zevria_foundation::{CommandJobId, TerminationOrigin};
-use zevria_session_api::CommandJobs;
+use zevria_session_api::{CommandJobs, command_render as render};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -45,7 +42,7 @@ impl Tool for CommandTerminateTool {
         args: Self::Args,
     ) -> Result<String, CommandError> {
         let id = CommandJobId::new(args.id);
-        let result = async {
+        async {
             let job = self.jobs.job(&id).map_err(job_error)?;
             job.terminate(TerminationOrigin::Model);
             if !job.wait_terminal(Duration::from_secs(5), &Default::default()).await {
@@ -55,7 +52,6 @@ impl Tool for CommandTerminateTool {
             let streams = job.take_unread();
             self.jobs.mark_reported(&snapshot.id);
             Ok(render::job_report(&snapshot, &streams, None))
-        }.await;
-        with_footer(result, &self.jobs, Some(&id))
+        }.await
     }
 }

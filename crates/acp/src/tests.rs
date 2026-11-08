@@ -1,3 +1,5 @@
+#[path = "command_job_tests.rs"]
+mod command_job_tests;
 #[path = "mode_protocol_tests.rs"]
 mod mode_protocol_tests;
 #[path = "skill_tests.rs"]
@@ -538,6 +540,7 @@ type ModeAcknowledgment = (
 #[derive(Clone)]
 struct FakeFactory {
     next_id: Arc<AtomicUsize>,
+    event_sender: Arc<Mutex<Option<zevria_session_api::SessionEventSender>>>,
     shutdowns: Arc<AtomicUsize>,
     answers: Arc<Mutex<Vec<QuestionResponse>>>,
     persisted: Arc<Vec<TranscriptItem>>,
@@ -550,6 +553,7 @@ impl FakeFactory {
     fn new() -> Self {
         Self {
             next_id: Arc::new(AtomicUsize::new(1)),
+            event_sender: Arc::default(),
             shutdowns: Arc::new(AtomicUsize::new(0)),
             answers: Arc::new(Mutex::new(Vec::new())),
             commands: Arc::new(Mutex::new(Vec::new())),
@@ -609,6 +613,7 @@ impl SessionRuntimeFactory for FakeFactory {
             let initial_artifact = plan_state.artifact().cloned();
             let recorded = self.commands.clone();
             let (events_tx, events) = session_event_channel(64);
+            *self.event_sender.lock().unwrap() = Some(events_tx.clone());
             let retained_events = events_tx.clone();
             let (commands, mut command_rx) = mpsc::unbounded_channel::<SessionCommand>();
             let (exit_tx, exit_rx) = oneshot::channel();
@@ -1085,6 +1090,9 @@ impl SessionRuntimeFactory for FakeFactory {
                         SessionCommand::Control(zevria_session_api::ControlCommand::Shutdown) => {
                             break;
                         }
+                        SessionCommand::Turn(
+                            zevria_session_api::TurnCommand::ContinueAfterJobs { .. },
+                        ) => panic!("ACP must never dispatch a job continuation"),
                         SessionCommand::Turn(zevria_session_api::TurnCommand::StartFromPlan {
                             ..
                         })

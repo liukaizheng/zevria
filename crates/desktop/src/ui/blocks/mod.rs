@@ -398,6 +398,24 @@ pub fn entry(
             h.artifact.markdown.clone(),
             false,
         )],
+        HistoryEntry::JobNotice(notice, header) => {
+            let mut block = BlockData::new(
+                key,
+                BlockKind::Prose {
+                    role: PresentationRole::System,
+                    plain: true,
+                },
+                Gutter::Label(Speaker::System),
+                format!(
+                    "Background jobs finished\n{}",
+                    notice.summary_lines().join("\n")
+                ),
+                true,
+            );
+            block.primary = notice.text().to_owned();
+            block.turn_boundary = header.is_some() && index > 0;
+            vec![block]
+        }
         HistoryEntry::Ensemble(e) => vec![BlockData::new(
             key,
             BlockKind::Ensemble,
@@ -1128,6 +1146,42 @@ mod tests {
         );
         assert!(data.body.chars().count() < 24_100);
         assert!(matches!(data.kind,BlockKind::Tool { summary,.. } if summary == "src/lib.rs"));
+    }
+    #[::core::prelude::v1::test]
+    fn job_notices_map_to_system_prose_and_copy_verbatim_text() {
+        use zevria_foundation::*;
+        let notice = CommandJobNotice::new(
+            CommandJobNoticeKind::Update,
+            vec![CommandJobSnapshot {
+                id: CommandJobId::new("job-view"),
+                call_id: None,
+                command: "test".into(),
+                mode: CommandJobMode::Background,
+                status: CommandJobStatus::Exited {
+                    code: Some(1),
+                    success: false,
+                    signal: None,
+                },
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                finished_at: Some(std::time::SystemTime::UNIX_EPOCH),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+            }],
+            vec![],
+            "Command job update: full output".into(),
+        );
+        let history = HistoryEntry::JobNotice(notice.clone(), None);
+        let data = entry("epoch", 1, &history, 0, false, false);
+        assert!(matches!(
+            data[0].kind,
+            BlockKind::Prose {
+                role: PresentationRole::System,
+                ..
+            }
+        ));
+        assert_eq!(data[0].gutter, Gutter::Label(Speaker::System));
+        assert_eq!(data[0].primary, notice.text());
+        assert!(!data[0].body.contains("full output"));
     }
     #[::core::prelude::v1::test]
     fn child_prompts_use_task_gutters_and_prompt_boundaries() {

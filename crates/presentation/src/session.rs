@@ -30,6 +30,7 @@ pub enum OperationKind {
     ModelManagement,
     ModeManagement,
     Submit,
+    JobContinuation,
     TranscriptEdit,
     Skill,
     Ensemble,
@@ -47,6 +48,7 @@ pub enum OperationKind {
     AuthoritativeTurn,
     AuthoritativeEnsemble,
     AuthoritativePlanHandoff,
+    AuthoritativeJobContinuation,
 }
 
 impl OperationKind {
@@ -70,7 +72,7 @@ impl OperationKind {
             ) | (
                 Self::PlanImplementCurrent { .. } | Self::AuthoritativePlanHandoff,
                 StartKind::PlanHandoff,
-            )
+            ) | (Self::JobContinuation, StartKind::JobContinuation)
         )
     }
 
@@ -188,6 +190,7 @@ pub enum SessionActivity {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StartKind {
+    JobContinuation,
     Turn,
     Ensemble,
     PlanHandoff,
@@ -617,6 +620,20 @@ impl SessionState {
             role,
             StartKind::Ensemble,
             OperationKind::AuthoritativeEnsemble,
+        )
+    }
+
+    pub fn start_job_continuation(
+        &mut self,
+        id: TurnId,
+        mode: SessionMode,
+    ) -> Option<StartTransition> {
+        self.start(
+            id,
+            mode,
+            role_for_mode(mode),
+            StartKind::JobContinuation,
+            OperationKind::AuthoritativeJobContinuation,
         )
     }
 

@@ -58,6 +58,8 @@ timeout_seconds = 300
 capture_bytes = 1048576
 # Running background job cap. Set 0 for the foreground-only command surface.
 max_background_jobs = 8
+# Maximum automatic job-completion turns between user requests; 0 disables.
+max_automatic_continuations = 3
 # Optional total wall-clock limit, at least timeout_seconds. Omit for no limit.
 # background_timeout_seconds = 3600
 
@@ -459,6 +461,7 @@ pub struct CommandConfig {
     pub timeout_seconds: u64,
     pub capture_bytes: usize,
     pub max_background_jobs: usize,
+    pub max_automatic_continuations: u32,
     pub background_timeout_seconds: Option<u64>,
 }
 
@@ -468,6 +471,7 @@ impl Default for CommandConfig {
             timeout_seconds: 300,
             capture_bytes: 1024 * 1024,
             max_background_jobs: 8,
+            max_automatic_continuations: 3,
             background_timeout_seconds: None,
         }
     }

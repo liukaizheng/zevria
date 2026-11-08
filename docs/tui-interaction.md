@@ -31,7 +31,8 @@ Text in a dialog belongs to the dialog, never the pane composer.
 `/jobs` opens the Jobs overlay even while the root is busy or has locally queued
 follow-ups. It is frontend-only: it never allocates a turn, enters the follow-up
 queue, or sends text to the model. The list shows running foreground/background
-commands and up to eight recent finished background jobs, including their IDs,
+commands and eight recent finished background jobs (plus jobs pinned for pending
+delivery or promised unread output), including their IDs,
 status, elapsed time, and command previews. Enter inspects bounded stdout/stderr
 tails; Backspace/Left/`b` returns to the list. `x` terminates a running job and `m`
 moves a running foreground command into the background. Ineligible actions are
@@ -132,6 +133,34 @@ and an eligible exact proposal revision. Ineligible confirmation is not advertis
 as an executable shortcut. A Normal-mode composer is not labeled locked merely
 because it lacks editing focus. Pending durable transcript edits do retain a
 stronger draft/paste/undo lock until acceptance or rejection.
+
+## Background-job completion handoff
+
+Finished jobs reach the model automatically before its next eligible request,
+without polling. Compact system-styled notice rows show status summaries, not
+stream output; copying a notice includes its full model-visible text, and `/jobs`
+continues to show bounded output tails. Notice rows are not editable or recallable.
+
+If the agent has already finished responding, the engine can advertise an idle
+continuation. The TUI dispatches it only after **EngineIdle**, with the advertised
+mode still selected, no Ready Plan/review or transcript edit open, no draft
+awaiting acceptance, an **empty root composer**, and an **empty follow-up queue**.
+Even whitespace or an in-progress paste holds it. Queued user follow-ups run
+first; drafts are never accepted, cleared, or restored by a continuation. Results
+instead arrive passively with newer user work. A stale continuation is quietly
+rejected and does not pause the queue. A genuine continuation failure still
+pauses any queue the user populated meanwhile.
+
+Continuations use the normal selected Build/Plan policy as a new Standard
+request, not `/orchestrate`, and cannot approve or change a Plan workflow. The
+default cap is three automatic turns between user requests, configurable with
+`command.max_automatic_continuations` (0 disables them). **Ctrl-C** cancels an
+active continuation just like any root turn, pauses an existing follow-up queue,
+and prevents jobs from that or older work from reviving it again. Background
+processes themselves still survive Ctrl-C; their statuses arrive passively with
+the next user request and unread output remains available through `command_status`.
+Session replacement/shutdown terminates jobs; resume never restores processes.
+ACP clients receive passive notices only and never dispatch automatic turns.
 
 ## Queued follow-ups
 

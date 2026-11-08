@@ -756,9 +756,6 @@ impl RunningSession {
     /// an eligible existing abandoned transcript best-effort. An absent pending
     /// transcript is normal and shutdown does not materialize it.
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
-        if let Some(jobs) = &self.command_jobs {
-            jobs.close();
-        }
         if let Some(command_tx) = self.command_tx.take() {
             let _ = command_tx.send(SessionCommand::Control(
                 zevria_session_api::ControlCommand::Shutdown,
@@ -774,6 +771,10 @@ impl RunningSession {
         } else {
             Ok(())
         };
+        // Completion publication cannot schedule work after the engine exits.
+        if let Some(jobs) = &self.command_jobs {
+            jobs.close();
+        }
         let supervisor_shutdown = if let Some(supervisor_task) = self.supervisor_task.take() {
             join_with_grace(supervisor_task, "subtask supervisor").await
         } else {
@@ -1022,7 +1023,9 @@ pub async fn start_session(
         .with_ensemble_launcher(ensemble)
         .with_plans_dir(transcript::plans_dir(workspace));
     if let Some(jobs) = &command_jobs {
-        engine = engine.with_command_jobs(jobs.clone());
+        engine = engine
+            .with_command_jobs(jobs.clone())
+            .with_job_continuations(app_config.command.max_automatic_continuations);
     }
     if let Some(path) = &app_config.source_path {
         engine = engine.with_model_management(

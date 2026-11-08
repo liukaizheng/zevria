@@ -64,6 +64,8 @@ pub enum SessionCommand {
 /// Work that allocates a turn identity and queues FIFO while busy.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnCommand {
+    /// Frontend-dispatched, engine-validated Standard request for finished jobs.
+    ContinueAfterJobs { mode: SessionMode },
     Submit {
         text: UserPrompt,
         mode: SessionMode,
@@ -113,9 +115,10 @@ pub enum TurnCommand {
 impl TurnCommand {
     pub const fn mode(&self) -> SessionMode {
         match self {
-            Self::Submit { mode, .. } | Self::InvokeSkill { mode, .. } | Self::Compact { mode } => {
-                *mode
-            }
+            Self::Submit { mode, .. }
+            | Self::InvokeSkill { mode, .. }
+            | Self::Compact { mode }
+            | Self::ContinueAfterJobs { mode } => *mode,
             Self::RevisePlanWithSkill { .. } => SessionMode::Plan,
             Self::EditTranscript(edit) => edit.replacement.mode(),
             Self::RunEnsemble { workflow, .. } => match workflow {

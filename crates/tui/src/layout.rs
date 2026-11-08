@@ -25,8 +25,8 @@ use crate::app::{
 use crate::chrome::style_selected_line;
 use crate::layout::prepare::{
     ConversationBlockContext, FoldHeader, card_inset, fold_body_rows, render_compaction_divider,
-    render_conversation_block, render_ensemble, render_error, render_plan_artifact,
-    render_plan_handoff, truncate_line_to_width, wrapped_height,
+    render_conversation_block, render_ensemble, render_error, render_job_notice,
+    render_plan_artifact, render_plan_handoff, truncate_line_to_width, wrapped_height,
 };
 use crate::presentation::{
     ConversationEntry, NativeHeader, PresentationBlock, PresentationBlockId, PresentationBlockKind,
@@ -234,6 +234,7 @@ impl EntryLayout {
                 // These entries are immutable once committed.
                 HistoryEntry::PlanArtifact(_)
                 | HistoryEntry::PlanHandoff(..)
+                | HistoryEntry::JobNotice(..)
                 | HistoryEntry::CompactionDivider
                 | HistoryEntry::Error(_) => {
                     self.conversation_blocks.is_none()
@@ -449,6 +450,20 @@ impl EntryLayout {
                     0,
                     render_plan_handoff(
                         handoff,
+                        *header,
+                        &mut lines,
+                        width,
+                        entry_selection.single_item(),
+                        message_folded || entry_folds.is_item_folded(0),
+                    ),
+                )],
+                None,
+            ),
+            HistoryEntry::JobNotice(notice, header) => (
+                vec![(
+                    0,
+                    render_job_notice(
+                        notice,
                         *header,
                         &mut lines,
                         width,

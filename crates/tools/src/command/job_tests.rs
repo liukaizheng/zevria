@@ -16,6 +16,11 @@ fn jobs() -> CommandJobs {
 }
 async fn start(tool: &CommandTool, command: &str) -> CommandJobId {
     let mut context = ToolContext::new();
+    context.insert_scope(TurnContext::new(
+        TurnId::new(7),
+        SessionMode::Build,
+        Default::default(),
+    ));
     let result = tokio::time::timeout(
         Duration::from_secs(1),
         tool.call(
@@ -52,7 +57,7 @@ async fn status(jobs: &CommandJobs, id: &CommandJobId, wait: Option<u64>) -> Str
         .unwrap()
 }
 #[tokio::test]
-async fn background_returns_promptly_incremental_output_cap_and_footer_once() {
+async fn background_returns_promptly_incremental_output_cap_and_no_footers() {
     let directory = tempfile::tempdir().unwrap();
     let jobs = jobs();
     let tool = CommandTool::with_jobs(directory.path().into(), jobs.clone());
@@ -99,9 +104,11 @@ async fn background_returns_promptly_incremental_output_cap_and_footer_once() {
         )
         .await
         .unwrap();
-    assert!(result.contains("job updates:"));
-    assert!(result.contains(&format!("job updates:\n{id2} · exited 0 · ")));
-    assert!(result.ends_with(" · printf update"));
+    assert!(!result.contains("job updates:"));
+    let pending = jobs.pending_completions();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].snapshot.id, id2);
+    assert_eq!(pending[0].origin, Some(TurnId::new(7)));
     let result = tool
         .call(
             &mut ToolContext::new(),
@@ -113,6 +120,9 @@ async fn background_returns_promptly_incremental_output_cap_and_footer_once() {
         .await
         .unwrap();
     assert!(!result.contains("job updates:"));
+    assert_eq!(jobs.pending_completions().len(), 1);
+    assert!(status(&jobs, &id2, None).await.contains("update"));
+    assert!(jobs.pending_completions().is_empty());
 }
 #[cfg(any(unix, windows))]
 #[tokio::test]
@@ -217,7 +227,7 @@ async fn lists_share_job_lines_and_do_not_consume_unread_streams() {
     let jobs = jobs();
     let command = format!("  rg\t-n\n{}   src  ", "é".repeat(150));
     let job = jobs
-        .register(command, None, CommandJobMode::Background)
+        .register(command, None, CommandJobMode::Background, None)
         .await
         .unwrap();
     job.append(zevria_session_api::CommandStream::Stdout, b"still unread");
@@ -251,7 +261,7 @@ async fn lists_share_job_lines_and_do_not_consume_unread_streams() {
 }
 
 #[tokio::test]
-async fn interrupted_error_keeps_its_variant_and_reports_notices_exactly_once() {
+async fn interrupted_error_keeps_its_variant_and_does_not_consume_completions() {
     let jobs = CommandJobs::new(
         CommandJobLimits {
             foreground_timeout: Duration::from_millis(100),
@@ -260,7 +270,12 @@ async fn interrupted_error_keeps_its_variant_and_reports_notices_exactly_once() 
         None,
     );
     let finished = jobs
-        .register("printf update".into(), None, CommandJobMode::Background)
+        .register(
+            "printf update".into(),
+            None,
+            CommandJobMode::Background,
+            None,
+        )
         .await
         .unwrap();
     finished
@@ -283,11 +298,12 @@ async fn interrupted_error_keeps_its_variant_and_reports_notices_exactly_once() 
         .unwrap_err();
     assert!(matches!(error, CommandError::Timeout { .. }));
     let rendered = error.to_string();
-    assert_eq!(rendered.matches("job updates:").count(), 1);
-    assert!(rendered.contains(&format!(
-        "\njob updates:\n{} · exited 0 · ",
+    assert!(!rendered.contains("job updates:"));
+    assert_eq!(jobs.pending_completions().len(), 1);
+    assert_eq!(
+        jobs.pending_completions()[0].snapshot.id,
         finished.snapshot().id
-    )));
+    );
     let next = CommandStatusTool::new(jobs)
         .call(
             &mut ToolContext::new(),

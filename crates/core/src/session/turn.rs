@@ -99,7 +99,9 @@ impl AcceptedTurn {
     }
     pub(super) fn mode(&self) -> SessionMode {
         match self.kind {
-            AcceptedKind::Prompt { mode } | AcceptedKind::ManualCompaction { mode } => mode,
+            AcceptedKind::Prompt { mode }
+            | AcceptedKind::ManualCompaction { mode }
+            | AcceptedKind::Continuation { mode } => mode,
             AcceptedKind::Ensemble {
                 workflow: EnsembleWorkflow::Plan,
                 ..
@@ -109,6 +111,9 @@ impl AcceptedTurn {
     }
 }
 pub(super) enum AcceptedKind {
+    Continuation {
+        mode: SessionMode,
+    },
     Prompt {
         mode: SessionMode,
     },
@@ -163,6 +168,13 @@ impl<P: ModelProvider> SessionEngine<P> {
         turn: &TurnContext,
     ) -> Result<(), SessionReplayError> {
         self.ensure_replay_valid()?;
+        if !matches!(
+            &work,
+            TurnWork::Command(TurnCommand::ContinueAfterJobs { .. })
+        ) {
+            self.capabilities.job_follow.consecutive = 0;
+        }
+        self.refresh_continuation_offer(events).await;
         if turn.is_cancelled() && matches!(work, TurnWork::Command(_)) {
             return self
                 .finish_rejected(turn, events, Rejection::Cancelled)
@@ -175,6 +187,9 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
         };
         match command {
+            TurnCommand::ContinueAfterJobs { mode } => {
+                self.continue_after_jobs(mode, events, turn).await
+            }
             TurnCommand::Submit {
                 text,
                 mode,
@@ -243,6 +258,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         match rejection {
             Rejection::Fatal(error) => return Err(error),
             Rejection::Cancelled => {
+                self.capabilities
+                    .job_follow
+                    .raise_floor(TurnId::new(turn.id.get().saturating_add(1)));
                 self.provider.reset();
                 let _ = events
                     .send(SessionEvent::TurnCancelled { turn_id: turn.id })
@@ -272,6 +290,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         let Err(failure) = outcome else {
             return Ok(());
         };
+        self.capabilities
+            .job_follow
+            .raise_floor(TurnId::new(turn.id.get().saturating_add(1)));
         if let Failure::Fatal(error) = failure {
             return Err(error);
         }

@@ -18,6 +18,7 @@ use zevria_model::*;
 use zevria_workflow::*;
 pub mod command;
 pub mod command_job;
+pub mod command_render;
 pub mod ensemble;
 pub mod event;
 pub mod provider;

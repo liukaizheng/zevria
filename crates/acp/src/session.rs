@@ -907,7 +907,18 @@ impl LiveSession {
 
     fn handle_event(self: &Arc<Self>, event: SessionEvent) -> Result<(), AcpError> {
         match event {
-            SessionEvent::EngineIdle => {}
+            SessionEvent::EngineIdle | SessionEvent::JobContinuationChanged { .. } => {}
+            SessionEvent::CommandJobsReported { turn_id, notice }
+            | SessionEvent::JobContinuationStarted {
+                turn_id, notice, ..
+            } => {
+                let category = format!("job-notice-{}", notice.jobs()[0].id);
+                self.send_update(diagnostic_update(
+                    Some(turn_id),
+                    &category,
+                    notice.summary_lines().join("\n"),
+                ))?;
+            }
             SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
                 let updates = {
                     let mut state = self.state.lock().expect("ACP session state poisoned");

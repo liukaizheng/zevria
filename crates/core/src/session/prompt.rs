@@ -676,6 +676,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                 return Err(self.acceptance_failed(operation, error, events).await);
             }
         };
+        if matches!(prepared.anchor, TurnAnchor::ReplaceFrom(_)) {
+            self.capabilities.job_follow.raise_floor(turn.id);
+        }
         if let (Some(tokens), Some(identity)) = (measurement.exact, measurement.identity) {
             self.context.input_count = TurnInputCountState::Prepared {
                 turn_id: turn.id,

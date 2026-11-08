@@ -71,13 +71,24 @@ async fn set_mode(
             mode,
         }))
         .unwrap();
-    assert!(matches!(event(events).await, SessionEvent::ModeResult {
+    let result = loop {
+        let event = event(events).await;
+        if !matches!(event, SessionEvent::JobContinuationChanged { mode: None }) {
+            break event;
+        }
+    };
+    assert!(matches!(result, SessionEvent::ModeResult {
         request_id, result: ModeSelectionResult::Accepted { mode: actual, .. },
     } if request_id == "mode-round-trip" && actual == mode));
-    assert!(
-        events.try_recv().is_err(),
-        "mode management must not allocate a turn or call a provider"
-    );
+    while let Ok(update) = events.try_recv() {
+        assert!(
+            matches!(
+                update,
+                SessionUpdate::Lifecycle(SessionEvent::JobContinuationChanged { mode: None })
+            ),
+            "mode management must not allocate a turn or call a provider: {update:?}"
+        );
+    }
 }
 
 fn assert_models(

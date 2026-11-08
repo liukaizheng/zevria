@@ -1,5 +1,6 @@
-//! Runtime-only shell command identities and display values.
-use serde::{Deserialize, Serialize};
+//! Shell command identities, display values, and verbatim completion notices.
+use rig_core::message::Message;
+use serde::{Deserialize, Serialize, de::Error as _};
 use std::{fmt, time::SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -166,6 +167,151 @@ pub enum CommandJobDisposition {
 pub struct CommandJobDetail {
     pub id: CommandJobId,
     pub disposition: CommandJobDisposition,
+}
+
+/// The common compact job-line format used by notices, tools, and frontends.
+pub fn command_job_line(snapshot: &CommandJobSnapshot) -> String {
+    let collapsed = snapshot
+        .command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = collapsed.chars();
+    let mut preview: String = chars.by_ref().take(120).collect();
+    if chars.next().is_some() {
+        preview.pop();
+        preview.push('…');
+    }
+    format!(
+        "{} · {} · {} · {preview}",
+        snapshot.id,
+        snapshot.status,
+        command_job_duration(snapshot)
+    )
+}
+
+pub fn command_job_duration(snapshot: &CommandJobSnapshot) -> String {
+    let elapsed = snapshot
+        .finished_at
+        .unwrap_or_else(SystemTime::now)
+        .duration_since(snapshot.started_at)
+        .unwrap_or_default();
+    format!("{:.1}s", elapsed.as_secs_f64())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandJobNoticeKind {
+    Update,
+    Continuation,
+}
+
+/// Persisted model text is authoritative. The private user-message cache is
+/// derived once from those exact bytes, never re-rendered from job snapshots.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandJobNotice {
+    kind: CommandJobNoticeKind,
+    jobs: Vec<CommandJobSnapshot>,
+    running: Vec<CommandJobSnapshot>,
+    text: String,
+    model_message: Message,
+}
+impl Eq for CommandJobNotice {}
+impl CommandJobNotice {
+    pub fn new(
+        kind: CommandJobNoticeKind,
+        jobs: Vec<CommandJobSnapshot>,
+        running: Vec<CommandJobSnapshot>,
+        text: String,
+    ) -> Self {
+        assert!(!jobs.is_empty(), "a command job notice requires jobs");
+        assert!(
+            !text.trim().is_empty(),
+            "a command job notice requires text"
+        );
+        let model_message = Message::user(text.clone());
+        Self {
+            kind,
+            jobs,
+            running,
+            text,
+            model_message,
+        }
+    }
+    pub fn kind(&self) -> CommandJobNoticeKind {
+        self.kind
+    }
+    pub fn jobs(&self) -> &[CommandJobSnapshot] {
+        &self.jobs
+    }
+    pub fn running(&self) -> &[CommandJobSnapshot] {
+        &self.running
+    }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn model_message(&self) -> &Message {
+        &self.model_message
+    }
+    pub fn summary_lines(&self) -> Vec<String> {
+        let mut lines: Vec<_> = self.jobs.iter().map(command_job_line).collect();
+        if !self.running.is_empty() {
+            lines.push("Still running:".into());
+            lines.extend(self.running.iter().map(command_job_line));
+        }
+        lines
+    }
+}
+impl Serialize for CommandJobNotice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Fields<'a> {
+            version: u32,
+            kind: CommandJobNoticeKind,
+            jobs: &'a [CommandJobSnapshot],
+            running: &'a [CommandJobSnapshot],
+            text: &'a str,
+        }
+        Fields {
+            version: 1,
+            kind: self.kind,
+            jobs: &self.jobs,
+            running: &self.running,
+            text: &self.text,
+        }
+        .serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for CommandJobNotice {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            version: u32,
+            kind: CommandJobNoticeKind,
+            jobs: Vec<CommandJobSnapshot>,
+            running: Vec<CommandJobSnapshot>,
+            text: String,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        if fields.version != 1 {
+            return Err(D::Error::custom(
+                "unsupported command job notice version; expected 1",
+            ));
+        }
+        if fields.jobs.is_empty() {
+            return Err(D::Error::custom("a command job notice requires jobs"));
+        }
+        if fields.text.trim().is_empty() {
+            return Err(D::Error::custom("a command job notice requires text"));
+        }
+        Ok(Self::new(
+            fields.kind,
+            fields.jobs,
+            fields.running,
+            fields.text,
+        ))
+    }
 }
 
 #[cfg(test)]

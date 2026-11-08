@@ -23,7 +23,7 @@ async fn job_controls_are_immediate_while_busy_and_leave_queued_turns_untouched(
         None,
     );
     let job = jobs
-        .register("synthetic".into(), None, CommandJobMode::Foreground)
+        .register("synthetic".into(), None, CommandJobMode::Foreground, None)
         .await
         .unwrap();
     let (provider, mut calls) = GatedProvider::new();

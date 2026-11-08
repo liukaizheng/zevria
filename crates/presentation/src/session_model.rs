@@ -82,6 +82,7 @@ pub struct SessionModel {
     scope: PaneScope,
     jobs: crate::jobs::CommandJobsState,
     pending_edit: Option<PendingEdit>,
+    continuation_offer: Option<SessionMode>,
 }
 pub struct RestorationInput {
     pub items: Vec<TranscriptItem>,
@@ -111,6 +112,20 @@ impl SessionModel {
                 self.jobs.update(job);
             }
             SessionEvent::CommandControlResult { .. } => {}
+            SessionEvent::JobContinuationChanged { mode } => {
+                if self.scope.is_root() { self.continuation_offer = mode; }
+            }
+            SessionEvent::JobContinuationStarted { turn_id, mode, notice } => {
+                if self.session.start_job_continuation(turn_id, mode).is_none() { return effects; }
+                self.continuation_offer = None;
+                effects.accepted = self.session.operation_kind();
+                let turn = self.conversation.allocate_turn();
+                self.session.bind_display_turn(turn);
+                self.conversation.push_job_notice(notice, Some(crate::presentation::NativeHeader::Prompt(turn)));
+            }
+            SessionEvent::CommandJobsReported { turn_id, notice } => {
+                if self.session.progress(turn_id) { self.conversation.push_job_notice(notice, None); }
+            }
             SessionEvent::EngineIdle => self.session.observe_engine_idle(),
             SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
                 if !self.session.accepts_active(turn_id) { return effects; }
@@ -377,7 +392,9 @@ impl SessionModel {
                 }
                 // The old transcript tail is authoritative; no accepted tool
                 // execution belongs to this rejected operation.
-                self.conversation.push_error(error);
+                if kind != OperationKind::JobContinuation {
+                    self.conversation.push_error(error);
+                }
             }
             SessionEvent::TurnFailed { turn_id, error } => {
                 let Some((kind, _)) = self.finish_turn(turn_id) else {
@@ -531,6 +548,7 @@ impl SessionModel {
         self.session.reset_for_restore();
         self.workflow.reset();
         self.pending_edit = None;
+        self.continuation_offer = None;
         self.conversation.restore(items);
         for job in self.jobs.iter() {
             self.conversation.update_command_job(job);
@@ -571,13 +589,36 @@ impl SessionModel {
         mode: SessionMode,
         role: ModelRole,
     ) -> bool {
-        self.scope.is_root() && self.session.begin_operation(kind, mode, role)
+        if self.scope.is_root() && self.session.begin_operation(kind, mode, role) {
+            // Management can leave eligibility unchanged (and hence produce no
+            // new advertisement). Only turn dispatch consumes the local offer.
+            if !kind.is_management() {
+                self.continuation_offer = None;
+            }
+            true
+        } else {
+            false
+        }
     }
     fn admits_work(&self) -> bool {
         self.scope.is_root()
             && !self.is_busy()
             && !matches!(self.workflow.snapshot(), PlanWorkflowState::Ready { .. })
     }
+    pub fn continue_after_jobs(&mut self) -> Option<TurnCommand> {
+        let mode = self.next_mode();
+        if !self.admits_work()
+            || !self.session.is_quiescent()
+            || self.pending_edit.is_some()
+            || self.workflow.dialog().is_some()
+            || self.continuation_offer != Some(mode)
+        {
+            return None;
+        }
+        self.begin_operation(OperationKind::JobContinuation, mode, role_for_mode(mode))
+            .then_some(TurnCommand::ContinueAfterJobs { mode })
+    }
+
     pub fn submit(&mut self, text: UserPrompt, behavior: RequestBehavior) -> Option<TurnCommand> {
         self.submit_in_mode(text, behavior, self.next_mode())
     }

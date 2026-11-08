@@ -1,5 +1,6 @@
 use super::*;
 use std::time::Duration;
+use std::time::SystemTime;
 use zevria_foundation::{CommandJobMode, TerminationOrigin};
 
 fn snapshot(status: CommandJobStatus, seconds: f64) -> CommandJobSnapshot {
@@ -174,7 +175,7 @@ fn tiny_capture_and_unequal_segments_never_invent_or_duplicate_bytes() {
         );
     }
     for limit in [1, 2, 21, 42] {
-        let mut buffer = zevria_session_api::StreamBuffer::new(limit);
+        let mut buffer = crate::StreamBuffer::new(limit);
         buffer.append(&vec![b'x'; 100]);
         let retained = buffer.retained();
         let rendered = elide(&retained).unwrap();
@@ -285,7 +286,7 @@ fn signal_and_unavailable_exit_headers() {
             CommandJobStatus::Exited {
                 code: None,
                 success: false,
-                signal: Some(libc::SIGKILL),
+                signal: Some(9),
             },
             0.1,
         );
@@ -302,15 +303,10 @@ fn signal_and_unavailable_exit_headers() {
 
 #[test]
 fn interrupted_errors_have_only_the_core_status_and_no_exit_header() {
-    use crate::command::CommandError;
     let timeout = snapshot(CommandJobStatus::TimedOut { seconds: 300 }, 300.0);
-    let error = CommandError::Timeout {
-        seconds: 300,
-        output: interrupted_body(&timeout, &streams("partial", "")),
-    };
     assert_format(
-        &format!("status: error\nerror: {error}"),
-        "status: error\nerror: command timed out after 300s; its process tree was terminated\nduration: 300.0s\n<stdout>\npartial\n</stdout>",
+        &interrupted_body(&timeout, &streams("partial", "")),
+        "duration: 300.0s\n<stdout>\npartial\n</stdout>",
     );
     let body = interrupted_body(
         &snapshot(
@@ -321,22 +317,7 @@ fn interrupted_errors_have_only_the_core_status_and_no_exit_header() {
         ),
         &streams("", ""),
     );
-    assert_format(
-        &format!(
-            "status: error\nerror: {}",
-            CommandError::Terminated {
-                output: body.clone()
-            }
-        ),
-        "status: error\nerror: the user terminated this command\nduration: 12.0s",
-    );
-    assert_format(
-        &format!(
-            "status: error\nerror: {}",
-            CommandError::Cancelled { output: body }
-        ),
-        "status: error\nerror: command cancelled with the turn\nduration: 12.0s",
-    );
+    assert_format(&body, "duration: 12.0s");
 }
 
 #[test]
@@ -401,7 +382,7 @@ fn duration_uses_finished_time_and_clamps_reversed_clocks() {
 }
 
 #[test]
-fn list_and_footer_share_compact_job_lines() {
+fn list_uses_compact_job_lines() {
     let running = snapshot(CommandJobStatus::Running, 41.0);
     let mut done = exited(0, 3.2);
     done.id = CommandJobId::new("job-d4e5f6");
@@ -410,15 +391,6 @@ fn list_and_footer_share_compact_job_lines() {
         &format!("{}\n{}", job_line(&running), job_line(&done)),
         "job-a1b2c3 · running · 41.0s · cargo test --workspace\njob-d4e5f6 · exited 0 · 3.2s · rg -n foo src",
     );
-    assert_format(
-        &job_footer(&[done.clone()]),
-        "\njob updates:\njob-d4e5f6 · exited 0 · 3.2s · rg -n foo src",
-    );
-    assert_format(
-        &job_footer(&[running, done]),
-        "\njob updates:\njob-a1b2c3 · running · 41.0s · cargo test --workspace\njob-d4e5f6 · exited 0 · 3.2s · rg -n foo src",
-    );
-    assert_eq!(job_footer(&[]), "");
 }
 
 #[test]

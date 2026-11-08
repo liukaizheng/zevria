@@ -141,6 +141,13 @@ impl<P: ModelProvider> SessionEngine<P> {
         );
         let mut call = 0;
         loop {
+            if !matches!(
+                accepted.kind,
+                AcceptedKind::Ensemble { .. } | AcceptedKind::ManualCompaction { .. }
+            ) {
+                self.deliver_job_notices(policy, &submission_gate, &progress)
+                    .await?;
+            }
             self.prepare_dispatch(policy, &progress, &mut state).await?;
             // Immutable owned input releases the conversation borrow while the
             // provider runs. Only display checkpoints may be appended below;

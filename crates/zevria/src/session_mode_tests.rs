@@ -18,10 +18,19 @@ async fn select_mode(
             mode,
         }))
         .unwrap();
-    let update = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let update = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let update = events.recv().await.unwrap();
+            if !matches!(
+                update,
+                SessionUpdate::Lifecycle(SessionEvent::JobContinuationChanged { mode: None })
+            ) {
+                break update;
+            }
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
         update,
         SessionUpdate::Lifecycle(SessionEvent::ModeResult {
@@ -30,7 +39,15 @@ async fn select_mode(
         }),
         "selection must acknowledge management without turn, workflow, or provider events"
     );
-    assert!(events.try_recv().is_err());
+    while let Ok(update) = events.try_recv() {
+        assert!(
+            matches!(
+                update,
+                SessionUpdate::Lifecycle(SessionEvent::JobContinuationChanged { mode: None })
+            ),
+            "mode management must not allocate turns or call a provider: {update:?}"
+        );
+    }
 }
 
 fn assert_tui_restoration_uses_selected_mode(restoration: &runtime::SessionRestoration) {

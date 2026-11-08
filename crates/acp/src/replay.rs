@@ -72,6 +72,13 @@ pub(crate) fn replay_transcript(
                 updates.extend(subtasks.results(metadata));
                 updates.extend(project_tool_results(message, metadata, workspace, &tools));
             }
+            TranscriptItem::CommandJobNotice(notice) => {
+                updates.push(diagnostic_update(
+                    None,
+                    &format!("{prefix}-jobs"),
+                    notice.summary_lines().join("\n"),
+                ));
+            }
             TranscriptItem::SkillInvocation(invocation) => {
                 updates.extend(project_completed_message(
                     &invocation.display_message(),

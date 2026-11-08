@@ -130,6 +130,7 @@ pub enum HistoryEntry {
     Conversation(ConversationEntry),
     PlanArtifact(PlanArtifact),
     PlanHandoff(PlanHandoff, Option<NativeHeader>),
+    JobNotice(zevria_foundation::CommandJobNotice, Option<NativeHeader>),
     Ensemble(EnsembleHistory),
     CompactionDivider,
     Error(String),
@@ -247,13 +248,14 @@ impl HistoryEntry {
         }))
     }
 
-    /// Numbered, user-originated prompt boundaries shared by folding and
-    /// Normal-mode turn navigation. Metadata and worker rows are not prompts.
+    /// Numbered display-turn boundaries shared by folding and Normal-mode
+    /// navigation, including handoffs and job continuations. These are not the
+    /// editable transcript prompt ordinals; metadata and worker rows are excluded.
     pub fn has_prompt_header(&self) -> bool {
         let header = match self {
             Self::Conversation(entry) => entry.header,
             Self::Ensemble(entry) => entry.header,
-            Self::PlanHandoff(_, header) => *header,
+            Self::PlanHandoff(_, header) | Self::JobNotice(_, header) => *header,
             _ => None,
         };
         matches!(header, Some(NativeHeader::Prompt(_)))
@@ -262,7 +264,7 @@ impl HistoryEntry {
     pub fn selectable_upper_bound(&self) -> usize {
         match self {
             Self::Conversation(entry) => entry.blocks.len(),
-            Self::PlanArtifact(_) | Self::PlanHandoff(..) => 1,
+            Self::PlanArtifact(_) | Self::PlanHandoff(..) | Self::JobNotice(..) => 1,
             Self::Ensemble(ensemble) => ensemble.workers.len().saturating_add(1),
             Self::CompactionDivider => 0,
             Self::Error(_) => 1,
@@ -383,9 +385,11 @@ fn selected_plain_text(entry: &HistoryEntry, content_index: usize) -> Option<Str
             }
             Some(text)
         }
+        HistoryEntry::JobNotice(notice, _) if content_index == 0 => Some(notice.text().to_owned()),
         HistoryEntry::Error(error) if content_index == 0 => Some(error.clone()),
         HistoryEntry::PlanArtifact(_)
         | HistoryEntry::PlanHandoff(..)
+        | HistoryEntry::JobNotice(..)
         | HistoryEntry::CompactionDivider
         | HistoryEntry::Error(_) => None,
     }
@@ -1160,6 +1164,14 @@ impl ConversationState {
         ));
     }
 
+    pub fn push_job_notice(
+        &mut self,
+        notice: zevria_foundation::CommandJobNotice,
+        header: Option<NativeHeader>,
+    ) {
+        self.history.push(HistoryEntry::JobNotice(notice, header));
+    }
+
     pub fn push_compaction_divider(&mut self) {
         self.history.push(HistoryEntry::CompactionDivider);
     }
@@ -1733,6 +1745,7 @@ impl ConversationState {
                 HistoryEntry::Conversation(_)
                 | HistoryEntry::PlanArtifact(_)
                 | HistoryEntry::PlanHandoff(..)
+                | HistoryEntry::JobNotice(..)
                 | HistoryEntry::CompactionDivider
                 | HistoryEntry::Error(_) => None,
             })
@@ -1805,6 +1818,7 @@ impl ConversationState {
             )),
             HistoryEntry::PlanArtifact(_)
             | HistoryEntry::PlanHandoff(..)
+            | HistoryEntry::JobNotice(..)
             | HistoryEntry::Ensemble(_)
             | HistoryEntry::CompactionDivider
             | HistoryEntry::Error(_) => None,
@@ -2140,6 +2154,17 @@ impl ConversationState {
                 | TranscriptItem::SessionMode(_)
                 | TranscriptItem::Directive(_)
                 | TranscriptItem::RequestDirective(_) => {}
+                TranscriptItem::CommandJobNotice(notice) => {
+                    let header =
+                        if notice.kind() == zevria_foundation::CommandJobNoticeKind::Continuation {
+                            let turn = self.allocate_turn();
+                            current_turn = Some(turn);
+                            Some(NativeHeader::Prompt(turn))
+                        } else {
+                            None
+                        };
+                    self.push_job_notice(notice, header);
+                }
                 TranscriptItem::SkillInvocation(invocation) => {
                     let turn = self.allocate_turn();
                     current_turn = Some(turn);

@@ -1,26 +1,30 @@
 use crate::*;
 
 #[tokio::test]
-async fn engine_idle_does_not_fence_an_unread_root_preview() {
-    let (sender, mut receiver) = session_event_channel(1);
-    let reporter = ProgressReporter::new(sender.clone());
-    reporter.stream_updated(Message::assistant("keep this preview"));
-    sender.send(SessionEvent::EngineIdle).await.unwrap();
-    assert_eq!(
-        receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(SessionEvent::EngineIdle))
-    );
-    assert!(matches!(
-        receiver.recv().await,
-        Some(SessionUpdate::Streams(SessionStreamBatch {
-            root: Some(SessionStreamState {
-                message: Some(Message::Assistant { .. }),
+async fn idle_and_continuation_metadata_do_not_fence_an_unread_root_preview() {
+    for event in [
+        SessionEvent::EngineIdle,
+        SessionEvent::JobContinuationChanged {
+            mode: Some(SessionMode::Build),
+        },
+    ] {
+        let (sender, mut receiver) = session_event_channel(1);
+        let reporter = ProgressReporter::new(sender.clone());
+        reporter.stream_updated(Message::assistant("keep this preview"));
+        sender.send(event.clone()).await.unwrap();
+        assert_eq!(receiver.recv().await, Some(SessionUpdate::Lifecycle(event)));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(SessionUpdate::Streams(SessionStreamBatch {
+                root: Some(SessionStreamState {
+                    message: Some(Message::Assistant { .. }),
+                    ..
+                }),
                 ..
-            }),
-            ..
-        }))
-    ));
-    assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+            }))
+        ));
+        assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
 }
 
 #[tokio::test]
@@ -38,7 +42,7 @@ async fn command_job_events_do_not_fence_an_unread_root_preview() {
         Some(sender.clone()),
     );
     let job = jobs
-        .register("example".into(), None, CommandJobMode::Background)
+        .register("example".into(), None, CommandJobMode::Background, None)
         .await
         .unwrap();
     sender

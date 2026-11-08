@@ -99,6 +99,9 @@ const SCROLL_STEP: usize = 1;
 /// Side effect requested by the pure [`App`] input reducer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiAction {
+    ContinueAfterJobs {
+        mode: SessionMode,
+    },
     WorkerControl(WorkerControl),
     SetMode {
         request_id: String,
@@ -1021,23 +1024,35 @@ impl App {
 
     fn apply_reduction(&mut self, reduction: Reduction) -> Vec<AppEffect> {
         if let Some(kind) = reduction.accepted {
-            self.drafts.accept();
+            if !matches!(
+                kind,
+                OperationKind::JobContinuation | OperationKind::AuthoritativeJobContinuation
+            ) {
+                self.drafts.accept();
+            }
             if kind.is_transcript_edit() {
                 self.edit.accept();
             }
         }
-        if let Some((_, settlement)) = reduction.settled {
+        if let Some((kind, settlement)) = reduction.settled {
             match &settlement {
                 zevria_presentation::Settlement::Failed(_) => self.queue.pause(QueuePause::Failed),
-                zevria_presentation::Settlement::Rejected(_) => {
+                zevria_presentation::Settlement::Rejected(_)
+                    if kind != OperationKind::JobContinuation =>
+                {
                     self.queue.pause(QueuePause::Rejected)
                 }
                 _ => {}
             }
             self.view.invalidate_rendered_geometry();
-            self.edit.reject();
-            if settlement.restores_draft() {
-                self.restore_rejected_draft();
+            if !matches!(
+                kind,
+                OperationKind::JobContinuation | OperationKind::AuthoritativeJobContinuation
+            ) {
+                self.edit.reject();
+                if settlement.restores_draft() {
+                    self.restore_rejected_draft();
+                }
             }
         }
         if reduction.plan_ready {

@@ -492,6 +492,7 @@ fn history_accent(entry: &crate::app::HistoryEntry, diagnostics_visible: bool) -
             EnsembleWorkflow::Plan => theme().workflow.plan,
             EnsembleWorkflow::Review => theme().workflow.review,
         },
+        crate::app::HistoryEntry::JobNotice(..) => theme().roles.system,
         crate::app::HistoryEntry::Error(_) => theme().feedback.error,
         crate::app::HistoryEntry::CompactionDivider => theme().text.muted,
     }

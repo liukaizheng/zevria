@@ -393,6 +393,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                     .await);
             }
         };
+        if matches!(anchor, TurnAnchor::ReplaceFrom(_)) {
+            self.capabilities.job_follow.raise_floor(turn.id);
+        }
         self.emit_selected_mode(events).await;
         let accepted = AcceptedTurn::new(AcceptedKind::Ensemble {
             run_id: start.run_id.clone(),

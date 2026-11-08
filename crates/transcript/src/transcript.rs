@@ -10,6 +10,7 @@
 
 #[cfg(test)]
 mod record;
+use zevria_foundation::CommandJobNotice;
 use zevria_model::MessageRecord;
 
 use std::io::Write as _;
@@ -37,6 +38,7 @@ use crate::{
 const TOOL_RESULT_METADATA_KEY: &str = "zevria_tool_result_metadata";
 const SUBTASK_RESULTS_KEY: &str = "zevria_subtask_results";
 const SKILL_INVOCATION_KEY: &str = "zevria_skill_invocation";
+const COMMAND_JOB_NOTICE_KEY: &str = "zevria_command_job_notice";
 const SKILL_APPLICATIONS_KEY: &str = "zevria_skill_applications";
 const SKILL_DIRECTIVE_KEY: &str = "zevria_skill_directive";
 const REQUEST_METADATA_KEY: &str = "zevria_request";
@@ -159,6 +161,8 @@ pub enum TranscriptItem {
     /// An owning direct invocation. Its bodyless canonical model message is
     /// derived privately from name and ordered arguments, never its application.
     SkillInvocation(SkillInvocation),
+    /// Append-only untrusted command data with verbatim model-visible text.
+    CommandJobNotice(CommandJobNotice),
     /// Engine-owned Plan workflow state. Only `PlanRecord::Handoff` projects
     /// a message into model history; every other record is metadata-only.
     Plan(PlanRecord),
@@ -292,6 +296,9 @@ impl Serialize for TranscriptItem {
             Self::SkillInvocation(invocation) => {
                 serde_json::json!({SKILL_INVOCATION_KEY: invocation}).serialize(serializer)
             }
+            Self::CommandJobNotice(notice) => {
+                serde_json::json!({COMMAND_JOB_NOTICE_KEY: notice}).serialize(serializer)
+            }
             Self::Plan(record) => {
                 let mut value = serde_json::Map::new();
                 value.insert(
@@ -359,6 +366,9 @@ impl<'de> Deserialize<'de> for TranscriptItem {
                             map.next_value::<zevria_instructions::RequestDirective>()?;
                         directive.validate().map_err(A::Error::custom)?;
                         serde_json::to_value(directive).map_err(A::Error::custom)?
+                    } else if key == COMMAND_JOB_NOTICE_KEY {
+                        let notice = map.next_value::<CommandJobNotice>()?;
+                        serde_json::to_value(notice).map_err(A::Error::custom)?
                     } else if key == INCOMPLETE_RESPONSE_KEY {
                         let attempt = map.next_value::<crate::IncompleteResponse>()?;
                         attempt.validate().map_err(A::Error::custom)?;
@@ -565,6 +575,16 @@ impl<'de> Deserialize<'de> for TranscriptItem {
                 skill_applications,
             });
         }
+        if let Some(notice) = value.get(COMMAND_JOB_NOTICE_KEY) {
+            if value.as_object().is_none_or(|object| object.len() != 1) {
+                return Err(D::Error::custom(
+                    "a command job notice must be a standalone record",
+                ));
+            }
+            return serde_json::from_value::<CommandJobNotice>(notice.clone())
+                .map(Self::CommandJobNotice)
+                .map_err(D::Error::custom);
+        }
         if let Some(invocation) = value.get(SKILL_INVOCATION_KEY) {
             if value.as_object().is_none_or(|object| object.len() != 1) {
                 return Err(D::Error::custom(
@@ -618,6 +638,7 @@ impl TranscriptItem {
             | Self::RequestPrompt { message, .. }
             | Self::ToolResults { message, .. } => Some(message),
             Self::SkillInvocation(invocation) => Some(invocation.model_message()),
+            Self::CommandJobNotice(notice) => Some(notice.model_message()),
             Self::ProviderMessage(provider_message) => Some(provider_message.content.message()),
             Self::Plan(record) => record.model_message(),
             Self::Ensemble(record) => record.model_message(),
@@ -660,6 +681,7 @@ impl TranscriptItem {
             | Self::Directive(_)
             | Self::RequestDirective(_)
             | Self::SkillInvocation(_)
+            | Self::CommandJobNotice(_)
             | Self::Plan(_)
             | Self::Ensemble(_)
             | Self::Compaction(_)
@@ -684,6 +706,9 @@ impl TranscriptItem {
             | Self::ToolResults { message, .. } => Some(ModelRequestItem::message(message)),
             Self::SkillInvocation(invocation) => {
                 Some(ModelRequestItem::message(invocation.model_message()))
+            }
+            Self::CommandJobNotice(notice) => {
+                Some(ModelRequestItem::message(notice.model_message()))
             }
             Self::Plan(record) => record.model_message().map(ModelRequestItem::message),
             Self::Ensemble(record) => record.model_message().map(ModelRequestItem::message),
@@ -1417,6 +1442,7 @@ pub fn is_conversation_item(item: &TranscriptItem) -> bool {
             | TranscriptItem::ProviderMessage(_)
             | TranscriptItem::ToolResults { .. }
             | TranscriptItem::IncompleteResponse(_)
+            | TranscriptItem::CommandJobNotice(_)
             | TranscriptItem::SkillInvocation(_)
             | TranscriptItem::Plan(PlanRecord::Handoff { .. })
             | TranscriptItem::Ensemble(EnsembleRecord::Started { .. })
@@ -2371,6 +2397,12 @@ fn validate_reserved_lifecycle_keys(value: &serde_json::Value) -> anyhow::Result
             );
         }
     }
+    if object.contains_key(COMMAND_JOB_NOTICE_KEY) {
+        anyhow::ensure!(
+            object.len() == 1,
+            "a command job notice must be a standalone record"
+        );
+    }
     if object.contains_key(SKILL_DIRECTIVE_KEY) {
         anyhow::ensure!(
             object.len() == 1,
@@ -2731,6 +2763,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
         return true;
     }
     for (envelope, version) in [
+        (COMMAND_JOB_NOTICE_KEY, 1),
         (COMPACTION_RECORD_KEY, crate::compaction::COMPACTION_VERSION),
         (PROVIDER_REPLAY_KEY, crate::PROVIDER_REPLAY_VERSION),
         (
@@ -2760,6 +2793,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
                 | PLAN_RECORD_KEY
                 | ENSEMBLE_RECORD_KEY
                 | SKILL_DIRECTIVE_KEY
+                | COMMAND_JOB_NOTICE_KEY
                 | INCOMPLETE_RESPONSE_KEY
         ) && let Some(value) = partial_json_field(line, &[key])
             && serde_json::from_value::<TranscriptItem>(serde_json::json!({(key): value})).is_err()
@@ -2775,6 +2809,7 @@ fn current_reserved_key(key: &str) -> bool {
     matches!(
         key,
         SKILL_APPLICATIONS_KEY
+            | COMMAND_JOB_NOTICE_KEY
             | SKILL_INVOCATION_KEY
             | SKILL_DIRECTIVE_KEY
             | TOOL_RESULT_METADATA_KEY

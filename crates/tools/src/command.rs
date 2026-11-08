@@ -7,8 +7,8 @@ use zevria_foundation::{
     CommandJobDetail, CommandJobDisposition, CommandJobMode, CommandJobStatus, TerminationOrigin,
     ToolCallId, ToolCancelled, ToolResultDetail,
 };
+pub(crate) use zevria_session_api::command_render as render;
 use zevria_session_api::{CommandJobLimits, CommandJobs, JobHandle, TurnContext};
-pub(crate) mod render;
 mod supervise;
 use render::MAX_OUTPUT_STREAM_BYTES;
 #[cfg(test)]
@@ -113,7 +113,12 @@ impl CommandTool {
         let call_id = context.get::<ToolCallId>().ok().flatten().map(|id| id.0);
         let job = self
             .jobs
-            .register(args.command.clone(), call_id, mode)
+            .register(
+                args.command.clone(),
+                call_id,
+                mode,
+                context.scope::<TurnContext>().map(|t| t.id),
+            )
             .await
             .map_err(|e| CommandError::Job(e.to_string()))?;
         let mut guard = ForegroundGuard {
@@ -267,7 +272,7 @@ impl Tool for CommandTool {
         let description =
             description.replacen("Commands time out", "Foreground commands time out", 1);
         format!(
-            "{description} Set background: true for long builds, test suites, or servers, not quick inspection commands. Background jobs return a job ID immediately; use command_status for incremental output and optional waiting, or command_terminate to stop one process tree. At most {} background jobs can run. Jobs persist across turns and Ctrl+C but end with the session; {}. A user can move a foreground command to the background or terminate it without cancelling the turn. Descendants started using & or nohup in a foreground command are still terminated when its shell exits.",
+            "{description} Set background: true for long builds, test suites, or servers, not quick inspection commands. Background jobs return a job ID immediately; use command_status for incremental output and optional waiting, or command_terminate to stop one process tree. When a background job finishes, its final status and unread output are reported to you automatically before your next model request, so you do not need to poll; if you have already responded, an interactive session may resume you automatically to handle the result. At most {} background jobs can run. Jobs persist across turns and Ctrl+C but end with the session; {}. A user can move a foreground command to the background or terminate it without cancelling the turn. Descendants started using & or nohup in a foreground command are still terminated when its shell exits.",
             limits.max_running_background,
             limits.background_timeout.map_or_else(
                 || "there is no default background time limit".into(),
@@ -298,30 +303,7 @@ impl Tool for CommandTool {
         context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<String, CommandError> {
-        let result = self.execute(context, args).await;
-        let own = context
-            .result::<ToolResultDetail>()
-            .ok()
-            .flatten()
-            .and_then(|detail| detail.command_job().map(|job| job.id.clone()));
-        let footer = render::job_footer(&self.jobs.take_unreported_notices(own.as_ref()));
-        match result {
-            Ok(mut output) => {
-                output.push_str(&footer);
-                Ok(output)
-            }
-            Err(mut error) => {
-                if !footer.is_empty() {
-                    match &mut error {
-                        CommandError::Timeout { output, .. }
-                        | CommandError::Cancelled { output }
-                        | CommandError::Terminated { output } => output.push_str(&footer),
-                        _ => return Err(CommandError::Job(format!("{error}{footer}"))),
-                    }
-                }
-                Err(error)
-            }
-        }
+        self.execute(context, args).await
     }
 }
 #[cfg(test)]

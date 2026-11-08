@@ -28,6 +28,95 @@ fn pause_label(app: &App) -> Option<&'static str> {
 }
 
 #[test]
+fn job_continuation_waits_for_queue_composer_and_barrier_and_ctrl_c_cancels_it() {
+    let offer = || SessionEvent::JobContinuationChanged {
+        mode: Some(SessionMode::Build),
+    };
+    let mut app = busy();
+    enqueue(&mut app, "user follow up");
+    complete(&mut app, TEST_TURN_ID);
+    app.reduce_without_effects(offer());
+    assert_eq!(app.dispatch_job_continuation(), None);
+    idle(&mut app);
+    assert_eq!(app.dispatch_job_continuation(), None);
+    assert!(matches!(
+        app.dispatch_next_queued(),
+        Some(UiAction::Submit { .. })
+    ));
+
+    let mut app = busy();
+    complete(&mut app, TEST_TURN_ID);
+    app.reduce_without_effects(offer());
+    assert_eq!(app.dispatch_job_continuation(), None);
+    idle(&mut app);
+    app.set_input_for_test("a draft", 7);
+    assert_eq!(app.dispatch_job_continuation(), None);
+    app.set_input_for_test(" ", 1);
+    assert_eq!(app.dispatch_job_continuation(), None);
+    app.set_input_for_test("", 0);
+    assert_eq!(
+        app.dispatch_job_continuation(),
+        Some(UiAction::ContinueAfterJobs {
+            mode: SessionMode::Build
+        })
+    );
+    assert!(matches!(
+        app.handle_event(ctrl('c')),
+        Some(UiAction::CancelTurn { turn_id: None })
+    ));
+    app.reduce_without_effects(SessionEvent::TurnRejected {
+        turn_id: TurnId::new(99),
+        error: "stale continuation".into(),
+    });
+    assert!(!app.history().iter().any(
+        |row| matches!(row, HistoryEntry::Error(text) if text.contains("stale continuation"))
+    ));
+    assert_eq!(pause_label(&app), None);
+}
+
+#[test]
+fn job_notice_is_a_compact_system_block_without_stream_output() {
+    use zevria_foundation::*;
+    let notice = CommandJobNotice::new(
+        CommandJobNoticeKind::Continuation,
+        vec![CommandJobSnapshot {
+            id: CommandJobId::new("job-view"),
+            call_id: None,
+            command: "sleep 5; false".into(),
+            mode: CommandJobMode::Background,
+            status: CommandJobStatus::Exited {
+                code: Some(1),
+                success: false,
+                signal: None,
+            },
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            finished_at: Some(std::time::SystemTime::UNIX_EPOCH),
+            stdout_bytes: 6,
+            stderr_bytes: 0,
+        }],
+        vec![],
+        "Command job update: hidden stream output".into(),
+    );
+    let mut app = App::new();
+    app.reduce_without_effects(SessionEvent::JobContinuationStarted {
+        turn_id: TEST_TURN_ID,
+        mode: SessionMode::Build,
+        notice,
+    });
+    let text = rendered_text(&mut app, 100, 24);
+    assert!(text.contains("Background jobs finished"));
+    assert!(text.contains("job-view"));
+    assert!(text.contains("exited 1"));
+    assert!(!text.contains("hidden stream output"));
+    assert!(matches!(
+        app.handle_event(ctrl('c')),
+        Some(UiAction::CancelTurn {
+            turn_id: Some(TEST_TURN_ID)
+        })
+    ));
+}
+
+#[test]
 fn busy_prompt_orchestration_skill_and_image_only_drafts_are_queued_with_captured_mode() {
     for (text, mode) in [
         ("follow up", SessionMode::Build),

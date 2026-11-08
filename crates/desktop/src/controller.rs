@@ -450,7 +450,7 @@ impl SessionController {
     fn apply(
         &mut self,
         update: SessionUpdate,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<zevria_workflow::PlanHandoff> {
         self.model.observe_clock(Instant::now());
         let reduction = self.model.apply(update);
@@ -468,14 +468,32 @@ impl SessionController {
                 self.draft_generation += 1;
             }
         }
+        if reduction.fresh.is_none() {
+            self.dispatch_job_continuation(cx);
+        }
         reduction.fresh
+    }
+    fn dispatch_job_continuation(&mut self, cx: &mut Context<Self>) {
+        if self.phase == Phase::Live
+            && self.draft.is_empty()
+            && self.submitted.is_none()
+            && self.model.question.is_none()
+            && let Some(command) = self.model.root.continue_after_jobs()
+        {
+            self.send(SessionCommand::Turn(command), cx);
+        }
     }
     fn apply_reduction(&mut self, reduction: Reduction) {
         if reduction.accepted == Some(zevria_presentation::session::OperationKind::Submit) {
             self.orchestrate = false;
         }
-        if reduction.accepted.is_some()
-            && let Some(submitted) = &mut self.submitted
+        if reduction.accepted.is_some_and(|kind| {
+            !matches!(
+                kind,
+                zevria_presentation::session::OperationKind::JobContinuation
+                    | zevria_presentation::session::OperationKind::AuthoritativeJobContinuation
+            )
+        }) && let Some(submitted) = &mut self.submitted
         {
             if self.draft_generation == submitted.generation && self.draft == submitted.text {
                 self.draft.clear();
@@ -486,7 +504,13 @@ impl SessionController {
             }
             submitted.accepted = true;
         }
-        if let Some((_, settlement)) = reduction.settled {
+        if let Some((kind, settlement)) = reduction.settled
+            && !matches!(
+                kind,
+                zevria_presentation::session::OperationKind::JobContinuation
+                    | zevria_presentation::session::OperationKind::AuthoritativeJobContinuation
+            )
+        {
             self.cancelling = false;
             if let Some(submitted) = self.submitted.take()
                 && settlement.restores_draft()
@@ -539,6 +563,7 @@ impl SessionController {
     pub fn edit_draft(&mut self, text: String, cx: &mut Context<Self>) {
         self.draft = text;
         self.draft_generation += 1;
+        self.dispatch_job_continuation(cx);
         cx.notify();
     }
     fn ensure_tick(&mut self, cx: &mut Context<Self>) {
@@ -776,6 +801,9 @@ builder = {{ provider = "test", model = "fixture", reasoning_level = "medium" }}
     fn until(cx: &mut TestAppContext, mut ready: impl FnMut(&mut TestAppContext) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
+            // The pump may yield after startup metadata before conversational
+            // work arrives. Real Tokio time does not advance GPUI's test timers.
+            cx.executor().advance_clock(Duration::from_millis(2));
             cx.run_until_parked();
             if ready(cx) {
                 return;

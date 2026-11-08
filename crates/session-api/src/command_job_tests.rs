@@ -22,14 +22,19 @@ async fn registration_cancellation_rolls_back_and_terminal_state_precedes_backpr
     let (events, mut receiver) = crate::session_event_channel(1);
     let jobs = CommandJobs::new(limits(), Some(events));
     let first = jobs
-        .register("first".into(), None, CommandJobMode::Background)
+        .register("first".into(), None, CommandJobMode::Background, None)
         .await
         .unwrap();
     let task = tokio::spawn({
         let jobs = jobs.clone();
         async move {
-            jobs.register("never launched".into(), None, CommandJobMode::Foreground)
-                .await
+            jobs.register(
+                "never launched".into(),
+                None,
+                CommandJobMode::Foreground,
+                None,
+            )
+            .await
         }
     });
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -64,10 +69,10 @@ async fn registration_cancellation_rolls_back_and_terminal_state_precedes_backpr
         "only frontend publication should be blocked"
     );
     jobs.mark_reported(&id);
-    assert!(jobs.take_unreported_notices(None).is_empty());
+    assert!(jobs.pending_completions().is_empty());
     receiver.recv().await.unwrap();
     task.await.unwrap();
-    assert!(jobs.take_unreported_notices(None).is_empty());
+    assert!(jobs.pending_completions().is_empty());
 }
 #[tokio::test]
 async fn unique_ids_survive_eviction_and_private_jobs_are_not_model_visible() {
@@ -75,7 +80,7 @@ async fn unique_ids_survive_eviction_and_private_jobs_are_not_model_visible() {
     let mut seen = HashSet::new();
     for _ in 0..512 {
         let job = jobs
-            .register("private".into(), None, CommandJobMode::Foreground)
+            .register("private".into(), None, CommandJobMode::Foreground, None)
             .await
             .unwrap();
         assert!(seen.insert(job.snapshot().id));
@@ -93,14 +98,19 @@ async fn unique_ids_survive_eviction_and_private_jobs_are_not_model_visible() {
 async fn backgrounding_and_turn_cancellation_are_serialized() {
     let jobs = CommandJobs::new(limits(), None);
     let moved = jobs
-        .register("move first".into(), None, CommandJobMode::Foreground)
+        .register("move first".into(), None, CommandJobMode::Foreground, None)
         .await
         .unwrap();
     jobs.move_to_background(&moved.snapshot().id).unwrap();
     assert!(!moved.terminate_foreground(TerminationOrigin::TurnCancelled));
     assert_eq!(*moved.termination_requested().borrow(), None);
     let stopped = jobs
-        .register("cancel first".into(), None, CommandJobMode::Foreground)
+        .register(
+            "cancel first".into(),
+            None,
+            CommandJobMode::Foreground,
+            None,
+        )
         .await
         .unwrap();
     assert!(stopped.terminate_foreground(TerminationOrigin::TurnCancelled));

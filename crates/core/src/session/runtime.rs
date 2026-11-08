@@ -41,18 +41,43 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> Result<(), SessionReplayError> {
         self.ensure_replay_valid()?;
         let mut pending = self.restored_work();
+        let mut completions = self
+            .capabilities
+            .command_jobs
+            .as_ref()
+            .filter(|jobs| !jobs.is_closed())
+            .map(|jobs| jobs.completions_changed());
+        if pending.is_empty() && commands.is_empty() {
+            self.refresh_continuation_offer(&events).await;
+        }
         loop {
             let control = if let Some(work) = pending.pop_front() {
                 self.dispatch_work(work, &mut commands, &mut pending, &events)
                     .await?
-            } else if let Some(command) = commands.recv().await {
-                self.dispatch_idle(command, &mut commands, &mut pending, &events)
-                    .await?
             } else {
-                break;
+                tokio::select! {
+                    biased;
+                    command = commands.recv() => {
+                        let Some(command) = command else { break };
+                        self.dispatch_idle(command, &mut commands, &mut pending, &events).await?
+                    }
+                    changed = async {
+                        match &mut completions {
+                            Some(receiver) => receiver.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if changed.is_err() || self.capabilities.command_jobs.as_ref().is_some_and(|jobs| jobs.is_closed()) { completions = None; }
+                        self.refresh_continuation_offer(&events).await;
+                        RunControl::Continue
+                    }
+                }
             };
             if control == RunControl::Shutdown {
                 break;
+            }
+            if pending.is_empty() && commands.is_empty() {
+                self.refresh_continuation_offer(&events).await;
             }
         }
         self.repair_transcript_on_exit();
@@ -126,6 +151,9 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
             SessionCommand::Manage(ManagementCommand::SetMode { request_id, mode }) => {
                 self.manage_mode(request_id, mode, events).await?;
+                if pending.is_empty() && commands.is_empty() {
+                    self.refresh_continuation_offer(events).await;
+                }
                 Ok(RunControl::Continue)
             }
             SessionCommand::Manage(ManagementCommand::Skills {
@@ -166,6 +194,28 @@ impl<P: ModelProvider> SessionEngine<P> {
         events: &SessionEventSender,
     ) -> Result<RunControl, SessionReplayError> {
         let turn = self.next_turn(work.mode());
+        if matches!(
+            &work,
+            TurnWork::Command(TurnCommand::ContinueAfterJobs { .. })
+        ) && (!pending.is_empty() || !commands.is_empty())
+        {
+            self.capabilities
+                .job_follow
+                .raise_floor(TurnId::new(turn.id.get().saturating_add(1)));
+            self.finish_rejected(
+                &turn,
+                events,
+                Rejection::Rejected(
+                    "newer queued work takes precedence over background jobs".into(),
+                ),
+            )
+            .await?;
+            self.refresh_continuation_offer(events).await;
+            if self.capabilities.idle_notifications && pending.is_empty() {
+                let _ = events.send(SessionEvent::EngineIdle).await;
+            }
+            return Ok(RunControl::Continue);
+        }
         let control = ActiveWorkControl {
             work: ActiveWork::Turn(turn.clone()),
             question_responder: self.capabilities.question_responder.clone(),
@@ -177,11 +227,13 @@ impl<P: ModelProvider> SessionEngine<P> {
         let active = self.execute_turn(work, events, &turn).boxed();
         let outcome = Self::supervise(active, &control, commands, pending, events).await;
         self.exit_turn();
-        if self.capabilities.idle_notifications
-            && outcome == Ok(RunControl::Continue)
-            && pending.is_empty()
-        {
-            let _ = events.send(SessionEvent::EngineIdle).await;
+        if outcome == Ok(RunControl::Continue) && pending.is_empty() {
+            if commands.is_empty() {
+                self.refresh_continuation_offer(events).await;
+            }
+            if self.capabilities.idle_notifications {
+                let _ = events.send(SessionEvent::EngineIdle).await;
+            }
         }
         if outcome.is_err() {
             events.stream_cleared(turn.id);

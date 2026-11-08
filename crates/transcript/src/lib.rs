@@ -34,6 +34,8 @@ pub use replay::{SessionReplayError, ValidatedSessionReplay, validate_session_re
 pub use transcript::*;
 pub use worker_log::*;
 #[cfg(test)]
+mod command_job_notice_tests;
+#[cfg(test)]
 mod directive_tests;
 #[cfg(test)]
 mod ensemble_review_tests;

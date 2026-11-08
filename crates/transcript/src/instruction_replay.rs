@@ -145,6 +145,10 @@ impl InstructionReplayState {
                 }
                 self.directives.apply(directive)?;
             }
+            TranscriptItem::CommandJobNotice(_) => anyhow::ensure!(
+                self.pending.is_empty(),
+                "a command job notice cannot split a tool call/result batch"
+            ),
             TranscriptItem::Compaction(_) => anyhow::ensure!(
                 self.pending.is_empty(),
                 "a checkpoint cannot split a tool call/result batch"

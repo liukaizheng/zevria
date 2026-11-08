@@ -2,25 +2,30 @@
 use super::*;
 #[tokio::test]
 async fn background_jobs_keep_static_prefix_append_only_input_and_resume_without_processes() {
+    background_completion_cache_fixture(true).await;
+}
+
+#[tokio::test]
+async fn passive_job_delivery_keeps_static_prefix_and_verbatim_resume() {
+    background_completion_cache_fixture(false).await;
+}
+
+async fn background_completion_cache_fixture(automatic: bool) {
     let temporary = tempfile::tempdir().unwrap();
     let workspace = std::fs::canonicalize(temporary.path()).unwrap();
     std::fs::write(workspace.join("AGENTS.md"), "STABLE_JOB_GUIDANCE").unwrap();
-    let outputs = (0..6)
-        .map(|index| match index {
-                0 => {
-                    json!([{"type":"function_call", "id":"fc-job", "call_id":"call-job", "name":"command", "arguments":json!({"command":"printf cache-job", "background":true}).to_string(), "status":"completed"}])
-                }
-                2 => {
-                    json!([{"type":"function_call", "id":"fc-read", "call_id":"call-read", "name":"command", "arguments":json!({"command":"printf inspection", "background":null}).to_string(), "status":"completed"}])
-                }
-                4 => {
-                    json!([{"type":"function_call", "id":"fc-status", "call_id":"call-status", "name":"command_status", "arguments":"{\"id\":null,\"wait_seconds\":null}", "status":"completed"}])
-                }
-                _ => {
-                    json!([{"type":"message", "id":format!("msg-{index}"), "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":"Job fixture complete."}]}])
-                }
-        })
-        .collect();
+    let offset = usize::from(automatic);
+    let outputs = (0..6 + offset).map(|index| {
+        if index == 0 {
+            json!([{"type":"function_call", "id":"fc-job", "call_id":"call-job", "name":"command", "arguments":json!({"command":"while [ ! -f release-job ]; do sleep 0.02; done; printf cache-job", "background":true}).to_string(), "status":"completed"}])
+        } else if index == 2 + offset {
+            json!([{"type":"function_call", "id":"fc-read", "call_id":"call-read", "name":"command", "arguments":json!({"command":"printf inspection", "background":null}).to_string(), "status":"completed"}])
+        } else if index == 4 + offset {
+            json!([{"type":"function_call", "id":"fc-status", "call_id":"call-status", "name":"command_status", "arguments":"{\"id\":null,\"wait_seconds\":null}", "status":"completed"}])
+        } else {
+            json!([{"type":"message", "id":format!("msg-{index}"), "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":"Job fixture complete."}]}])
+        }
+    }).collect();
     let (address, server) = command_server(outputs).await;
     let config = crate::test_support::write_fixture(
         &workspace.join("config.toml"),
@@ -46,39 +51,33 @@ async fn background_jobs_keep_static_prefix_append_only_input_and_resume_without
             behavior: zevria_foundation::RequestBehavior::Standard,
         }))
         .unwrap();
+    // completed() includes the post-turn EngineIdle barrier.
     completed(&mut events).await;
-    // A frontend inspection is an ordering barrier, not model input. Poll until
-    // the supervisor has recorded the terminal transition before the next tool.
+    std::fs::write(workspace.join("release-job"), "go").unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            running
-                .command_sender()
-                .send(SessionCommand::Control(
-                    zevria_session_api::ControlCommand::Command(
-                        zevria_session_api::CommandControl {
-                            request_id: "job-barrier".into(),
-                            action: zevria_session_api::CommandControlAction::Inspect { id: None },
-                        },
-                    ),
-                ))
-                .unwrap();
-            while let Some(update) = events.recv().await {
-                if let SessionUpdate::Lifecycle(SessionEvent::CommandControlResult {
-                    result: zevria_session_api::CommandControlResult::Inspected(jobs),
-                    ..
-                }) = update
-                {
-                    if jobs.iter().any(|j| j.snapshot.status.is_terminal()) {
-                        return;
-                    }
-                    break;
-                }
+        while let Some(update) = events.recv().await {
+            if matches!(
+                update,
+                SessionUpdate::Lifecycle(SessionEvent::JobContinuationChanged {
+                    mode: Some(SessionMode::Build)
+                })
+            ) {
+                return;
             }
-            tokio::task::yield_now().await;
         }
+        panic!("runtime ended before job continuation offer");
     })
     .await
     .unwrap();
+    if automatic {
+        running
+            .command_sender()
+            .send(SessionCommand::Turn(TurnCommand::ContinueAfterJobs {
+                mode: SessionMode::Build,
+            }))
+            .unwrap();
+        completed(&mut events).await;
+    }
     running
         .command_sender()
         .send(SessionCommand::Turn(TurnCommand::Submit {
@@ -89,6 +88,22 @@ async fn background_jobs_keep_static_prefix_append_only_input_and_resume_without
         .unwrap();
     completed(&mut events).await;
     running.shutdown().await.unwrap();
+    let saved = transcript::load(&path)
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item {
+            zevria_transcript::TranscriptItem::CommandJobNotice(notice) => Some(notice),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        saved.kind(),
+        if automatic {
+            zevria_foundation::CommandJobNoticeKind::Continuation
+        } else {
+            zevria_foundation::CommandJobNoticeKind::Update
+        }
+    );
     let mut resumed = start_session(&config, &workspace, SessionStart::Resume(path.clone()))
         .await
         .unwrap();
@@ -111,6 +126,7 @@ async fn background_jobs_keep_static_prefix_append_only_input_and_resume_without
         assert_eq!(request["instructions"], requests[0]["instructions"]);
         assert_eq!(request["tools"], requests[0]["tools"]);
         assert_eq!(request["prompt_cache_key"], requests[0]["prompt_cache_key"]);
+        assert!(!request["input"].to_string().contains("job updates:"));
         if index > 0 {
             assert!(
                 request["input"]
@@ -164,31 +180,50 @@ async fn background_jobs_keep_static_prefix_append_only_input_and_resume_without
             "id: {id}\nstatus: running\nnote: started in the background; use command_status to read output or wait, and command_terminate to stop it"
         )
     );
-    let read = command_result_text(&requests[3], "call-read");
+    let read = command_result_text(&requests[3 + offset], "call-read");
     assert!(read.starts_with("exit_code: 0\nduration: "));
-    assert!(read.contains("\n<stdout>\ninspection\n</stdout>\njob updates:\n"));
-    let (_, footer) = read.split_once("\njob updates:\n").unwrap();
-    assert!(footer.starts_with(&format!("{id} · exited 0 · ")));
-    assert!(footer.ends_with(" · printf cache-job"));
+    assert!(read.ends_with("\n<stdout>\ninspection\n</stdout>"));
     assert_eq!(
-        command_result_text(&requests[5], "call-read"),
-        read,
-        "resume must preserve the exact result bytes"
+        command_result_text(requests.last().unwrap(), "call-read"),
+        read
     );
-    assert!(requests[3]["input"].to_string().contains("job updates:"));
+    assert!(request_notice_text(&requests[2]).contains("<stdout>\ncache-job\n</stdout>"));
+    assert_eq!(request_notice_text(&requests[2]), saved.text());
+    assert_eq!(request_notice_text(requests.last().unwrap()), saved.text());
     assert_eq!(
-        requests[3]["input"]
-            .to_string()
-            .matches("job updates:")
+        requests.last().unwrap()["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.to_string().contains("Command job update:"))
             .count(),
         1
     );
     assert_eq!(
-        command_result_text(&requests[5], "call-status"),
+        command_result_text(requests.last().unwrap(), "call-status"),
         "No command jobs in this session. Jobs do not survive restarts or session replacement."
     );
-    let items = transcript::load(&path).unwrap();
-    assert!(format!("{items:?}").contains("StartedInBackground"));
+    let loaded = transcript::load(&path)
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item {
+            zevria_transcript::TranscriptItem::CommandJobNotice(notice) => Some(notice),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(loaded.text().as_bytes(), saved.text().as_bytes());
+}
+
+fn request_notice_text(request: &Value) -> &str {
+    request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flat_map(|content| content.iter())
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .find(|text| text.starts_with("Command job update:"))
+        .unwrap()
 }
 
 #[tokio::test]

@@ -123,6 +123,35 @@ pub(crate) fn render_plan_handoff(
     )
 }
 
+pub(crate) fn render_job_notice(
+    notice: &zevria_foundation::CommandJobNotice,
+    header: Option<NativeHeader>,
+    lines: &mut Vec<Line<'static>>,
+    wrap_width: u16,
+    selected_content: Option<usize>,
+    folded: bool,
+) -> RowRange {
+    let mut title = role_header("Background jobs finished", theme().roles.system);
+    append_native_header(&mut title, header);
+    lines.push(title);
+    let start = lines.len();
+    for line in notice.summary_lines() {
+        lines.push(Line::styled(line, Style::default().fg(theme().text.muted)));
+    }
+    if folded {
+        fold_body_rows(lines, start, wrap_width, None, None, None);
+    }
+    if selected_content == Some(0) {
+        for line in &mut lines[start..] {
+            style_selected_line(line);
+        }
+    }
+    RowRange::new(
+        wrapped_height(&lines[..start], wrap_width),
+        wrapped_height(lines, wrap_width),
+    )
+}
+
 fn append_native_header(header: &mut Line<'static>, identity: Option<NativeHeader>) {
     if let Some(identity) = identity {
         header.spans.push(Span::styled(

@@ -199,7 +199,6 @@ impl App {
 
     fn queue_admits_dispatch(&self) -> bool {
         self.pane.is_root()
-            && self.queue.len() > 0
             && !self.model.session.is_busy()
             && !matches!(
                 self.model.workflow.snapshot(),
@@ -212,7 +211,8 @@ impl App {
 
     /// Automatic dispatch waits until every event from the preceding work is reduced.
     pub(crate) fn dispatch_next_queued(&mut self) -> Option<UiAction> {
-        if !self.queue_admits_dispatch()
+        if self.queue.len() == 0
+            || !self.queue_admits_dispatch()
             || self.queue.is_paused()
             || !self.model.session.is_quiescent()
         {
@@ -224,6 +224,21 @@ impl App {
             return None;
         }
         self.dispatch_queue_head()
+    }
+
+    pub(crate) fn dispatch_job_continuation(&mut self) -> Option<UiAction> {
+        if self.queue.len() != 0
+            || !self.composer.is_empty()
+            || self.composer.is_paste_pending()
+            || !self.queue_admits_dispatch()
+        {
+            return None;
+        }
+        let TurnCommand::ContinueAfterJobs { mode } = self.model.continue_after_jobs()? else {
+            unreachable!("job continuation admission")
+        };
+        self.after_admission();
+        Some(UiAction::ContinueAfterJobs { mode })
     }
 
     fn dispatch_queue_head(&mut self) -> Option<UiAction> {
@@ -261,7 +276,7 @@ impl App {
     }
 
     pub(super) fn can_send_queued(&self) -> bool {
-        self.composer.is_blank() && self.queue_admits_dispatch()
+        self.composer.is_blank() && self.queue.len() > 0 && self.queue_admits_dispatch()
     }
 
     pub(super) fn send_queued_now(&mut self) -> Option<UiAction> {

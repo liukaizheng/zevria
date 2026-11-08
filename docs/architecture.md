@@ -278,7 +278,9 @@ backends, capture timing, trust boundaries, and persistence/privacy rules.
 Frontends send three explicit `SessionCommand` families:
 
 - `Turn(TurnCommand)`: submissions, transcript edits, skill invocations, manual
-  compaction, ensembles, versioned Plan decisions, and typed handoffs. Each
+  compaction, ensembles, versioned Plan decisions, typed handoffs, and
+  `ContinueAfterJobs { mode }`. The latter is a frontend-dispatched, engine-validated
+  Standard request, never an orchestration grant or a Plan workflow transition. Each
   dispatched command gets a monotonic `TurnId`; `TurnCommand::mode()` is total.
 - `Control(ControlCommand)`: question answers, targeted/untargeted cancellation,
   run/turn/worker-scoped Plan feedback, confirmation and optional baseline selection, and shutdown. Control
@@ -349,6 +351,10 @@ See [image input](image-input.md) for user behavior, limits, and privacy.
   accepted into local history;
 - coalesced `StreamUpdated`/`StreamCleared` state tagged with `turn_id`;
 - tagged `Intermediate` and `ToolResults` lifecycle events;
+- root-scoped, fencing `CommandJobsReported { turn_id, notice }` for passive
+  dispatch-boundary delivery and `JobContinuationStarted { turn_id, mode, notice }`
+  for accepted continuation turns. `JobContinuationChanged { mode: Option<SessionMode> }`
+  is instead frontend-only, non-persisted, non-fencing eligibility metadata;
 - tagged `TurnCompleted`, `TurnRecovered`, `TurnRejected`, `TurnFailed`, or
   `TurnCancelled` terminal events; manual compaction and non-inference Plan
   decisions retain their domain-specific completion acknowledgements;
@@ -2248,8 +2254,10 @@ Background jobs have no default deadline. `command.background_timeout_seconds`,
 when set, must be at least `command.timeout_seconds`; the total wall-clock
 budget is re-armed when a foreground job is moved to the background.
 `command.max_background_jobs` caps running background jobs (default 8); zero
-restores the foreground-only root registry and policies. At most eight finished
-background jobs are retained; completed foreground jobs are removed immediately.
+restores the foreground-only root registry and policies. Eight finished background
+jobs are normally retained; pending delivery and promised unread output pin jobs
+past that retention bound until acknowledged/read. Completed foreground jobs are
+removed immediately.
 Each job keeps bounded head/tail capture, with 16 KiB per-stream model elision
 and independent, non-consuming 8 KiB frontend tails. UTF-8 fragments at the
 running model cursor are held until complete. Capture returns structured head,
@@ -2261,7 +2269,7 @@ keeps at most 8 KiB each of head and tail at UTF-8 character boundaries, includi
 when a small capture limit retains less than either half-budget.
 
 The shell tool family (`command`, `command_status`, `command_terminate`, and
-completion footers) uses one compact model-facing renderer. Headers are
+completion notices) uses one compact model-facing renderer. Headers are
 `key: value` lines ordered as applicable: `id`, `status`, `exit_code` or `signal`,
 `duration`, then `note`. A foreground exit reports only its exit code (or Unix
 signal number and known name) and duration, not a redundant success/failure
@@ -2282,28 +2290,63 @@ Timeout, user termination, and turn cancellation retain the core
 streams, never a second status or an unavailable exit code. Tool success/error
 classification and the command-job sidecar are independent of this text.
 
-Job lists and the once-only `job updates:` footer use the same line shape:
+Job lists and completion notices use the same line shape:
 `{id} · {status phrase} · {duration} · {command preview}`. Previews collapse
 whitespace and are capped at 120 characters including a trailing `…` when cut.
 Status phrases are shared with the TUI jobs overlay and command badge, including
 `exited 0`, `killed by signal 9 (SIGKILL)`, `terminated by the agent`,
 `terminated by the user`, and `cancelled with the turn`; internal enum Debug
-names never enter these displays. Notices are drained once per finished job,
-without consuming its unread streams.
+names never enter these displays.
 
-Jobs are runtime-only and do not survive process restart or session replacement.
-Ordinary tool results persist their bytes (including once-only `job updates:`
-completion footers) plus a display-only `ToolResultDetail::CommandJob` sidecar.
-`CommandJobUpdated` and `CommandControlResult` events are frontend-only,
-non-fencing, and never persisted or injected into core model input. No job IDs,
-counts, status, or output enter instructions or tool definitions: provider prompt
-prefixes stay static and history remains append-only. Format changes affect only
-newly appended results; persisted results are never re-rendered or migrated, so
-resumed transcripts may intentionally mix old and new result formats.
+Before each eligible root model dispatch, finished model-owned jobs are delivered
+once in a typed `TranscriptItem::CommandJobNotice` under the standalone
+`zevria_command_job_notice` key. It stores version 1, Update/Continuation kind,
+structured completed/running snapshots for display, and exact model-visible text.
+That text projects as an ordinary **user-role** message: command output is data,
+not system/developer authority. Updates append after a complete tool-result batch,
+or after the first prompt and its request boundary. Delivery is disabled for
+children, maintenance and ensemble synthesis, and after `submit_plan` has been
+accepted; a Ready Plan keeps completions pending until an explicit handoff.
+
+Each job records its origin turn. A monotonic follow floor excludes origins from
+cancelled or failed turns, rejected continuations, and history discarded by an
+accepted edit. Only model-owned Exited/TimedOut/Failed jobs at or above that floor
+are followed. User/model/shutdown terminations, launch failures, and already
+reported jobs never restart work. Unfollowed completions arrive with the next
+eligible request as status-only notices and keep output unread for `command_status`.
+Followed completions include unread output in finish order using the shared
+16 KiB-per-stream renderer. A notice budgets 32 KiB of stream text (always
+including the first followed job); other jobs get a status line and
+`note: output not included; use command_status to read it`. Peek-then-acknowledge
+means failed required commits or rejected continuations consume nothing.
+
+Idle completion is engine-decided and frontend-dispatched, never an engine-created
+turn racing a pending user submission. An offer requires an idle root with no
+queued work, a writable transcript, no Plan transition for the selected mode, a
+followed pending completion, and remaining continuation allowance.
+`command.max_automatic_continuations` defaults to 3 between user turns; 0 disables
+idle continuations but not passive delivery. Any non-continuation turn resets it.
+TUI and desktop wait for EngineIdle quiescence, matching selected mode, no Ready
+Plan/review/edit or pending acceptance, an empty root composer, and (in the TUI)
+an empty follow-up queue. Newer user work wins and receives notices passively.
+ACP ignores offers, so editors never receive unsolicited turns. Acceptance
+revalidates eligibility and durably commits a Continuation notice, its Standard
+request boundary when enabled, and ordinary instruction updates before
+acknowledging output. Continuations use the selected mode's unchanged policy and
+never inherit orchestration authorization or change Plan workflow state.
+
+Jobs and pending completions are runtime-only and never restored. Ordinary tool
+results keep their display-only `ToolResultDetail::CommandJob` sidecar.
+`CommandJobUpdated` and `CommandControlResult` are frontend-only, non-fencing
+metadata. No live job IDs, counts, status, or output enter instructions or tool
+definitions: provider cacheable prefixes stay static and history remains
+append-only. Persisted notice text is replayed byte-for-byte, never re-rendered
+from snapshots. Historical tool-result footers are left untouched, not migrated.
 
 Session shutdown (`/new`, `/resume`, `/implement-fresh`, quit, or ACP close)
-closes registration before signalling the engine, joins the engine and child
+signals and joins the engine before closing job registration, joins the child
 supervisor, then terminates/drains command jobs before abandoned-history cleanup.
+Shutdown terminations therefore cannot trigger another model turn.
 Unix termination sends SIGTERM to the owned process group, waits up to two
 seconds, then sends SIGKILL; Windows kills the owned Job Object. Supervisor abort
 and registry drop also kill the process tree. Unix groups can outlive a hard

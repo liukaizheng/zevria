@@ -76,6 +76,19 @@ pub enum SessionEvent {
         trigger: CompactionTrigger,
         backend: CompactionBackend,
     },
+    /// Level-triggered root-only eligibility; never persisted or a stream fence.
+    JobContinuationChanged {
+        mode: Option<SessionMode>,
+    },
+    JobContinuationStarted {
+        turn_id: TurnId,
+        mode: SessionMode,
+        notice: CommandJobNotice,
+    },
+    CommandJobsReported {
+        turn_id: TurnId,
+        notice: CommandJobNotice,
+    },
     /// The user message has been accepted into local history and transcript
     /// persistence has been attempted.
     TurnStarted {
@@ -755,6 +768,7 @@ impl SessionEventReceiver {
             | SessionEvent::NetworkStatus { .. }
             | SessionEvent::EngineIdle
             | SessionEvent::CommandJobUpdated { .. }
+            | SessionEvent::JobContinuationChanged { .. }
             | SessionEvent::CommandControlResult { .. } => {}
             SessionEvent::AgentRunUpdated {
                 event: AgentRunEvent::ResponseDisplay { .. },
