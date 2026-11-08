@@ -154,6 +154,73 @@ fn plan_panel_emits_versioned_resolution(cx: &mut TestAppContext) {
     );
 }
 #[gpui_kit::test]
+fn restored_math_and_plan_document_and_panel_render_at_both_widths(cx: &mut TestAppContext) {
+    const PROOF: &str = include_str!("../../tests/fixtures/holder-proof.md");
+    for width in [1240., 720.] {
+        let (window, _, controller, _receiver) = setup_at_size(cx, width, 1100.);
+        controller.update(cx, |c, cx| {
+            c.model.root.conversation.restore(vec![
+                zevria_transcript::transcript::TranscriptItem::Message(Message::user(
+                    "Prove Hölder’s inequality.",
+                )),
+                zevria_transcript::transcript::TranscriptItem::Message(Message::assistant(PROOF)),
+            ]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        event(
+            &controller,
+            E::PlanStateChanged {
+                state: PlanWorkflowState::Ready {
+                    artifact: PlanArtifact {
+                        version: PlanVersion {
+                            id: PlanId::new(),
+                            revision: 1,
+                        },
+                        title: "Math plan".into(),
+                        markdown: PROOF.into(),
+                        source_turn_id: TurnId::new(1),
+                    },
+                },
+            },
+            cx,
+        );
+        let key = controller.read_with(cx, |c, _| {
+            let conversation = &c.model.root.conversation;
+            let index = conversation
+                .history()
+                .iter()
+                .position(|e| {
+                    matches!(
+                        e,
+                        zevria_presentation::conversation::HistoryEntry::PlanArtifact(_)
+                    )
+                })
+                .unwrap();
+            format!("{:?}-row-{index}", conversation.epoch())
+        });
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+                .unwrap();
+        }
+        cx.update_window(window.into(), |_, window, cx| {
+            window.within(key).click("expand", cx);
+            window.click("plan-copy", cx);
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|i| i.text()),
+                Some(PROOF.to_owned())
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+    }
+}
+#[gpui_kit::test]
 fn question_dialog_emits_answer_question(cx: &mut TestAppContext) {
     let (window, _, controller, mut receiver) = setup(cx);
     let turn_id = TurnId::new(9);

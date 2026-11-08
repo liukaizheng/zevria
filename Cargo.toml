@@ -45,6 +45,19 @@ eventsource-stream = "0.2.3"
 futures-util = "0.3.32"
 # Apache-2.0; native desktop UI kit, a macOS-only dependency of zevria-desktop.
 gpui-kit = "=0.9.0"
+# MIT; portable parser regression tests; GPUI uses the same pinned fork below.
+markdown = "=1.0.0"
+# MIT; in-process KaTeX-compatible math parsing and em-based layout (desktop only).
+ratex-parser = "=0.1.15"
+ratex-layout = "=0.1.15"
+ratex-types = "=0.1.15"
+ratex-font = "=0.1.15"
+# OFL-1.1; embedded KaTeX fonts via ratex-katex-fonts.
+ratex-katex-fonts = "=0.1.15"
+# BSD-3-Clause; direct outline rasterization, without SVG/PNG or an external process.
+tiny-skia = "=0.11.4"
+# MIT OR Apache-2.0; KaTeX font outlines and cmap coverage.
+ttf-parser = "=0.25.1"
 # MIT OR Unlicense; UI-only workspace path discovery with standard ignore rules.
 ignore = "0.4.33"
 libc = "0.2"
@@ -84,3 +97,7 @@ unicode-width = "0.2.2"
 url = "2.5"
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
 which = "8.0.5"
+
+[patch.crates-io]
+# MIT; source-faithful TeX math; provenance and maintenance in docs/markdown-parser-patch.md.
+markdown = { git = "https://github.com/liukaizheng/markdown-rs", rev = "e629e7e4370cac5cc6dac39971c77feba3e3aaf9" }

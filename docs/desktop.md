@@ -34,8 +34,8 @@ the CLI or `-p zevria-desktop` for the desktop rather than bare `cargo run`.
 **The native GUI supports macOS only.** On Linux/Windows the package builds its
 GPUI-free CLI/session model and tests, plus a stub executable that reports the
 unsupported platform and suggests the Zevria CLI. `--help`/`-h` works on every
-platform. The desktop's GPUI Kit/tracing-appender dependency declarations and
-its actions, controller, engine, launch and UI modules are macOS-gated. Native
+platform. The desktop's GPUI Kit, math-rendering and tracing-appender dependency declarations
+and its actions, controller, engine, launch and UI modules are macOS-gated. Native
 Linux/Windows builds do not need GPUI; the shared host's existing logging
 dependencies are unchanged.
 
@@ -71,7 +71,7 @@ expansions within 720 px. At a main-column width below 760 px, speaker labels
 move above the text and tool glyphs move inline. The sidebar auto-hides below a
 900 px window; **⌃⌘S** or **View → Toggle Sidebar** overrides that choice.
 
-Only macOS-bundled fonts are addressed: **SF Pro** (`.SystemUIFont`) for controls
+For prose and controls, only macOS-bundled fonts are addressed: **SF Pro** (`.SystemUIFont`) for controls
 and conversation, **Charter** for Plan documents and handoffs, and **Menlo** for
 commands, paths, code and diffs. GPUI falls back when a font is unavailable. The
 explicit type scale is 11, 12, 14, 16, 18, 21, 24 and 36 px, with Menlo's optical
@@ -80,7 +80,8 @@ explicit type scale is 11, 12, 14, 16, 18, 21, 24 and 36 px, with Menlo's optica
 
 The only ambient motion is the shared ◐◓◑◒ work glyph on the existing 250 ms
 redraw clock. **Reduce Motion** freezes it at ◐ and makes Plan-sheet opening
-instant. Icon controls have tooltips and accessible names; native controls retain
+instant. Math uses embedded KaTeX fonts with native system fallback for missing
+glyphs; see [Math](#math). Icon controls have tooltips and accessible names; native controls retain
 visible focus rings. Question and replacement sheets use a translucent scrim so
 the conversation remains visible behind the decision.
 
@@ -102,8 +103,24 @@ PNGs are written to the repository's `target/desktop-gallery/`. The 1240×840 an
 The gallery covers configuration errors, no workspace, starting, stopping,
 failed/idle/empty sessions, working prose and tool loops with an expanded native
 diff, Plan review, questions, replacement confirmation and completions. Working
-scenes also render under a generated light palette. The executable runs on the
-macOS main thread and requires a compatible Metal device. It is excluded from
+scenes also render under a generated light palette. The `math` scene restores
+the shared Hölder proof fixture at 1240×3200 and 720×3200, plus a light-palette
+1240×3200 capture. It contains all 15 inline and 11 display formulas, including
+large delimiters, boxes and an aligned derivation with a 2 mm row gap.
+
+For an opt-in, **read-only** capture of an existing session:
+
+```sh
+rtk proxy env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  ZEVRIA_DESKTOP_GALLERY_SESSION=/absolute/path/to/session.jsonl \
+  cargo test --locked -p zevria-desktop --features fixtures --test gallery
+```
+
+This adds `session-1240.png` and `session-720.png`. The gallery calls
+`zevria_transcript::transcript::load` and projects validated items without
+starting a host/provider, acquiring a lease, appending, repairing, or modifying
+the file. No session is captured unless that environment variable is set. The
+executable runs on the macOS main thread and requires a compatible Metal device. It is excluded from
 ordinary `cargo test`; the `fixtures` feature exposes only dev fixture entry
 points, not a production session mode.
 
@@ -111,6 +128,114 @@ Kit 0.9's syntect-only highlight-status type is an empty compatibility stub.
 The adapter supplies the portable status document for Kit builds that support
 it, but native diffs actually consume the mapped `success`/`danger` colors.
 No tree-sitter dependency is enabled merely to fill that stub.
+
+## Math
+
+All desktop **Markdown** views share one stable math extension registration:
+transcript prose, reasoning, Markdown tool details/notices, Plan documents and
+the Plan review panel. HTML-backed tool output, errors, plain text and startup
+screens retain their current behavior. The TUI is unchanged.
+
+### Syntax and copying
+
+- Inline `\(…\)` works in paragraphs, headings, link labels and table cells.
+  Backslashes pair with the next byte: `\\)` does not close a formula, and
+  `\\[2mm]` inside an aligned derivation stays raw TeX. Inline content can
+  continue onto the next line in the same paragraph. An unmatched opener stays
+  a Markdown character escape, rather than swallowing the rest of a message.
+- A line containing only `\[` (after up to three spaces) opens display math.
+  It can interrupt prose without a blank line and works inside lists/quotes.
+  A line ending in an unpaired `\]` closes it; TeX may precede the closer on
+  that line. An unclosed fence extends to the container/document end like an
+  unclosed code fence, and falls back to the existing code-block presentation.
+- Whole-line `\[…\]` and `$$…$$` are displays. Trailing non-whitespace declines
+  the block, so `\[1\] Smith et al.` is still ordinary Markdown. Mid-line
+  `\[…\]` remains escaped brackets, not math.
+- Single-dollar math follows Pandoc's rule: an opener must precede
+  non-whitespace; a closer must follow non-whitespace and must not precede a
+  digit. `$5 and $10` and `costs $5-$10` remain currency; `$x$, $y$` and `$5$`
+  are math. Unusual prose such as `$FOO$BAR` can still be ambiguous.
+- Existing `$$`/`$$$` fences, inline multi-dollar math, indented code, code spans,
+  and fenced code (including a `math` language label) retain their syntax.
+  A continuation line that looks like a list item can end the inline paragraph.
+
+The parser never rewrites message bytes. Every custom node's Plain and Source
+copy representations contain its exact original source, **including delimiters**,
+and its accessibility label contains the TeX. Inline math selects as one atomic
+object; display math selects as one block. Copy buttons and whole-message/Plan
+copy still use their unchanged raw payloads. Kit's ordinary clipboard Copy trims
+outer whitespace; Source-format select-all otherwise uses the original document.
+Invalid, unsupported, empty or oversized inline math shows atomic source text,
+which Kit fits to the line. Failed/unclosed displays decline the plugin and use
+Kit's existing code block. There is no implicit TeX repair.
+
+### Native rendering and limits
+
+RaTeX **0.1.15**, a pure-Rust KaTeX port, parses and lays out math in-process.
+The parser plugin runs parse → layout → validation → display-list conversion
+inside `catch_unwind`, after a TeX size check. Kit runs document parsing on its
+background task, except small (≤4 KiB) full replacements that may parse
+synchronously. A 1,024-entry typeset memo caches successes **and failures**,
+including repeated inline probes and streaming tail reparses.
+
+Math uses 1.21× the surrounding font size, an alphabetic inline baseline, and
+the effective inherited text color (including links, headings and muted text).
+RaTeX's default black means inherit; explicit TeX colors/backgrounds are honored.
+A private alpha sentinel on the base ink distinguishes inheritance from explicit
+opaque black, so `\color{black}` and `\colorbox{black}` stay black on dark themes.
+Inline advances use layout metrics, not ink bounds; overhanging ink adds no
+spacing. Inline math wider than 480 logical pixels scales down. Displays have
+small vertical padding, center within the column, and scroll horizontally when
+wider, without converting vertical wheel input into horizontal motion.
+
+At paint time, tiny-skia rasterizes the embedded KaTeX TTF outlines, rules,
+rectangles and paths directly into a device-resolution, transparent, straight
+BGRA `RenderImage`. GPUI paints CJK, emoji and missing KaTeX glyphs at RaTeX's
+positions through native text fallback; no system font files are copied into
+memory. No webview, Node.js, worker process, network, TeX installation, SVG atlas
+or PNG encoding/decoding is involved. Offscreen measurement creates no rasters.
+The app-owned LRU keys formula/mode, em, device scale and color, verifies full
+TeX on a hit, and calls `App::drop_image` when evicting an image.
+
+Named, tested budgets:
+
+| Resource | Limit |
+| --- | --- |
+| TeX source per formula | 16 KiB |
+| Formula layout | 200 em wide, 100 em total height |
+| One raster | 4,096 device pixels per side, 4,000,000 pixels total |
+| Decoded raster LRU | 32 MiB or 1,024 entries, whichever comes first |
+| Typeset memo | 1,024 entries |
+| RaTeX built-in guards | 1,000 macro expansions, nesting 32, 65,536 output items |
+
+Device scales or extreme overhangs that exceed the raster budget show source
+rather than leaving a blank box. CPU pixels and GPUI atlas tiles are released
+on eviction. Raster antialiasing is grayscale rather than subpixel; fallback
+Unicode spacing uses RaTeX's approximate metrics. Very large working sets can
+thrash the bounded cache. Initial typesetting/rasterization is synchronous but
+bounded; the planning prototype measured about 1 ms warm to typeset the complete
+26-formula proof, and about 7 ms to rasterize it at DPR 2 / 19.4 px em. Those are
+prototype observations, not an end-to-end real-provider latency guarantee.
+Formula contents are never logged by this module.
+
+### Parser maintenance
+
+Markdown-rs 1.0.0 comes from `liukaizheng/markdown-rs`, pinned to Git commit
+`e629e7e4370cac5cc6dac39971c77feba3e3aaf9` through root `[patch.crates-io]`.
+There is no vendored source or local-path override. Two isolated constructs add
+source-faithful TeX math, and the existing raw-text tokenizer handles dollar
+policy and failed-scan memos. The original `math_text`/`math_flow` switches gate
+the patch; no public options, serde or AST formats change. `to_mdast` and
+`to_html` are unmodified, and math-disabled parsing retains upstream behavior.
+
+See [the provenance and maintenance ledger](markdown-parser-patch.md) for the
+exact source revision, syntax, license and update procedure. Application-specific
+proof/parser tests live in `crates/desktop/tests/markdown_math.rs` and run in the
+existing CI on all platforms without GPUI. The fork maintains its own generic
+fixtures and locked workspace CI; its historic SWC/Serde test lock does not
+constrain Zevria's Serde versions or add SWC to this workspace. Same-line display
+candidates can retract during streaming; the ledger records that incremental
+parser boundary separately from the fully covered proof fixture.
 
 ## Included controls
 
@@ -169,6 +294,7 @@ GPUI window + native components
 | TUI `App` / `SessionViews` | Terminal editor/recall drafts, selection, viewport, folds, overlays and existing worker-review routing. `App` applies `Reduction` hooks instead of interpreting lifecycle events again. |
 | Desktop `WorkspaceModel` | GPUI-free root/child/question routing and command metadata; each pane is the shared `SessionModel`. |
 | Desktop `SessionController` | Starting/live/stopping/failed ownership, replacement, event/exit tasks, commands, desktop drafts, session catalog and graceful quit. |
+| Desktop `ui/math/` | Source-faithful math plugins, bounded in-process em layout, direct KaTeX rasterization and evictable images; no provider/persistence dependencies. |
 | Desktop `ui/` | Native retained Markdown/plain text, gutter-led tool/diff/image rows, virtualized list invalidation, composer, sidebar, Plan/question surfaces and status. |
 
 `zevria-host` was previously the workspace's `zevria-app` package; it is not the
@@ -178,7 +304,11 @@ production dependency, including target-specific dependencies. The manifest-boun
 tests discover all `crates/*` automatically and enforce these rules. Neither the
 host nor desktop has a Ratatui/Crossterm dependency path.
 
-The CLI's `cargo build -p zevria` graph contains no GPUI. macOS `--workspace`
+The CLI's `cargo build -p zevria` graph contains no GPUI or RaTeX. Neither does
+the desktop's non-macOS compilation graph. Math and all of its runtime
+dependencies are macOS-only. The desktop's test-only Markdown dependency allows
+portable parser regressions without adding a renderer to other targets.
+macOS `--workspace`
 builds do include GPUI and unify additive features in shared dependencies, such
 as extra image codecs and regex support. Cross-platform workspace CI includes
 the desktop; CLI release check/test jobs exclude `zevria-desktop` to retain the
@@ -242,23 +372,29 @@ slow external credential commands can therefore delay close.
 Run from the workspace root on macOS:
 
 ```sh
-cargo fmt --all -- --check
-cargo check --locked --workspace --all-targets
-cargo build --locked -p zevria
-cargo test --locked --workspace
-cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics
-cargo clippy --locked -p zevria-desktop --all-targets --no-deps -- -D warnings
-cargo build --locked --release -p zevria-desktop
-target/release/zevria-desktop --help
-cargo tree --locked -p zevria-desktop -i ratatui
-cargo tree --locked -p zevria-desktop -i crossterm
-cargo tree --locked -p zevria --prefix none | grep -ci gpui
-cargo tree --locked -p zevria-desktop -e features -i rustls
+rtk cargo fmt --all -- --check
+rtk cargo check --locked --workspace --all-targets
+rtk cargo build --locked -p zevria
+rtk cargo test --locked --workspace
+rtk cargo test --locked -p zevria-desktop --test markdown_math
+rtk cargo test --locked -p zevria-desktop
+rtk cargo test --locked -p zevria-desktop --features fixtures --test gallery
+rtk cargo test --locked -p zevria --test crate_boundaries
+rtk cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics
+rtk cargo clippy --locked -p zevria-desktop --all-targets --no-deps -- -D warnings
+rtk cargo build --locked --release -p zevria-desktop
+rtk proxy target/release/zevria-desktop --help
+rtk cargo tree --locked -p zevria-desktop -i ratatui
+rtk cargo tree --locked -p zevria-desktop -i crossterm
+rtk proxy cargo tree --locked -p zevria --prefix none | rg -ci '^(gpui|ratex)'
+rtk proxy cargo tree --locked -p zevria-desktop --target x86_64-unknown-linux-gnu --prefix none | rg -ci '^(gpui|ratex)'
+rtk proxy cargo tree --locked -p zevria-desktop --target x86_64-pc-windows-msvc --prefix none | rg -ci '^(gpui|ratex)'
+rtk cargo tree --locked -p zevria-desktop -e features -i rustls
 ```
 
 The inverse terminal trees should report that the packages are absent from the
-desktop graph; Cargo's nonzero absent-package result is expected. The CLI GPUI
-count must be `0`. Native rustls must enable only `aws-lc-rs`, not `ring`; recheck
+desktop graph; Cargo's nonzero absent-package result is expected. The CLI and
+non-macOS desktop GPUI/RaTeX counts must be `0` (`rg` returns 1 for no matches). Native rustls must enable only `aws-lc-rs`, not `ring`; recheck
 this after any GPUI Kit bump because enabling both providers can make the
 WebSocket TLS builder panic. `ring` in the lockfile alone is not a violation:
 the wasm-only `gpui-pre-reqwest` dependency can use it.
@@ -435,6 +571,92 @@ a redundant file summary once the native diff header is visible. PNG generation
 and automated text/layout checks are **not human visual acceptance**; the native
 window interactions and real-provider checklist below remain manual.
 
+### Native math validation before Git migration (2026-11-08, local CST)
+
+The original vendored implementation was validated on native macOS arm64 with
+the low-disk Cargo settings above. These historical results predate replacing
+the workspace parser member with the pinned Git dependency; the parser tests
+now live in the portable desktop integration target:
+
+| Check | Result |
+| --- | --- |
+| Workspace fmt / locked all-target check | Passed |
+| `cargo test --locked --workspace` | **2,724 passed, 0 failed, 16 ignored**, 62 suites; 11 ignored examples are from the newly vendored upstream parser |
+| `cargo test --locked -p markdown` | **83 passed, 11 ignored** (52 upstream unit tests, 9 math contract/streaming tests, 22 doctests) |
+| Published/patched parser comparison | All 14 off-switch golden cases and 45 tracked Markdown documents match upstream mdast in both math modes |
+| `cargo test --locked -p zevria-desktop` | **63 passed**; includes 19 math tests, native select-all/copy, streaming, measurement without rasterization, and restored/Plan views at both widths |
+| Desktop Clippy, all targets, `-D warnings` | Passed with default features and with `fixtures` |
+| Release desktop build / `--help` | Passed |
+| `crate_boundaries` | **3 passed**; first-party package inventory unchanged |
+| Five default-feature provider/core prefix gates | All passed; independently discovered nonempty counts **1 / 2 / 1 / 1 / 1** |
+| Cache-diagnostics provider / host tests | **271 passed, 2 ignored** / **122 passed** |
+| CLI / Linux-desktop / Windows-desktop production dependency trees | **0 GPUI or RaTeX nodes** in each |
+| Real Metal gallery, including opt-in source session | **31 PNGs**; all three math and both session captures have the full proof through its final paragraph |
+
+The gallery's automated OCR/geometry sanity check caught zero-depth inline math
+falling back to source when GPUI rounded its box below the explicit baseline.
+Rounding the box height outward fixed it; the native fixture test now requires
+all **26** formulas to allocate painted raster entries, not merely some of them.
+Corrected captures have no raw TeX artifacts. Explicit black/black colorboxes,
+straight BGRA tinting, representative ink signatures, inclusive resource limits,
+Unicode fallback, LRU eviction and the typeset memo are covered by unit tests.
+
+The source JSONL was read-only throughout, and its SHA-256 remains
+`de8a2c0ebc0463d5ec59464db39c9f6de5400e1c6df0679de63baf88d71fe289`.
+The checked-in fixture is byte-identical to the specified assistant output text;
+no replay records or reasoning were copied. Parser compilers are byte-identical
+to the published archive; the source patch is eight files (+497 / −6 lines).
+
+**Not performed:** human visual approval of the PNGs, interactive real-provider
+GUI scrolling/drag selection/resizing/sidebar/Plan acceptance, and native
+Linux/Windows compilation. Dependency trees were checked for those platforms;
+the existing CI remains responsible for cross-platform builds. Automated native
+copy/selection and headless rendering tests are not a substitute for that manual
+acceptance. No prompts, tool declarations/order, replay/persistence code or TUI
+implementation changed.
+
+### Pinned Git parser validation (2026-11-08, local CST)
+
+The parser patch is published on `liukaizheng/markdown-rs` **main**, commit
+`e629e7e4370cac5cc6dac39971c77feba3e3aaf9`, and root Cargo metadata/lockfile select
+that exact Git source. The vendored tree is removed. No dependency versions
+changed: only the Markdown source record and desktop's direct test dependency
+changed in the lockfile. Zevria still uses Serde 1.0.228, with no SWC/test-tool
+leakage from the fork. Its complete upstream library manifest and both parser
+compilers remain byte-identical to the 1.0.0 upstream commit.
+
+| Check against the published Git source | Result |
+| --- | --- |
+| Workspace fmt / locked all-target check | Passed |
+| Workspace tests | **2,650 passed, 0 failed, 5 ignored**, 60 suites |
+| Portable `markdown_math` integration target | **9 passed**, including the complete 15-inline / 11-display proof and incremental boundaries |
+| Complete desktop package | **72 passed** |
+| Desktop Clippy, all targets, `-D warnings` | Passed with default features and with `fixtures` |
+| Release desktop build / `--help` | Passed |
+| `crate_boundaries` | **3 passed** |
+| Five default-feature provider/core prefix gates | All passed; discovered counts **1 / 2 / 1 / 1 / 1**, none empty |
+| Cache-diagnostics provider / host | **271 passed, 2 ignored** / **122 passed** |
+| CLI / Linux-desktop / Windows-desktop production trees | **0 GPUI or RaTeX nodes** in each |
+| Metal gallery, including read-only opt-in session | **31 PNGs regenerated** |
+| Fork's own local workspace validation | **207 passed, 11 ignored**; fmt and Clippy passed (existing upstream style warnings remain) |
+
+The lower workspace test/ignore count reflects removing the third-party parser
+as a workspace member; its upstream suite now runs in the fork. All nine
+application-specific parser regressions remain in Zevria's portable desktop
+test target. Validation used `--offline`/`--locked` and the low-disk settings;
+an isolated Cargo home under `target/` avoided editor-owned shared-cache locks,
+without changing global configuration or interrupting those processes.
+
+The source session acquired newer appended records during this work. Its
+original **six-record, 56,254-byte** snapshot is still an exact prefix with
+SHA-256 `de8a2c0ebc0463d5ec59464db39c9f6de5400e1c6df0679de63baf88d71fe289`;
+the specified proof output and checked-in fixture remain byte-identical. The
+newer records were preserved, not truncated or rewritten to restore the old
+whole-file hash. No application session data or local paths were published to
+the fork, and Zevria's unrelated working-tree implementation changes remain
+uncommitted. Human visual/manual GUI acceptance and native Linux/Windows builds
+remain outside this local validation, as noted above.
+
 ## Manual acceptance (not performed)
 
 Automated headless tests and the local SSE fixture **do not constitute a manual
@@ -453,6 +675,10 @@ release:
 - [ ] Resume from the sidebar and `--continue` (including no prior root).
 - [ ] Close/Cmd-Q while a turn is active, then resume cleanly.
 - [ ] Scroll away during streaming, expand diffs/reasoning, copy input/output.
+- [ ] Open the Hölder-proof session from the sidebar; scroll, select/Cmd-A/copy,
+  drag across prose and atomic formulas, resize to compact, and check the Plan
+  panel. Inspect math baselines, SF Pro/Charter sizing, display centering,
+  aligned 2 mm row gaps, boxes, large delimiters and narrow horizontal scrolling.
 
 No external provider credentials were exercised for this acceptance checklist.
 
@@ -477,6 +703,10 @@ No external provider credentials were exercised for this acceptance checklist.
 
 ## Explicit limitations
 
+- Math is KaTeX-compatible, not a TeX engine: unsupported commands show source,
+  not an approximation. Native math/gallery require macOS and Metal. Raster
+  overhang, device dimensions and caches have the budgets listed above; Unicode
+  fallback metrics and grayscale antialiasing can differ from surrounding text.
 - No live ensemble-worker panes or worker confirmation/review/abandon controls.
   `/ensemble-plan` and `/ensemble-review` are disabled. Restored unfinished Plan
   ensembles can be observed through root rows and cancelled, but confirmation

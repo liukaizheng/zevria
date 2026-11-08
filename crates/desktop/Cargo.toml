@@ -34,9 +34,18 @@ tracing = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-kit = { workspace = true, features = ["syntect"] }
 tracing-appender = { workspace = true }
+ratex-parser = { workspace = true }
+ratex-layout = { workspace = true }
+ratex-types = { workspace = true }
+ratex-font = { workspace = true }
+ratex-katex-fonts = { workspace = true }
+tiny-skia = { workspace = true }
+ttf-parser = { workspace = true }
+image = { workspace = true }
 
 [dev-dependencies]
 image = { workspace = true }
+markdown = { workspace = true }
 zevria-host = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 

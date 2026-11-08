@@ -51,6 +51,8 @@ mod native {
         Question,
         Confirm,
         Completion,
+        Math,
+        Session,
     }
     impl Scene {
         fn name(self) -> &'static str {
@@ -67,6 +69,8 @@ mod native {
                 Self::Question => "question",
                 Self::Confirm => "replace-confirmation",
                 Self::Completion => "completion",
+                Self::Math => "math",
+                Self::Session => "session",
             }
         }
     }
@@ -98,6 +102,7 @@ mod native {
                 capture(
                     scene,
                     width,
+                    840.,
                     zevria_theme::ZEVRIA_GRAPHITE,
                     &directory.join(format!("{}-{}.png", scene.name(), width as u32)),
                 )?;
@@ -105,10 +110,36 @@ mod native {
             capture(
                 Scene::Working,
                 width,
+                840.,
                 light,
                 &directory.join(format!("working-light-{}.png", width as u32)),
             )?;
         }
+        for width in [1240., 720.] {
+            capture(
+                Scene::Math,
+                width,
+                3200.,
+                zevria_theme::ZEVRIA_GRAPHITE,
+                &directory.join(format!("math-{}.png", width as u32)),
+            )?;
+            if std::env::var_os("ZEVRIA_DESKTOP_GALLERY_SESSION").is_some() {
+                capture(
+                    Scene::Session,
+                    width,
+                    3200.,
+                    zevria_theme::ZEVRIA_GRAPHITE,
+                    &directory.join(format!("session-{}.png", width as u32)),
+                )?;
+            }
+        }
+        capture(
+            Scene::Math,
+            1240.,
+            3200.,
+            light,
+            &directory.join("math-light-1240.png"),
+        )?;
         println!(
             "Desktop gallery: {} (logical viewports at native 2× scale)",
             directory.display()
@@ -128,9 +159,22 @@ mod native {
     fn capture(
         scene: Scene,
         width: f32,
+        height: f32,
         tokens: zevria_theme::ZevriaTheme,
         output: &Path,
     ) -> anyhow::Result<()> {
+        // File::open through the transcript projection, never a host/resume,
+        // writer, provider, lease, or repair path. Load before entering GPUI.
+        let restored = if scene == Scene::Session {
+            let path = std::env::var_os("ZEVRIA_DESKTOP_GALLERY_SESSION").ok_or_else(|| {
+                anyhow::anyhow!("session scene requires ZEVRIA_DESKTOP_GALLERY_SESSION")
+            })?;
+            let items = zevria_transcript::transcript::load(Path::new(&path))?;
+            let replay = zevria_transcript::validate_session_replay(&items)?;
+            Some((items, replay))
+        } else {
+            None
+        };
         let mut cx = HeadlessAppContext::with_platform(
             gpui_kit::platform::current_platform(true).text_system(),
             Arc::new(AppAssets),
@@ -158,6 +202,23 @@ mod native {
                 }
                 c
             });
+            if let Some((items, replay)) = restored {
+                controller.update(cx, |c, cx| {
+                    c.model.root.restore_transcript(items);
+                    c.model.root.apply_plan_snapshot(replay.plan);
+                    c.model.root.apply_selected_mode(replay.instructions.persisted_mode().unwrap_or_default());
+                    cx.notify();
+                });
+            }
+            if scene == Scene::Math {
+                controller.update(cx, |c, cx| {
+                    c.model.root.conversation.restore(vec![
+                        zevria_transcript::transcript::TranscriptItem::Message(Message::user("Prove Hölder’s inequality using Young’s inequality and normalization.")),
+                        zevria_transcript::transcript::TranscriptItem::Message(Message::assistant(include_str!("fixtures/holder-proof.md"))),
+                    ]);
+                    cx.notify();
+                });
+            }
             if matches!(scene,Scene::Working | Scene::Question | Scene::Confirm) { working(&controller,cx); }
             if scene == Scene::Plan {
                 controller.update(cx, |c,cx| {
@@ -184,7 +245,7 @@ mod native {
             }
             if scene == Scene::Completion { controller.update(cx, |c,cx| c.edit_draft("/".into(),cx)); }
             let (window,_view) = gpui_kit::open_window(WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Default::default(),size: size(px(width),px(840.)) })),
+                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Default::default(),size: size(px(width),px(height)) })),
                 focus: false,show: false,..gpui_kit::component::TitleBar::window_options()
             },cx,|window,cx| cx.new(|cx| DesktopWindow::new(controller.clone(),window,cx)))?;
             Ok((window,controller))

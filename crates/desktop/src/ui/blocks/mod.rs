@@ -1,7 +1,7 @@
 //! Retained semantic log blocks. They never infer or mutate engine semantics.
 mod tools;
 use super::{
-    style,
+    math, style,
     theme::{palette, tones},
 };
 use crate::controller::SessionController;
@@ -663,6 +663,7 @@ impl BlockView {
     }
     fn rich_text(&self, document: bool, cx: &App) -> TextView {
         TextView::new(&self.text)
+            .markdown_extensions(math::extensions())
             .style(style::markdown(cx, document))
             .scrollable(false)
             .font_family(if document {

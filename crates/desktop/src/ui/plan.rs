@@ -1,5 +1,5 @@
 use super::{
-    style,
+    math, style,
     theme::{palette, tones},
     window::DesktopWindow,
 };
@@ -93,6 +93,7 @@ impl DesktopWindow {
                     .pb(px(24.))
                     .child(
                         TextView::new(text)
+                            .markdown_extensions(math::extensions())
                             .size_full()
                             .style(style::markdown(cx, true))
                             .font_family(style::DOCUMENT_FONT)

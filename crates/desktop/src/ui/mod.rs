@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod blocks;
 pub mod composer;
+pub mod math;
 pub mod plan;
 pub mod question;
 pub mod rows;
