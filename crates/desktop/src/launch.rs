@@ -3,7 +3,7 @@ use crate::{
     cli::Cli,
     controller::SessionController,
     engine::{EngineRuntime, LOG_FILE, LogGuard},
-    ui::{theme, window::DesktopWindow},
+    ui::{assets::AppAssets, theme, window::DesktopWindow},
 };
 use gpui_kit::{AppContext as _, *};
 
@@ -11,7 +11,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     let workspace = cli.workspace()?;
     let mut config = zevria_host::Config::load().map_err(|e| format!("{e:#}"));
     let mut guard = None;
-    let mut tokens = zevria_theme::ZEVRIA_DARK;
+    let mut tokens = zevria_theme::ZEVRIA_GRAPHITE;
     if let Ok(loaded) = &config {
         match zevria_foundation::logging::init_named(loaded.log(), LOG_FILE).and_then(|log| {
             guard = Some(log);
@@ -23,7 +23,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     }
     let runtime = EngineRuntime::new()?;
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(AppAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
             gpui_kit::init(cx);
@@ -46,9 +46,11 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 ))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Zevria".into()),
-                    ..Default::default()
+                    traffic_light_position: Some(point(px(16.), px(13.))),
+                    ..gpui_kit::component::TitleBar::title_bar_options()
                 }),
-                ..Default::default()
+                window_min_size: Some(size(px(720.), px(520.))),
+                ..gpui_kit::component::TitleBar::window_options()
             };
             match gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| DesktopWindow::new(controller.clone(), window, cx))

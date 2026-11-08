@@ -3,6 +3,16 @@ name = "zevria-desktop"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Opt-in, provider-free controller fixtures for the native screenshot gallery.
+fixtures = []
+
+[[test]]
+name = "gallery"
+harness = false
+test = false
+required-features = ["fixtures"]
+
 [dependencies]
 zevria-host = { workspace = true }
 zevria-presentation = { workspace = true }
@@ -26,6 +36,7 @@ gpui-kit = { workspace = true, features = ["syntect"] }
 tracing-appender = { workspace = true }
 
 [dev-dependencies]
+image = { workspace = true }
 zevria-host = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 

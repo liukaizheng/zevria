@@ -11011,6 +11011,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "image",
  "rig-core",
  "serde_json",
  "tempfile",

@@ -1,11 +1,18 @@
-use super::{theme::palette, transcript::TranscriptView};
+use super::{
+    style,
+    theme::{palette, tones},
+    transcript::TranscriptView,
+};
 use crate::{
     actions,
     controller::{Phase, SessionController, SessionRequest},
 };
 use gpui_kit::component::{
+    IconName, Sizable, TitleBar,
+    button::{Button, ButtonVariants},
     input::{InputEvent, TextareaState},
     text::TextViewState,
+    tooltip::Tooltip,
 };
 use gpui_kit::{prelude::*, *};
 use std::path::PathBuf;
@@ -18,14 +25,19 @@ pub(super) enum Replacement {
 pub struct DesktopWindow {
     pub controller: Entity<SessionController>,
     pub(super) composer: Entity<TextareaState>,
+    composer_mode: zevria_foundation::SessionMode,
     pub(super) transcript: Entity<TranscriptView>,
     pub(super) plan: Option<(zevria_workflow::PlanVersion, Entity<TextViewState>)>,
+    pub(super) screen_error: Option<(String, Entity<TextViewState>)>,
     pub(super) question_id: String,
     pub(super) question_inputs: Vec<Entity<TextareaState>>,
     pub(super) question_subscriptions: Vec<Subscription>,
     pub(super) pending_replace: Option<Replacement>,
     pub(super) completion_dismissed: Option<(String, usize)>,
     pub(super) completion_selected: usize,
+    pub(super) sidebar_override: Option<bool>,
+    pub(super) compact: bool,
+    pub(super) plan_width: f32,
     picker: Option<Task<()>>,
     was_live: bool,
     _input: Subscription,
@@ -39,7 +51,8 @@ impl DesktopWindow {
     ) -> Self {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(2, 8)
+                .auto_grow(2, 10)
+                .placeholder("Ask Zevria to make a change")
                 .submit_on_enter(true)
         });
         let input = cx.subscribe_in(
@@ -96,14 +109,19 @@ impl DesktopWindow {
         let mut this = Self {
             controller,
             composer,
+            composer_mode: zevria_foundation::SessionMode::Build,
             transcript,
             plan: None,
+            screen_error: None,
             question_id: String::new(),
             question_inputs: Vec::new(),
             question_subscriptions: Vec::new(),
             pending_replace: None,
             completion_dismissed: None,
             completion_selected: 0,
+            sidebar_override: None,
+            compact: false,
+            plan_width: 400.,
             picker: None,
             was_live: false,
             _input: input,
@@ -115,6 +133,7 @@ impl DesktopWindow {
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let controller = self.controller.read(cx);
         let draft = controller.draft.clone();
+        let mode = controller.model.root.next_mode();
         let live = controller.phase == Phase::Live;
         let plan = controller
             .model
@@ -122,12 +141,33 @@ impl DesktopWindow {
             .workflow
             .dialog_artifact()
             .map(|a| (a.version, a.markdown.clone()));
+        let screen_error = controller
+            .config_error
+            .clone()
+            .or_else(|| match &controller.phase {
+                Phase::Failed(error) => Some(error.clone()),
+                _ => None,
+            });
         let question = controller.model.question.as_ref().map(|q| {
             (
                 q.request.id.to_string(),
                 q.answers.iter().map(|a| a.text.clone()).collect::<Vec<_>>(),
             )
         });
+        if self.composer_mode != mode {
+            self.composer_mode = mode;
+            self.composer.update(cx, |input, cx| {
+                input.set_placeholder(
+                    if mode == zevria_foundation::SessionMode::Build {
+                        "Ask Zevria to make a change"
+                    } else {
+                        "Describe what Zevria should plan"
+                    },
+                    window,
+                    cx,
+                )
+            });
+        }
         if self.composer.read(cx).value().as_ref() != draft {
             self.composer.update(cx, |input, cx| {
                 let end = draft.len();
@@ -147,6 +187,25 @@ impl DesktopWindow {
                 .is_none_or(|(current, _)| *current != version)
         {
             self.plan = Some((version, cx.new(|cx| TextViewState::markdown(&markdown, cx))));
+        }
+        if let Some(error) = screen_error {
+            if self
+                .screen_error
+                .as_ref()
+                .is_none_or(|(current, _)| current != &error)
+            {
+                let html = format!(
+                    "<p>{}</p>",
+                    error
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('\n', "<br>")
+                );
+                self.screen_error = Some((error, cx.new(|cx| TextViewState::html(&html, cx))));
+            }
+        } else {
+            self.screen_error = None;
         }
         self.sync_question(question, window, cx);
     }
@@ -202,13 +261,18 @@ impl DesktopWindow {
             }
             Ok(Ok(None)) => {}
             error => {
+                let error = match error {
+                    Ok(Err(error)) => format!("{error:#}"),
+                    Err(error) => error.to_string(),
+                    Ok(Ok(_)) => return,
+                };
                 let _ = owner.update(cx, |this, cx| {
                     this.controller.update(cx, |controller, cx| {
                         controller
                             .model
                             .root
                             .conversation
-                            .push_error(format!("Folder picker failed: {error:?}"));
+                            .push_error(format!("Couldn't open the folder picker: {error}"));
                         cx.notify();
                     });
                 });
@@ -244,9 +308,151 @@ impl DesktopWindow {
         self.controller.update(cx, |this, cx| this.cancel(cx));
     }
 }
+impl DesktopWindow {
+    pub(super) fn sidebar_visible(&self, width: f32) -> bool {
+        self.sidebar_override.unwrap_or(width >= 900.)
+    }
+    fn title_strip(&self, visible: bool, cx: &mut Context<Self>) -> AnyElement {
+        let t = palette(cx);
+        let tone = tones(cx);
+        let path = self
+            .controller
+            .read(cx)
+            .workspace
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let mut main = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(16.))
+            .bg(t.surfaces.canvas)
+            .border_b_1()
+            .border_color(tone.hairline);
+        let model = &self.controller.read(cx).model;
+        if let Some(child) = model
+            .selected_child
+            .as_ref()
+            .and_then(|id| model.children.iter().find(|c| &c.id == id))
+        {
+            main = main
+                .child(
+                    Button::new("back-to-root")
+                        .ghost()
+                        .small()
+                        .label("Conversation")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.controller.update(cx, |this, cx| {
+                                this.model.selected_child = None;
+                                cx.notify();
+                            })
+                        })),
+                )
+                .child(style::label().text_color(t.text.muted).child("/"))
+                .child(div().min_w_0().truncate().text_size(px(14.)).child(format!(
+                    "{}: {}",
+                    style::kind_label(child.kind),
+                    child.title
+                )))
+                .child(style::tag("Read-only", t.text.secondary, cx));
+        } else {
+            main = main.child(
+                div()
+                    .id("workspace-title")
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .tooltip(move |w, cx| Tooltip::new(path.clone()).build(w, cx))
+                    .child(self.workspace_name(cx)),
+            );
+        }
+        main = main.child(div().flex_1());
+        if model.root.workflow.submitted_artifact().is_some()
+            && model.root.workflow.dialog().is_none()
+        {
+            main = main.child(
+                Button::new("review-plan")
+                    .ghost()
+                    .small()
+                    .child(div().size(px(5.)).rounded_full().bg(t.workflow.plan))
+                    .label("Review plan")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.controller.update(cx, |this, cx| {
+                            this.model.root.workflow.open_review();
+                            cx.notify();
+                        })
+                    })),
+            );
+        }
+        TitleBar::new()
+            .h(px(style::TITLE))
+            .pl_0()
+            .border_b_0()
+            .bg(t.surfaces.canvas)
+            .child(
+                div()
+                    .w(px(if visible { style::SIDEBAR } else { 120. }))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .bg(if visible {
+                        t.surfaces.panel
+                    } else {
+                        t.surfaces.canvas
+                    })
+                    .when(visible, |d| d.border_r_1().border_color(tone.hairline))
+                    .child(div().w(px(80.)).flex_shrink_0())
+                    .child(
+                        style::icon_button(
+                            "toggle-sidebar",
+                            IconName::PanelLeft,
+                            if visible {
+                                "Hide sidebar ⌃⌘S"
+                            } else {
+                                "Show sidebar ⌃⌘S"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.sidebar_override = Some(
+                                !this.sidebar_visible(f32::from(window.viewport_size().width)),
+                            );
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(main)
+            .into_any_element()
+    }
+}
 impl Render for DesktopWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = palette(cx);
+        let width = f32::from(window.viewport_size().width);
+        let visible = self.sidebar_visible(width);
+        self.plan_width = (width * 0.36).clamp(400., 560.);
+        let plan_open = self
+            .controller
+            .read(cx)
+            .model
+            .root
+            .workflow
+            .dialog()
+            .is_some();
+        let compact = width
+            - if visible { style::SIDEBAR } else { 0. }
+            - if plan_open { self.plan_width } else { 0. }
+            < 760.;
+        if compact != self.compact {
+            self.compact = compact;
+            self.transcript
+                .update(cx, |view, cx| view.set_compact(compact, cx));
+        }
         let mut root = div()
             .id("zevria-desktop")
             .key_context(if self.completions(cx).is_empty() {
@@ -269,6 +475,11 @@ impl Render for DesktopWindow {
             .on_action(cx.listener(|this, _: &actions::NewSession, _, cx| {
                 this.request_replace(Replacement::New, cx)
             }))
+            .on_action(cx.listener(|this, _: &actions::ToggleSidebar, window, cx| {
+                this.sidebar_override =
+                    Some(!this.sidebar_visible(f32::from(window.viewport_size().width)));
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| this.cancel(cx)))
             .on_action(cx.listener(|this, _: &actions::Submit, window, cx| this.submit(window, cx)))
             .on_action(cx.listener(|this, _: &actions::Complete, window, cx| {
@@ -283,57 +494,30 @@ impl Render for DesktopWindow {
                     .min(this.completions(cx).len().saturating_sub(1));
                 cx.notify();
             }));
+        root = root.child(self.title_strip(visible, cx));
         if let Some(screen) = self.screen(cx) {
-            root = root.child(screen);
+            root = root.child(div().flex_1().min_h_0().child(screen));
         } else {
-            let mut center = div().flex_1().min_w_0().h_full().flex().flex_col();
-            let workspace = &self.controller.read(cx).model;
-            if let Some(child) = workspace
-                .selected_child
-                .as_ref()
-                .and_then(|id| workspace.children.iter().find(|child| &child.id == id))
-            {
-                let title = format!(
-                    "{} · {} · {}",
-                    child.kind,
-                    child.title,
-                    child.workspace.as_deref().unwrap_or("read-only inspection")
-                );
-                center = center.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .p_3()
-                        .border_b_1()
-                        .border_color(t.surfaces.border)
-                        .child(
-                            gpui_kit::component::button::Button::new("back-to-root")
-                                .label("← Conversation")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.controller.update(cx, |this, cx| {
-                                        this.model.selected_child = None;
-                                        cx.notify();
-                                    })
-                                })),
-                        )
-                        .child(title),
-                );
-            }
-            center = center.child(div().flex_1().min_h_0().child(self.transcript.clone()));
+            let mut center = div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(self.transcript.clone()));
             if self.controller.read(cx).model.selected_child.is_none() {
                 center = center.child(self.composer_view(cx));
             }
-            let mut body = div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .child(self.sidebar(cx))
-                .child(center);
+            center = center.child(self.status_bar(cx));
+            let mut body = div().flex_1().min_h_0().flex();
+            if visible {
+                body = body.child(self.sidebar(cx));
+            }
+            body = body.child(center);
             if let Some(plan) = self.plan_panel(cx) {
                 body = body.child(plan);
             }
-            root = root.child(body).child(self.status_bar(cx));
+            root = root.child(body);
         }
         if let Some(question) = self.question_dialog(window, cx) {
             root = root.child(question);

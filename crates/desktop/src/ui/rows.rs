@@ -5,9 +5,20 @@ use std::{
     hash::{Hash, Hasher},
     ops::Range,
 };
-use zevria_presentation::conversation::HistoryEntry;
-pub fn fingerprint(entry: &HistoryEntry) -> u64 {
+use zevria_presentation::{blocks::NativeHeader, conversation::HistoryEntry};
+/// A following assistant entry in the same native turn does not repeat its nick.
+pub fn continues_turn(previous: Option<&HistoryEntry>, entry: &HistoryEntry) -> bool {
+    matches!((previous, entry),
+        (Some(HistoryEntry::Conversation(previous)), HistoryEntry::Conversation(current))
+        if matches!((previous.header, current.header),
+            (Some(NativeHeader::Assistant { turn: a, .. }), Some(NativeHeader::Assistant { turn: b, .. })) if a == b))
+}
+pub fn is_assistant(entry: &HistoryEntry) -> bool {
+    matches!(entry, HistoryEntry::Conversation(e) if matches!(e.header, Some(NativeHeader::Assistant { .. })))
+}
+pub fn fingerprint(entry: &HistoryEntry, continues_turn: bool) -> u64 {
     let mut hash = DefaultHasher::new();
+    continues_turn.hash(&mut hash);
     match entry {
         HistoryEntry::Conversation(entry) => {
             entry.header.hash(&mut hash);
@@ -75,6 +86,25 @@ mod tests {
         assert_eq!(compare(&[1], &[1]), RowChange::None);
     }
     #[test]
+    fn continuing_turn_changes_the_fingerprint_and_remeasures() {
+        let entry = HistoryEntry::from_message(
+            rig_core::message::Message::assistant("Text"),
+            zevria_presentation::conversation::ToolCallStatus::Finished,
+        )
+        .unwrap();
+        let a = fingerprint(&entry, false);
+        let b = fingerprint(&entry, true);
+        assert_ne!(a, b);
+        assert_eq!(compare(&[a], &[b]), RowChange::Remeasure(vec![0]));
+        let first = crate::ui::blocks::entry("epoch", 0, &entry, a, false, false);
+        let next = crate::ui::blocks::entry("epoch", 0, &entry, b, true, false);
+        assert_eq!(
+            first[0].gutter,
+            crate::ui::blocks::Gutter::Label(crate::ui::blocks::Speaker::Zevria)
+        );
+        assert_eq!(next[0].gutter, crate::ui::blocks::Gutter::None);
+    }
+    #[test]
     fn ordinary_transcript_text_is_not_subject_to_tool_preview_bounds() {
         let text = "x".repeat(32_000);
         let entry = zevria_presentation::conversation::HistoryEntry::from_message(
@@ -82,7 +112,7 @@ mod tests {
             zevria_presentation::conversation::ToolCallStatus::Finished,
         )
         .unwrap();
-        let blocks = crate::ui::blocks::entry("epoch", 0, &entry, 0);
+        let blocks = crate::ui::blocks::entry("epoch", 0, &entry, 0, false, false);
         assert_eq!(blocks[0].body, text);
         assert_eq!(blocks[0].primary, blocks[0].body);
     }

@@ -5,6 +5,7 @@ gpui_kit::actions!(
         Quit,
         OpenWorkspace,
         NewSession,
+        ToggleSidebar,
         Cancel,
         Submit,
         Complete,
@@ -17,6 +18,7 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-o", OpenWorkspace, None),
         KeyBinding::new("cmd-n", NewSession, None),
+        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("ZevriaDesktop")),
         KeyBinding::new("cmd-.", Cancel, None),
         KeyBinding::new("escape", Cancel, Some("ZevriaDesktop")),
         KeyBinding::new("tab", Complete, Some("ZevriaCompletion > Input")),
@@ -26,8 +28,9 @@ pub fn install(cx: &mut App) {
     cx.set_menus([
         Menu::new("Zevria").items([MenuItem::action("Quit Zevria", Quit)]),
         Menu::new("File").items([
-            MenuItem::action("Open Workspace…", OpenWorkspace),
-            MenuItem::action("New Session", NewSession),
+            MenuItem::action("Open workspace…", OpenWorkspace),
+            MenuItem::action("New session", NewSession),
         ]),
+        Menu::new("View").items([MenuItem::action("Toggle Sidebar", ToggleSidebar)]),
     ]);
 }

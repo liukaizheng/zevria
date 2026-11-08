@@ -46,29 +46,90 @@ transcript formats are unchanged.
 
 On first run `Config::load` creates the ordinary Zevria config skeleton and
 returns an actionable error. The window shows that error rather than exiting:
-**Reveal config**, fill in the generated files, then **Retry**. The desktop does
+**Show config in Finder**, fill in the generated files, then **Try again**. The desktop does
 not create another configuration schema. Logs default to
 `~/.zevria/logs/zevria-desktop.log` (or the configured `[log]` directory).
 The old `zevria-app.log` is left alone; update any scripts using the old binary
 or log name.
 
+## Design language
+
+The desktop's built-in default is **Zevria Graphite**: a warm graphite reading
+plane, recessed wells for the sidebar, input and literal output, and raised
+sheets for decisions. Build mint and Plan blue retain the TUI's mode families;
+success is a quiet ✓, while live work, failures and denials carry color. A named
+`[theme]` selection overrides the default in **both** frontends. The TUI default
+remains Zevria Dark. One immutable palette is used per process, with Kit's light
+or dark polarity following the palette, not the system appearance. There is no
+automatic light/dark switching. See [themes](themes.md).
+
+The signature is an **editor gutter**, not a stack of chat cards. Hanging speaker
+labels appear once per turn; ○ ◐ ✓ ✗ ⊘ ◼ mark tool lifecycle at the same edge.
+Tool inputs, output and diffs expand into recessed wells. The composer is the
+next line on that same axis. Conversation prose stays within 600 px and tool
+expansions within 720 px. At a main-column width below 760 px, speaker labels
+move above the text and tool glyphs move inline. The sidebar auto-hides below a
+900 px window; **⌃⌘S** or **View → Toggle Sidebar** overrides that choice.
+
+Only macOS-bundled fonts are addressed: **SF Pro** (`.SystemUIFont`) for controls
+and conversation, **Charter** for Plan documents and handoffs, and **Menlo** for
+commands, paths, code and diffs. GPUI falls back when a font is unavailable. The
+explicit type scale is 11, 12, 14, 16, 18, 21, 24 and 36 px, with Menlo's optical
+13 px exception. Status numbers are tabular. Transparent native chrome joins the
+40 px draggable title strip to the window's three depth planes.
+
+The only ambient motion is the shared ◐◓◑◒ work glyph on the existing 250 ms
+redraw clock. **Reduce Motion** freezes it at ◐ and makes Plan-sheet opening
+instant. Icon controls have tooltips and accessible names; native controls retain
+visible focus rings. Question and replacement sheets use a translucent scrim so
+the conversation remains visible behind the decision.
+
+### Screenshot gallery
+
+The opt-in gallery renders the **real DesktopWindow** without a provider or
+credentials, using macOS's text system and the Metal headless renderer:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+cargo test --locked -p zevria-desktop --features fixtures --test gallery
+# Optional output-directory override (absolute paths are easiest):
+ZEVRIA_DESKTOP_GALLERY_DIR=/tmp/zevria-gallery \
+cargo test --locked -p zevria-desktop --features fixtures --test gallery
+```
+
+PNGs are written to the repository's `target/desktop-gallery/`. The 1240×840 and
+720×840 logical viewports are captured at the native test renderer's 2× scale.
+The gallery covers configuration errors, no workspace, starting, stopping,
+failed/idle/empty sessions, working prose and tool loops with an expanded native
+diff, Plan review, questions, replacement confirmation and completions. Working
+scenes also render under a generated light palette. The executable runs on the
+macOS main thread and requires a compatible Metal device. It is excluded from
+ordinary `cargo test`; the `fixtures` feature exposes only dev fixture entry
+points, not a production session mode.
+
+Kit 0.9's syntect-only highlight-status type is an empty compatibility stub.
+The adapter supplies the portable status document for Kit builds that support
+it, but native diffs actually consume the mapped `success`/`danger` colors.
+No tree-sitter dependency is enabled merely to fill that stub.
+
 ## Included controls
 
-- Open Workspace (Cmd-O), new session (Cmd-N), previous-session sidebar and
+- Open workspace (Cmd-O), new session (Cmd-N), Sessions sidebar and
   `--continue`. If there is no latest session, continue starts a new one with a
-  notice. Replacing a busy session from the sidebar asks for confirmation.
+  notice. Replacing a busy session from the sidebar offers **Keep working** or
+  **Stop and switch**.
 - Live/restored transcripts, selectable user text, retained Markdown, collapsible
-  reasoning, web activity, native tool cards, structured task/reconciliation
+  reasoning, web activity, native tool rows, structured task/reconciliation
   lists, command fences, file-change counts and expandable diffs, Plan artifacts
   and handoffs, validated prompt-image thumbnails, errors and compaction dividers.
 - Multiline composer: **Enter** sends, **Shift-Enter** inserts a newline. Shared
   slash/skill completions support click, arrow selection, Tab and Enter. Built-in
   completion Enter executes the selected built-in; skill completion only inserts.
-- Build/Plan selection, next-Build-prompt Orchestrate toggle, Stop / Cmd-. / Esc.
+- Build/Plan selection, next-Build-prompt Orchestrate subtasks switch, Stop / Cmd-. / Esc.
   Esc first belongs to an open question, review panel or completion. Cancellation
   targets the pending operation or the learned active turn, never a guessed ID.
 - Plan review: Implement, Implement in fresh session, Revise / recovery Close,
-  Copy and reopen Review Plan. Every decision includes the authoritative version.
+  Copy plan as Markdown and reopen Review plan. Every decision includes the authoritative version.
 - Text, single-select, Other, multi-select and optional-skip questions. Native
   answers use strings; ACP multi-select uses arrays. Dismiss is available only
   when the request permits it. Terminal/close correlation cannot dismiss a newer
@@ -108,7 +169,7 @@ GPUI window + native components
 | TUI `App` / `SessionViews` | Terminal editor/recall drafts, selection, viewport, folds, overlays and existing worker-review routing. `App` applies `Reduction` hooks instead of interpreting lifecycle events again. |
 | Desktop `WorkspaceModel` | GPUI-free root/child/question routing and command metadata; each pane is the shared `SessionModel`. |
 | Desktop `SessionController` | Starting/live/stopping/failed ownership, replacement, event/exit tasks, commands, desktop drafts, session catalog and graceful quit. |
-| Desktop `ui/` | Native retained Markdown/plain text, tool/diff/image cards, virtualized list invalidation, composer, sidebar, Plan/question surfaces and status. |
+| Desktop `ui/` | Native retained Markdown/plain text, gutter-led tool/diff/image rows, virtualized list invalidation, composer, sidebar, Plan/question surfaces and status. |
 
 `zevria-host` was previously the workspace's `zevria-app` package; it is not the
 renamed desktop. The desktop is a leaf workspace frontend: no package may depend
@@ -156,6 +217,10 @@ cacheable prompt prefixes remain under the existing regression tests.
   splices and remeasurement. Markdown state is retained and updated cumulatively;
   asynchronous parser and diff-completion notifications remeasure the correct row.
   Ordinary transcript text is not truncated by the tool-preview display bounds.
+  Turn-continuation flags participate in fingerprints; switching width class
+  remeasures every row so hanging labels and virtualized heights stay in sync.
+- Desktop styling never enters request construction, tool registration, prompts
+  or transcript envelopes. The provider's cacheable prompt prefix is unchanged.
 
 ### Shutdown
 
@@ -343,14 +408,44 @@ uncached platform archives during Cargo's host-inclusive acquisition; no new
 targets/toolchains were installed. No manual GUI or real-provider acceptance run
 was performed, and the sibling checkout was left untouched.
 
+### Gutter-led redesign validation
+
+The redesign was validated with the low-disk Cargo environment documented above.
+The historical ledgers are retained as history; the current results are:
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | Passed |
+| `cargo test --locked -p zevria-theme` | 16 passed, including both built-ins and the color-literal guard |
+| `cargo test --locked -p zevria-desktop` | 42 passed; all original flows and IDs retained |
+| Desktop Clippy, all targets, `-D warnings` | Passed, both default features and `--features fixtures` |
+| `cargo test --locked -p zevria --test crate_boundaries` | 3 passed |
+| `cargo check --locked --workspace --all-targets` | Passed |
+| `cargo test --locked --workspace` | 2,558 passed, 0 failed, 5 ignored, 59 suites; includes prompt/cache-prefix regression coverage |
+| `cargo build --locked -p zevria` and CLI dependency tree | Passed; 0 GPUI entries |
+| Release desktop build and `target/release/zevria-desktop --help` | Passed |
+| Opt-in Metal gallery | 26 PNGs at both widths, including generated-light scenes |
+
+Native control tests cover the 720×520 composer, compact mode commands,
+round-trip wide/compact row remeasurement, rendered completion selection,
+sidebar toggling, radios/Other/skip, and Reduce Motion. Gallery text/layout
+analysis checked every render's dimensions and decision text, and caught and
+corrected a Plan-body overflow into its footer. The critique pass also removed
+a redundant file summary once the native diff header is visible. PNG generation
+and automated text/layout checks are **not human visual acceptance**; the native
+window interactions and real-provider checklist below remain manual.
+
 ## Manual acceptance (not performed)
 
 Automated headless tests and the local SSE fixture **do not constitute a manual
 real-provider GUI acceptance run**. Check these on a scratch workspace before a
 release:
 
-- [ ] First-run config error, Reveal config and Retry.
-- [ ] Open workspace, new session, streamed Markdown and native command/edit cards.
+- [ ] First-run config error, Show config in Finder and Try again.
+- [ ] Drag the title strip; double-click to zoom; check traffic-light placement.
+- [ ] Toggle the sidebar with ⌃⌘S; resize to 720×520; inspect a generated light theme.
+- [ ] Tab through controls with visible focus; test Reduce Motion on and off.
+- [ ] Open workspace, new session, streamed Markdown and native command/edit rows.
 - [ ] Cancel during a provider stream; enter another turn afterwards.
 - [ ] Plan → Ready → Implement; repeat with Implement in fresh session.
 - [ ] Text/select/Other/multi-select/optional questions; Answer and permitted Dismiss.
@@ -363,7 +458,7 @@ No external provider credentials were exercised for this acceptance checklist.
 
 ## Troubleshooting
 
-- **Config skeleton/error:** use Reveal config and Retry; provider/model errors
+- **Config skeleton/error:** use Show config in Finder and Try again; provider/model errors
   are host errors, not a desktop-specific configuration layer.
 - **Engine stopped:** inspect `zevria-desktop.log`, then Start new session. Startup
   and cleanup errors remain visible; session replacements do not overlap engines.
@@ -392,13 +487,15 @@ No external provider credentials were exercised for this acceptance checklist.
   The shared model already supports transcript editing; restored images display.
 - One window and one live session; no tabs or concurrent-session UI.
 - No `.app` packaging, signing or notarization; no native Windows/Linux GUI.
-- No theme hot reload or full accessibility/keyboard-navigation parity audit.
-  Fixed-size review/question/sidebar layouts have not been audited on very small
-  windows. Large-session projection is off-thread, but no real-provider GUI
-  latency benchmark or manual visual acceptance is claimed.
+- No automatic light/dark switching, theme hot reload or full accessibility/
+  keyboard-navigation parity audit. Compact layout is covered down to a 720 px
+  window by native tests and the gallery; OS title-strip interactions, 720×520
+  operation and real-provider acceptance still need the manual checks above.
+  Large-session projection is off-thread; no real-provider GUI latency benchmark
+  or human visual acceptance is claimed.
 - Tool input/output previews are capped at 24,000 characters, parsed diffs at
   128 KiB, and add/delete previews at 1,000 source lines. Raw copy remains exact.
-  Diff views use a fixed-height nested viewport. Worker journals are host-loaded
+  Diff viewports follow the displayed line count, clamped to 120–420 px. Worker journals are host-loaded
   but individual worker panes are deliberately absent.
 - Hosted macOS runner behavior and stable-toolchain GPUI builds remain subject
   to the shared CI run; local validation uses the toolchain recorded in the ledger.

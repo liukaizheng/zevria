@@ -685,7 +685,7 @@ impl SessionController {
                         .model
                         .root
                         .conversation
-                        .push_error(format!("Session list: {error:#}")),
+                        .push_error(format!("Couldn't load earlier sessions: {error:#}")),
                 }
                 cx.notify();
             });
@@ -723,7 +723,7 @@ impl SessionController {
             });
         }));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixtures"))]
     pub fn fixture(
         sender: tokio::sync::mpsc::UnboundedSender<SessionCommand>,
         cx: &mut Context<Self>,
@@ -734,7 +734,7 @@ impl SessionController {
         this.command = Some(sender);
         this
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixtures"))]
     pub fn fixture_event(
         &mut self,
         event: zevria_session_api::SessionEvent,

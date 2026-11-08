@@ -60,9 +60,15 @@ changes. Already-running TUI processes do not change.** Colors are not stored in
 transcripts. Headless ACP processes do not open theme files or initialize the
 renderer.
 
-Without a selector, the exact built-in **Zevria Dark** palette remains the
-default, including its `#282C34` canvas. There is no automatic background
-detection, transparency, hot reload, or ANSI/256-color fallback.
+Without a selector, the TUI uses the exact built-in **Zevria Dark** palette,
+including its `#282C34` canvas. Zevria Desktop uses **Zevria Graphite**: warm
+graphite planes (`#201E1B` canvas, `#191714` recessed wells, `#2A2724` raised
+sheets), paper-white text, Build mint and Plan blue. Both built-ins use the same
+27-reference semantic graph and pass the same contrast and CVD validation.
+A selected generated theme applies to **both frontends**; restart to activate it.
+The desktop follows that palette's light/dark polarity, not the system appearance.
+There is no automatic background detection, light/dark switching, hot reload, or
+ANSI/256-color fallback.
 
 ## Collisions, retries, and failures
 

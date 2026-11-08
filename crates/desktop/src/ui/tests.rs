@@ -22,17 +22,29 @@ fn setup(
     Entity<SessionController>,
     Receiver,
 ) {
+    setup_at_size(cx, 1240., 840.)
+}
+fn setup_at_size(
+    cx: &mut TestAppContext,
+    width: f32,
+    height: f32,
+) -> (
+    Window,
+    Entity<DesktopWindow>,
+    Entity<SessionController>,
+    Receiver,
+) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let (window, view, controller) = cx.update(|cx| {
         gpui_kit::init(cx);
-        theme::apply(zevria_theme::ZEVRIA_DARK, cx);
+        theme::apply(zevria_theme::ZEVRIA_GRAPHITE, cx);
         actions::install(cx);
         let controller = cx.new(|cx| SessionController::fixture(sender, cx));
         let (window, view) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),
-                    size: size(px(1240.), px(840.)),
+                    size: size(px(width), px(height)),
                 })),
                 ..Default::default()
             },
@@ -463,4 +475,256 @@ fn editing_and_undoing_does_not_revive_a_submitted_draft_token(cx: &mut TestAppC
         controller.read_with(cx, |this, _| this.recovery.clone()),
         vec!["original".to_string()]
     );
+}
+
+#[gpui_kit::test]
+fn compact_minimum_window_keeps_composer_controls_inside_the_viewport(cx: &mut TestAppContext) {
+    let (window, view, _, _) = setup_at_size(cx, 720., 520.);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let send = window.find("send").bounds();
+        assert!(send.origin.x >= px(0.) && send.right() <= px(720.));
+        assert!(send.origin.y >= px(40.) && send.bottom() <= px(492.));
+        assert!(window.find("mode-build").visible());
+        assert!(window.find("mode-plan").visible());
+    })
+    .unwrap();
+    assert!(view.read_with(cx, |v, _| v.compact));
+    assert!(!view.read_with(cx, |v, _| v.sidebar_visible(720.)));
+}
+
+#[gpui_kit::test]
+fn compact_segmented_modes_emit_the_same_authoritative_mode_commands(cx: &mut TestAppContext) {
+    let (window, _, controller, mut receiver) = setup_at_size(cx, 720., 840.);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("mode-plan", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let SessionCommand::Manage(zevria_session_api::ManagementCommand::SetMode { request_id, mode }) =
+        receiver.try_recv().unwrap()
+    else {
+        panic!("mode command");
+    };
+    assert_eq!(mode, SessionMode::Plan);
+    event(
+        &controller,
+        E::ModeResult {
+            request_id,
+            result: zevria_session_api::ModeSelectionResult::Accepted {
+                mode,
+                changed: true,
+            },
+        },
+        cx,
+    );
+    assert_eq!(
+        controller.read_with(cx, |c, _| c.model.root.next_mode()),
+        SessionMode::Plan
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("mode-build", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionCommand::Manage(zevria_session_api::ManagementCommand::SetMode {
+            mode: SessionMode::Build,
+            ..
+        })
+    ));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[gpui_kit::test]
+fn width_class_changes_remeasure_retained_gutter_rows(cx: &mut TestAppContext) {
+    let (window, view, controller, _) = setup(cx);
+    controller.update(cx, |c, cx| {
+        c.model.root.conversation.restore(vec![
+            zevria_transcript::transcript::TranscriptItem::Message(Message::user("A short prompt")),
+        ]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let key = controller.read_with(cx, |c, _| {
+        let conversation = &c.model.root.conversation;
+        let zevria_presentation::conversation::HistoryEntry::Conversation(entry) =
+            &conversation.history()[0]
+        else {
+            panic!("prompt entry");
+        };
+        format!("{:?}-{}", conversation.epoch(), entry.blocks[0].id.0)
+    });
+    let wide = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.find(key.clone()).bounds().size.height
+        })
+        .unwrap();
+    cx.simulate_window_resize(window.into(), size(px(720.), px(840.)));
+    cx.run_until_parked();
+    let compact = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.find(key.clone()).bounds().size.height
+        })
+        .unwrap();
+    assert!(view.read_with(cx, |v, _| v.compact));
+    assert!(
+        compact > wide,
+        "compact {compact:?} should include the hanging label above prose, wide {wide:?}"
+    );
+    cx.simulate_window_resize(window.into(), size(px(1240.), px(840.)));
+    cx.run_until_parked();
+    let restored = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.find(key).bounds().size.height
+        })
+        .unwrap();
+    assert!(!view.read_with(cx, |v, _| v.compact));
+    assert_eq!(restored, wide);
+}
+
+#[gpui_kit::test]
+fn reduce_motion_freezes_the_shared_work_glyph(cx: &mut TestAppContext) {
+    let _ = setup(cx);
+    cx.update(|cx| {
+        cx.set_reduce_motion(true);
+        assert_eq!(super::style::frame(cx), 0);
+        assert_eq!(
+            zevria_presentation::status_icon::StatusIcon::Running.glyph(super::style::frame(cx)),
+            "◐"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn sidebar_toggle_is_ui_local_and_obeys_the_automatic_breakpoint(cx: &mut TestAppContext) {
+    let (window, view, controller, mut receiver) = setup(cx);
+    assert!(view.read_with(cx, |v, _| v.sidebar_visible(900.)));
+    assert!(!view.read_with(cx, |v, _| v.sidebar_visible(899.)));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("toggle-sidebar", cx);
+    })
+    .unwrap();
+    assert_eq!(view.read_with(cx, |v, _| v.sidebar_override), Some(false));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.press("ctrl-cmd-s", cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.sidebar_override), Some(true));
+    assert!(view.read_with(cx, |v, _| v.sidebar_visible(720.)));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(
+        controller.read_with(cx, |c, _| c.phase.clone()),
+        crate::controller::Phase::Live
+    );
+}
+
+#[gpui_kit::test]
+fn completion_keyboard_selection_has_a_rendered_selected_state(cx: &mut TestAppContext) {
+    let (window, view, _, mut receiver) = setup(cx);
+    cx.update_window(window.into(), |_, window, cx| window.input("/", cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("completion-state", 0usize)).selected(),
+            Some(true)
+        );
+        assert_eq!(
+            window.find(("completion-state", 1usize)).selected(),
+            Some(false)
+        );
+        window.press("down", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("completion-state", 0usize)).selected(),
+            Some(false)
+        );
+        assert_eq!(
+            window.find(("completion-state", 1usize)).selected(),
+            Some(true)
+        );
+    })
+    .unwrap();
+    assert_eq!(view.read_with(cx, |v, _| v.completion_selected), 1);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[gpui_kit::test]
+fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
+    cx: &mut TestAppContext,
+) {
+    let (window, _, controller, _) = setup(cx);
+    let turn_id = TurnId::new(20);
+    event(
+        &controller,
+        E::TurnStarted {
+            turn_id,
+            mode: SessionMode::Build,
+            message: Message::user("choose"),
+        },
+        cx,
+    );
+    event(
+        &controller,
+        E::QuestionAsked {
+            turn_id,
+            request: QuestionRequest {
+                id: QuestionRequestId::new("choice"),
+                source_label: Some("Explore".into()),
+                dismissible: true,
+                questions: vec![QuestionPrompt {
+                    id: "style".into(),
+                    header: "Style".into(),
+                    question: "Which style?".into(),
+                    kind: QuestionPromptKind::SingleSelect { allow_other: true },
+                    options: vec![zevria_foundation::QuestionOption {
+                        label: "Gutter".into(),
+                        description: "Compact log rows".into(),
+                    }],
+                    required: false,
+                    default: None,
+                }],
+            },
+        },
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("question-option", 0usize)).role(),
+            Some(gpui_kit::Role::RadioButton)
+        );
+        window.click(("question-option", 0usize), cx);
+    })
+    .unwrap();
+    assert_eq!(
+        controller.read_with(cx, |c, _| c.model.question.as_ref().unwrap().answers[0]
+            .selected
+            .clone()),
+        vec![0]
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("question-other", 0usize), cx)
+    })
+    .unwrap();
+    assert!(controller.read_with(cx, |c, _| {
+        c.model.question.as_ref().unwrap().answers[0].other
+    }));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("question-skip", 0usize), cx)
+    })
+    .unwrap();
+    assert!(controller.read_with(cx, |c, _| {
+        c.model.question.as_ref().unwrap().answers[0].skip
+    }));
 }

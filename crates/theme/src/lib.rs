@@ -81,6 +81,36 @@ const REF_SYNTAX_FUNCTION: HexRgb = HexRgb(0x6e, 0xc9, 0xe5); // oklch(79.0% 0.0
 const REF_SYNTAX_STRING: HexRgb = HexRgb(0x92, 0xcc, 0x93); // oklch(79.0% 0.100 145) -> #92CC93
 const REF_SYNTAX_CONSTANT: HexRgb = HexRgb(0xe1, 0xb6, 0x6c); // oklch(80.0% 0.105 80) -> #E1B66C
 
+// Zevria Graphite: warm, low-chroma planes and two cool workflow inks.
+// Hex outputs are authoritative; comments record the authored OKLCH sources.
+const GRAPHITE_CANVAS: HexRgb = HexRgb(0x20, 0x1e, 0x1b); // oklch(23.5% 0.006 75) -> #201E1B
+const GRAPHITE_PANEL: HexRgb = HexRgb(0x19, 0x17, 0x14); // oklch(20.5% 0.006 75) -> #191714
+const GRAPHITE_OVERLAY: HexRgb = HexRgb(0x2a, 0x27, 0x24); // oklch(27.5% 0.007 75) -> #2A2724
+const GRAPHITE_BORDER: HexRgb = HexRgb(0x4a, 0x47, 0x43); // oklch(40.0% 0.008 75) -> #4A4743
+const GRAPHITE_BORDER_STRONG: HexRgb = HexRgb(0x8a, 0x85, 0x80); // oklch(62.0% 0.010 75) -> #8A8580
+const GRAPHITE_SELECTION: HexRgb = HexRgb(0x80, 0xb1, 0xda); // oklch(74.0% 0.080 245) -> #80B1DA
+const GRAPHITE_TEXT_PRIMARY: HexRgb = HexRgb(0xec, 0xe9, 0xe2); // oklch(93.5% 0.010 85) -> #ECE9E2
+const GRAPHITE_TEXT_SECONDARY: HexRgb = HexRgb(0xc7, 0xc3, 0xbd); // oklch(82.0% 0.010 80) -> #C7C3BD
+const GRAPHITE_TEXT_MUTED: HexRgb = HexRgb(0xa2, 0x9e, 0x98); // oklch(70.0% 0.010 75) -> #A29E98
+const GRAPHITE_BUILD: HexRgb = HexRgb(0x63, 0xdf, 0xb1); // oklch(82.0% 0.130 166) -> #63DFB1
+const GRAPHITE_PLAN: HexRgb = HexRgb(0x64, 0xa9, 0xf3); // oklch(72.0% 0.130 252) -> #64A9F3
+const GRAPHITE_REVIEW: HexRgb = HexRgb(0xf2, 0xbd, 0x68); // oklch(83.0% 0.120 78) -> #F2BD68
+const GRAPHITE_EXPLORE: HexRgb = HexRgb(0xd2, 0xbf, 0xf8); // oklch(84.0% 0.080 300) -> #D2BFF8
+const GRAPHITE_YOU: HexRgb = HexRgb(0x8e, 0xbe, 0xa8); // oklch(76.0% 0.060 165) -> #8EBEA8
+const GRAPHITE_ASSISTANT: HexRgb = HexRgb(0xb8, 0xa8, 0xd8); // oklch(76.0% 0.070 300) -> #B8A8D8
+const GRAPHITE_SYSTEM: HexRgb = HexRgb(0xc9, 0xad, 0x7e); // oklch(76.0% 0.070 80) -> #C9AD7E
+const GRAPHITE_TOOLS: HexRgb = HexRgb(0x6c, 0xc7, 0xd7); // oklch(78.0% 0.090 210) -> #6CC7D7
+const GRAPHITE_SUCCESS: HexRgb = HexRgb(0x93, 0xc4, 0x49); // oklch(76.0% 0.160 128) -> #93C449
+const GRAPHITE_WARNING: HexRgb = HexRgb(0xff, 0xd3, 0x8f); // oklch(89.0% 0.110 78) -> #FFD38F
+const GRAPHITE_ERROR: HexRgb = HexRgb(0xef, 0x6e, 0x88); // oklch(70.0% 0.160 10) -> #EF6E88
+const GRAPHITE_INFO: HexRgb = HexRgb(0x55, 0xbe, 0xf0); // oklch(76.0% 0.120 232) -> #55BEF0
+const GRAPHITE_DIFF_ADDITION_BACKGROUND: HexRgb = HexRgb(0x21, 0x33, 0x1d); // oklch(30.0% 0.045 140) -> #21331D
+const GRAPHITE_DIFF_DELETION_BACKGROUND: HexRgb = HexRgb(0x44, 0x23, 0x24); // oklch(30.0% 0.050 18) -> #442324
+const GRAPHITE_SYNTAX_KEYWORD: HexRgb = HexRgb(0xc8, 0xa5, 0xf0); // oklch(78.0% 0.110 305) -> #C8A5F0
+const GRAPHITE_SYNTAX_FUNCTION: HexRgb = HexRgb(0x7a, 0xca, 0xe9); // oklch(80.0% 0.090 225) -> #7ACAE9
+const GRAPHITE_SYNTAX_STRING: HexRgb = HexRgb(0x95, 0xcf, 0x96); // oklch(80.0% 0.100 145) -> #95CF96
+const GRAPHITE_SYNTAX_CONSTANT: HexRgb = HexRgb(0xe7, 0xb3, 0x69); // oklch(80.0% 0.110 75) -> #E7B369
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ZevriaTheme<C = Rgb> {
     pub surfaces: SurfaceTokens<C>,
@@ -292,17 +322,60 @@ pub const ZEVRIA_DARK: ZevriaTheme = ReferencePalette {
 }
 .tokens();
 
+/// Built-in desktop default. This does not initialize the process-wide theme:
+/// the TUI's default remains [`ZEVRIA_DARK`], and a selected theme wins in both.
+pub const ZEVRIA_GRAPHITE: ZevriaTheme = ReferencePalette {
+    canvas: GRAPHITE_CANVAS,
+    panel: GRAPHITE_PANEL,
+    overlay: GRAPHITE_OVERLAY,
+    border: GRAPHITE_BORDER,
+    border_strong: GRAPHITE_BORDER_STRONG,
+    selection: GRAPHITE_SELECTION,
+    text_primary: GRAPHITE_TEXT_PRIMARY,
+    text_secondary: GRAPHITE_TEXT_SECONDARY,
+    text_muted: GRAPHITE_TEXT_MUTED,
+    build: GRAPHITE_BUILD,
+    plan: GRAPHITE_PLAN,
+    review: GRAPHITE_REVIEW,
+    explore: GRAPHITE_EXPLORE,
+    you: GRAPHITE_YOU,
+    assistant: GRAPHITE_ASSISTANT,
+    system: GRAPHITE_SYSTEM,
+    tools: GRAPHITE_TOOLS,
+    success: GRAPHITE_SUCCESS,
+    warning: GRAPHITE_WARNING,
+    error: GRAPHITE_ERROR,
+    info: GRAPHITE_INFO,
+    diff_addition_background: GRAPHITE_DIFF_ADDITION_BACKGROUND,
+    diff_deletion_background: GRAPHITE_DIFF_DELETION_BACKGROUND,
+    syntax_keyword: GRAPHITE_SYNTAX_KEYWORD,
+    syntax_function: GRAPHITE_SYNTAX_FUNCTION,
+    syntax_string: GRAPHITE_SYNTAX_STRING,
+    syntax_constant: GRAPHITE_SYNTAX_CONSTANT,
+}
+.tokens();
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const BUILT_INS: [(&str, ZevriaTheme); 2] = [
+        ("Zevria Dark", ZEVRIA_DARK),
+        ("Zevria Graphite", ZEVRIA_GRAPHITE),
+    ];
+
     #[test]
     fn every_reference_reaches_the_terminal_as_truecolor() {
-        for (name, color) in all_tokens() {
-            assert!(
-                matches!(color, Rgb(_, _, _)),
-                "{name} must be a 24-bit RGB token, got {color:?}"
-            );
+        for (name, t) in BUILT_INS {
+            let result = std::panic::catch_unwind(|| {
+                for (name, color) in all_tokens(t) {
+                    assert!(
+                        matches!(color, Rgb(_, _, _)),
+                        "{name} must be a 24-bit RGB token, got {color:?}"
+                    );
+                }
+            });
+            assert!(result.is_ok(), "{name} failed its built-in contract");
         }
     }
 
@@ -313,235 +386,251 @@ mod tests {
 
     #[test]
     fn normal_and_semantic_foregrounds_meet_wcag_aa_on_every_surface() {
-        let surfaces = [
-            ("canvas", ZEVRIA_DARK.surfaces.canvas),
-            ("panel", ZEVRIA_DARK.surfaces.panel),
-            ("overlay", ZEVRIA_DARK.surfaces.overlay),
-        ];
-        let text = [
-            ("primary", ZEVRIA_DARK.text.primary),
-            ("secondary", ZEVRIA_DARK.text.secondary),
-            ("muted", ZEVRIA_DARK.text.muted),
-        ];
-        for (foreground_name, foreground) in text {
-            for &(surface_name, background) in &surfaces {
-                assert_contrast(foreground_name, foreground, surface_name, background, 4.5);
-            }
-        }
+        for (name, t) in BUILT_INS {
+            let result = std::panic::catch_unwind(|| {
+                let surfaces = [
+                    ("canvas", t.surfaces.canvas),
+                    ("panel", t.surfaces.panel),
+                    ("overlay", t.surfaces.overlay),
+                ];
+                let text = [
+                    ("primary", t.text.primary),
+                    ("secondary", t.text.secondary),
+                    ("muted", t.text.muted),
+                ];
+                for (foreground_name, foreground) in text {
+                    for &(surface_name, background) in &surfaces {
+                        assert_contrast(foreground_name, foreground, surface_name, background, 4.5);
+                    }
+                }
 
-        for (name, foreground) in semantic_foregrounds() {
-            for &(surface_name, background) in &surfaces {
-                assert_contrast(name, foreground, surface_name, background, 4.5);
-            }
+                for (name, foreground) in semantic_foregrounds(t) {
+                    for &(surface_name, background) in &surfaces {
+                        assert_contrast(name, foreground, surface_name, background, 4.5);
+                    }
+                }
+                assert_contrast(
+                    "selection foreground",
+                    t.surfaces.selection_foreground,
+                    "selection background",
+                    t.surfaces.selection_background,
+                    4.5,
+                );
+            });
+            assert!(result.is_ok(), "{name} failed its built-in contract");
         }
-        assert_contrast(
-            "selection foreground",
-            ZEVRIA_DARK.surfaces.selection_foreground,
-            "selection background",
-            ZEVRIA_DARK.surfaces.selection_background,
-            4.5,
-        );
     }
 
     #[test]
     fn semantic_aliases_and_selection_polarity_remain_stable() {
-        assert_eq!(ZEVRIA_DARK.content.heading, ZEVRIA_DARK.workflow.explore);
-        assert_eq!(ZEVRIA_DARK.content.strong, ZEVRIA_DARK.workflow.plan);
-        assert_eq!(ZEVRIA_DARK.syntax.r#type, ZEVRIA_DARK.workflow.plan);
-        assert_eq!(ZEVRIA_DARK.content.code, ZEVRIA_DARK.syntax.string);
-        assert_eq!(ZEVRIA_DARK.content.link, ZEVRIA_DARK.feedback.info);
-        assert_eq!(ZEVRIA_DARK.content.diff_hunk, ZEVRIA_DARK.feedback.info);
-        assert_eq!(
-            ZEVRIA_DARK.content.diff_addition,
-            ZEVRIA_DARK.feedback.success
-        );
-        assert_eq!(
-            ZEVRIA_DARK.content.diff_deletion,
-            ZEVRIA_DARK.feedback.error
-        );
-        assert_eq!(ZEVRIA_DARK.syntax.invalid, ZEVRIA_DARK.feedback.error);
-        assert_eq!(ZEVRIA_DARK.syntax.comment, ZEVRIA_DARK.text.muted);
-        assert_eq!(
-            ZEVRIA_DARK.surfaces.selection_foreground,
-            ZEVRIA_DARK.surfaces.canvas
-        );
+        for (name, t) in BUILT_INS {
+            let result = std::panic::catch_unwind(|| {
+                assert_eq!(t.content.heading, t.workflow.explore);
+                assert_eq!(t.content.strong, t.workflow.plan);
+                assert_eq!(t.syntax.r#type, t.workflow.plan);
+                assert_eq!(t.content.code, t.syntax.string);
+                assert_eq!(t.content.link, t.feedback.info);
+                assert_eq!(t.content.diff_hunk, t.feedback.info);
+                assert_eq!(t.content.diff_addition, t.feedback.success);
+                assert_eq!(t.content.diff_deletion, t.feedback.error);
+                assert_eq!(t.syntax.invalid, t.feedback.error);
+                assert_eq!(t.syntax.comment, t.text.muted);
+                assert_eq!(t.surfaces.selection_foreground, t.surfaces.canvas);
+            });
+            assert!(result.is_ok(), "{name} failed its built-in contract");
+        }
     }
 
     #[test]
     fn diff_row_foregrounds_meet_wcag_aa_on_diff_backgrounds() {
-        let backgrounds = [
-            (
-                "diff addition background",
-                ZEVRIA_DARK.content.diff_addition_background,
-            ),
-            (
-                "diff deletion background",
-                ZEVRIA_DARK.content.diff_deletion_background,
-            ),
-        ];
-        let foregrounds = [
-            ("primary", ZEVRIA_DARK.text.primary),
-            ("secondary", ZEVRIA_DARK.text.secondary),
-            ("muted", ZEVRIA_DARK.text.muted),
-            ("diff addition", ZEVRIA_DARK.content.diff_addition),
-            ("diff deletion", ZEVRIA_DARK.content.diff_deletion),
-            ("keyword", ZEVRIA_DARK.syntax.keyword),
-            ("function", ZEVRIA_DARK.syntax.function),
-            ("type", ZEVRIA_DARK.syntax.r#type),
-            ("string", ZEVRIA_DARK.syntax.string),
-            ("constant", ZEVRIA_DARK.syntax.constant),
-            ("comment", ZEVRIA_DARK.syntax.comment),
-            ("invalid", ZEVRIA_DARK.syntax.invalid),
-        ];
-        for (background_name, background) in backgrounds {
-            for (foreground_name, foreground) in foregrounds {
-                assert_contrast(
-                    foreground_name,
-                    foreground,
-                    background_name,
-                    background,
-                    4.5,
-                );
-            }
+        for (name, t) in BUILT_INS {
+            let result = std::panic::catch_unwind(|| {
+                let backgrounds = [
+                    (
+                        "diff addition background",
+                        t.content.diff_addition_background,
+                    ),
+                    (
+                        "diff deletion background",
+                        t.content.diff_deletion_background,
+                    ),
+                ];
+                let foregrounds = [
+                    ("primary", t.text.primary),
+                    ("secondary", t.text.secondary),
+                    ("muted", t.text.muted),
+                    ("diff addition", t.content.diff_addition),
+                    ("diff deletion", t.content.diff_deletion),
+                    ("keyword", t.syntax.keyword),
+                    ("function", t.syntax.function),
+                    ("type", t.syntax.r#type),
+                    ("string", t.syntax.string),
+                    ("constant", t.syntax.constant),
+                    ("comment", t.syntax.comment),
+                    ("invalid", t.syntax.invalid),
+                ];
+                for (background_name, background) in backgrounds {
+                    for (foreground_name, foreground) in foregrounds {
+                        assert_contrast(
+                            foreground_name,
+                            foreground,
+                            background_name,
+                            background,
+                            4.5,
+                        );
+                    }
+                }
+            });
+            assert!(result.is_ok(), "{name} failed its built-in contract");
         }
     }
 
     #[test]
     fn strong_boundaries_and_focus_indicators_meet_three_to_one() {
-        for (surface_name, surface) in [
-            ("canvas", ZEVRIA_DARK.surfaces.canvas),
-            ("panel", ZEVRIA_DARK.surfaces.panel),
-            ("overlay", ZEVRIA_DARK.surfaces.overlay),
-        ] {
-            assert_contrast(
-                "strong border",
-                ZEVRIA_DARK.surfaces.border_strong,
-                surface_name,
-                surface,
-                3.0,
-            );
-            assert_contrast(
-                "selection background",
-                ZEVRIA_DARK.surfaces.selection_background,
-                surface_name,
-                surface,
-                3.0,
-            );
-        }
+        for (name, t) in BUILT_INS {
+            let result = std::panic::catch_unwind(|| {
+                for (surface_name, surface) in [
+                    ("canvas", t.surfaces.canvas),
+                    ("panel", t.surfaces.panel),
+                    ("overlay", t.surfaces.overlay),
+                ] {
+                    assert_contrast(
+                        "strong border",
+                        t.surfaces.border_strong,
+                        surface_name,
+                        surface,
+                        3.0,
+                    );
+                    assert_contrast(
+                        "selection background",
+                        t.surfaces.selection_background,
+                        surface_name,
+                        surface,
+                        3.0,
+                    );
+                }
 
-        for (name, focus) in [
-            ("Build focus", ZEVRIA_DARK.workflow.build),
-            ("Plan focus", ZEVRIA_DARK.workflow.plan),
-            ("Review focus", ZEVRIA_DARK.workflow.review),
-            ("Explore focus", ZEVRIA_DARK.workflow.explore),
-        ] {
-            assert_contrast(name, focus, "panel", ZEVRIA_DARK.surfaces.panel, 3.0);
+                for (name, focus) in [
+                    ("Build focus", t.workflow.build),
+                    ("Plan focus", t.workflow.plan),
+                    ("Review focus", t.workflow.review),
+                    ("Explore focus", t.workflow.explore),
+                ] {
+                    assert_contrast(name, focus, "panel", t.surfaces.panel, 3.0);
+                }
+            });
+            assert!(result.is_ok(), "{name} failed its built-in contract");
         }
     }
 
     #[test]
     fn workflow_and_feedback_accents_remain_separated_under_full_cvd() {
-        let workflows = [
-            ("Build", ZEVRIA_DARK.workflow.build),
-            ("Plan", ZEVRIA_DARK.workflow.plan),
-            ("Review", ZEVRIA_DARK.workflow.review),
-            ("Explore", ZEVRIA_DARK.workflow.explore),
-        ];
-        let feedback = [
-            ("success", ZEVRIA_DARK.feedback.success),
-            ("warning", ZEVRIA_DARK.feedback.warning),
-            ("error", ZEVRIA_DARK.feedback.error),
-            ("info", ZEVRIA_DARK.feedback.info),
-        ];
-        for (simulation, matrix) in validation::SIMULATIONS {
-            assert_pairwise_separation(simulation, &workflows, matrix, 0.08);
-            assert_pairwise_separation(simulation, &feedback, matrix, 0.075);
+        for (name, t) in BUILT_INS {
+            let result = std::panic::catch_unwind(|| {
+                let workflows = [
+                    ("Build", t.workflow.build),
+                    ("Plan", t.workflow.plan),
+                    ("Review", t.workflow.review),
+                    ("Explore", t.workflow.explore),
+                ];
+                let feedback = [
+                    ("success", t.feedback.success),
+                    ("warning", t.feedback.warning),
+                    ("error", t.feedback.error),
+                    ("info", t.feedback.info),
+                ];
+                for (simulation, matrix) in validation::SIMULATIONS {
+                    assert_pairwise_separation(simulation, &workflows, matrix, 0.08);
+                    assert_pairwise_separation(simulation, &feedback, matrix, 0.075);
+                }
+            });
+            assert!(result.is_ok(), "{name} failed its built-in contract");
         }
     }
 
-    fn all_tokens() -> Vec<(&'static str, Rgb)> {
+    fn all_tokens(t: ZevriaTheme) -> Vec<(&'static str, Rgb)> {
         vec![
-            ("surface.canvas", ZEVRIA_DARK.surfaces.canvas),
-            ("surface.panel", ZEVRIA_DARK.surfaces.panel),
-            ("surface.overlay", ZEVRIA_DARK.surfaces.overlay),
-            ("surface.border", ZEVRIA_DARK.surfaces.border),
-            ("surface.border_strong", ZEVRIA_DARK.surfaces.border_strong),
+            ("surface.canvas", t.surfaces.canvas),
+            ("surface.panel", t.surfaces.panel),
+            ("surface.overlay", t.surfaces.overlay),
+            ("surface.border", t.surfaces.border),
+            ("surface.border_strong", t.surfaces.border_strong),
             (
                 "surface.selection_background",
-                ZEVRIA_DARK.surfaces.selection_background,
+                t.surfaces.selection_background,
             ),
             (
                 "surface.selection_foreground",
-                ZEVRIA_DARK.surfaces.selection_foreground,
+                t.surfaces.selection_foreground,
             ),
-            ("text.primary", ZEVRIA_DARK.text.primary),
-            ("text.secondary", ZEVRIA_DARK.text.secondary),
-            ("text.muted", ZEVRIA_DARK.text.muted),
-            ("workflow.build", ZEVRIA_DARK.workflow.build),
-            ("workflow.plan", ZEVRIA_DARK.workflow.plan),
-            ("workflow.review", ZEVRIA_DARK.workflow.review),
-            ("workflow.explore", ZEVRIA_DARK.workflow.explore),
-            ("roles.you", ZEVRIA_DARK.roles.you),
-            ("roles.assistant", ZEVRIA_DARK.roles.assistant),
-            ("roles.system", ZEVRIA_DARK.roles.system),
-            ("roles.tools", ZEVRIA_DARK.roles.tools),
-            ("feedback.success", ZEVRIA_DARK.feedback.success),
-            ("feedback.warning", ZEVRIA_DARK.feedback.warning),
-            ("feedback.error", ZEVRIA_DARK.feedback.error),
-            ("feedback.info", ZEVRIA_DARK.feedback.info),
-            ("content.heading", ZEVRIA_DARK.content.heading),
-            ("content.strong", ZEVRIA_DARK.content.strong),
-            ("content.code", ZEVRIA_DARK.content.code),
-            ("content.link", ZEVRIA_DARK.content.link),
-            ("content.diff_addition", ZEVRIA_DARK.content.diff_addition),
+            ("text.primary", t.text.primary),
+            ("text.secondary", t.text.secondary),
+            ("text.muted", t.text.muted),
+            ("workflow.build", t.workflow.build),
+            ("workflow.plan", t.workflow.plan),
+            ("workflow.review", t.workflow.review),
+            ("workflow.explore", t.workflow.explore),
+            ("roles.you", t.roles.you),
+            ("roles.assistant", t.roles.assistant),
+            ("roles.system", t.roles.system),
+            ("roles.tools", t.roles.tools),
+            ("feedback.success", t.feedback.success),
+            ("feedback.warning", t.feedback.warning),
+            ("feedback.error", t.feedback.error),
+            ("feedback.info", t.feedback.info),
+            ("content.heading", t.content.heading),
+            ("content.strong", t.content.strong),
+            ("content.code", t.content.code),
+            ("content.link", t.content.link),
+            ("content.diff_addition", t.content.diff_addition),
             (
                 "content.diff_addition_background",
-                ZEVRIA_DARK.content.diff_addition_background,
+                t.content.diff_addition_background,
             ),
-            ("content.diff_deletion", ZEVRIA_DARK.content.diff_deletion),
+            ("content.diff_deletion", t.content.diff_deletion),
             (
                 "content.diff_deletion_background",
-                ZEVRIA_DARK.content.diff_deletion_background,
+                t.content.diff_deletion_background,
             ),
-            ("content.diff_hunk", ZEVRIA_DARK.content.diff_hunk),
-            ("syntax.keyword", ZEVRIA_DARK.syntax.keyword),
-            ("syntax.function", ZEVRIA_DARK.syntax.function),
-            ("syntax.type", ZEVRIA_DARK.syntax.r#type),
-            ("syntax.string", ZEVRIA_DARK.syntax.string),
-            ("syntax.constant", ZEVRIA_DARK.syntax.constant),
-            ("syntax.comment", ZEVRIA_DARK.syntax.comment),
-            ("syntax.invalid", ZEVRIA_DARK.syntax.invalid),
+            ("content.diff_hunk", t.content.diff_hunk),
+            ("syntax.keyword", t.syntax.keyword),
+            ("syntax.function", t.syntax.function),
+            ("syntax.type", t.syntax.r#type),
+            ("syntax.string", t.syntax.string),
+            ("syntax.constant", t.syntax.constant),
+            ("syntax.comment", t.syntax.comment),
+            ("syntax.invalid", t.syntax.invalid),
         ]
     }
 
-    fn semantic_foregrounds() -> Vec<(&'static str, Rgb)> {
+    fn semantic_foregrounds(t: ZevriaTheme) -> Vec<(&'static str, Rgb)> {
         vec![
-            ("Build", ZEVRIA_DARK.workflow.build),
-            ("Plan", ZEVRIA_DARK.workflow.plan),
-            ("Review", ZEVRIA_DARK.workflow.review),
-            ("Explore", ZEVRIA_DARK.workflow.explore),
-            ("You", ZEVRIA_DARK.roles.you),
-            ("Assistant", ZEVRIA_DARK.roles.assistant),
-            ("System", ZEVRIA_DARK.roles.system),
-            ("tools", ZEVRIA_DARK.roles.tools),
-            ("success", ZEVRIA_DARK.feedback.success),
-            ("warning", ZEVRIA_DARK.feedback.warning),
-            ("error", ZEVRIA_DARK.feedback.error),
-            ("info", ZEVRIA_DARK.feedback.info),
-            ("heading", ZEVRIA_DARK.content.heading),
-            ("strong", ZEVRIA_DARK.content.strong),
-            ("code", ZEVRIA_DARK.content.code),
-            ("link", ZEVRIA_DARK.content.link),
-            ("diff addition", ZEVRIA_DARK.content.diff_addition),
-            ("diff deletion", ZEVRIA_DARK.content.diff_deletion),
-            ("diff hunk", ZEVRIA_DARK.content.diff_hunk),
-            ("keyword", ZEVRIA_DARK.syntax.keyword),
-            ("function", ZEVRIA_DARK.syntax.function),
-            ("type", ZEVRIA_DARK.syntax.r#type),
-            ("string", ZEVRIA_DARK.syntax.string),
-            ("constant", ZEVRIA_DARK.syntax.constant),
-            ("comment", ZEVRIA_DARK.syntax.comment),
-            ("invalid", ZEVRIA_DARK.syntax.invalid),
+            ("Build", t.workflow.build),
+            ("Plan", t.workflow.plan),
+            ("Review", t.workflow.review),
+            ("Explore", t.workflow.explore),
+            ("You", t.roles.you),
+            ("Assistant", t.roles.assistant),
+            ("System", t.roles.system),
+            ("tools", t.roles.tools),
+            ("success", t.feedback.success),
+            ("warning", t.feedback.warning),
+            ("error", t.feedback.error),
+            ("info", t.feedback.info),
+            ("heading", t.content.heading),
+            ("strong", t.content.strong),
+            ("code", t.content.code),
+            ("link", t.content.link),
+            ("diff addition", t.content.diff_addition),
+            ("diff deletion", t.content.diff_deletion),
+            ("diff hunk", t.content.diff_hunk),
+            ("keyword", t.syntax.keyword),
+            ("function", t.syntax.function),
+            ("type", t.syntax.r#type),
+            ("string", t.syntax.string),
+            ("constant", t.syntax.constant),
+            ("comment", t.syntax.comment),
+            ("invalid", t.syntax.invalid),
         ]
     }
 

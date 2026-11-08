@@ -257,6 +257,7 @@ mod tests {
     #[test]
     fn built_in_contract_and_actionable_pairs() {
         validate_tokens(&super::super::ZEVRIA_DARK).unwrap();
+        validate_tokens(&super::super::ZEVRIA_GRAPHITE).unwrap();
         let mut broken = super::super::ZEVRIA_DARK;
         broken.text.primary = broken.surfaces.canvas;
         assert!(
