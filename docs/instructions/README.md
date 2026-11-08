@@ -4,6 +4,8 @@ Every other file in this folder is compiled verbatim with `include_str!`:
 
 - Instruction modules come from `crates/instructions/src/prompts.rs`.
 - Context-checkpoint templates come from `crates/model/src/compaction.rs`.
+  `compact-request.md` is the engine-owned trailing user instruction: summaries
+  extend the normal request instead of changing its instruction/tool prefix.
 
 Human-facing documentation belongs in `docs/`.
 

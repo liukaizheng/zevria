@@ -1,7 +1,7 @@
 //! Embedded instruction documents stay separate from human-facing documentation.
 use std::path::PathBuf;
 use zevria_instructions::prompts;
-use zevria_model::compaction::{SUMMARIZATION_PROMPT, SUMMARY_PREFIX};
+use zevria_model::compaction::{SUMMARIZATION_PROMPT, SUMMARY_PREFIX, SUMMARY_REQUEST_PREFACE};
 
 #[test]
 fn instruction_documents_match_production_constants() {
@@ -20,7 +20,7 @@ fn instruction_documents_match_production_constants() {
         prompts::ENSEMBLE_WORKER_REVIEW_INSTRUCTIONS,
         prompts::ENSEMBLE_PLAN_SYNTHESIS_INSTRUCTIONS,
         prompts::ENSEMBLE_REVIEW_SYNTHESIS_INSTRUCTIONS,
-        prompts::MAINTENANCE_INSTRUCTIONS,
+        SUMMARY_REQUEST_PREFACE,
         SUMMARIZATION_PROMPT,
         SUMMARY_PREFIX,
     ];

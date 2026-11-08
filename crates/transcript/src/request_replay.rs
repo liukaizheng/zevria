@@ -46,6 +46,9 @@ impl RequestReplayState {
         item: &TranscriptItem,
         pending_empty: bool,
     ) -> anyhow::Result<()> {
+        if matches!(item, TranscriptItem::ToolDeclarations(_)) {
+            return Ok(());
+        }
         if self.expected.is_some() {
             anyhow::ensure!(
                 matches!(item, TranscriptItem::RequestDirective(d) if d.kind == RequestDirectiveKind::Boundary),

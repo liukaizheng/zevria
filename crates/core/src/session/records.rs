@@ -58,8 +58,13 @@ impl<P: ModelProvider> SessionEngine<P> {
     pub(super) fn record_completed(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
         self.ensure_replay_valid()?;
         let estimated = item.clone();
-        let model_visible =
-            item.model_request_item().is_some() && !matches!(item, TranscriptItem::Directive(_));
+        let model_visible = item.model_request_item().is_some()
+            && !matches!(
+                item,
+                TranscriptItem::Directive(_)
+                    | TranscriptItem::RequestDirective(_)
+                    | TranscriptItem::ToolDeclarations(_)
+            );
         let result = self.conversation.push_completed(item);
         self.refresh_replay()?;
         self.append_context_estimates(std::slice::from_ref(&estimated));
@@ -75,7 +80,13 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> anyhow::Result<()> {
         self.ensure_replay_valid()?;
         let model_visible = items.iter().any(|item| {
-            item.model_request_item().is_some() && !matches!(item, TranscriptItem::Directive(_))
+            item.model_request_item().is_some()
+                && !matches!(
+                    item,
+                    TranscriptItem::Directive(_)
+                        | TranscriptItem::RequestDirective(_)
+                        | TranscriptItem::ToolDeclarations(_)
+                )
         });
         let estimated = items.clone();
         let result = self.conversation.push_completed_batch(items);

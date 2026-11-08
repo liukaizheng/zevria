@@ -672,7 +672,8 @@ impl<'a> ToolExecutionScope<'a> {
             mode,
             policy,
             catalog: &engine.skills.catalog,
-            fixed_tokens: engine.fixed_input_tokens(policy),
+            fixed_tokens: engine
+                .irreducible_input_tokens(&engine.rendered_instructions(policy), policy),
             instruction_state: engine.directive_state().ok().cloned(),
             instructions: engine.instruction_preparation(policy),
             skill_activation_available: engine.skill_activation_available(policy),

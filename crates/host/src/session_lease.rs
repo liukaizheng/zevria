@@ -16,7 +16,7 @@ use anyhow::Context as _;
 
 #[cfg(test)]
 #[path = "session_lease_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 const COORDINATOR_NAME: &str = ".leases.lock";
 const COORDINATOR_WAIT: Duration = Duration::from_millis(250);

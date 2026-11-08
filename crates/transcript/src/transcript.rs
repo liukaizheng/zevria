@@ -39,6 +39,8 @@ const TOOL_RESULT_METADATA_KEY: &str = "zevria_tool_result_metadata";
 const SUBTASK_RESULTS_KEY: &str = "zevria_subtask_results";
 const SKILL_INVOCATION_KEY: &str = "zevria_skill_invocation";
 const COMMAND_JOB_NOTICE_KEY: &str = "zevria_command_job_notice";
+const TOOL_DECLARATIONS_KEY: &str = "zevria_tool_declarations";
+pub use crate::{ToolDeclarationPlacement, ToolDeclarationRecord, ToolWindow, tool_window};
 const SKILL_APPLICATIONS_KEY: &str = "zevria_skill_applications";
 const SKILL_DIRECTIVE_KEY: &str = "zevria_skill_directive";
 const REQUEST_METADATA_KEY: &str = "zevria_request";
@@ -133,6 +135,8 @@ impl<'de> Deserialize<'de> for UniqueEnvelope {
 /// Removed reserved sidecars are rejected before ordinary message decoding.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
+    /// Model structure only: top-level window anchor or ordered inline additions.
+    ToolDeclarations(ToolDeclarationRecord),
     /// Immutable display-only evidence of an abandoned response.
     IncompleteResponse(crate::IncompleteResponse),
     /// Canonical current Build/Plan selections, only at the start of a root log.
@@ -217,6 +221,10 @@ impl Serialize for TranscriptItem {
         }
 
         match self {
+            Self::ToolDeclarations(record) => {
+                record.validate().map_err(serde::ser::Error::custom)?;
+                serde_json::json!({TOOL_DECLARATIONS_KEY: record}).serialize(serializer)
+            }
             Self::IncompleteResponse(attempt) => {
                 attempt.validate().map_err(serde::ser::Error::custom)?;
                 serde_json::json!({INCOMPLETE_RESPONSE_KEY: attempt}).serialize(serializer)
@@ -366,6 +374,9 @@ impl<'de> Deserialize<'de> for TranscriptItem {
                             map.next_value::<zevria_instructions::RequestDirective>()?;
                         directive.validate().map_err(A::Error::custom)?;
                         serde_json::to_value(directive).map_err(A::Error::custom)?
+                    } else if key == TOOL_DECLARATIONS_KEY {
+                        let record = map.next_value::<ToolDeclarationRecord>()?;
+                        serde_json::to_value(record).map_err(A::Error::custom)?
                     } else if key == COMMAND_JOB_NOTICE_KEY {
                         let notice = map.next_value::<CommandJobNotice>()?;
                         serde_json::to_value(notice).map_err(A::Error::custom)?
@@ -394,6 +405,16 @@ impl<'de> Deserialize<'de> for TranscriptItem {
         }
         let mut value = deserializer.deserialize_map(RecordValue)?;
         validate_reserved_lifecycle_keys(&value).map_err(D::Error::custom)?;
+        if let Some(record) = value.get(TOOL_DECLARATIONS_KEY) {
+            if value.as_object().is_none_or(|object| object.len() != 1) {
+                return Err(D::Error::custom(
+                    "tool declarations must be a standalone record",
+                ));
+            }
+            return serde_json::from_value(record.clone())
+                .map(Self::ToolDeclarations)
+                .map_err(D::Error::custom);
+        }
         if let Some(directive) = value.get(REQUEST_DIRECTIVE_KEY) {
             if value.as_object().is_none_or(|object| object.len() != 1) {
                 return Err(D::Error::custom(
@@ -646,6 +667,7 @@ impl TranscriptItem {
             | Self::SessionMode(_)
             | Self::Directive(_)
             | Self::RequestDirective(_)
+            | Self::ToolDeclarations(_)
             | Self::Compaction(_)
             | Self::IncompleteResponse(_)
             | Self::Error { .. } => None,
@@ -682,6 +704,7 @@ impl TranscriptItem {
             | Self::RequestDirective(_)
             | Self::SkillInvocation(_)
             | Self::CommandJobNotice(_)
+            | Self::ToolDeclarations(_)
             | Self::Plan(_)
             | Self::Ensemble(_)
             | Self::Compaction(_)
@@ -694,6 +717,12 @@ impl TranscriptItem {
     /// Checkpoints themselves are expanded by [`Conversation::model_input`].
     pub fn model_request_item(&self) -> Option<ModelRequestItem<'_>> {
         match self {
+            Self::ToolDeclarations(record) => match record.placement {
+                ToolDeclarationPlacement::Initial => None,
+                ToolDeclarationPlacement::Additional => {
+                    Some(ModelRequestItem::AdditionalTools(&record.tools))
+                }
+            },
             Self::Directive(directive) => Some(ModelRequestItem::DeveloperInstruction(directive)),
             Self::RequestDirective(directive) => {
                 Some(ModelRequestItem::RequestInstruction(directive))
@@ -2172,6 +2201,7 @@ pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {
                     || key == REQUEST_METADATA_KEY
                     || key == REQUEST_DIRECTIVE_KEY
                     || key == INCOMPLETE_RESPONSE_KEY
+                    || key == TOOL_DECLARATIONS_KEY
             })
         });
         match serde_json::from_slice::<TranscriptItem>(line) {
@@ -2396,6 +2426,12 @@ fn validate_reserved_lifecycle_keys(value: &serde_json::Value) -> anyhow::Result
                 key.chars().take(128).collect::<String>()
             );
         }
+    }
+    if object.contains_key(TOOL_DECLARATIONS_KEY) {
+        anyhow::ensure!(
+            object.len() == 1,
+            "tool declarations must be a standalone record"
+        );
     }
     if object.contains_key(COMMAND_JOB_NOTICE_KEY) {
         anyhow::ensure!(
@@ -2716,6 +2752,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
         matches!(
             key.as_str(),
             INCOMPLETE_RESPONSE_KEY
+                | TOOL_DECLARATIONS_KEY
                 | COMPACTION_RECORD_KEY
                 | PROVIDER_REPLAY_KEY
                 | SKILL_DIRECTIVE_KEY
@@ -2744,6 +2781,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
         matches!(
             key.as_str(),
             INSTRUCTION_PREFIX_KEY
+                | TOOL_DECLARATIONS_KEY
                 | DIRECTIVE_KEY
                 | COMPACTION_RECORD_KEY
                 | SESSION_MODE_KEY
@@ -2764,6 +2802,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
     }
     for (envelope, version) in [
         (COMMAND_JOB_NOTICE_KEY, 1),
+        (TOOL_DECLARATIONS_KEY, 1),
         (COMPACTION_RECORD_KEY, crate::compaction::COMPACTION_VERSION),
         (PROVIDER_REPLAY_KEY, crate::PROVIDER_REPLAY_VERSION),
         (
@@ -2794,6 +2833,7 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
                 | ENSEMBLE_RECORD_KEY
                 | SKILL_DIRECTIVE_KEY
                 | COMMAND_JOB_NOTICE_KEY
+                | TOOL_DECLARATIONS_KEY
                 | INCOMPLETE_RESPONSE_KEY
         ) && let Some(value) = partial_json_field(line, &[key])
             && serde_json::from_value::<TranscriptItem>(serde_json::json!({(key): value})).is_err()
@@ -2809,6 +2849,7 @@ fn current_reserved_key(key: &str) -> bool {
     matches!(
         key,
         SKILL_APPLICATIONS_KEY
+            | TOOL_DECLARATIONS_KEY
             | COMMAND_JOB_NOTICE_KEY
             | SKILL_INVOCATION_KEY
             | SKILL_DIRECTIVE_KEY

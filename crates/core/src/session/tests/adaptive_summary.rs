@@ -68,19 +68,21 @@ impl ModelProvider for PrefixProvider {
         input: &[ModelRequestItem<'_>],
     ) -> anyhow::Result<zevria_model::models::ReplayPreflight> {
         if input.last().and_then(|item| item.message_ref())
-            == Some(&Message::user(zevria_model::SUMMARIZATION_PROMPT))
+            == Some(&zevria_model::compaction::summary_request_message(
+                zevria_model::SUMMARIZATION_PROMPT,
+            ))
         {
             self.evaluated.lock().unwrap().push(
                 input
                     .iter()
-                    .filter(|item| !matches!(item, ModelRequestItem::DeveloperInstruction(_)))
+                    .filter(|item| item.message_ref().is_some() || item.replay_ref().is_some())
                     .count()
                     - 1,
             );
         }
         let tokens = input
             .iter()
-            .filter(|item| !matches!(item, ModelRequestItem::DeveloperInstruction(_)))
+            .filter(|item| item.message_ref().is_some() || item.replay_ref().is_some())
             .count() as u64
             * 1000;
         Ok(zevria_model::models::ReplayPreflight::Compatible(
@@ -93,16 +95,17 @@ impl ModelProvider for PrefixProvider {
         request: ModelRequest<'a>,
     ) -> InputTokenCountFuture<'a> {
         Box::pin(async move {
-            assert_eq!(request.allowed_tool_names, Some([].as_slice()));
             if request.input.last().and_then(|item| item.message_ref())
-                == Some(&Message::user(zevria_model::SUMMARIZATION_PROMPT))
+                == Some(&zevria_model::compaction::summary_request_message(
+                    zevria_model::SUMMARIZATION_PROMPT,
+                ))
             {
-                zevria_model::maintenance::validate_maintenance_input(&request.input).unwrap();
+                assert!(!request.forbid_tool_calls);
             }
             let k = request
                 .input
                 .iter()
-                .filter(|item| !matches!(item, ModelRequestItem::DeveloperInstruction(_)))
+                .filter(|item| item.message_ref().is_some() || item.replay_ref().is_some())
                 .count()
                 - 1;
             self.counts.push(k);
@@ -133,14 +136,11 @@ impl ModelProvider for PrefixProvider {
             self.requests
                 .push(snapshot_model_input(request.input.clone())?);
             if request.input.last().and_then(|item| item.message_ref())
-                == Some(&Message::user(zevria_model::SUMMARIZATION_PROMPT))
+                == Some(&zevria_model::compaction::summary_request_message(
+                    zevria_model::SUMMARIZATION_PROMPT,
+                ))
             {
-                zevria_model::maintenance::validate_maintenance_input(&request.input).unwrap();
-            }
-            if request.input.last().and_then(|item| item.message_ref())
-                == Some(&Message::user(zevria_model::SUMMARIZATION_PROMPT))
-            {
-                assert_eq!(request.allowed_tool_names, Some([].as_slice()));
+                assert!(!request.forbid_tool_calls);
             }
             if let Some(cancellation) = &self.cancel {
                 cancellation.cancel();
@@ -181,6 +181,21 @@ fn source(n: usize) -> Vec<OwnedModelRequestItem> {
         .map(|i| OwnedModelRequestItem::message(Message::user(format!("source-{i}"))))
         .collect()
 }
+fn captured_source(input: &[OwnedModelRequestItem]) -> CompactionSource {
+    let (history, positions) = snapshot_conversation_input(input);
+    CompactionSource {
+        request: CompactionRequest {
+            instructions: "normal request instructions".repeat(100),
+            tools: ToolDeclarations::default(),
+            input: input.to_vec(),
+        },
+        history,
+        positions,
+        retained_user_candidates: vec![],
+        task_snapshot: None,
+        plan_context: None,
+    }
+}
 fn size_error() -> anyhow::Result<Message> {
     Err(anyhow::Error::new(ModelInputTooLarge::new(anyhow::anyhow!(
         "structured size diagnostic"
@@ -209,8 +224,7 @@ async fn descending_admission_exact_fallback_and_full_success() {
         let context = engine.provider.context.clone();
         let result = engine
             .summarize_prefix(
-                &source,
-                &zevria_instructions::InstructionSet::maintenance("", []),
+                &captured_source(&source),
                 &context,
                 test_policies().policy(SessionMode::Build),
                 &events,
@@ -230,13 +244,15 @@ async fn descending_admission_exact_fallback_and_full_success() {
         );
         assert_eq!(
             engine.provider.requests[0][expected_k],
-            OwnedModelRequestItem::message(Message::user(zevria_model::SUMMARIZATION_PROMPT))
+            OwnedModelRequestItem::message(zevria_model::compaction::summary_request_message(
+                zevria_model::SUMMARIZATION_PROMPT
+            ))
         );
         let history =
             zevria_model::compaction::summary_tail_history(&source, expected_k, &result.0).unwrap();
         assert_eq!(&history[1..], &original[expected_k..]);
         assert_eq!(source, original);
-        assert_eq!(engine.provider.resets, 2);
+        assert_eq!(engine.provider.resets, 1);
         assert!(
             collect_events(&mut receiver).await.is_empty(),
             "synthetic usage and streams stay silent"
@@ -245,6 +261,62 @@ async fn descending_admission_exact_fallback_and_full_success() {
             assert_eq!(engine.provider.counts, [4]);
         }
     }
+}
+
+#[tokio::test]
+async fn shorter_attempts_are_full_input_prefixes_without_moving_declarations_or_directives() {
+    let mut provider = PrefixProvider::new(
+        Counting::Unsupported,
+        [size_error(), Ok(Message::assistant("summary"))],
+    );
+    provider.catalog = false;
+    let (_directory, mut engine) = engine(provider);
+    let directive = zevria_instructions::DirectiveContent::skill(
+        &test_skills().get("review").unwrap().snapshot(),
+    );
+    let declarations = ToolDeclarations::new(vec![zevria_model::ToolDeclaration {
+        name: "echo".into(),
+        description: "echo".into(),
+        parameters: json!({"type":"object"}),
+    }])
+    .unwrap();
+    let input = vec![
+        OwnedModelRequestItem::message(Message::user("one")),
+        OwnedModelRequestItem::DeveloperInstruction(directive),
+        OwnedModelRequestItem::message(Message::assistant("two")),
+        OwnedModelRequestItem::AdditionalTools(declarations),
+        OwnedModelRequestItem::message(Message::user("three")),
+    ];
+    let source = captured_source(&input);
+    let context = engine.provider.context.clone();
+    let (events, _) = session_event_channel(32);
+    let (_, k) = engine
+        .summarize_prefix(
+            &source,
+            &context,
+            test_policies().policy(SessionMode::Build),
+            &events,
+            &turn(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(k, 2);
+    assert_eq!(&engine.provider.requests[0][..input.len()], &input);
+    assert_eq!(
+        &engine.provider.requests[1][..source.cut(k)],
+        &input[..source.cut(k)]
+    );
+    assert!(matches!(
+        engine.provider.requests[1][source.cut(k) - 1],
+        OwnedModelRequestItem::AdditionalTools(_)
+    ));
+    let tail =
+        zevria_model::compaction::summary_tail_history(&source.history, k, "summary").unwrap();
+    assert_eq!(tail[1], input[4]);
+    assert!(tail.iter().all(|item| !matches!(
+        item,
+        OwnedModelRequestItem::DeveloperInstruction(_) | OwnedModelRequestItem::AdditionalTools(_)
+    )));
 }
 
 #[tokio::test]
@@ -263,8 +335,7 @@ async fn provider_size_retries_have_no_sixteen_candidate_cap_and_mix_with_local_
         let (events, _) = session_event_channel(32);
         let (summary, k) = engine
             .summarize_prefix(
-                &source,
-                &zevria_instructions::InstructionSet::maintenance("", []),
+                &captured_source(&source),
                 &context,
                 test_policies().policy(SessionMode::Build),
                 &events,
@@ -280,14 +351,14 @@ async fn provider_size_retries_have_no_sixteen_candidate_cap_and_mix_with_local_
                 .iter()
                 .map(|request| request
                     .iter()
-                    .filter(|item| !matches!(item, OwnedModelRequestItem::DeveloperInstruction(_)))
+                    .filter(|item| item.message_ref().is_some() || item.replay_ref().is_some())
                     .count()
                     - 1)
                 .collect::<Vec<_>>(),
             (1..=19).rev().collect::<Vec<_>>()
         );
         assert_eq!(engine.provider.requests.len(), 19);
-        assert_eq!(engine.provider.resets, 38);
+        assert_eq!(engine.provider.resets, 19);
     }
 }
 
@@ -315,8 +386,7 @@ async fn irreducible_empty_non_size_and_cancellation_preserve_history() {
         let (events, mut receiver) = session_event_channel(32);
         let error = engine
             .summarize_prefix(
-                &source,
-                &zevria_instructions::InstructionSet::maintenance("", []),
+                &captured_source(&source),
                 &context,
                 test_policies().policy(SessionMode::Build),
                 &events,
@@ -387,8 +457,7 @@ async fn unsafe_boundaries_are_skipped_without_counting_or_dispatch_and_malforme
     let (events, _) = session_event_channel(32);
     let (_, k) = engine
         .summarize_prefix(
-            &source,
-            &zevria_instructions::InstructionSet::maintenance("", []),
+            &captured_source(&source),
             &context,
             test_policies().policy(SessionMode::Build),
             &events,
@@ -402,8 +471,7 @@ async fn unsafe_boundaries_are_skipped_without_counting_or_dispatch_and_malforme
     source.remove(2);
     let error = engine
         .summarize_prefix(
-            &source,
-            &zevria_instructions::InstructionSet::maintenance("", []),
+            &captured_source(&source),
             &context,
             test_policies().policy(SessionMode::Build),
             &events,
@@ -464,10 +532,10 @@ async fn partial_edited_prefix_is_installed_only_with_an_accepted_revision() {
                     }
                 })
                 .expect("accepted edit checkpoint");
-            let source = snapshot_conversation_input(zevria_transcript::transcript::model_input(
-                &original[..4],
-            ))
-            .unwrap();
+            let full =
+                snapshot_model_input(zevria_transcript::transcript::model_input(&original[..4]))
+                    .unwrap();
+            let (source, _) = snapshot_conversation_input(&full);
             assert_eq!(&checkpoint.replacement_history[1..], &source[2..]);
             assert_eq!(&engine.provider.requests[0][..2], &source[..2]);
             assert_eq!(
@@ -559,10 +627,11 @@ async fn mid_turn_partial_checkpoint_preserves_a_complete_batch_even_if_dispatch
         &loaded[checkpoint_index - 1],
         TranscriptItem::ToolResults { .. }
     ));
-    let source = snapshot_conversation_input(zevria_transcript::transcript::model_input(
+    let full = snapshot_model_input(zevria_transcript::transcript::model_input(
         &loaded[..checkpoint_index],
     ))
     .unwrap();
+    let (source, _) = snapshot_conversation_input(&full);
     assert_eq!(&checkpoint.replacement_history[1..], &source[3..]);
     assert_eq!(checkpoint.replacement_history.len(), 3);
     assert_eq!(engine.provider.counts, [5, 3]);

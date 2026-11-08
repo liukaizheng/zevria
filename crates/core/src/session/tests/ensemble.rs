@@ -196,10 +196,7 @@ async fn ensemble_to_ensemble_edit_atomically_replaces_the_tail_with_a_fresh_run
     }));
     let persisted =
         zevria_transcript::transcript::load(&transcript_path).expect("durable transcript");
-    assert_eq!(
-        persisted,
-        conversation_records(engine.conversation().items())
-    );
+    assert_eq!(persisted, engine.conversation().items());
     assert_eq!(
         &persisted[..2],
         &[
@@ -350,10 +347,7 @@ async fn prompt_edits_can_become_fresh_plan_or_review_ensembles() {
         }));
         let persisted =
             zevria_transcript::transcript::load(&transcript_path).expect("durable transcript");
-        assert_eq!(
-            persisted,
-            conversation_records(engine.conversation().items())
-        );
+        assert_eq!(persisted, engine.conversation().items());
         {
             let requests = requests.lock().expect("requests");
             assert!(!requests.is_empty());
@@ -451,10 +445,7 @@ async fn ensemble_to_message_edit_runs_build_or_plan_from_the_retained_prefix() 
         }));
         let persisted =
             zevria_transcript::transcript::load(&transcript_path).expect("durable transcript");
-        assert_eq!(
-            persisted,
-            conversation_records(engine.conversation().items())
-        );
+        assert_eq!(persisted, engine.conversation().items());
         assert!(persisted.iter().any(|item| {
             matches!(item, TranscriptItem::Message(message) if message == &Message::user("ordinary replacement"))
         }));
@@ -584,10 +575,7 @@ async fn prompt_ensemble_and_skill_targets_can_become_typed_skill_turns() {
         }));
         let persisted =
             zevria_transcript::transcript::load(&transcript_path).expect("durable transcript");
-        assert_eq!(
-            persisted,
-            conversation_records(engine.conversation().items())
-        );
+        assert_eq!(persisted, engine.conversation().items());
         {
             let requests = requests.lock().expect("requests");
             assert_eq!(requests.len(), 1);
@@ -2104,6 +2092,7 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
             "reconciliation accepted",
         ),
         TranscriptItem::Message(create_and_submit_plan_call(title, &markdown)),
+        successful_tool_result("create-plan", CREATE_PLAN_TOOL_NAME, "Plan draft created."),
         TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
             message: Message::User {

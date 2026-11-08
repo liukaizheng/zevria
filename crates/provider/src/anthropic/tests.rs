@@ -61,7 +61,6 @@ fn runtime(profile: &ResolvedModelProfile) -> AnthropicProvider {
         profile,
         zevria_foundation::ReasoningLevel::High,
         "stable",
-        ToolServer::new().run(),
         "session-1",
     )
     .unwrap();
@@ -70,6 +69,8 @@ fn runtime(profile: &ResolvedModelProfile) -> AnthropicProvider {
 }
 fn request(user: &Message) -> ModelRequest<'_> {
     ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: "stable",
         input: vec![ModelRequestItem::message(user)],
         model_role: ModelRole::Build,
@@ -128,6 +129,7 @@ async fn headers_streaming_usage_counting_and_local_compaction() {
         "thinking-display-updates-2026-08-18",
         "server-side-fallback-2026-07-01",
         "gateway-beta",
+        "inline-tools-2026-09-15",
     ] {
         assert!(headers.contains(expected), "{expected}");
     }
@@ -136,6 +138,7 @@ async fn headers_streaming_usage_counting_and_local_compaction() {
             .headers
             .starts_with("POST /v1/messages/count_tokens ")
     );
+    assert!(requests[1].headers.contains("inline-tools-2026-09-15"));
     assert_eq!(
         requests[1].body,
         zevria_anthropic::body::count_tokens_body(&requests[0].body)
@@ -303,6 +306,8 @@ async fn binding_mismatch_retries_once_with_thinking_removed_and_new_binding() {
         zevria_model::ReplayMessage::new(first.record().provider_replay().unwrap().clone())
             .unwrap();
     let req = ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: "stable",
         input: vec![
             ModelRequestItem::message(&user),

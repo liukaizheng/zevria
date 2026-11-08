@@ -1,17 +1,13 @@
 //! Permanent continuation tests for the request-owned instruction set.
 use super::*;
-use rig_agent::tool::server::ToolServer;
 use zevria_foundation::{ModelRole, TurnPolicy};
 use zevria_instructions::{DirectiveContent, DirectivePolicy, InstructionSet, SkillSnapshot};
 use zevria_model::ModelRequestItem;
 
 #[tokio::test]
 async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incremental() {
-    let mut provider = crate::tests::connect_http_test_provider(
-        "http://127.0.0.1:9/responses".into(),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut provider =
+        crate::tests::connect_http_test_provider("http://127.0.0.1:9/responses".into()).await;
     let mut set = InstructionSet {
         application: "Application".into(),
         system: vec![],
@@ -24,6 +20,8 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
     let build = set.render();
     let prompt = Message::user("first");
     let first_request = ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: &build,
         input: vec![ModelRequestItem::message(&prompt)],
         model_role: ModelRole::Build,
@@ -58,6 +56,8 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
         ModelRequestItem::DeveloperInstruction(&body),
     ];
     let build_request = ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: &build,
         input,
         model_role: ModelRole::Build,

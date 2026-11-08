@@ -10,6 +10,8 @@ use zevria_model::{compaction, models};
 use zevria_workflow::*;
 use zevria_workflow::{ensemble, plan};
 mod display;
+mod tool_declarations;
+pub use tool_declarations::*;
 mod incomplete_response;
 pub use incomplete_response::*;
 mod ensemble_review_history;
@@ -47,6 +49,8 @@ mod prompt_record_tests;
 mod request_tests;
 #[cfg(test)]
 mod skill_replay_tests;
+#[cfg(test)]
+mod tool_declaration_tests;
 
 mod launch_metadata;
 pub use launch_metadata::subtask_launch_metadata;

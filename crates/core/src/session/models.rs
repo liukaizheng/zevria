@@ -189,7 +189,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         reasoning_level: ReasoningLevel,
         input: &[OwnedModelRequestItem],
         policy: &TurnPolicy,
-        live_state: bool,
+        fresh_window: bool,
         cancellation: &CancellationToken,
     ) -> anyhow::Result<bool> {
         let borrowed = input
@@ -201,7 +201,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             reasoning_level,
             &borrowed,
             policy,
-            live_state,
+            fresh_window,
             cancellation,
         )
         .await
@@ -213,7 +213,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         reasoning_level: ReasoningLevel,
         input: &[ModelRequestItem<'_>],
         policy: &TurnPolicy,
-        live_state: bool,
+        fresh_window: bool,
         cancellation: &CancellationToken,
     ) -> anyhow::Result<bool> {
         let mut projected = input.to_vec();
@@ -224,39 +224,59 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
         }
         let mut updates = Vec::new();
-        if live_state {
-            if state.snapshot().directives.is_empty() {
-                updates = self.directive_state()?.snapshot().directives;
-                for directive in &updates {
-                    state.apply(directive)?;
-                }
+        if state.snapshot().directives.is_empty() {
+            updates = self.directive_state()?.snapshot().directives;
+            for directive in &updates {
+                state.apply(directive)?;
             }
-            updates.extend(self.reconcile_instruction_state(
-                &state,
-                policy,
-                self.active_skills()?,
-            )?);
-            projected.extend(updates.iter().map(ModelRequestItem::DeveloperInstruction));
         }
+        let items = if fresh_window {
+            &[][..]
+        } else {
+            self.conversation.items()
+        };
+        let tools = self.request_tools(items, policy);
+        let tool_update = self.tool_declaration_update(items, policy);
+        projected.extend(
+            tool_update
+                .as_ref()
+                .and_then(TranscriptItem::model_request_item),
+        );
+        updates.extend(self.reconcile_instruction_state(&state, policy, self.active_skills()?)?);
+        projected.extend(updates.iter().map(ModelRequestItem::DeveloperInstruction));
+        let instructions = self.rendered_instructions(policy);
+        let request = ModelRequest {
+            instructions: &instructions,
+            tools: &tools,
+            forbid_tool_calls: false,
+            input: projected,
+            model_role: policy.model_role,
+            allowed_tool_names: policy.allowed_tool_names.as_deref(),
+        };
+        self.request_fits_view(context, reasoning_level, request, cancellation)
+            .await
+    }
+
+    /// Capacity admission for the actual request, including its exact prefix.
+    /// Synthetic callers must not substitute maintenance instructions or tools.
+    pub(super) async fn request_fits_view(
+        &mut self,
+        context: &ModelContextPolicy,
+        reasoning_level: ReasoningLevel,
+        request: ModelRequest<'_>,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<bool> {
         let ReplayPreflight::Compatible(estimate) = self
             .provider
-            .preflight_input(&context.profile, &projected)?
+            .preflight_input(&context.profile, &request.input)?
         else {
             anyhow::bail!(
                 "profile {} cannot read this opaque checkpoint; select its exact source or start a fresh session",
                 context.profile
             );
         };
-        let instructions = if live_state {
-            self.rendered_instructions(policy)
-        } else {
-            self.prepare_maintenance_guidance().render()
-        };
-        let overhead = if live_state {
-            self.fixed_input_tokens(policy)
-        } else {
-            zevria_model::compaction::approximate_tokens(&instructions)
-        };
+        let overhead =
+            prepared_fixed_tokens(request.instructions, &serde_json::to_vec(request.tools)?);
         let estimate = estimate.conservative_tokens.saturating_add(overhead);
         if estimate < context.trigger_tokens(self.compaction.auto_trigger_percent()) {
             return Ok(true);
@@ -264,12 +284,6 @@ impl<P: ModelProvider> SessionEngine<P> {
         if self.context.count_failures.contains(&context.profile) {
             return Ok(estimate <= context.input_token_limit);
         }
-        let request = ModelRequest {
-            instructions: &instructions,
-            input: projected,
-            model_role: policy.model_role,
-            allowed_tool_names: policy.allowed_tool_names.as_deref(),
-        };
         let selection = ModelSelection::new(context.profile.clone(), reasoning_level);
         let count = {
             let count = self.provider.count_profile(&selection, request);
@@ -281,7 +295,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             Ok(InputTokenCount::Unsupported) => Ok(estimate <= context.input_token_limit),
             Err(error) => {
                 self.context.count_failures.insert(context.profile.clone());
-                tracing::warn!(%error, "model selection exact count failed; using conservative estimate");
+                tracing::warn!(%error, "request exact count failed; using conservative estimate");
                 Ok(estimate <= context.input_token_limit)
             }
         }
@@ -401,7 +415,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                         target.reasoning_level,
                         &history,
                         &policy,
-                        true,
+                        false,
                         cancellation,
                     )
                     .await?
@@ -461,7 +475,6 @@ impl<P: ModelProvider> SessionEngine<P> {
                 self.convert_model_history(
                     (&source_context, &source),
                     (&context, &target),
-                    &history,
                     &policy,
                     events,
                     cancellation,
@@ -612,41 +625,35 @@ impl<P: ModelProvider> SessionEngine<P> {
         &mut self,
         source: (&ModelContextPolicy, &ModelSelection),
         destination: (&ModelContextPolicy, &ModelSelection),
-        history: &[OwnedModelRequestItem],
         policy: &TurnPolicy,
         events: &SessionEventSender,
         cancellation: &CancellationToken,
     ) -> anyhow::Result<CompactionCheckpoint> {
         let (source, source_selection) = source;
         let (destination, destination_selection) = destination;
-        let instructions = self.prepare_maintenance_guidance().render();
-        let mut input = history
+        let captured = self.compaction_source(self.conversation.items(), policy)?;
+        let prompt =
+            zevria_model::compaction::summary_request_message(self.compaction.summary_prompt());
+        let mut input = captured
+            .request
+            .input
             .iter()
-            .filter(|item| {
-                !matches!(
-                    item,
-                    OwnedModelRequestItem::DeveloperInstruction(_)
-                        | OwnedModelRequestItem::RequestInstruction(_)
-                )
-            })
-            .cloned()
+            .map(OwnedModelRequestItem::as_borrowed)
             .collect::<Vec<_>>();
-        input.push(OwnedModelRequestItem::message(Message::user(
-            self.compaction.summary_prompt().to_string(),
-        )));
-        let summary_policy = TurnPolicy::new(
-            "Summarize without tools",
-            Some(Vec::new()),
-            policy.model_role,
-            false,
-        );
+        input.push(ModelRequestItem::message(&prompt));
+        let request = ModelRequest {
+            instructions: &captured.request.instructions,
+            tools: &captured.request.tools,
+            forbid_tool_calls: false,
+            input,
+            model_role: policy.model_role,
+            allowed_tool_names: policy.allowed_tool_names.as_deref(),
+        };
         anyhow::ensure!(
-            self.selection_fits(
+            self.request_fits_view(
                 source,
                 source_selection.reasoning_level,
-                &input,
-                &summary_policy,
-                false,
+                request.clone(),
                 cancellation
             )
             .await?,
@@ -664,39 +671,42 @@ impl<P: ModelProvider> SessionEngine<P> {
         );
         let progress =
             ProgressReporter::silent_for_turn(events.clone(), turn, policy.model_role, source);
-        let request = ModelRequest {
-            instructions: &instructions,
-            input: input
-                .iter()
-                .map(OwnedModelRequestItem::as_borrowed)
-                .collect(),
-            model_role: policy.model_role,
-            allowed_tool_names: Some(&[]),
-        };
-        zevria_model::maintenance::validate_maintenance_input(&request.input)?;
-        self.provider.reset();
-        let result = {
-            let completion = self
-                .provider
-                .complete_profile(source_selection, request, progress);
-            tokio::pin!(completion);
-            tokio::select! { biased; () = cancellation.cancelled() => None, result = &mut completion => Some(result) }
-        };
-        if result.is_none() {
-            self.provider.cancel();
+        let mut summary = None;
+        for forbid_tool_calls in [false, true] {
+            let mut request = request.clone();
+            request.forbid_tool_calls = forbid_tool_calls;
+            let result = {
+                let completion =
+                    self.provider
+                        .complete_profile(source_selection, request, progress.clone());
+                tokio::pin!(completion);
+                tokio::select! { biased; () = cancellation.cancelled() => None, result = &mut completion => Some(result) }
+            };
+            if result.is_none() {
+                self.provider.cancel();
+            }
+            self.provider.reset();
+            let response =
+                result.ok_or_else(|| anyhow::anyhow!("model conversion cancelled"))??;
+            if !assistant_tool_calls(response.message()).is_empty() && !forbid_tool_calls {
+                tracing::warn!(
+                    "source summary returned tool calls; retrying with tool_choice none (may invalidate the messages cache)"
+                );
+                continue;
+            }
+            anyhow::ensure!(
+                assistant_tool_calls(response.message()).is_empty(),
+                "source model returned tool calls instead of a summary; selection unchanged"
+            );
+            let text = assistant_plain_text(response.message());
+            anyhow::ensure!(
+                !text.trim().is_empty(),
+                "source model returned an empty summary; selection unchanged"
+            );
+            summary = Some(text);
+            break;
         }
-        // Synthetic source traffic can never own a subsequent continuation.
-        self.provider.reset();
-        let response = result.ok_or_else(|| anyhow::anyhow!("model conversion cancelled"))??;
-        anyhow::ensure!(
-            assistant_tool_calls(response.message()).is_empty(),
-            "source model returned tool calls instead of a summary; selection unchanged"
-        );
-        let summary = assistant_plain_text(response.message());
-        anyhow::ensure!(
-            !summary.trim().is_empty(),
-            "source model returned an empty summary; selection unchanged"
-        );
+        let summary = summary.expect("successful source summary");
         let retained = select_recent_user_messages(
             &self.conversation.retained_user_candidates(),
             destination.retained_user_tokens,

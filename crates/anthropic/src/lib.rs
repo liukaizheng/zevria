@@ -28,6 +28,8 @@ pub enum RefusalFallback {
 pub struct Compatibility {
     pub prompt_caching: bool,
     pub system_messages: bool,
+    /// Inline tool additions require mid-conversation system messages too.
+    pub inline_tools: bool,
     pub eager_tool_input_streaming: bool,
     pub strict_thinking_binding: bool,
 }
@@ -36,12 +38,15 @@ impl Default for Compatibility {
         Self {
             prompt_caching: true,
             system_messages: true,
+            inline_tools: true,
             eager_tool_input_streaming: true,
             strict_thinking_binding: false,
         }
     }
 }
 
+#[cfg(test)]
+mod incremental_tool_tests;
 #[cfg(test)]
 mod regression_tests;
 #[cfg(test)]

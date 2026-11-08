@@ -82,6 +82,8 @@ async fn explicit_a_b_a_switches_send_full_websocket_input_and_clear_all_continu
             .provider_mut()
             .complete(
                 ModelRequest {
+                    tools: &[],
+                    forbid_tool_calls: false,
                     instructions: test_instructions(),
                     input: history
                         .iter()
@@ -572,8 +574,7 @@ reasoning_summary_level = "detailed"
     };
     let routing =
         ModelRouting::resolve(&BTreeMap::from([("p".into(), provider)]), &modes, 90).unwrap();
-    let tools = ToolServer::new().run();
-    let mut root = ProviderRouter::root(&routing, "", tools.clone(), "root").unwrap();
+    let mut root = ProviderRouter::root(&routing, "", "root").unwrap();
     assert_eq!(root.model_catalog().len(), 2);
     assert!(root.requires_portable_compaction());
     assert_eq!(root.initialized_profile_count(), 0);
@@ -581,6 +582,8 @@ reasoning_summary_level = "detailed"
         let error = root
             .complete(
                 ModelRequest {
+                    tools: &[],
+                    forbid_tool_calls: false,
                     instructions: test_instructions(),
                     input: Vec::new(),
                     model_role: role,
@@ -602,7 +605,7 @@ reasoning_summary_level = "detailed"
             routing.selection_for_role(role).reasoning_level,
             "",
         )
-        .create("child", tools.clone())
+        .create("child")
         .unwrap();
         assert_eq!(child.model_catalog().len(), 1);
         assert!(!child.requires_portable_compaction());

@@ -152,6 +152,7 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
             executions: Arc::new(AtomicUsize::new(0)),
         })
         .run();
+    let declared = declarations(&tools, None);
     let mut router = ProviderRouter::from_routes(
         [
             (
@@ -166,7 +167,6 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
             ),
         ],
         "stable",
-        tools,
         "root",
     )
     .unwrap();
@@ -176,8 +176,10 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
     );
     assert!(router.requires_portable_compaction());
     let user = Message::user("go");
+    let mut first_request = request(&user);
+    first_request.tools = &declared;
     let first = router
-        .complete(request(&user), discard_updates())
+        .complete(first_request, discard_updates())
         .await
         .unwrap();
     let first_record = first.into_record();
@@ -203,6 +205,8 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
     let second = router
         .complete(
             ModelRequest {
+                tools: &declared,
+                forbid_tool_calls: false,
                 instructions: "stable",
                 input: input.clone(),
                 model_role: ModelRole::Build,
@@ -234,6 +238,8 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
     router
         .complete(
             ModelRequest {
+                tools: &declared,
+                forbid_tool_calls: false,
                 instructions: "stable",
                 input,
                 model_role: ModelRole::Build,
@@ -312,7 +318,6 @@ async fn engine_tool_loop_persists_signed_thinking_and_reload_reproduces_request
             zevria_foundation::ReasoningLevel::High,
         )],
         "stable",
-        tools.clone(),
         "root",
     )
     .unwrap();
@@ -407,13 +412,16 @@ async fn engine_tool_loop_persists_signed_thinking_and_reload_reproduces_request
             zevria_foundation::ReasoningLevel::High,
         )],
         "stable",
-        tools,
         "root",
     )
     .unwrap();
     resumed
         .complete(
             ModelRequest {
+                tools: zevria_transcript::tool_window(&loaded[..final_index])
+                    .initial
+                    .unwrap(),
+                forbid_tool_calls: false,
                 instructions: &instructions,
                 input,
                 model_role: ModelRole::Build,

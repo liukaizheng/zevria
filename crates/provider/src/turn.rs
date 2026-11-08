@@ -7,12 +7,9 @@ use crate::recovery::{
 };
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures_util::StreamExt;
+use rig_core::error::ProviderError as CompletionError;
 #[cfg(test)]
 use rig_core::message::Message;
-use rig_core::{
-    error::ProviderError as CompletionError,
-    providers::openai::responses_api::ResponsesToolDefinition,
-};
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message as WebSocketMessage};
 use zevria_model::CompactResult;
 use zevria_model::InputTokenCount;
@@ -22,6 +19,7 @@ use zevria_model::ModelResponse;
 use zevria_model::ProviderReplay;
 use zevria_model::openai::ResponseStatus;
 use zevria_responses::protocol::{ProgressObservation, ResponseProgress};
+use zevria_responses::tools::ToolRendererOptions;
 use zevria_responses::wire::{
     CompletionResponse as OpenAiCompletionResponse, ResponseChunkKind, ResponsesWebSocketEvent,
 };
@@ -273,11 +271,15 @@ fn complete_provider_input(
     model_request: &ModelRequest<'_>,
     target_profile: &zevria_foundation::ModelProfileRef,
     developer_messages: bool,
+    tool_options: ToolRendererOptions,
+    additional_tools: bool,
 ) -> anyhow::Result<(Vec<serde_json::Value>, ReplaySource)> {
     let projected = zevria_responses::replay::project_with_compatibility(
         &model_request.input,
         target_profile,
         developer_messages,
+        tool_options,
+        additional_tools,
     )?;
     anyhow::ensure!(
         !projected.0.is_empty(),
@@ -290,24 +292,24 @@ pub(crate) async fn prepare_turn_request(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
 ) -> anyhow::Result<PreparedRequest> {
-    let catalog = openai.tools.snapshot();
-    let mut tools = catalog
-        .definitions()
+    let tool_options = ToolRendererOptions {
+        strict_tools: openai.compatibility.strict_tools,
+    };
+    let declarations = zevria_model::ToolDeclarations::new(model_request.tools.to_vec())?;
+    let additions = model_request
+        .input
         .iter()
-        .filter(|tool| {
-            model_request
-                .allowed_tool_names
-                .is_none_or(|names| names.iter().any(|name| name == tool.name.as_str()))
-        })
-        .map(|tool| ResponsesToolDefinition::from(tool.as_ref().clone()))
-        .map(|tool| {
-            if openai.compatibility.strict_tools {
-                tool.with_strict()
-            } else {
-                tool
-            }
+        .filter_map(|item| match item {
+            zevria_model::ModelRequestItem::AdditionalTools(tools) => Some(*tools),
+            _ => None,
         })
         .collect::<Vec<_>>();
+    let folded = if openai.compatibility.additional_tools {
+        declarations
+    } else {
+        declarations.fold(additions.iter().copied())
+    };
+    let mut tools = zevria_responses::tools::render(&folded, tool_options)?;
 
     let search_advertised = openai.web_search.enabled
         && model_request.allowed_tool_names.is_none_or(|names| {
@@ -316,22 +318,9 @@ pub(crate) async fn prepare_turn_request(
                 .any(|name| name == zevria_foundation::WEB_SEARCH_TOOL_NAME)
         });
     if search_advertised {
-        tools.push(openai.web_search.tool()?);
+        tools.push(serde_json::to_value(openai.web_search.tool()?)?);
     }
 
-    let mut tools = tools
-        .into_iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()?;
-    if !openai.compatibility.strict_tools {
-        // Compatibility profiles intentionally omit this field, including
-        // Rig 0.46's newly explicit `strict: false` on function tools.
-        for tool in &mut tools {
-            if let Some(fields) = tool.as_object_mut() {
-                fields.remove("strict");
-            }
-        }
-    }
     let mut request_properties = openai
         .prepared_responses_parameters()
         .unwrap_or_else(|| serde_json::json!({}));
@@ -352,17 +341,21 @@ pub(crate) async fn prepare_turn_request(
     }
     properties.remove("input");
     properties.remove("previous_response_id");
-    if model_request
-        .allowed_tool_names
-        .is_some_and(|names| names.is_empty())
-    {
-        // Maintenance is tool-free, even with a provider forcing override.
-        properties.remove("tool_choice");
-        properties.remove("parallel_tool_calls");
-        properties.insert("tools".into(), serde_json::json!([]));
+    if model_request.forbid_tool_calls {
+        properties.insert("tool_choice".into(), serde_json::json!("none"));
     } else {
-        validate_tool_choice(properties).map_err(|error| anyhow::anyhow!(
-            "profile {}: providers.{}.additional_params.tool_choice conflicts with the effective tools (check providers.{}.web_search.enabled and task permissions): {error}",
+        let mut declared = properties
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if openai.compatibility.additional_tools {
+            for addition in &additions {
+                declared.extend(zevria_responses::tools::render(addition, tool_options)?);
+            }
+        }
+        validate_tool_choice(properties, &declared).map_err(|error| anyhow::anyhow!(
+            "profile {}: providers.{}.additional_params.tool_choice conflicts with declared tools or hosted capabilities (check providers.{}.web_search.enabled and hosted-search task permissions): {error}",
             openai.profile, openai.profile.provider, openai.profile.provider
         ))?;
     }
@@ -371,6 +364,8 @@ pub(crate) async fn prepare_turn_request(
         model_request,
         &openai.profile,
         openai.compatibility.developer_messages,
+        tool_options,
+        openai.compatibility.additional_tools,
     )?;
     Ok(PreparedRequest {
         #[cfg(feature = "cache-diagnostics")]
@@ -384,27 +379,23 @@ pub(crate) async fn prepare_turn_request(
 
 fn validate_tool_choice(
     properties: &serde_json::Map<String, serde_json::Value>,
+    tools: &[serde_json::Value],
 ) -> anyhow::Result<()> {
     let Some(choice) = properties.get("tool_choice") else {
         return Ok(());
     };
-    let tools = properties
-        .get("tools")
-        .and_then(serde_json::Value::as_array);
     let permitted = |choice: &serde_json::Value| {
-        tools.is_some_and(|tools| {
-            tools.iter().any(|tool| {
-                tool.get("type") == choice.get("type")
-                    && (tool.get("type").and_then(serde_json::Value::as_str) != Some("function")
-                        || tool.get("name") == choice.get("name"))
-            })
+        tools.iter().any(|tool| {
+            tool.get("type") == choice.get("type")
+                && (tool.get("type").and_then(serde_json::Value::as_str) != Some("function")
+                    || tool.get("name") == choice.get("name"))
         })
     };
     match choice.as_str() {
         Some("auto" | "none") => return Ok(()),
         Some("required") => {
             anyhow::ensure!(
-                tools.is_some_and(|tools| !tools.is_empty()),
+                !tools.is_empty(),
                 "required tool choice has no permitted tools"
             );
             return Ok(());
@@ -427,85 +418,6 @@ fn validate_tool_choice(
         );
     }
     Ok(())
-}
-
-const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
-    "Output exceeded the available model context and was truncated";
-
-/// Rewrite only correlated tool outputs, newest first, when a compact request
-/// exceeds the configured input ceiling. Calls, output envelopes, IDs, status
-/// fields, and order stay byte-for-byte equivalent apart from the output body
-/// itself.
-pub(crate) fn trim_correlated_tool_outputs(
-    input: &[serde_json::Value],
-    request_property_bytes: usize,
-    input_token_limit: u64,
-) -> Vec<serde_json::Value> {
-    let mut rewritten = input.to_vec();
-    fn request_tokens(input: &[serde_json::Value], request_property_bytes: usize) -> u64 {
-        zevria_model::compaction::estimate_responses_input_tokens(input, request_property_bytes)
-    }
-    if request_tokens(&rewritten, request_property_bytes) <= input_token_limit {
-        return rewritten;
-    }
-
-    let calls = input
-        .iter()
-        .filter_map(|item| {
-            let kind = item.get("type")?.as_str()?;
-            matches!(kind, "function_call" | "custom_tool_call")
-                .then(|| item.get("call_id")?.as_str().map(ToOwned::to_owned))?
-        })
-        .collect::<std::collections::HashSet<_>>();
-
-    for index in (0..rewritten.len()).rev() {
-        if request_tokens(&rewritten, request_property_bytes) <= input_token_limit {
-            break;
-        }
-        let item = &mut rewritten[index];
-        let Some(object) = item.as_object_mut() else {
-            continue;
-        };
-        let eligible = matches!(
-            object.get("type").and_then(serde_json::Value::as_str),
-            Some("function_call_output" | "custom_tool_call_output")
-        ) && object
-            .get("call_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|call_id| calls.contains(call_id));
-        if !eligible {
-            continue;
-        }
-        let Some(output) = object.get_mut("output") else {
-            continue;
-        };
-        let old_len = serde_json::to_vec(output).map_or(0, |value| value.len());
-        if old_len <= CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE.len() {
-            continue;
-        }
-        match output {
-            serde_json::Value::Object(payload) => {
-                if let Some(body) = payload.get_mut("body") {
-                    *body = serde_json::Value::String(
-                        CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE.to_string(),
-                    );
-                } else if let Some(text) = payload.get_mut("text") {
-                    *text = serde_json::Value::String(
-                        CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE.to_string(),
-                    );
-                } else {
-                    *output = serde_json::Value::String(
-                        CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE.to_string(),
-                    );
-                }
-            }
-            _ => {
-                *output =
-                    serde_json::Value::String(CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE.to_string());
-            }
-        }
-    }
-    rewritten
 }
 
 async fn count_full_input_tokens(
@@ -598,20 +510,12 @@ async fn run_remote_compaction(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
 ) -> anyhow::Result<CompactResult> {
-    zevria_model::maintenance::validate_maintenance_input(&model_request.input)?;
-    anyhow::ensure!(
-        model_request
-            .allowed_tool_names
-            .is_some_and(|names| names.is_empty()),
-        "maintenance requests must disable tools"
-    );
     let Some(url) = openai.compaction_url.clone() else {
         return Ok(CompactResult::Unsupported);
     };
     let prepared = prepare_turn_request(model_request, openai).await?;
     let mut body = prepared.request_properties;
     crate::prompt_cache::remove_comparison(&mut body);
-    let request_property_bytes = serde_json::to_vec(&body).map_or(usize::MAX, |bytes| bytes.len());
     let properties = body
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("the compact request did not serialize as an object"))?;
@@ -621,16 +525,9 @@ async fn run_remote_compaction(
     properties
         .entry("parallel_tool_calls".to_string())
         .or_insert(serde_json::Value::Bool(true));
-    properties
-        .entry("tools".to_string())
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
     properties.insert(
         "input".to_string(),
-        serde_json::Value::Array(trim_correlated_tool_outputs(
-            &prepared.full_input,
-            request_property_bytes,
-            openai.input_token_limit,
-        )),
+        serde_json::Value::Array(prepared.full_input),
     );
 
     let log_url = crate::connection::redacted_url_for_logging(url.as_str());
@@ -682,7 +579,19 @@ async fn run_remote_compaction(
     if output.iter().any(|item| !item.is_object()) {
         anyhow::bail!("OpenAI compaction output items must be JSON objects");
     }
-    let replay = ProviderReplay::openai_responses(openai.profile.clone(), output.clone());
+    let output = output
+        .iter()
+        .filter(|item| {
+            item.get("role").and_then(serde_json::Value::as_str) != Some("developer")
+                && item.get("type").and_then(serde_json::Value::as_str) != Some("additional_tools")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !output.is_empty(),
+        "OpenAI compaction output was empty after filtering instruction and tool declarations"
+    );
+    let replay = ProviderReplay::openai_responses(openai.profile.clone(), output);
     Ok(CompactResult::Replacement(vec![
         zevria_model::OwnedModelRequestItem::replay_only(replay)?,
     ]))
@@ -2257,6 +2166,8 @@ pub(crate) async fn run_turn(
     input.push(zevria_model::ModelRequestItem::message(&prompt));
     run_turn_request(
         ModelRequest {
+            tools: &[],
+            forbid_tool_calls: false,
             instructions: crate::tests::test_instructions(),
             input,
             model_role: zevria_foundation::ModelRole::Build,

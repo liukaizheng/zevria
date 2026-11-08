@@ -99,6 +99,7 @@ pub(crate) fn replay_transcript(
             | TranscriptItem::SessionMode(_)
             | TranscriptItem::Directive(_)
             | TranscriptItem::RequestDirective(_)
+            | TranscriptItem::ToolDeclarations(_)
             | TranscriptItem::Plan(_)
             | TranscriptItem::Ensemble(_)
             | TranscriptItem::Compaction(_) => {}

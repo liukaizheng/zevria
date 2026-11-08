@@ -60,8 +60,8 @@ kinds run nominal Build turns with their dedicated roles and restricted tools.
 Only an explicitly orchestrated root Build request permits native Builders;
 Standard Build retains optional Explore, and Plan retains configurable Explore only. Native worker
 Plan/Review is unchanged. `ProviderRouterFactory::new(role, profile, reasoning_level, preamble)` captures the opening
-assignment; `create(session_id, tools)` receives the same child registry handle
-as its engine. Root model switches never repoint either child factory.
+assignment; `create(session_id)` builds the independent router. The child engine
+owns the registry and supplies explicit window declarations in each request. Root model switches never repoint either child factory.
 All configurations must explicitly assign both `modes.explore` and the required
 `modes.builder`, in addition to Build, Plan, and Review; there is no fallback.
 
@@ -432,13 +432,14 @@ keep the selected profile frozen. Ordinary Build/Plan mode changes
 still use safe per-profile continuations, subject to policy and advertised-tool
 replay requirements; sharing Build's profile does not bypass them. Synthetic confirmed source-summary requests
 also reset ownership on success, failure, and cancellation. Adaptive local prefix
-summaries invalidate ownership before each attempted completion and afterward,
-including failure/cancellation, so shorter inputs cannot reuse an incompatible
-chain. Their streams/usage are silent; all ordered directives are structurally
-excluded. Top-level maintenance instructions contain captured application/file
-guidance and a no-tool summary policy, without a catalog. Live checkpoint projection
-folds effective pinned bodies from preceding history; the next normal request
-renders its workflow instruction set, not synthetic maintenance guidance. Explicit model-selection conversion remains separate from adaptive
+summaries reset afterward, not before dispatch. Their first full-history attempt
+reuses normal instructions, tools and complete ordered input (including directives
+and additions), appending only one user summary instruction. A valid chain can
+send only that instruction with `previous_response_id`; exact-prefix checks force
+full replay for shorter or otherwise incompatible candidates. Streams/usage stay
+silent. Tool-call replies never execute and get one retry with `tool_choice: none`,
+which intentionally changes request properties. Live checkpoint projection folds
+effective pinned bodies from preceding history and starts a fresh tool window. Explicit model-selection conversion remains separate from adaptive
 local-summary retries. Unsupported old instruction histories are rejected, not
 migrated.
 

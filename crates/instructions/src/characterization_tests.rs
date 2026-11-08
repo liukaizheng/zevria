@@ -91,19 +91,6 @@ fn optional_sections_and_disabled_catalog() {
 }
 
 #[test]
-fn maintenance_is_tool_and_skill_free() {
-    let set = InstructionSet::maintenance("Application", [("guidance:project", "Project")]);
-    set.validate().unwrap();
-    let text = set.render();
-    assert!(text.contains("## Application guidance\nApplication"));
-    assert!(text.contains("## File guidance\nProject"));
-    assert!(text.contains(
-        "## Workflow policy: maintenance\n{\"scope\":\"maintenance\",\"tools\":[],\"skills\":false}"
-    ));
-    assert!(text.ends_with("## Eligible skills\nSkill selection is unavailable."));
-}
-
-#[test]
 fn invalid_policy_and_catalog_are_rejected() {
     let mut set = fixture_set();
     set.workflow.scope.clear();

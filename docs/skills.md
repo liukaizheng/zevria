@@ -408,15 +408,18 @@ Management remains available to disable names or reload. Catalog mutations
 invalidate request measurements and change instructions, without changing the
 prompt-cache key; these changes require safe full provider replay.
 
-Local summaries, remote compaction and model conversion carry **no ordered
-directives** and advertise no tools. Their maintenance instruction set contains
-captured application/file guidance and a no-tool summary policy, without a skill
-catalog. Summary prose cannot recreate instruction authority. Resume renders
+Local summaries, remote compaction and model conversion preserve the normal
+active-policy instruction/tool prefix, including the eligible catalog and ordered
+directives/additions. Local summaries and conversion append one user instruction
+that treats history as data and forbids tool calls; returned calls never execute.
+Checkpoint replacement history excludes directives and declarations, which are
+folded/redeclared for the new window. Summary prose cannot recreate instruction authority. Resume renders
 current application/file/workflow guidance and the installed catalog, restores
 ordered directives, and reconciles effective bodies against saved pins and current
 policy rather than changed package files. Disabled pins stay inactive after
-reconciliation and skill-free workers acquire no catalog. Maintenance works even
-before the first resumed turn, without enabling skills.
+reconciliation and skill-free workers acquire no catalog. Compaction uses the same
+captured instruction builder even before the first resumed turn, without changing
+skill state.
 
 Within one workflow, instructions remain byte-identical across turns, activation,
 revocation, tool continuations, retries and reconnects. Mode/synthesis switches,

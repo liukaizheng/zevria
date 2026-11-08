@@ -2,6 +2,10 @@ use crate::{ContextTokenEstimate, ModelProfileRef, ModelRequestItem, estimate_me
 use rig_core::message::{AssistantContent, Message};
 pub fn estimate_model_request_item(item: ModelRequestItem<'_>) -> ContextTokenEstimate {
     match item {
+        ModelRequestItem::AdditionalTools(tools) => {
+            let tokens = tools.approximate_tokens();
+            ContextTokenEstimate::new(tokens, tokens.saturating_add(16))
+        }
         ModelRequestItem::Message(message) => estimate_message_tokens(message),
         ModelRequestItem::ReplayBacked(content) => estimate_message_tokens(content.message()),
         ModelRequestItem::ReplayOnly(replay) => replay.replay_only_token_estimate(),
@@ -28,6 +32,10 @@ pub fn estimate_model_request_item_for_profile(
     target_profile: &ModelProfileRef,
 ) -> anyhow::Result<ContextTokenEstimate> {
     match item {
+        ModelRequestItem::AdditionalTools(tools) => {
+            tools.validate()?;
+            Ok(estimate_model_request_item(item))
+        }
         ModelRequestItem::Message(message @ Message::Assistant { .. }) => {
             let mut portable = message.clone();
             if let Message::Assistant(assistant) = &mut portable {

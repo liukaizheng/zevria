@@ -10,6 +10,8 @@ mod cache_preparation_probe;
 mod command_credentials;
 #[path = "directive_wire_tests.rs"]
 mod directive_wire;
+#[path = "incremental_tool_tests.rs"]
+mod incremental_tools;
 #[path = "inline_search_tests.rs"]
 mod inline_search_tests;
 #[path = "model_tests.rs"]
@@ -165,6 +167,8 @@ fn test_skill(body: &str) -> &'static zevria_instructions::DirectiveContent {
 }
 
 struct RequestParts {
+    tools: zevria_model::ToolDeclarations,
+    forbid_tool_calls: bool,
     prompt: Message,
     history: Vec<Message>,
     instructions: String,
@@ -172,15 +176,8 @@ struct RequestParts {
 }
 
 impl RequestParts {
-    fn maintenance_request(&self) -> ModelRequest<'_> {
-        let mut request = self.request();
-        request.instructions = Box::leak(
-            zevria_instructions::InstructionSet::maintenance(&self.instructions, [])
-                .render()
-                .into_boxed_str(),
-        );
-        request.allowed_tool_names = Some(&[]);
-        request
+    fn compaction_request(&self) -> ModelRequest<'_> {
+        self.request()
     }
 
     fn request(&self) -> ModelRequest<'_> {
@@ -206,6 +203,8 @@ impl RequestParts {
             input.push(ModelRequestItem::DeveloperInstruction(test_skill(body)));
         }
         ModelRequest {
+            tools: &self.tools,
+            forbid_tool_calls: self.forbid_tool_calls,
             instructions: rendered_test_instructions(&self.instructions),
             input,
             model_role,
@@ -236,11 +235,29 @@ fn request_with_replays<'a>(
         input.push(ModelRequestItem::DeveloperInstruction(test_skill(body)));
     }
     ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: rendered_test_instructions(instructions),
         input,
         model_role: ModelRole::Build,
         allowed_tool_names: None,
     }
+}
+
+async fn run_declared_turn(
+    user_message: impl Into<String>,
+    tools: &[zevria_model::ToolDeclaration],
+    openai: &mut OpenAiProvider,
+    state: &mut AttemptState,
+    progress: &ProgressReporter,
+) -> anyhow::Result<()> {
+    let prompt = Message::user(user_message.into());
+    let history = state.history.clone();
+    let replays = state.history_replays.clone();
+    let mut request = request_with_replays(&history, &replays, &prompt, "", None);
+    request.instructions = test_instructions();
+    request.tools = tools;
+    run_turn_request(request, openai, state, progress).await
 }
 
 /// A throwaway update sender for turns that don't assert on UI output. The
@@ -435,19 +452,13 @@ impl TestProviderConfig {
 struct TestProviderFactory {
     config: TestProviderConfig,
     preamble: String,
-    tools: ToolServerHandle,
 }
 
 impl TestProviderFactory {
-    fn new(
-        config: TestProviderConfig,
-        preamble: impl Into<String>,
-        tools: ToolServerHandle,
-    ) -> Self {
+    fn new(config: TestProviderConfig, preamble: impl Into<String>) -> Self {
         Self {
             config,
             preamble: preamble.into(),
-            tools,
         }
     }
 
@@ -456,7 +467,6 @@ impl TestProviderFactory {
             &self.config.resolved(ModelRole::Build),
             self.config.reasoning.effort,
             &self.preamble,
-            self.tools.clone(),
             cache_key,
             cache_key,
         )
@@ -464,13 +474,9 @@ impl TestProviderFactory {
     }
 }
 
-pub(crate) async fn connect_http_test_provider(
-    base_url: String,
-    tools: ToolServerHandle,
-) -> OpenAiProvider {
+pub(crate) async fn connect_http_test_provider(base_url: String) -> OpenAiProvider {
     connect_http_test_provider_with_options(
         base_url,
-        tools,
         ResponsesCompatibilityConfig::default(),
         BTreeMap::new(),
         "test-session",
@@ -480,7 +486,6 @@ pub(crate) async fn connect_http_test_provider(
 
 async fn connect_http_test_provider_with_options(
     base_url: String,
-    tools: ToolServerHandle,
     compatibility: ResponsesCompatibilityConfig,
     additional_params: BTreeMap<String, Value>,
     cache_key: &str,
@@ -499,7 +504,6 @@ async fn connect_http_test_provider_with_options(
         &config.resolved(ModelRole::Build),
         config.reasoning.effort,
         "Test instructions",
-        tools,
         "test-session-id",
         cache_key,
     )
@@ -512,6 +516,7 @@ async fn capture_http_request_with_options(
     additional_params: BTreeMap<String, Value>,
     tools: ToolServerHandle,
 ) -> CapturedHttpRequest {
+    let declared = declarations(&tools, None);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("HTTP listener");
@@ -531,7 +536,6 @@ async fn capture_http_request_with_options(
 
     let mut openai = connect_http_test_provider_with_options(
         format!("http://{address}/v1/responses"),
-        tools,
         compatibility,
         additional_params,
         "compat-session",
@@ -539,6 +543,8 @@ async fn capture_http_request_with_options(
     .await;
     let mut state = AttemptState::default();
     let parts = RequestParts {
+        tools: declared,
+        forbid_tool_calls: false,
         prompt: Message::user("compatibility request"),
         history: Vec::new(),
         instructions: "Compatibility instructions".to_string(),
@@ -610,14 +616,12 @@ fn test_session_with_pump(
     session: OpenAiWebSocketSession,
     pending_done_response_id: Option<&str>,
 ) -> OpenAiProvider {
-    let tools = ToolServer::new().run();
     let endpoints = OpenAiResponseEndpoints::parse(url).expect("test endpoint");
     OpenAiProvider {
         #[cfg(feature = "cache-diagnostics")]
         cache_diagnostics: Default::default(),
         profile: zevria_foundation::ModelProfileRef::new("test-provider", "gpt-test"),
         context_window_tokens: 272_000,
-        input_token_limit: 272_000,
         preamble: "Test instructions".to_string(),
         responses_parameters: None,
         reasoning_level: ReasoningEffort::Medium,
@@ -630,7 +634,6 @@ fn test_session_with_pump(
         },
         additional_params: Default::default(),
         prompt_cache_key: "test-session".to_string(),
-        tools,
         ws: OpenAiParkedWebSocket {
             session,
             config: OpenAiWebSocketConfig {
@@ -998,7 +1001,6 @@ async fn enabled_cache_keys_are_validated_before_transport_setup_and_disabled_ke
             &invalid_endpoint_profile,
             zevria_foundation::ReasoningLevel::Medium,
             "preamble",
-            ToolServer::new().run(),
             "test-session-id",
             &invalid_key,
         )
@@ -1032,7 +1034,6 @@ async fn enabled_cache_keys_are_validated_before_transport_setup_and_disabled_ke
             &disabled_profile,
             zevria_foundation::ReasoningLevel::Medium,
             "preamble",
-            ToolServer::new().run(),
             "test-session-id",
             &ignored_key,
         )
@@ -1087,11 +1088,12 @@ async fn websocket_router_transmits_its_hashed_profile_cache_key_and_encrypted_r
             zevria_foundation::ReasoningLevel::Medium,
         )],
         "preamble",
-        ToolServer::new().run(),
         "root-会话",
     )
     .expect("single-profile router");
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("cache shape"),
         history: Vec::new(),
         instructions: "instructions".to_string(),
@@ -1253,6 +1255,8 @@ async fn exact_input_count_posts_the_complete_logical_request_without_touching_c
     });
     let image = zevria_content::PromptImage::from_rgba(1, 1, &[3, 2, 1, 255]).unwrap();
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: zevria_content::UserPrompt::new(vec![
             zevria_content::PromptBlock::Text("count this request".into()),
             zevria_content::PromptBlock::Image(image.clone()),
@@ -1351,6 +1355,8 @@ async fn definitive_input_count_unsupported_is_cached_but_transient_errors_retry
             .expect("unsupported URL"),
     );
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("count"),
         history: Vec::new(),
         instructions: "instructions".to_string(),
@@ -1503,25 +1509,18 @@ async fn configured_remote_compaction_posts_ordered_input_and_preserves_opaque_o
     );
     openai.api_key = ApiKeySource::literal("remote-secret");
     let parts = RequestParts {
+        tools: declarations(&policy_tools(), None),
+        forbid_tool_calls: false,
         prompt: Message::user("compact this"),
         history: vec![Message::assistant("earlier answer")],
         instructions: "Remote compact instructions".to_string(),
         allowed_tool_names: Some(Vec::new()),
     };
-    let error = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        openai.compact(
-            parts.request_with_role_and_skills(ModelRole::Plan, Some("must not enter compaction")),
-        ),
-    )
-    .await
-    .expect("invalid maintenance input must be rejected locally")
-    .expect_err("skill overlays are forbidden on compaction requests");
-    assert!(error.to_string().contains("ordered developer instructions"));
-    assert_eq!(requests.load(Ordering::SeqCst), 0);
-
-    let mut request = parts.maintenance_request();
-    request.model_role = ModelRole::Plan;
+    let request =
+        parts.request_with_role_and_skills(ModelRole::Plan, Some("preserved compaction body"));
+    let normal = crate::turn::prepare_turn_request(&request, &mut openai)
+        .await
+        .unwrap();
     let result = openai.compact(request).await.expect("remote compaction");
     assert_eq!(requests.load(Ordering::SeqCst), 1);
     let CompactResult::Replacement(replacement) = result else {
@@ -1553,20 +1552,18 @@ async fn configured_remote_compaction_posts_ordered_input_and_preserves_opaque_o
     );
     assert_eq!(
         body["instructions"],
-        zevria_instructions::InstructionSet::maintenance("Remote compact instructions", [])
-            .render()
+        rendered_test_instructions("Remote compact instructions")
     );
     assert!(
         !body["input"]
             .to_string()
             .contains("Remote compact instructions")
     );
+    assert_eq!(body["input"], json!(normal.full_input));
     assert!(
-        !body["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["role"] == "developer")
+        body["input"]
+            .to_string()
+            .contains("preserved compaction body")
     );
     assert!(body.get("stream").is_none());
     assert!(body.get("previous_response_id").is_none());
@@ -1578,77 +1575,8 @@ async fn configured_remote_compaction_posts_ordered_input_and_preserves_opaque_o
         body["prompt_cache_options"],
         json!({"mode":"implicit", "ttl":"30m"})
     );
-    assert_eq!(body["tools"], json!([]));
+    assert_eq!(body["tools"], normal.request_properties["tools"]);
     ws_server.abort();
-}
-
-#[test]
-fn remote_compaction_trimming_rewrites_only_complete_correlated_outputs() {
-    let large = "x".repeat(1_100_000);
-    let input = vec![
-        json!({
-            "type": "function_call",
-            "id": "fc_1",
-            "call_id": "call_1",
-            "name": "read",
-            "arguments": "{}",
-            "status": "completed"
-        }),
-        json!({
-            "type": "function_call_output",
-            "id": "out_1",
-            "call_id": "call_1",
-            "status": "completed",
-            "output": {"body": large, "success": true}
-        }),
-        json!({
-            "type": "function_call_output",
-            "id": "orphan",
-            "call_id": "missing_call",
-            "status": "completed",
-            "output": "must stay intact"
-        }),
-    ];
-    let original = input.clone();
-
-    let rewritten = crate::turn::trim_correlated_tool_outputs(&input, 0, 272_000);
-
-    assert_eq!(
-        input, original,
-        "the source transcript/request is immutable"
-    );
-    assert_eq!(rewritten[0], input[0], "the call is preserved exactly");
-    assert_eq!(rewritten[1]["id"], "out_1");
-    assert_eq!(rewritten[1]["call_id"], "call_1");
-    assert_eq!(rewritten[1]["status"], "completed");
-    assert_eq!(rewritten[1]["output"]["success"], true);
-    assert_eq!(
-        rewritten[1]["output"]["body"],
-        "Output exceeded the available model context and was truncated"
-    );
-    assert_eq!(rewritten[2], input[2], "an orphan output is never trimmed");
-}
-
-#[test]
-fn remote_compaction_trimming_uses_the_selected_profile_window() {
-    let input = vec![
-        function_call("fc_small", "call_small", "read", json!({})),
-        json!({
-            "type": "function_call_output",
-            "id": "out_small",
-            "call_id": "call_small",
-            "status": "completed",
-            "output": "x".repeat(4_000)
-        }),
-    ];
-    let large_profile = crate::turn::trim_correlated_tool_outputs(&input, 0, 10_000);
-    assert_eq!(large_profile, input, "large profile keeps the output");
-
-    let small_profile = crate::turn::trim_correlated_tool_outputs(&input, 0, 100);
-    assert_eq!(
-        small_profile[1]["output"],
-        "Output exceeded the available model context and was truncated"
-    );
 }
 
 #[tokio::test]
@@ -1925,6 +1853,16 @@ impl Tool for PolicyWriteTool {
     ) -> Result<Self::Output, Self::Error> {
         Ok("write".to_string())
     }
+}
+
+fn declarations(
+    tools: &ToolServerHandle,
+    allowed: Option<&[String]>,
+) -> zevria_model::ToolDeclarations {
+    zevria_model::ToolDeclarations::from_definitions(tools.snapshot().definitions(), |tool| {
+        allowed.is_none_or(|names| names.iter().any(|name| name == tool.name.as_str()))
+    })
+    .unwrap()
 }
 
 fn policy_tools() -> ToolServerHandle {
@@ -2346,6 +2284,8 @@ async fn foreign_replay_only_checkpoint_fails_before_network() {
     );
     let prompt = Message::user("continue");
     let request = ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: test_instructions(),
         input: vec![
             ModelRequestItem::replay_only(&replay),
@@ -2354,11 +2294,7 @@ async fn foreign_replay_only_checkpoint_fails_before_network() {
         model_role: ModelRole::Build,
         allowed_tool_names: None,
     };
-    let mut provider = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut provider = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         provider.complete(request, discard_updates()),
@@ -2450,6 +2386,8 @@ async fn foreign_replay_uses_portable_text_and_correlated_tool_projection() {
     let trusted = zevria_model::ReplayMessage::new(replay.clone()).unwrap();
     let prompt = Message::user("continue elsewhere");
     let request = ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: test_instructions(),
         input: vec![
             ModelRequestItem::replay_backed(&trusted),
@@ -2459,11 +2397,7 @@ async fn foreign_replay_uses_portable_text_and_correlated_tool_projection() {
         model_role: ModelRole::Build,
         allowed_tool_names: None,
     };
-    let mut provider = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut provider = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     provider
         .complete(request, discard_updates())
         .await
@@ -2835,6 +2769,8 @@ async fn instructions_are_top_level_and_skill_directives_keep_input_order() {
     let mut state = AttemptState::default();
 
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("plan this change"),
         history: Vec::new(),
         instructions: "Plan overlay".to_string(),
@@ -2903,11 +2839,12 @@ async fn changed_mode_tools_and_instructions_force_full_replay() {
         .expect("client should connect");
     let tools = policy_tools();
     let mut openai = test_session(socket, None);
-    openai.tools = tools;
     openai.profile.model = "gpt-fixed".to_string();
     let mut state = AttemptState::default();
 
     let plan = RequestParts {
+        tools: declarations(&tools, Some(&["command".into()])),
+        forbid_tool_calls: false,
         prompt: Message::user("plan this change"),
         history: Vec::new(),
         instructions: "Plan provider instructions".to_string(),
@@ -2923,6 +2860,8 @@ async fn changed_mode_tools_and_instructions_force_full_replay() {
     .expect("Plan request should complete");
 
     let build = RequestParts {
+        tools: declarations(&tools, None),
+        forbid_tool_calls: false,
         prompt: Message::user("Implement the approved plan."),
         history: state.history.clone(),
         instructions: "Build provider instructions".to_string(),
@@ -2999,6 +2938,8 @@ async fn guidance_system_components_preserve_continuation_without_duplicate_pref
     .into();
     let instructions = set.render();
     let first = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("first prompt"),
         history: Vec::new(),
         instructions: "Build overlay".into(),
@@ -3084,6 +3025,8 @@ async fn active_skill_change_continues_incrementally_on_the_very_next_request() 
     let mut state = AttemptState::default();
 
     let first = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("first prompt"),
         history: Vec::new(),
         instructions: "Build overlay".to_string(),
@@ -3507,6 +3450,8 @@ async fn native_output_items_survive_capture_and_full_replay_after_reconnect() {
         .collect::<Vec<_>>();
     resumed_input.push(ModelRequestItem::message(&resumed_prompt));
     let resumed_request = ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: test_instructions(),
         input: resumed_input,
         model_role: ModelRole::Build,
@@ -3552,6 +3497,8 @@ async fn a_completed_response_with_usage_reports_it_once() {
     let mut openai = test_session(socket, None);
     let (events, mut receiver) = session_event_channel(256);
     let request = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("question"),
         history: Vec::new(),
         instructions: "Test turn instructions".to_string(),
@@ -3693,10 +3640,11 @@ async fn provider_reconnects_and_replays_prompt_after_idle_drop() {
 
     let (socket, _) = connect_async(&url).await.expect("client should connect");
     let mut openai = test_session_with_url(&url, socket, None);
-    openai.tools = policy_tools();
     let mut state = AttemptState::default();
 
     let parts = RequestParts {
+        tools: declarations(&policy_tools(), Some(&["command".into()])),
+        forbid_tool_calls: false,
         prompt: Message::user("idle question"),
         history: Vec::new(),
         instructions: "Plan reconnect instructions".to_string(),
@@ -3801,6 +3749,8 @@ async fn relayed_upstream_disconnect_reconnects_and_replays_prompt() {
     let mut state = AttemptState::default();
 
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("relayed question"),
         history: Vec::new(),
         instructions: "Build provider test instructions".to_string(),
@@ -3866,6 +3816,8 @@ async fn close_frame_with_transport_reason_reconnects_and_replays_prompt() {
     let mut state = AttemptState::default();
 
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("closed question"),
         history: Vec::new(),
         instructions: "Build provider test instructions".to_string(),
@@ -3930,6 +3882,8 @@ async fn reconnect_replays_full_history_without_a_stale_id_round_trip() {
     };
 
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("new question"),
         history: state.history.clone(),
         instructions: "Build provider test instructions".to_string(),
@@ -3984,6 +3938,8 @@ async fn provider_rejection_event_fails_the_turn_without_reconnecting() {
     let mut state = AttemptState::default();
 
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("oversized question"),
         history: Vec::new(),
         instructions: "Build provider test instructions".to_string(),
@@ -4566,7 +4522,6 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         cache_diagnostics: Default::default(),
         profile: test_profile_ref(),
         context_window_tokens: 272_000,
-        input_token_limit: 272_000,
         preamble: "Test instructions".to_string(),
         responses_parameters: None,
         reasoning_level: ReasoningEffort::Medium,
@@ -4579,7 +4534,6 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         },
         additional_params: Default::default(),
         prompt_cache_key: "test-session".to_string(),
-        tools: tools.clone(),
         ws: OpenAiParkedWebSocket {
             session: OpenAiWebSocketSession::new(socket),
             config: OpenAiWebSocketConfig {
@@ -4704,6 +4658,8 @@ async fn chained_continuations_resend_byte_identical_instructions() {
 
     for _ in 0..2 {
         let parts = RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: Message::user("keep going"),
             history: state.history.clone(),
             instructions: "Build provider instructions".to_string(),
@@ -4789,7 +4745,6 @@ async fn factory_connections_run_independent_response_chains() {
             compaction: RemoteCompactionConfig::default(),
         },
         "Test instructions",
-        ToolServer::new().run(),
     );
     let mut root = factory
         .connect("root-session")
@@ -4849,7 +4804,6 @@ async fn disabled_cache_key_transmission_retains_distinct_provider_identities() 
             compaction: RemoteCompactionConfig::default(),
         },
         "Test instructions",
-        ToolServer::new().run(),
     );
     let root = factory
         .connect("root-session-id")
@@ -4947,7 +4901,6 @@ async fn every_request_carries_its_connections_prompt_cache_key() {
             compaction: RemoteCompactionConfig::default(),
         },
         "Test instructions",
-        ToolServer::new().run(),
     );
     let mut root = factory
         .connect("root-session-id")
@@ -5069,6 +5022,8 @@ async fn a_close_observed_while_parked_reconnects_before_the_next_request() {
     let mut state = AttemptState::default();
     let policy = fast_recovery_policy(3);
     let initial = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("parked question"),
         history: Vec::new(),
         instructions: "Parked close instructions".to_string(),
@@ -5088,6 +5043,8 @@ async fn a_close_observed_while_parked_reconnects_before_the_next_request() {
     let terminal = wait_for_terminal(&openai.ws.session).await;
     assert_eq!(terminal, OpenAiWebSocketTerminalCategory::CloseFrame);
     let continuation = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("next question"),
         history: state.history.clone(),
         instructions: "Parked close instructions".to_string(),
@@ -5167,6 +5124,8 @@ async fn response_idle_timeout_reconnects_after_only_a_late_prior_done() {
     let mut policy = fast_recovery_policy(3);
     policy.response_idle_timeout = std::time::Duration::from_millis(30);
     let initial = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("old question"),
         history: Vec::new(),
         instructions: "First event timeout instructions".to_string(),
@@ -5183,6 +5142,8 @@ async fn response_idle_timeout_reconnects_after_only_a_late_prior_done() {
     .expect("initial turn should complete");
 
     let continuation = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("black-holed question"),
         history: state.history.clone(),
         instructions: "First event timeout instructions".to_string(),
@@ -5276,6 +5237,8 @@ async fn stale_id_full_retry_consumes_budget_then_falls_back_to_http() {
     let mut policy = fast_recovery_policy(3);
     policy.response_idle_timeout = std::time::Duration::from_millis(30);
     let initial = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("old question"),
         history: Vec::new(),
         instructions: "Stale timeout instructions".to_string(),
@@ -5292,6 +5255,8 @@ async fn stale_id_full_retry_consumes_budget_then_falls_back_to_http() {
     .expect("initial turn should complete");
 
     let continuation = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("stale timeout question"),
         history: state.history.clone(),
         instructions: "Stale timeout instructions".to_string(),
@@ -5367,6 +5332,8 @@ async fn send_timeout_reconnects_and_replays_on_a_fresh_pump() {
     let mut policy = fast_recovery_policy(3);
     policy.send_timeout = std::time::Duration::from_millis(20);
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("send timeout question"),
         history: Vec::new(),
         instructions: "Send timeout instructions".to_string(),
@@ -5444,6 +5411,8 @@ async fn websocket_connection_limit_reconnects_and_replays_full_history() {
     let mut state = AttemptState::default();
     let policy = fast_recovery_policy(3);
     let initial = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("old question"),
         history: Vec::new(),
         instructions: "Connection limit instructions".to_string(),
@@ -5460,6 +5429,8 @@ async fn websocket_connection_limit_reconnects_and_replays_full_history() {
     .expect("initial turn should complete");
 
     let continuation = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("after the limit"),
         history: state.history.clone(),
         instructions: "Connection limit instructions".to_string(),
@@ -5584,6 +5555,8 @@ async fn turn_survives_repeated_drops_within_the_recovery_budget() {
     let (sender, mut events) = session_event_channel(256);
 
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("flaky question"),
         history: Vec::new(),
         instructions: "Recovery instructions".to_string(),
@@ -5680,6 +5653,8 @@ async fn turn_fails_after_the_recovery_budget_is_exhausted() {
     let mut state = AttemptState::default();
 
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("doomed question"),
         history: Vec::new(),
         instructions: "Recovery instructions".to_string(),
@@ -5746,6 +5721,8 @@ async fn a_healthy_socket_remains_incremental_after_more_than_sixty_seconds_idle
     let mut state = AttemptState::default();
 
     let initial = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("old question"),
         history: Vec::new(),
         instructions: "Recovery instructions".to_string(),
@@ -5764,6 +5741,8 @@ async fn a_healthy_socket_remains_incremental_after_more_than_sixty_seconds_idle
     openai.ws.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(120);
     let original_generation = openai.ws.socket_generation;
     let continuation = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("after a long think"),
         history: state.history.clone(),
         instructions: "Recovery instructions".to_string(),
@@ -5865,11 +5844,13 @@ async fn http_only_transport_posts_full_streaming_request_and_accumulates_fragme
     });
 
     let endpoint = format!("http://{address}/custom/responses?version=1");
-    let mut openai = connect_http_test_provider(endpoint, ToolServer::new().run()).await;
+    let mut openai = connect_http_test_provider(endpoint).await;
     openai.profile.model = "gpt-explore".to_string();
     let mut state = AttemptState::default();
     let (sender, mut events) = session_event_channel(32);
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("HTTP question"),
         history: Vec::new(),
         instructions: "HTTP instructions".to_string(),
@@ -5936,14 +5917,12 @@ async fn http_response_done_completes_with_native_output_and_usage() {
         request
     });
 
-    let mut openai = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut openai = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let mut state = AttemptState::default();
     let (sender, mut events) = session_event_channel(16);
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("finish with response.done"),
         history: Vec::new(),
         instructions: "HTTP response.done instructions".to_string(),
@@ -6014,7 +5993,6 @@ async fn http_terminal_diagnostics_include_attempt_identity_usage_and_safe_cache
     async {
         let mut openai = connect_http_test_provider_with_options(
             format!("http://{address}/v1/responses"),
-            ToolServer::new().run(),
             ResponsesCompatibilityConfig::default(),
             BTreeMap::new(),
             raw_cache_key,
@@ -6022,6 +6000,8 @@ async fn http_terminal_diagnostics_include_attempt_identity_usage_and_safe_cache
         .await;
         let mut state = AttemptState::default();
         let parts = RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: Message::user("diagnostic request"),
             history: Vec::new(),
             instructions: "Diagnostic instructions".to_string(),
@@ -6114,7 +6094,6 @@ async fn websocket_terminal_diagnostics_keep_handshake_identity_connection_scope
                 compaction: RemoteCompactionConfig::default(),
             },
             "Test instructions",
-            ToolServer::new().run(),
         );
         let mut openai = factory
             .connect(raw_cache_key)
@@ -6210,17 +6189,15 @@ async fn http_retries_server_errors_and_partial_stream_loss_with_identical_reque
         requests
     });
 
-    let mut openai = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut openai = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     openai
         .additional_params
         .insert("gateway_routing".to_string(), json!("stable-route"));
     let mut state = AttemptState::default();
     let (sender, mut events) = session_event_channel(64);
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("retry exactly"),
         history: Vec::new(),
         instructions: "Retry instructions".to_string(),
@@ -6311,14 +6288,12 @@ async fn http_stream_retry_and_terminal_error_keep_their_per_attempt_request_ids
         }
     });
 
-    let mut openai = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut openai = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let mut state = AttemptState::default();
     let (sender, mut events) = session_event_channel(16);
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("request identity"),
         history: Vec::new(),
         instructions: "Request identity instructions".to_string(),
@@ -6381,15 +6356,13 @@ async fn http_idle_timeout_retries_even_after_unknown_event() {
         (first, second)
     });
 
-    let mut openai = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut openai = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let mut state = AttemptState::default();
     let mut policy = fast_recovery_policy(2);
     policy.response_idle_timeout = std::time::Duration::from_millis(20);
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("wait for it"),
         history: Vec::new(),
         instructions: "Slow stream instructions".to_string(),
@@ -6503,13 +6476,11 @@ async fn http_client_and_modeled_failures_are_terminal_and_error_bodies_are_boun
                 .is_err()
         });
 
-        let mut openai = connect_http_test_provider(
-            format!("http://{address}/v1/responses"),
-            ToolServer::new().run(),
-        )
-        .await;
+        let mut openai = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
         let mut state = AttemptState::default();
         let parts = RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: Message::user("terminal failure"),
             history: Vec::new(),
             instructions: "Failure instructions".to_string(),
@@ -6573,13 +6544,11 @@ async fn chat_completions_sse_is_rejected_without_persisting_partial_output() {
         request
     });
 
-    let mut openai = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut openai = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let mut state = AttemptState::default();
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("reject chat protocol"),
         history: Vec::new(),
         instructions: "Responses only".to_string(),
@@ -6647,7 +6616,6 @@ async fn startup_websocket_426_immediately_selects_sticky_http() {
         &config.resolved(ModelRole::Build),
         config.reasoning.effort,
         "Test instructions",
-        ToolServer::new().run(),
         "test-session-id",
         "test-session",
     )
@@ -6737,7 +6705,6 @@ async fn exhausted_websocket_retries_fall_back_with_full_input_and_remain_http()
         &config.resolved(ModelRole::Build),
         config.reasoning.effort,
         "Test instructions",
-        ToolServer::new().run(),
         "test-session-id",
         "test-session",
     )
@@ -6745,6 +6712,8 @@ async fn exhausted_websocket_retries_fall_back_with_full_input_and_remain_http()
     .expect("startup WebSocket");
     let mut state = AttemptState::default();
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("fallback question"),
         history: Vec::new(),
         instructions: "Fallback instructions".to_string(),
@@ -6827,7 +6796,6 @@ async fn transient_startup_preconnect_failure_is_retried_by_the_first_request() 
         &config.resolved(ModelRole::Build),
         config.reasoning.effort,
         "Test instructions",
-        ToolServer::new().run(),
         "test-session-id",
         "test-session",
     )
@@ -6841,6 +6809,8 @@ async fn transient_startup_preconnect_failure_is_retried_by_the_first_request() 
 
     let mut state = AttemptState::default();
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("retry startup"),
         history: Vec::new(),
         instructions: "Reconnect instructions".to_string(),
@@ -6894,11 +6864,7 @@ async fn http_tool_followup_replays_complete_native_history_without_continuation
         (first, second)
     });
 
-    let mut openai = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut openai = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let mut state = AttemptState::default();
     run_turn("run the tool", &mut openai, &mut state, &discard_updates())
         .await
@@ -7085,6 +7051,7 @@ async fn http_only_responses_gateway_supports_arbitrary_models_tools_and_replay(
             send_prompt_cache_key: false,
             send_store: false,
             developer_messages: true,
+            additional_tools: true,
         },
         additional_params: BTreeMap::from([
             ("gateway_routing".to_string(), json!("deepseek-and-glm")),
@@ -7096,7 +7063,6 @@ async fn http_only_responses_gateway_supports_arbitrary_models_tools_and_replay(
         &config.resolved(ModelRole::Build),
         config.reasoning.effort,
         "Gateway test instructions",
-        tools.clone(),
         "gateway-conversation-id",
         "gateway-root-session",
     )
@@ -7235,15 +7201,13 @@ async fn cancelling_an_http_completion_drops_the_live_sse_stream() {
         matches!(closed, Ok(0) | Err(_))
     });
 
-    let openai = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let openai = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let request_task = tokio::spawn(async move {
         let mut openai = openai;
         let prompt = Message::user("cancel HTTP");
         let request = ModelRequest {
+            tools: &[],
+            forbid_tool_calls: false,
             instructions: test_instructions(),
             input: vec![ModelRequestItem::message(&prompt)],
             model_role: ModelRole::Build,
@@ -7313,7 +7277,6 @@ async fn factory_root_and_child_keep_independent_sticky_transport_state() {
             compaction: RemoteCompactionConfig::default(),
         },
         "Test instructions",
-        ToolServer::new().run(),
     );
     let mut root = factory.connect("root").await.expect("root provider");
     let mut child = factory.connect("child").await.expect("child provider");
@@ -7420,6 +7383,7 @@ async fn router_lazily_dispatches_role_specific_profiles_and_reuses_exact_matche
             send_prompt_cache_key: false,
             send_store: false,
             developer_messages: true,
+            additional_tools: true,
         },
         BTreeMap::from([("gateway_routing".to_string(), json!("route-b"))]),
         RemoteCompactionConfig::default(),
@@ -7446,7 +7410,6 @@ async fn router_lazily_dispatches_role_specific_profiles_and_reuses_exact_matche
             ),
         ],
         "Router preamble",
-        tools,
         "root-session",
     )
     .expect("router");
@@ -7454,6 +7417,8 @@ async fn router_lazily_dispatches_role_specific_profiles_and_reuses_exact_matche
     assert!(router.requires_portable_compaction());
 
     let build = RequestParts {
+        tools: declarations(&tools, Some(&["command".into()])),
+        forbid_tool_calls: false,
         prompt: Message::user("build request"),
         history: Vec::new(),
         instructions: "Build route instructions".to_string(),
@@ -7466,6 +7431,8 @@ async fn router_lazily_dispatches_role_specific_profiles_and_reuses_exact_matche
     assert_eq!(router.initialized_profile_count(), 1);
 
     let plan = RequestParts {
+        tools: declarations(&tools, Some(&["write".into()])),
+        forbid_tool_calls: false,
         prompt: Message::user("plan request"),
         history: Vec::new(),
         instructions: "Plan route instructions".to_string(),
@@ -7478,6 +7445,8 @@ async fn router_lazily_dispatches_role_specific_profiles_and_reuses_exact_matche
     assert_eq!(router.initialized_profile_count(), 2);
 
     let review = RequestParts {
+        tools: declarations(&tools, Some(&["command".into()])),
+        forbid_tool_calls: false,
         prompt: Message::user("review request"),
         history: Vec::new(),
         instructions: "Review route instructions".to_string(),
@@ -7580,18 +7549,19 @@ async fn multi_profile_router_rejects_remote_compaction_without_connection() {
             ),
         ],
         "preamble",
-        ToolServer::new().run(),
         "root",
     )
     .expect("multi-profile router");
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("compact me"),
         history: Vec::new(),
         instructions: "Build".to_string(),
         allowed_tool_names: None,
     };
     let result = router
-        .compact(parts.maintenance_request())
+        .compact(parts.compaction_request())
         .await
         .expect("portable compaction policy");
     assert_eq!(result, CompactResult::Unsupported);
@@ -7656,19 +7626,20 @@ async fn single_profile_router_forwards_configured_remote_compaction() {
             ),
         ],
         "preamble",
-        ToolServer::new().run(),
         "root",
     )
     .expect("single-profile root router");
     assert!(!router.requires_portable_compaction());
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("history to compact"),
         history: Vec::new(),
         instructions: "Build".to_string(),
         allowed_tool_names: None,
     };
     let result = router
-        .compact(parts.maintenance_request())
+        .compact(parts.compaction_request())
         .await
         .expect("remote compaction");
     let CompactResult::Replacement(items) = result else {
@@ -7757,11 +7728,12 @@ async fn failed_profile_does_not_poison_another_router_slot() {
             ),
         ],
         "preamble",
-        ToolServer::new().run(),
         "root",
     )
     .expect("router");
     let parts = |text: &str| RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user(text),
         history: Vec::new(),
         instructions: text.to_string(),
@@ -7884,7 +7856,6 @@ async fn router_keeps_profile_local_continuations_across_switches_and_active_can
             ),
         ],
         "router preamble",
-        ToolServer::new().run(),
         "root-session",
     )
     .expect("router");
@@ -7893,6 +7864,8 @@ async fn router_keeps_profile_local_continuations_across_switches_and_active_can
     let response_a = router
         .complete(
             ModelRequest {
+                tools: &[],
+                forbid_tool_calls: false,
                 instructions: test_instructions(),
                 input: vec![ModelRequestItem::message(&prompt_a)],
                 model_role: ModelRole::Build,
@@ -7909,6 +7882,8 @@ async fn router_keeps_profile_local_continuations_across_switches_and_active_can
     let response_b = router
         .complete(
             ModelRequest {
+                tools: &[],
+                forbid_tool_calls: false,
                 instructions: test_instructions(),
                 input: vec![
                     ModelRequestItem::message(&prompt_a),
@@ -7948,6 +7923,8 @@ async fn router_keeps_profile_local_continuations_across_switches_and_active_can
     router
         .complete(
             ModelRequest {
+                tools: &[],
+                forbid_tool_calls: false,
                 instructions: test_instructions(),
                 input: vec![
                     ModelRequestItem::message(&prompt_a),
@@ -7997,12 +7974,8 @@ fn explore_factory_creates_fresh_uninitialized_router_state() {
         zevria_foundation::ReasoningLevel::Medium,
         "preamble",
     );
-    let first = factory
-        .create("child-a", ToolServer::new().run())
-        .expect("first child router");
-    let second = factory
-        .create("child-b", ToolServer::new().run())
-        .expect("second child router");
+    let first = factory.create("child-a").expect("first child router");
+    let second = factory.create("child-b").expect("second child router");
     assert_eq!(first.initialized_profile_count(), 0);
     assert_eq!(second.initialized_profile_count(), 0);
     assert!(!first.requires_portable_compaction());
@@ -8119,7 +8092,6 @@ async fn incident_prefix_flow(developer_messages: bool, cached_tokens: [u64; 4])
         .run();
     let (socket, _) = connect_async(&url).await.unwrap();
     let mut provider = test_session_with_url(&url, socket, None);
-    provider.tools = tools.clone();
     provider.compatibility.developer_messages = developer_messages;
     provider.compatibility.send_prompt_cache_key = true;
     provider.responses_parameters = Some(json!({"prompt_cache_key":"test-session"}));

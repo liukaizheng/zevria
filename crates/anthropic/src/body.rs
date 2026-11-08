@@ -3,7 +3,7 @@ use crate::{Compatibility, RefusalFallback, ThinkingDisplay, project};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use zevria_foundation::{ModelProfileRef, ReasoningLevel};
-use zevria_model::{ModelRequest, ModelRequestItem};
+use zevria_model::{ModelRequest, ModelRequestItem, ToolDeclaration, ToolDeclarations};
 
 pub struct RequestOptions<'a> {
     pub target: &'a ModelProfileRef,
@@ -21,28 +21,18 @@ pub struct PreparedRequest {
     pub stripped_thinking_turns: usize,
 }
 
-pub fn has_tool_history(input: &[ModelRequestItem<'_>]) -> bool {
-    input.iter().any(|item| {
-        item.replay_ref()
-            .is_some_and(|replay| !replay.tool_call_handles().is_empty())
-            || item.message_ref().is_some_and(|message| match message {
-                rig_core::message::Message::Assistant(assistant) => assistant
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, rig_core::message::AssistantContent::ToolCall(_))),
-                rig_core::message::Message::User { content } => content
-                    .iter()
-                    .any(|b| matches!(b, rig_core::message::UserContent::ToolResult(_))),
-                _ => false,
-            })
-    })
+pub fn tool_definition(tool: &ToolDeclaration, eager: bool) -> Value {
+    let mut value =
+        json!({"name":tool.name, "description":tool.description, "input_schema":tool.parameters});
+    if eager {
+        value["eager_input_streaming"] = true.into();
+    }
+    value
 }
 
-/// `registry` is in registry order and uses the Messages tool schema. Filtering
-/// is deliberately stable, identical to Responses' prepare_turn_request.
+/// Render the exact declared tools, independent of engine call permissions.
 pub fn build(
     request: &ModelRequest<'_>,
-    registry: &[Value],
     options: &RequestOptions<'_>,
 ) -> anyhow::Result<PreparedRequest> {
     anyhow::ensure!(
@@ -56,25 +46,16 @@ pub fn build(
         options.max_tokens > 0,
         "max_output_tokens must be greater than zero"
     );
-    let maintenance = request
-        .allowed_tool_names
-        .is_some_and(|names| names.is_empty());
-    let history_tools = has_tool_history(&request.input);
-    let selected = registry
+    let mut declarations = ToolDeclarations::new(request.tools.to_vec())?;
+    if !(options.compatibility.inline_tools && options.compatibility.system_messages) {
+        declarations = declarations.fold(request.input.iter().filter_map(|item| match item {
+            ModelRequestItem::AdditionalTools(tools) => Some(*tools),
+            _ => None,
+        }));
+    }
+    let selected = declarations
         .iter()
-        .filter(|tool| {
-            (maintenance && history_tools)
-                || request
-                    .allowed_tool_names
-                    .is_none_or(|names| names.iter().any(|name| tool["name"] == name.as_str()))
-        })
-        .cloned()
-        .map(|mut tool| {
-            if options.compatibility.eager_tool_input_streaming {
-                tool["eager_input_streaming"] = true.into();
-            }
-            tool
-        })
+        .map(|tool| tool_definition(tool, options.compatibility.eager_tool_input_streaming))
         .collect::<Vec<_>>();
     let tools = if selected.is_empty() {
         Value::Null
@@ -82,10 +63,10 @@ pub fn build(
         Value::Array(selected)
     };
     let system = json!([{"type":"text", "text":request.instructions}]);
-    let projected = project::project(
+    let projected = project::project_with_compatibility(
         &request.input,
         options.target,
-        options.compatibility.system_messages,
+        options.compatibility,
         &system,
         &tools,
         false,
@@ -98,9 +79,6 @@ pub fn build(
         json!({"model":options.target.model, "max_tokens":options.max_tokens, "system":system});
     if !tools.is_null() {
         body["tools"] = tools;
-        if maintenance {
-            body["tool_choice"] = json!({"type":"none"});
-        }
     }
     body["messages"] = projected.messages.into();
     body["thinking"] = thinking;
@@ -111,6 +89,9 @@ pub fn build(
     }
     for (key, value) in options.additional_params {
         body[key] = value.clone();
+    }
+    if request.forbid_tool_calls {
+        body["tool_choice"] = json!({"type":"none"});
     }
     place_cache_breakpoints(&mut body, options.compatibility.prompt_caching);
     Ok(PreparedRequest {
@@ -179,6 +160,7 @@ pub fn beta_headers(
     display: ThinkingDisplay,
     fallback: Option<RefusalFallback>,
     strict_binding: bool,
+    inline_tools: bool,
 ) -> String {
     let mut betas = configured.to_vec();
     for (enabled, beta) in [
@@ -188,6 +170,7 @@ pub fn beta_headers(
         ),
         (fallback.is_some(), "server-side-fallback-2026-07-01"),
         (strict_binding, "thinking-binding-controls-2026-08-01"),
+        (inline_tools, "inline-tools-2026-09-15"),
     ] {
         if enabled && !betas.iter().any(|b| b == beta) {
             betas.push(beta.into());

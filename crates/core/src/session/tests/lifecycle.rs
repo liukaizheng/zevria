@@ -1824,6 +1824,7 @@ async fn opaque_replay_regression_uses_usage_delta_instead_of_legacy_wire_maximu
                     serde_json::to_vec(&content.replay().items)
                 }
                 ModelRequestItem::ReplayOnly(replay) => serde_json::to_vec(&replay.items),
+                ModelRequestItem::AdditionalTools(tools) => serde_json::to_vec(tools),
             }
             .expect("legacy serialization");
             zevria_model::compaction::approximate_tokens_from_bytes(bytes.len())

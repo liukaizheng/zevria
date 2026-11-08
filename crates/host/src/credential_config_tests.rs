@@ -85,7 +85,6 @@ async fn models_directory_is_bound_and_each_reload_starts_with_an_empty_cache() 
                 .for_role(zevria_foundation::ModelRole::Build),
             zevria_foundation::ReasoningLevel::Medium,
             "stable",
-            rig_agent::tool::server::ToolServer::new().run(),
             "session",
             "cache-key",
         )

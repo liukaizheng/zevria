@@ -13,6 +13,8 @@ fn search_config() -> WebSearchConfig {
 }
 fn parts() -> RequestParts {
     RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("research"),
         history: vec![],
         instructions: "Test".into(),
@@ -20,11 +22,7 @@ fn parts() -> RequestParts {
     }
 }
 async fn provider() -> OpenAiProvider {
-    let mut provider = connect_http_test_provider(
-        "http://127.0.0.1:1/responses".into(),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut provider = connect_http_test_provider("http://127.0.0.1:1/responses".into()).await;
     provider.input_token_count_url = None;
     provider
 }
@@ -115,7 +113,7 @@ pub(super) async fn held_answer_stream(websocket: bool, advertised: bool, search
         let (socket, _) = connect_async(&url).await.unwrap();
         test_session_with_url(&url, socket, None)
     } else {
-        connect_http_test_provider(url, ToolServer::new().run()).await
+        connect_http_test_provider(url).await
     };
     if advertised {
         openai.web_search = search_config();
@@ -224,17 +222,24 @@ async fn hosted_request_controls_policy_choice_and_function_strictness() {
             && error.contains("web_search.enabled")
             && error.contains("profile")
     );
-    let maintenance = prepare(&parts.maintenance_request(), &mut openai)
+    parts.forbid_tool_calls = true;
+    let fallback = prepare(&parts.compaction_request(), &mut openai)
         .await
         .unwrap();
-    assert_eq!(maintenance.request_properties["tools"], json!([]));
-    assert!(maintenance.request_properties.get("tool_choice").is_none());
+    assert!(fallback.request_properties.get("tools").is_none());
+    assert_eq!(fallback.request_properties["tool_choice"], "none");
+    parts.forbid_tool_calls = false;
     parts.allowed_tool_names = None;
-    openai.tools = ToolServer::new()
+    let registry = ToolServer::new()
         .tool(CountTool {
             executions: Arc::new(AtomicUsize::new(0)),
         })
         .run();
+    parts.tools =
+        zevria_model::ToolDeclarations::from_definitions(registry.snapshot().definitions(), |_| {
+            true
+        })
+        .unwrap();
     openai.additional_params.insert("tool_choice".into(), json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search"},{"type":"function","name":"count_once"}]}));
     let mixed = prepare(&parts.request(), &mut openai).await.unwrap();
     let tools = mixed.request_properties["tools"].as_array().unwrap();
@@ -344,7 +349,7 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
         send_http_response(&mut socket, "200 OK", "text/event-stream", body).await;
     });
     let tools = ToolServer::new().run();
-    let mut openai = connect_http_test_provider(url, tools.clone()).await;
+    let mut openai = connect_http_test_provider(url).await;
     openai.web_search = search_config();
     openai.input_token_count_url = None;
     let directory = tempfile::tempdir().unwrap();
@@ -478,7 +483,7 @@ async fn http_idle_retry_keeps_distinct_observed_attempts_and_identical_controls
         }
         assert_eq!(requests[0], requests[1]);
     });
-    let mut openai = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut openai = connect_http_test_provider(url).await;
     openai.web_search = search_config();
     let (checkpoints, mut checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
     let progress = discard_updates().with_checkpoints(checkpoints);
@@ -646,7 +651,7 @@ async fn counting_fallback_does_not_remove_search_and_upstream_rejection_is_not_
             "no search-disabled retry"
         );
     });
-    let mut openai = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut openai = connect_http_test_provider(url).await;
     openai.web_search = search_config();
     assert_eq!(
         openai.count_input_tokens(parts().request()).await.unwrap(),
@@ -770,7 +775,7 @@ async fn recovery_records_leave_prepared_full_input_and_wire_body_identical() {
         assert_eq!(bodies[0], bodies[1]);
         bodies
     });
-    let mut openai = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut openai = connect_http_test_provider(url).await;
     openai.web_search = search_config();
     let ordinary = vec![
         TranscriptItem::Message(Message::user("earlier prompt")),
@@ -808,6 +813,8 @@ async fn recovery_records_leave_prepared_full_input_and_wire_body_identical() {
     for history in [&ordinary, &with_recovery] {
         let instructions = rendered_test_instructions("byte-identical instructions");
         let request = || ModelRequest {
+            tools: &[],
+            forbid_tool_calls: false,
             instructions,
             input: zevria_transcript::model_input(history),
             model_role: ModelRole::Build,
@@ -853,7 +860,7 @@ async fn silent_responses_reporters_produce_no_attempts_or_checkpoints() {
         )
         .await;
     });
-    let mut openai = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut openai = connect_http_test_provider(url).await;
     let (events, mut receiver) = session_event_channel(32);
     let policy = zevria_model::CompactionPolicy::default();
     let turn = ProgressReporter::new(events.clone()).turn().clone();
@@ -866,7 +873,7 @@ async fn silent_responses_reporters_produce_no_attempts_or_checkpoints() {
     )
     .with_checkpoints(checkpoints);
     let response = openai
-        .complete(parts().maintenance_request(), progress.clone())
+        .complete(parts().compaction_request(), progress.clone())
         .await
         .unwrap();
     assert!(response.attempt_id.is_none());

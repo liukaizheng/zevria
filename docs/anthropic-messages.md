@@ -23,6 +23,7 @@ ACP, with its own installation and authentication. See [ensemble.md](ensemble.md
       "compatibility": {
         "prompt_caching": true,
         "system_messages": true,
+        "inline_tools": true,
         "eager_tool_input_streaming": true,
         "strict_thinking_binding": false
       },
@@ -124,8 +125,10 @@ By default there are exactly two explicit `{ "type": "ephemeral" }` breakpoints:
 2. The last non-thinking block of the final message. This breakpoint moves on
    each new turn; no marker is placed on a thinking/redacted-thinking block.
 
-Tools retain registry order after allow-list filtering. Routing IDs, retry data,
-and other per-request metadata never enter system/tools/messages. Set
+Top-level tools retain the window's persisted Initial order, not a new allow-list
+filter on each request. Changes append inline additions at their recorded history
+positions. Routing IDs, retry data, and other per-request metadata never enter
+system/tools/messages. Set
 `compatibility.prompt_caching: false` to omit both markers for a gateway without
 explicit cache control. Cache eligibility still depends on the endpoint's
 minimum-length, model, and lifetime rules; a short prompt need not yield a hit.
@@ -151,8 +154,11 @@ verbatim. A mismatch sends only that turn's text/tool-use blocks, not its
 thinking, redacted thinking or unknown opaque blocks.
 
 This intentionally loses reasoning continuity after keep-tail compaction,
-Plan/Build instruction or tool-policy changes, maintenance requests, or edited
-file guidance/skills on resume. It does not alter the saved ledger: switching
+Plan/Build instruction changes, folded top-level tool changes, or edited
+file guidance/skills on resume. A prefix-sharing summary preserves historical
+thinking: it keeps system/tools and ordered directives/additions unchanged, then
+appends its user instruction. Effective inline additions do not rewrite bindings
+of earlier assistant turns. It does not alter the saved ledger: switching
 back to an unchanged original prefix can restore its original thinking. New
 post-compaction responses bind to the new history and replay normally.
 
@@ -183,8 +189,10 @@ results always precede other user content, including these directive blocks.
 
 ## Tools and eager inputs
 
-Client tools use `{name, description, input_schema}` without `strict`; the
-registry schemas include optional fields. `eager_input_streaming: true` is added
+Client tools render the request's explicit `{name, description, input_schema}`
+declarations without `strict` or host-only annotations; schemas include optional
+fields. The provider runtime does not read the registry or filter declarations by
+the engine call allow-list. `eager_input_streaming: true` is added
 by default so large write/edit inputs keep meaningful SSE progress flowing.
 Tool JSON is parsed strictly only at `content_block_stop`; incomplete/invalid
 JSON is a retryable failed attempt and **never executes**. On exhaustion the
@@ -193,10 +201,31 @@ a gateway workaround. A completed tool call must have exactly one result in the
 next user message. IDs in portable histories are deterministically re-minted and
 results are re-correlated by occurrence.
 
-No-tool maintenance requests omit tools unless the retained history contains a
-tool exchange. In that case they send the full registry with
-`tool_choice: {"type":"none"}` so historical tool blocks remain valid while
-new calls remain disabled.
+With `[session] incremental_tools = true` (the default), each compaction window
+persists one `Initial` snapshot and append-only `Additional` records for new or
+changed tools. Initial tools stay top-level. Additions become
+`{"type":"tool_addition","tool":{"type":"tool_definition","definition":{...}}}`
+blocks in the same pending mid-conversation `role: "system"` flush as directive
+text, retaining their order and eager-input setting. Identical redefinitions are
+no-ops upstream; later definitions replace earlier ones from that point onward.
+Tools that become forbidden stay declared, but local calls receive the engine's
+existing mode denial.
+
+`compatibility.inline_tools` defaults to `true` and is effective only with
+`system_messages: true`. Effective inline tools add `inline-tools-2026-09-15` to
+the beta header for both completion and `count_tokens`. The beta is model/endpoint
+limited like mid-conversation system messages. Disable `inline_tools` for an
+endpoint that rejects it; disabling either flag folds additions into top-level
+tools, replacing existing names in place and appending new ones. Calls remain
+correct, but this changes the cached tool prefix and historical thinking bindings.
+
+Summaries and explicit model conversion retain normal instructions, declarations,
+permissions and full ordered input, then append one user message containing the
+engine preface and configured summary prompt. This role also works after a final
+assistant turn. Returned tool calls are never executed: one retry changes only
+`forbid_tool_calls` to `tool_choice: {"type":"none"}`. That fallback can miss the
+messages cache; repeated tool calls fail. No `tool_choice` change is made on the
+first attempt. The post-checkpoint window declares a fresh current-policy set.
 
 ## Counting, stops and recovery
 
@@ -274,7 +303,10 @@ provider key to another protocol never sends foreign native items.
 Messages has no native remote compaction. `compact()` reports `Unsupported`,
 which selects core's existing local-summary path. Roots with multiple selectable
 profiles also keep the existing portable-compaction policy. Responses requests,
-registered tool prefixes and old transcript fixtures are unchanged.
+ordinary request tool prefixes remain unchanged for the same supplied declarations.
+Old transcripts load without migration and acquire an Initial at the next enabled
+dispatch. An existing Initial latches incremental layout even if the session flag
+is later disabled.
 
 Hosted web search is a follow-up, not part of this adapter. Native Bedrock and
 Vertex authentication are not supported; use the Claude API or a compatible

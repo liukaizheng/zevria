@@ -46,10 +46,15 @@ async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_a
         let (socket, _) = connect_async(&url).await.unwrap();
         let mut provider = test_session_with_url(&url, socket, None);
         provider.compatibility.developer_messages = developer_messages;
-        provider.tools = ToolServer::new()
+        let tools = ToolServer::new()
             .tool(PolicyCommandTool)
             .tool(PolicyWriteTool)
             .run();
+        let declarations = zevria_model::ToolDeclarations::from_definitions(
+            tools.snapshot().definitions(),
+            |_| true,
+        )
+        .unwrap();
         let instructions =
             test_instruction_set("Stable Build with conditional orchestration").render();
         let orchestrated = RequestMetadata::new(RequestBehavior::Orchestrate);
@@ -74,6 +79,8 @@ async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_a
                 ));
             }
             let request = ModelRequest {
+                tools: &declarations,
+                forbid_tool_calls: false,
                 instructions: &instructions,
                 input: input
                     .iter()
@@ -328,7 +335,6 @@ async fn engine_skill_lifecycle_is_incremental_with_both_explicit_wire_roles() {
         );
         let tools = ToolServer::new().tool(ApplySkill).run();
         let mut provider = test_session(socket, None);
-        provider.tools = tools.clone();
         provider.compatibility.developer_messages = developer_messages;
         provider.compatibility.send_prompt_cache_key = true;
         provider.responses_parameters = Some(json!({"prompt_cache_key":"test-session"}));
@@ -566,7 +572,6 @@ async fn directive_only_preflight_count_and_http_use_identical_input_without_rig
             mode_enabled: true,
         };
         let catalog = context.prompt_catalog();
-        let tools = ToolServer::new().tool(ApplySkill).run();
         let compatibility = ResponsesCompatibilityConfig {
             developer_messages,
             ..Default::default()
@@ -591,7 +596,6 @@ async fn directive_only_preflight_count_and_http_use_identical_input_without_rig
                 zevria_foundation::ReasoningLevel::Medium,
             )],
             "not wire instructions",
-            tools,
             "stable-session",
         )
         .unwrap();
@@ -618,6 +622,8 @@ async fn directive_only_preflight_count_and_http_use_identical_input_without_rig
         })
         .unwrap();
         let request = ModelRequest {
+            tools: &[],
+            forbid_tool_calls: false,
             instructions: &instructions,
             input: vec![
                 ModelRequestItem::DeveloperInstruction(body),
@@ -696,13 +702,11 @@ async fn unsupported_developer_role_does_not_silently_retry_as_user() {
             "role-changing retry is forbidden"
         );
     });
-    let mut provider = connect_http_test_provider(
-        format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut provider = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let instruction = test_skill("Pinned body");
     let request = ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: test_instructions(),
         input: vec![ModelRequestItem::DeveloperInstruction(instruction)],
         model_role: ModelRole::Build,

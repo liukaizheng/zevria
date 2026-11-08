@@ -78,6 +78,8 @@ async fn structured_size_events_are_typed_and_never_reconnect_websocket() {
         let mut openai = test_session_with_url(&url, socket, None);
         let mut state = AttemptState::default();
         let parts = RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: Message::user("summary"),
             history: Vec::new(),
             instructions: String::new(),
@@ -167,9 +169,11 @@ async fn structured_http_and_sse_size_errors_preserve_status_details_and_request
                     .is_err()
             );
         });
-        let mut openai = connect_http_test_provider(url, ToolServer::new().run()).await;
+        let mut openai = connect_http_test_provider(url).await;
         let mut state = AttemptState::default();
         let parts = RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: Message::user("summary"),
             history: Vec::new(),
             instructions: String::new(),
@@ -230,6 +234,8 @@ async fn count_endpoint_size_failures_are_not_completion_retry_signals() {
         );
         openai.input_token_count_url = Some(reqwest::Url::parse(&url).unwrap());
         let parts = RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: Message::user("count"),
             history: Vec::new(),
             instructions: String::new(),

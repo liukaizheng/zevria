@@ -1,6 +1,6 @@
 //! The complete request-owned instruction set, independent of conversation history.
 use crate::{DirectivePolicy, directive::digest, prompts::*, skill::SkillPromptCatalog};
-use zevria_foundation::{LAUNCH_SUBTASKS_TOOL_NAME, ModelRole, TurnPolicy, WorkspaceContract};
+use zevria_foundation::{LAUNCH_SUBTASKS_TOOL_NAME, WorkspaceContract};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstructionSet {
@@ -75,29 +75,6 @@ impl InstructionSet {
 
     pub fn identity(&self) -> String {
         digest(&self.render())
-    }
-
-    pub fn maintenance<'a>(
-        application: &str,
-        system: impl IntoIterator<Item = (&'a str, &'a str)>,
-    ) -> Self {
-        Self {
-            application: application.into(),
-            system: system
-                .into_iter()
-                .map(|(key, text)| (key.into(), text.into()))
-                .collect(),
-            workflow: DirectivePolicy::new(
-                "maintenance",
-                &TurnPolicy::new(
-                    MAINTENANCE_INSTRUCTIONS,
-                    Some(Vec::new()),
-                    ModelRole::Build,
-                    false,
-                ),
-            ),
-            catalog: None,
-        }
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {

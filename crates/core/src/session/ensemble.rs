@@ -220,15 +220,27 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .as_ref()
                 .and_then(TranscriptItem::model_request_item),
         );
+        let tool_update = self.tool_declaration_update(self.conversation.items(), &policy);
+        input.extend(
+            tool_update
+                .as_ref()
+                .and_then(TranscriptItem::model_request_item),
+        );
         input.extend(updates.iter().map(ModelRequestItem::DeveloperInstruction));
         let estimate = estimate_model_input_for_profile(input.clone(), &context.profile)?;
+        let tools = self.request_tools(self.conversation.items(), &policy);
+        let instructions = self.rendered_instructions(&policy);
         let mut tokens = estimate
             .conservative_tokens
-            .saturating_add(self.fixed_input_tokens(&policy));
+            .saturating_add(prepared_fixed_tokens(
+                &instructions,
+                &serde_json::to_vec(&tools)?,
+            ));
         let mut measurement = "estimated";
-        let instructions = self.rendered_instructions(&policy);
         let request = ModelRequest {
             instructions: &instructions,
+            tools: &tools,
+            forbid_tool_calls: false,
             input,
             model_role: policy.model_role,
             allowed_tool_names: policy.allowed_tool_names.as_deref(),

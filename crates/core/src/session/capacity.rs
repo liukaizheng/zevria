@@ -101,7 +101,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             policy,
             self.context_policy(policy.model_role),
             &self.rendered_instructions(policy),
-            &self.filtered_tool_bytes(policy),
+            &self.request_tool_bytes(self.conversation.items(), policy),
         ))
     }
 
@@ -115,27 +115,43 @@ impl<P: ModelProvider> SessionEngine<P> {
             policy,
             self.context_policy(policy.model_role),
             &instructions,
-            &self.filtered_tool_bytes(policy),
+            &self.request_tool_bytes(self.conversation.items(), policy),
         );
         prepared_request_identity(shape, &instructions, &self.conversation.model_input())
     }
 
-    pub(super) fn filtered_tool_bytes(&self, policy: &TurnPolicy) -> Vec<u8> {
-        let catalog = self.tools.snapshot();
-        let tools = catalog
-            .definitions()
-            .iter()
-            .map(|tool| tool.as_ref())
-            .filter(|tool| policy.allows_tool(&tool.name))
-            .collect::<Vec<_>>();
-        serde_json::to_vec(&tools).expect("tools serialize")
+    pub(super) fn request_tool_bytes(
+        &self,
+        items: &[TranscriptItem],
+        policy: &TurnPolicy,
+    ) -> Vec<u8> {
+        serde_json::to_vec(&self.request_tools(items, policy)).expect("tools serialize")
+    }
+
+    /// Recorded additions are input; only a not-yet-recorded addition is fixed
+    /// overhead. An Initial is already represented by request_tools.
+    pub(super) fn fixed_tool_tokens(&self, items: &[TranscriptItem], policy: &TurnPolicy) -> u64 {
+        let top_level = self.request_tools(items, policy).approximate_tokens();
+        let prospective = self
+            .tool_declaration_update(items, policy)
+            .as_ref()
+            .and_then(TranscriptItem::model_request_item)
+            .map(estimate_model_request_item)
+            .map_or(0, |estimate| estimate.conservative_tokens);
+        top_level.saturating_add(prospective)
     }
 
     pub(super) fn fixed_input_tokens(&self, policy: &TurnPolicy) -> u64 {
-        prepared_fixed_tokens(
-            &self.rendered_instructions(policy),
-            &self.filtered_tool_bytes(policy),
-        )
+        zevria_model::compaction::approximate_tokens(&self.rendered_instructions(policy))
+            .saturating_add(self.fixed_tool_tokens(self.conversation.items(), policy))
+    }
+
+    /// A checkpoint can discard the old declaration window. Only a freshly
+    /// rendered desired set is irreducible; current/prospective declarations
+    /// still count in full during ordinary request measurement.
+    pub(super) fn irreducible_input_tokens(&self, instructions: &str, policy: &TurnPolicy) -> u64 {
+        zevria_model::compaction::approximate_tokens(instructions)
+            .saturating_add(self.desired_tool_declarations(policy).approximate_tokens())
     }
 
     pub(super) fn compactable_context_tokens(
@@ -203,10 +219,12 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn append_context_estimates(&mut self, items: &[TranscriptItem]) {
-        if items
-            .iter()
-            .any(|item| matches!(item, TranscriptItem::Directive(_)))
-        {
+        if items.iter().any(|item| {
+            matches!(
+                item,
+                TranscriptItem::Directive(_) | TranscriptItem::ToolDeclarations(_)
+            )
+        }) {
             self.context.last_snapshots.clear();
             self.invalidate_model_preview();
         }
@@ -319,8 +337,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         {
             let input = self.conversation.model_input();
             let instructions = self.rendered_instructions(policy);
+            let tools = self.request_tools(self.conversation.items(), policy);
             let request = ModelRequest {
                 instructions: &instructions,
+                tools: &tools,
+                forbid_tool_calls: false,
                 input,
                 model_role: policy.model_role,
                 allowed_tool_names: policy.allowed_tool_names.as_deref(),

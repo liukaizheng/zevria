@@ -67,16 +67,14 @@ async fn real_plan_tools_keep_strict_schemas_and_cache_prefix_over_http_and_webs
             .tool(zevria_tools::ReadPlanTool)
             .tool(zevria_tools::SubmitPlanTool::new(131_072))
             .run();
+        let declared = declarations(&tools, None);
         let mut provider = if websocket {
             let url = format!("ws://{address}/v1/responses");
             let (socket, _) = connect_async(&url).await.unwrap();
-            let mut provider = test_session_with_url(&url, socket, None);
-            provider.tools = tools.clone();
-            provider
+            test_session_with_url(&url, socket, None)
         } else {
             connect_http_test_provider_with_options(
                 format!("http://{address}/v1/responses"),
-                tools.clone(),
                 ResponsesCompatibilityConfig::default(),
                 BTreeMap::new(),
                 "plan-cache",
@@ -90,8 +88,9 @@ async fn real_plan_tools_keep_strict_schemas_and_cache_prefix_over_http_and_webs
         )
         .unwrap();
         for native in &calls {
-            run_turn(
+            run_declared_turn(
                 "continue planning",
+                &declared,
                 &mut provider,
                 &mut state,
                 &discard_updates(),
@@ -136,9 +135,15 @@ async fn real_plan_tools_keep_strict_schemas_and_cache_prefix_over_http_and_webs
             ));
             state.history_replays.push(None);
         }
-        run_turn("finish", &mut provider, &mut state, &discard_updates())
-            .await
-            .unwrap();
+        run_declared_turn(
+            "finish",
+            &declared,
+            &mut provider,
+            &mut state,
+            &discard_updates(),
+        )
+        .await
+        .unwrap();
         let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server)
             .await
             .unwrap()

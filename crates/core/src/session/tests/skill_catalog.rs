@@ -300,7 +300,7 @@ async fn skill_catalog_lifecycle_reconciles_direct_reload_disable_and_mode_chang
     assert_eq!(engine.directive_state().unwrap().snapshot(), snapshot);
     assert_eq!(engine.active_skills().unwrap().len(), 1);
     let loaded = zevria_transcript::transcript::load(engine.conversation.path()).unwrap();
-    assert_eq!(loaded, conversation_records(engine.conversation.items()));
+    assert_eq!(loaded, engine.conversation.items());
 }
 
 #[tokio::test]
@@ -368,11 +368,7 @@ async fn skill_catalog_resume_edit_and_compaction_preserve_recorded_boundaries()
                 .iter()
                 .any(|item| matches!(item, OwnedModelRequestItem::DeveloperInstruction(_)))
         );
-        assert!(
-            maintenance
-                .instructions
-                .ends_with("## Eligible skills\nSkill selection is unavailable.")
-        );
+        assert_eq!(maintenance.instructions, instructions(&resumed));
     }
     let before = instructions(&resumed);
     submit(&mut resumed, "continue", SessionMode::Build).await;

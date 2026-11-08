@@ -165,11 +165,8 @@ fn socket_sidecar_keeps_bounded_cause_without_changing_terminal_precedence() {
 
 #[tokio::test]
 async fn late_and_duplicate_comparison_cannot_overwrite_current_request() {
-    let mut provider = crate::tests::connect_http_test_provider(
-        "http://127.0.0.1:9/responses".into(),
-        rig_agent::tool::server::ToolServer::new().run(),
-    )
-    .await;
+    let mut provider =
+        crate::tests::connect_http_test_provider("http://127.0.0.1:9/responses".into()).await;
     // No socket traffic: exercise the bounded ownership ledger directly.
     provider.transport = OpenAiTransport::WebSocket;
     let event = |id: &str, outcome: &str| {

@@ -44,9 +44,6 @@ pub const ENSEMBLE_PLAN_SYNTHESIS_INSTRUCTIONS: &str =
 /// Evidence-verified review synthesis.
 pub const ENSEMBLE_REVIEW_SYNTHESIS_INSTRUCTIONS: &str =
     include_str!("../../../docs/instructions/ensemble-review-synthesis.md");
-/// Tool-free maintenance summarization.
-pub const MAINTENANCE_INSTRUCTIONS: &str =
-    include_str!("../../../docs/instructions/maintenance-mode.md");
 
 #[cfg(test)]
 #[path = "prompt_tests.rs"]

@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use rig_agent::tool::server::ToolServerHandle;
 use sha2::{Digest, Sha256};
 use zevria_foundation::{ModelRole, ReasoningLevel};
 use zevria_model::CompactResult;
@@ -91,7 +90,6 @@ pub struct ProviderRouter {
     routes: [Option<Route>; ModelRole::COUNT],
     slots: Vec<ProfileSlot>,
     preamble: String,
-    tools: ToolServerHandle,
     session_id: String,
     last_dispatched: Option<usize>,
     requires_portable_compaction: bool,
@@ -103,7 +101,6 @@ impl ProviderRouter {
     pub fn root(
         routing: &ModelRouting,
         preamble: impl Into<String>,
-        tools: ToolServerHandle,
         session_id: impl Into<String>,
     ) -> anyhow::Result<Self> {
         let mut router = Self::from_routes(
@@ -117,7 +114,6 @@ impl ProviderRouter {
                     )
                 }),
             preamble,
-            tools,
             session_id,
         )?;
         for profile in routing.catalog() {
@@ -142,7 +138,6 @@ impl ProviderRouter {
     pub fn from_routes(
         routes: impl IntoIterator<Item = (ModelRole, ResolvedModelProfile, ReasoningLevel)>,
         preamble: impl Into<String>,
-        tools: ToolServerHandle,
         session_id: impl Into<String>,
     ) -> anyhow::Result<Self> {
         let mut route_table = [None; ModelRole::COUNT];
@@ -185,7 +180,6 @@ impl ProviderRouter {
             routes: route_table,
             slots,
             preamble: preamble.into(),
-            tools,
             session_id: session_id.into(),
             last_dispatched: None,
             requires_portable_compaction,
@@ -248,13 +242,17 @@ impl ProviderRouter {
                     &request.input,
                     &profile.profile,
                     endpoint.compatibility.developer_messages,
+                    zevria_responses::tools::ToolRendererOptions {
+                        strict_tools: endpoint.compatibility.strict_tools,
+                    },
+                    endpoint.compatibility.additional_tools,
                 )?;
             }
             ProfileProtocol::Anthropic { endpoint, .. } => {
-                zevria_anthropic::project::preflight(
+                zevria_anthropic::project::preflight_with_compatibility(
                     &request.input,
                     &profile.profile,
-                    endpoint.compatibility.system_messages,
+                    &endpoint.compatibility,
                 )?;
             }
         }
@@ -278,7 +276,6 @@ impl ProviderRouter {
                         &slot.profile,
                         level,
                         &self.preamble,
-                        self.tools.clone(),
                         &self.session_id,
                         &cache_key,
                     )
@@ -301,7 +298,6 @@ impl ProviderRouter {
                         &slot.profile,
                         level,
                         &self.preamble,
-                        self.tools.clone(),
                         &self.session_id,
                     )?))
                 }
@@ -396,13 +392,19 @@ impl ModelProvider for ProviderRouter {
                     input,
                     target,
                     endpoint.compatibility.developer_messages,
+                    zevria_responses::tools::ToolRendererOptions {
+                        strict_tools: endpoint.compatibility.strict_tools,
+                    },
+                    endpoint.compatibility.additional_tools,
                 )
             }
-            ProfileProtocol::Anthropic { endpoint, .. } => zevria_anthropic::project::preflight(
-                input,
-                target,
-                endpoint.compatibility.system_messages,
-            ),
+            ProfileProtocol::Anthropic { endpoint, .. } => {
+                zevria_anthropic::project::preflight_with_compatibility(
+                    input,
+                    target,
+                    &endpoint.compatibility,
+                )
+            }
         }
     }
 
@@ -551,7 +553,7 @@ impl ModelProvider for ProviderRouter {
 }
 
 /// Cloneable recipe for a fresh independent single-profile router, used by
-/// Explore and Builder child subsessions, with a registry supplied per child.
+/// Explore and Builder child subsessions. Declarations belong to each request.
 #[derive(Clone)]
 pub struct ProviderRouterFactory {
     role: ModelRole,
@@ -575,15 +577,10 @@ impl ProviderRouterFactory {
         }
     }
 
-    pub fn create(
-        &self,
-        session_id: &str,
-        tools: ToolServerHandle,
-    ) -> anyhow::Result<ProviderRouter> {
+    pub fn create(&self, session_id: &str) -> anyhow::Result<ProviderRouter> {
         ProviderRouter::from_routes(
             [(self.role, self.profile.clone(), self.reasoning_level)],
             self.preamble.clone(),
-            tools,
             session_id.to_string(),
         )
     }

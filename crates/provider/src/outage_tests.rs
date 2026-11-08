@@ -7,6 +7,8 @@ use zevria_session_api::event::NetworkStatus;
 
 fn parts() -> RequestParts {
     RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("recover this request"),
         history: vec![],
         instructions: "Immutable cache prefix".into(),
@@ -62,7 +64,7 @@ async fn six_unavailable_attempts_then_success_replay_byte_identical_requests() 
             }
         }
     });
-    let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut provider = connect_http_test_provider(url).await;
     let (sender, mut events) = session_event_channel(128);
     let policy = RecoveryPolicy {
         backoff_cap: Duration::from_secs(1),
@@ -117,7 +119,7 @@ async fn slow_headers_succeed_after_deadline_escalation_and_warn_while_waiting()
             worker.await.unwrap();
         }
     });
-    let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut provider = connect_http_test_provider(url).await;
     let policy = RecoveryPolicy {
         send_timeout: Duration::from_millis(60),
         stall_warning: Duration::from_millis(35),
@@ -226,7 +228,7 @@ async fn http_status_hints_quota_and_overrides_share_the_recovery_policy() {
                 );
             }
         });
-        let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+        let mut provider = connect_http_test_provider(url).await;
         let (sender, mut events) = session_event_channel(64);
         let result = run_turn_request_with_recovery(
             parts().request(),
@@ -283,7 +285,7 @@ async fn transient_sse_errors_and_failed_responses_replay_full_input() {
             )
             .await;
         });
-        let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+        let mut provider = connect_http_test_provider(url).await;
         run_turn_request_with_recovery(
             parts().request(),
             &mut provider,
@@ -343,7 +345,7 @@ async fn exhausted_connectivity_display_keeps_socket_cause_and_actionable_settin
         listener.local_addr().unwrap()
     );
     drop(listener);
-    let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut provider = connect_http_test_provider(url).await;
     provider.recovery = RecoveryPolicy {
         recovery_window: Duration::from_millis(25),
         ..fast_recovery_policy(30)
@@ -394,7 +396,7 @@ async fn fourth_partial_generation_stops_even_with_a_large_attempt_cap() {
                 .is_err()
         );
     });
-    let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut provider = connect_http_test_provider(url).await;
     let error = run_turn_request_with_recovery(
         parts().request(),
         &mut provider,

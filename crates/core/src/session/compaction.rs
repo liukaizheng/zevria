@@ -12,20 +12,21 @@ pub(super) fn snapshot_model_input(
 }
 
 pub(super) fn snapshot_conversation_input(
-    input: Vec<ModelRequestItem<'_>>,
-) -> anyhow::Result<Vec<OwnedModelRequestItem>> {
-    snapshot_model_input(
-        input
-            .into_iter()
-            .filter(|item| {
-                !matches!(
-                    item,
-                    ModelRequestItem::DeveloperInstruction(_)
-                        | ModelRequestItem::RequestInstruction(_)
-                )
-            })
-            .collect(),
-    )
+    input: &[OwnedModelRequestItem],
+) -> (Vec<OwnedModelRequestItem>, Vec<usize>) {
+    input
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            !matches!(
+                item,
+                OwnedModelRequestItem::DeveloperInstruction(_)
+                    | OwnedModelRequestItem::RequestInstruction(_)
+                    | OwnedModelRequestItem::AdditionalTools(_)
+            )
+        })
+        .map(|(position, item)| (item.clone(), position))
+        .unzip()
 }
 
 pub(super) fn append_task_snapshot_context(
@@ -61,7 +62,9 @@ pub(super) fn automatic_compaction_armed_for(items: &[TranscriptItem]) -> bool {
                     item.model_request_item().is_some()
                         && !matches!(
                             item,
-                            TranscriptItem::Directive(_) | TranscriptItem::RequestDirective(_)
+                            TranscriptItem::Directive(_)
+                                | TranscriptItem::RequestDirective(_)
+                                | TranscriptItem::ToolDeclarations(_)
                         )
                 })
                 .nth(1)
@@ -69,16 +72,58 @@ pub(super) fn automatic_compaction_armed_for(items: &[TranscriptItem]) -> bool {
         })
 }
 
-pub(super) struct CompactionSource {
+pub(super) struct CompactionRequest {
+    pub(super) instructions: String,
+    pub(super) tools: ToolDeclarations,
     pub(super) input: Vec<OwnedModelRequestItem>,
-    /// Prepared current maintenance guidance; never copied into the checkpoint.
-    pub(super) instructions: zevria_instructions::InstructionSet,
+}
+
+pub(super) struct CompactionSource {
+    pub(super) request: CompactionRequest,
+    pub(super) history: Vec<OwnedModelRequestItem>,
+    pub(super) positions: Vec<usize>,
     pub(super) retained_user_candidates: Vec<String>,
     pub(super) task_snapshot: Option<TaskList>,
     pub(super) plan_context: Option<String>,
 }
 
+impl CompactionSource {
+    pub(super) fn cut(&self, k: usize) -> usize {
+        self.positions
+            .get(k)
+            .copied()
+            .unwrap_or(self.request.input.len())
+    }
+}
+
 impl<P: ModelProvider> SessionEngine<P> {
+    pub(super) fn compaction_source(
+        &self,
+        items: &[TranscriptItem],
+        policy: &TurnPolicy,
+    ) -> anyhow::Result<CompactionSource> {
+        let input = snapshot_model_input(zevria_transcript::transcript::model_input(items))?;
+        let (history, positions) = snapshot_conversation_input(&input);
+        Ok(CompactionSource {
+            request: CompactionRequest {
+                instructions: self.rendered_instructions(policy),
+                tools: self.request_tools(items, policy),
+                input,
+            },
+            history,
+            positions,
+            retained_user_candidates: zevria_transcript::transcript::retained_user_candidates(
+                items,
+            ),
+            task_snapshot: latest_successful_task_snapshot(items),
+            plan_context: replay_plan_state(items.iter().filter_map(|item| match item {
+                TranscriptItem::Plan(record) => Some(record),
+                _ => None,
+            }))?
+            .checkpoint_context(),
+        })
+    }
+
     pub(super) async fn automatic_checkpoint_for_prompt(
         &mut self,
         anchor: TurnAnchor,
@@ -107,20 +152,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 {
                     return Ok(None);
                 }
-                let source = CompactionSource {
-                    input: snapshot_conversation_input(
-                        zevria_transcript::transcript::model_input(prefix),
-                    )?,
-                    instructions: self.prepare_maintenance_guidance(),
-                    retained_user_candidates:
-                        zevria_transcript::transcript::retained_user_candidates(prefix),
-                    task_snapshot: latest_successful_task_snapshot(prefix),
-                    plan_context: replay_plan_state(prefix.iter().filter_map(|item| match item {
-                        TranscriptItem::Plan(record) => Some(record),
-                        _ => None,
-                    }))?
-                    .checkpoint_context(),
-                };
+                let source = self.compaction_source(prefix, policy)?;
                 self.prepare_compaction(
                     CompactionTrigger::AutomaticPreTurn,
                     policy,
@@ -203,19 +235,20 @@ impl<P: ModelProvider> SessionEngine<P> {
             context.retained_user_tokens,
         );
 
-        let instructions = source.instructions.render();
         let remote = {
             let input = source
+                .request
                 .input
                 .iter()
                 .map(OwnedModelRequestItem::as_borrowed)
                 .collect::<Vec<_>>();
-            zevria_model::maintenance::validate_maintenance_input(&input)?;
             let request = ModelRequest {
-                instructions: &instructions,
+                instructions: &source.request.instructions,
+                tools: &source.request.tools,
+                forbid_tool_calls: false,
                 input,
                 model_role: policy.model_role,
-                allowed_tool_names: Some(&[]),
+                allowed_tool_names: policy.allowed_tool_names.as_deref(),
             };
             let compact = self.provider.compact(request);
             tokio::pin!(compact);
@@ -244,18 +277,11 @@ impl<P: ModelProvider> SessionEngine<P> {
                 // Type erasure bounds the spawned engine's nested Send checks
                 // without raising the compiler's recursion limit.
                 let (summary, prefix_end) = self
-                    .summarize_prefix(
-                        &source.input,
-                        &source.instructions,
-                        &context,
-                        policy,
-                        events,
-                        turn,
-                    )
+                    .summarize_prefix(source, &context, policy, events, turn)
                     .boxed()
                     .await?;
                 let replacement = zevria_model::compaction::summary_tail_history(
-                    &source.input,
+                    &source.history,
                     prefix_end,
                     &summary,
                 )?;
@@ -308,13 +334,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         if !self.conversation.has_compaction_prompt() {
             anyhow::bail!("cannot compact a conversation before its first user prompt");
         }
-        let source = CompactionSource {
-            input: snapshot_conversation_input(self.conversation.model_input())?,
-            instructions: self.prepare_maintenance_guidance(),
-            retained_user_candidates: self.conversation.retained_user_candidates(),
-            task_snapshot: latest_successful_task_snapshot(self.conversation.items()),
-            plan_context: self.plan_state()?.checkpoint_context(),
-        };
+        let source = self.compaction_source(self.conversation.items(), policy)?;
         let checkpoint = self
             .prepare_compaction(trigger, policy, events, turn, &source)
             .await?;

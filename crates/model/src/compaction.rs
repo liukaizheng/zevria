@@ -10,6 +10,12 @@ use crate::OwnedModelRequestItem;
 
 /// Codex's built-in checkpoint prompt, kept as a documentation artifact too.
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../../../docs/instructions/compact-prompt.md");
+/// Engine-owned trailing instruction; all preceding request bytes stay intact.
+pub const SUMMARY_REQUEST_PREFACE: &str =
+    include_str!("../../../docs/instructions/compact-request.md");
+pub fn summary_request_message(prompt: &str) -> Message {
+    Message::user(format!("{}\n{prompt}", SUMMARY_REQUEST_PREFACE.trim_end()))
+}
 /// Prefix identifying a model-generated checkpoint summary.
 pub const SUMMARY_PREFIX: &str = {
     let document = include_str!("../../../docs/instructions/compact-summary-prefix.md").as_bytes();
@@ -46,14 +52,36 @@ pub enum CompactionBackend {
 
 /// A durable context checkpoint. The transcript around it remains intact;
 /// only model projection changes.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompactionCheckpoint {
     pub version: u32,
     pub trigger: CompactionTrigger,
     pub backend: CompactionBackend,
     pub replacement_history: Vec<OwnedModelRequestItem>,
     pub retained_user_messages: Vec<String>,
+}
+
+impl Serialize for CompactionCheckpoint {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+        self.validate().map_err(S::Error::custom)?;
+        #[derive(Serialize)]
+        struct Record<'a> {
+            version: u32,
+            trigger: CompactionTrigger,
+            backend: CompactionBackend,
+            replacement_history: &'a [OwnedModelRequestItem],
+            retained_user_messages: &'a [String],
+        }
+        Record {
+            version: self.version,
+            trigger: self.trigger,
+            backend: self.backend,
+            replacement_history: &self.replacement_history,
+            retained_user_messages: &self.retained_user_messages,
+        }
+        .serialize(serializer)
+    }
 }
 
 #[derive(Deserialize)]
@@ -109,6 +137,7 @@ impl CompactionCheckpoint {
             self.replacement_history.iter().all(|item| !matches!(
                 item,
                 OwnedModelRequestItem::DeveloperInstruction(_)
+                    | OwnedModelRequestItem::AdditionalTools(_)
                     | OwnedModelRequestItem::RequestInstruction(_)
                     | OwnedModelRequestItem::Message(Message::System { .. })
             )),

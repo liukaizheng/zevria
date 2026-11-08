@@ -55,9 +55,10 @@ legitimately issue its own startup warning.
 On resume, current guidance is rebuilt before the next normal provider dispatch;
 historical application/file guidance text is not restored. Missing, whitespace-only, or
 rejected files contribute no body. A failed capture never retains an obsolete
-body. Immediate post-resume compaction prepares current application/file guidance
-in its maintenance instruction set, even before a normal turn, without activating
-skills or rereading files.
+body. Immediate post-resume compaction prepares the normal active-policy
+instruction set with current application/file guidance, even before a normal turn,
+without changing skill state or rereading files. Its summary instruction is one
+trailing user message, not a replacement instruction prefix.
 Prompt edits use the current opening snapshot rather than obsolete file guidance.
 
 The rendered `instructions` are byte-identical within a workflow across ordinary

@@ -56,6 +56,7 @@ use zevria_instructions::skill::SkillName;
 use zevria_instructions::skill::SkillRequest;
 #[cfg(test)]
 use zevria_model::ProviderReplay;
+use zevria_model::ToolDeclarations;
 use zevria_model::compaction::CompactionBackend;
 use zevria_model::compaction::CompactionCheckpoint;
 use zevria_model::compaction::CompactionTrigger;
@@ -72,6 +73,7 @@ use zevria_transcript::transcript::TranscriptItem;
 use zevria_transcript::transcript::TranscriptWriter;
 use zevria_transcript::transcript::latest_successful_task_snapshot;
 use zevria_transcript::transcript::replay_active_skills;
+use zevria_transcript::{ToolDeclarationPlacement, ToolDeclarationRecord, tool_window};
 #[cfg(test)]
 use zevria_workflow::ensemble::AgentRunId;
 use zevria_workflow::ensemble::AgentRunOutcome;
@@ -134,6 +136,7 @@ pub struct SessionEngine<P> {
     /// The only conversation copy; model input is a projection of these items.
     conversation: Conversation,
     compaction: CompactionPolicy,
+    incremental_tools: bool,
     replay: SessionReplayState,
     phase: EnginePhase,
     context: ContextState,
@@ -177,6 +180,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             policies,
             conversation,
             compaction: CompactionPolicy::default(),
+            incremental_tools: true,
             replay,
             phase: EnginePhase::Idle,
             context: ContextState::default(),
@@ -277,6 +281,64 @@ impl<P: ModelProvider> SessionEngine<P> {
     pub fn with_ensemble_launcher(mut self, launcher: Arc<dyn EnsembleLauncher>) -> Self {
         self.capabilities.ensemble_launcher = Some(launcher);
         self
+    }
+
+    pub fn with_incremental_tools(mut self, enabled: bool) -> Self {
+        self.incremental_tools = enabled;
+        self
+    }
+
+    pub(super) fn desired_tool_declarations(&self, policy: &TurnPolicy) -> ToolDeclarations {
+        ToolDeclarations::from_definitions(self.tools.snapshot().definitions(), |tool| {
+            policy.allows_tool(tool.name.as_str())
+        })
+        .expect("registered tools have unique names and object schemas")
+    }
+
+    pub(super) fn request_tools(
+        &self,
+        items: &[TranscriptItem],
+        policy: &TurnPolicy,
+    ) -> ToolDeclarations {
+        tool_window(items)
+            .initial
+            .cloned()
+            .unwrap_or_else(|| self.desired_tool_declarations(policy))
+    }
+
+    pub(super) fn tool_declaration_update(
+        &self,
+        items: &[TranscriptItem],
+        policy: &TurnPolicy,
+    ) -> Option<TranscriptItem> {
+        let desired = self.desired_tool_declarations(policy);
+        let window = tool_window(items);
+        let (placement, tools) = if window.initial.is_some() {
+            let additions = desired
+                .iter()
+                .filter(|tool| {
+                    window
+                        .latest
+                        .get(tool.name.as_str())
+                        .is_none_or(|latest| *latest != *tool)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if additions.is_empty() {
+                return None;
+            }
+            (
+                ToolDeclarationPlacement::Additional,
+                ToolDeclarations::new(additions).expect("filtered declarations"),
+            )
+        } else if self.incremental_tools {
+            (ToolDeclarationPlacement::Initial, desired)
+        } else {
+            return None;
+        };
+        Some(TranscriptItem::ToolDeclarations(
+            ToolDeclarationRecord::new(placement, tools).expect("valid declaration update"),
+        ))
     }
 
     /// Message-bearing compatibility view of the active model projection.

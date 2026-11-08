@@ -13,6 +13,7 @@ pub struct SessionConfig {
     pub plan: PlanConfig,
     pub compaction: CompactionConfig,
     pub preamble: String,
+    pub incremental_tools: bool,
 }
 
 impl Default for SessionConfig {
@@ -23,6 +24,7 @@ impl Default for SessionConfig {
             plan: PlanConfig::default(),
             compaction: CompactionConfig::default(),
             preamble: DEFAULT_PREAMBLE.to_string(),
+            incremental_tools: true,
         }
     }
 }
@@ -52,6 +54,12 @@ mod tests {
         let config: SessionConfig = toml::from_str("").expect("empty section should parse");
         assert_eq!(config.max_concurrent_subtasks, 10);
         assert_eq!(config.event_queue_capacity, 256);
+        assert!(config.incremental_tools);
+        assert!(
+            !toml::from_str::<SessionConfig>("incremental_tools = false")
+                .unwrap()
+                .incremental_tools
+        );
         assert_eq!(config.plan, PlanConfig::default());
         assert_eq!(config.compaction, CompactionConfig::default());
         assert_eq!(config.preamble, DEFAULT_PREAMBLE);

@@ -66,9 +66,11 @@ never retries a request with search or its controls silently removed.
 Search is allowed in Build (including request-local orchestration), Plan, Review, Explore,
 Builder, native ACP workers, and synthesis's configured task role. Empty task
 allow-lists disable it. Compaction, checkpoint conversion, and internal summaries
-are tool-free, including when a provider `additional_params.tool_choice` forces
-a tool. Ordinary task selection defaults to automatic; explicit `tool_choice`
-is respected only for actually advertised/permitted tools.
+retain the active policy's declarations and hosted-search gate to preserve the
+normal request prefix. Their trailing instruction forbids tools; returned calls
+are never executed and cause one retry with `tool_choice: "none"`. Ordinary task
+selection defaults to automatic; explicit `tool_choice` must reference declared
+function tools or an enabled, policy-permitted hosted capability.
 
 Search runs at the configured provider, never in a local executor or shell.
 HTTP/SSE, WebSocket, retries, stale-continuation recovery, HTTP fallback, and exact
@@ -518,7 +520,8 @@ Provider-level compatibility flags default to `true`:
 | --- | --- |
 | `send_reasoning` | Omit the top-level Responses `reasoning` object. Model reasoning settings remain configured. |
 | `send_reasoning_encrypted_content` | Omit `include: ["reasoning.encrypted_content"]`. This can make stateless native reasoning replay incomplete. |
-| `strict_tools` | Advertise the selected tools without `strict: true`. |
+| `strict_tools` | Advertise declared function tools without a `strict` field, including inline additions. |
+| `additional_tools` | Fold additions into top-level tools (replace same-name entries in place, append new names); correct calls, but the tool prefix changes. |
 | `send_prompt_cache_key` | Omit the profile-specific prompt-cache key. |
 | `send_store` | Omit `store`; when enabled Zevria sends `store: false`, never `true`. |
 | `developer_messages` | Project ordered skill directives with `role: "user"` instead of `role: "developer"`. |
@@ -531,9 +534,10 @@ policy when selected, and Eligible skills (selection module plus JSON, or an
 unavailable sentence). Stable protocol/application/file sections precede workflow
 changes to preserve the provider's cacheable prefix. `session.preamble` replaces
 only Application guidance, never the protocol or capability modules.
-Only skill bodies and revocations remain transient typed ordered input; they
-project at their recorded positions through preflight, counting, HTTP and WebSocket.
-Maintenance carries its own no-tool instruction set and no ordered directives.
+Skill bodies/revocations, request boundaries/corrections and additional function
+declarations project at their recorded positions through preflight, counting,
+HTTP and WebSocket. Compaction reuses this same prefix and appends a summary
+instruction instead of replacing instructions or stripping declarations/directives.
 Raw system messages are rejected rather than relocated into `instructions`.
 
 For a gateway that explicitly requires user-role instruction input:
@@ -837,6 +841,37 @@ one route relative to another. For replay-only checkpoints, known Responses
 items are decoded semantically and unknown future items use an opaque-stripped
 conservative fallback.
 
+## Incremental function tools
+
+`config.toml` enables append-only declaration history by default:
+
+```toml
+[session]
+incremental_tools = true
+```
+
+The first dispatch after session start or a checkpoint records an `Initial` tool
+snapshot in registry order. Top-level function `tools` remains that snapshot for
+the window. Newly permitted tools or changed definitions append persisted
+`Additional` records, rendered at their input position as
+`{"type":"additional_tools","role":"developer","tools":[...]}`. The role is
+always `developer`, independently of `developer_messages`. Host-only annotations
+are never transmitted. Tools that leave the permission list stay declared but
+local calls are denied by the engine. Hosted `web_search` remains top-level and
+policy-gated; it is not persisted.
+
+A window with an `Initial` stays incremental even after disabling the flag; a
+window without one follows the current policy per request and writes no records.
+Existing transcripts load without migration. After compaction, the next dispatch
+records a fresh current-policy `Initial`. Mode-specific instructions still change
+on Plan/Build switches; incremental tools do not stabilize that separate prefix.
+
+Gateways that reject `additional_tools` need
+`providers.<key>.compatibility.additional_tools: false`. This folds additions into
+top-level tools, preserving existing name positions and appending new names. The
+workaround changes the cached tools when additions occur; it never silently drops
+a declaration. Unsupported gateways may first fail when the tool set changes.
+
 ## Context and compaction
 
 `[session.compaction]` contains only session-wide settings:
@@ -891,8 +926,12 @@ Compaction itself may also fail (for example, irreducible input, cancellation,
 or provider failure).
 
 Local-summary fallback applies to automatic pre-turn, mid-turn, edited-prefix,
-and manual compaction. It snapshots the effective model input, including previous
-checkpoint tails, and tries the full source plus the configured summary prompt.
+and manual compaction. It snapshots the exact normal request: rendered active-policy
+instructions, window tools (or current desired tools before an initial record),
+full input including directives and additions, role and permissions. The full-history
+attempt appends exactly one user message: the engine-owned `compact-request.md`
+preface followed by the configured summary prompt. Reasoning and cache identity
+are unchanged.
 If local size admission rejects it, or the completion returns a typed input-size
 error, it tries prefixes one item shorter at a time. It stops at the first success,
 without binary search, chunk/reduce summarization, or a fixed retry cap. Cuts that
@@ -905,11 +944,11 @@ unsummarized tail**, not bounded retained-user copies followed by a summary. The
 tail keeps its values, variants, IDs, opaque data, and order regardless of
 `retained_user_tokens`, even when it is zero. Retained-user metadata is still saved
 for other consumers. Task state is restored separately after this replacement;
-typed live skill directives stay outside summarization and are folded at the
-checkpoint boundary from live history. Version-1 checkpoints persist no instruction
-snapshot. Synthetic summary requests carry captured application/file guidance and
-a no-tool maintenance policy in `instructions`, with no catalog or ordered
-directives. Destination-fit checks include replacement history, effective pinned
+typed live directives and declarations are excluded from replacement history and
+folded/redeclared at the new window. Version-1 checkpoints persist no instruction
+snapshot. Retry boundaries are based on summarizable history but mapped back to
+positions in the full input, so every shorter candidate remains an exact prefix
+with unchanged instruction/tool declarations. Destination-fit checks include replacement history, effective pinned
 bodies and the current rendered instruction set, never authority from summary prose.
 
 A successful summary does not guarantee the rebuilt request fits. A successful
@@ -932,7 +971,12 @@ WebSocket/SSE error events and structured failed/incomplete terminal responses.
 They return directly to core without transport reconnect/backoff of the same
 oversized request. Generic 400, authentication/quota/output-limit errors, and
 misleading prose are not size signals. Count-endpoint errors retain conservative
-estimate fallback rather than becoming completion retries.
+estimate fallback rather than becoming completion retries. Tool-call summary replies
+are never executed: one retry at the same boundary changes only
+`forbid_tool_calls` to emit `tool_choice: "none"`; a second tool-call reply fails.
+The engine resets provider continuation after each synthetic dispatch, not before
+it, so a full-history summary may use `previous_response_id` and send only the
+trailing instruction.
 
 A local-summary checkpoint can retain opaque replay-only tail items and is then
 not automatically portable. The `/model` and `/model-session` preflight and
@@ -961,9 +1005,13 @@ so a root with more than one **selectable catalog profile** must use local-summa
 compaction, even when Build/Plan/Review currently share one profile. Single-profile roots and
 single-profile Explore and Builder children may use their configured remote endpoint,
 with independent role-specific context limits and compaction lifetimes.
-Tool-output trimming for remote compaction uses the selected model's
-`input_token_limit`, while `context_window_tokens` remains physical capability
-metadata.
+Remote requests reuse the normal request's instructions, tools and full input
+without trimming tool outputs. Returned `role: "developer"` and
+`type: "additional_tools"` items are removed before the remaining items are stored
+verbatim as opaque replay-only history; an empty result after filtering fails.
+Zevria re-folds directives and declares tools in the new window. With
+`developer_messages: false`, user-role directive copies cannot be distinguished
+from ordinary user content and may persist in remote output.
 
 ## Changing models without clearing history
 
@@ -1126,9 +1174,9 @@ Root model-role routes remain Build/Plan/Review only; request-local orchestratio
 uses Build and a selectable child profile does
 not install a child-role route. Both child factories retain their session-opening
 configured assignments across root Build/Plan mode or model changes. The factory
-receives the registry at `create(session_id, tools)`: Explore shares command-only
-tools; Build gets a private directory-rooted
-command/task/edit/write/delete registry.
+creates the router with `create(session_id)`; each engine supplies explicit
+request declarations from its own registry. Explore shares command-only tools;
+Build gets a private directory-rooted command/task/edit/write/delete registry.
 
 Cache hits are observational upstream state, not a correctness requirement.
 Full local replay remains authoritative after cache expiry, reconnect, or

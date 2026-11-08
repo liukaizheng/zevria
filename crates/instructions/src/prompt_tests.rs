@@ -63,15 +63,6 @@ fn command_disabled_policies() -> Vec<TurnPolicy> {
                 .retain(|name| name != "command");
             policy
         })
-        .chain(std::iter::once(
-            TurnPolicy::new(
-                MAINTENANCE_INSTRUCTIONS,
-                Some(vec![]),
-                ModelRole::Build,
-                false,
-            )
-            .with_scope("maintenance"),
-        ))
         .collect()
 }
 
@@ -85,7 +76,6 @@ fn workflow_docs() -> Vec<&'static str> {
         ENSEMBLE_WORKER_REVIEW_INSTRUCTIONS,
         ENSEMBLE_PLAN_SYNTHESIS_INSTRUCTIONS,
         ENSEMBLE_REVIEW_SYNTHESIS_INSTRUCTIONS,
-        MAINTENANCE_INSTRUCTIONS,
     ]
 }
 

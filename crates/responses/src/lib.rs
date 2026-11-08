@@ -3,6 +3,7 @@ pub mod accumulator;
 pub mod attempt;
 pub mod protocol;
 pub mod replay;
+pub mod tools;
 pub mod web_search_config;
 pub mod wire;
 pub use web_search_config::{

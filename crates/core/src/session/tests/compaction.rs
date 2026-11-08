@@ -98,7 +98,7 @@ async fn guidance_checkpoint_and_maintenance_preserve_both_components_and_cleare
         assert!(
             maintenance
                 .instructions
-                .contains("## Workflow policy: maintenance")
+                .contains("## Workflow policy: build")
         );
         assert!(
             maintenance
@@ -150,7 +150,9 @@ async fn ensemble_reports_run_normal_pre_synthesis_compaction() {
     assert_eq!(requests.len(), 2, "terminal event: {:?}", emitted.last());
     assert_eq!(
         requests[0].prompt,
-        Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+        zevria_model::compaction::summary_request_message(
+            zevria_model::compaction::SUMMARIZATION_PROMPT
+        )
     );
     assert!(format!("{:?}", requests[0].history).contains("large worker evidence"));
     assert_eq!(requests[1].model_role, ModelRole::Review);
@@ -253,7 +255,7 @@ fn unsupported_checkpoint_is_rejected_without_normalization_or_model_calls() {
 }
 
 #[tokio::test]
-async fn compaction_omits_skill_overlay_and_next_request_restores_it_once() {
+async fn compaction_preserves_skill_overlay_and_next_request_restores_it_once() {
     let provider = ScriptedProvider::new([
         Ok(Message::assistant("skill turn complete")),
         Ok(Message::assistant("normalization summary")),
@@ -316,9 +318,14 @@ async fn compaction_omits_skill_overlay_and_next_request_restores_it_once() {
     );
     assert_eq!(
         requests[1].prompt,
-        Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+        zevria_model::compaction::summary_request_message(
+            zevria_model::compaction::SUMMARIZATION_PROMPT
+        )
     );
-    assert!(requests[1].skill_context.is_none());
+    assert_eq!(requests[1].skill_context, requests[0].skill_context);
+    assert_eq!(requests[1].instructions, requests[0].instructions);
+    assert_eq!(requests[1].tools, requests[0].tools);
+    assert!(requests[1].input.starts_with(&requests[0].input));
     assert_eq!(
         requests[2]
             .skill_context
@@ -472,7 +479,9 @@ async fn edited_submission_atomically_compacts_its_retained_prefix_before_the_re
         assert_eq!(requests.len(), 4);
         assert_eq!(
             requests[2].prompt,
-            Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+            zevria_model::compaction::summary_request_message(
+                zevria_model::compaction::SUMMARIZATION_PROMPT
+            )
         );
         assert_eq!(
             requests[2].history,
@@ -771,9 +780,20 @@ async fn manual_local_compaction_installs_checkpoint_and_replaces_next_request_h
         );
         assert_eq!(
             requests[1].prompt,
-            Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+            zevria_model::compaction::summary_request_message(
+                zevria_model::compaction::SUMMARIZATION_PROMPT
+            )
         );
-        assert_eq!(requests[1].allowed_tool_names, Some(Vec::new()));
+        assert_eq!(
+            requests[1].allowed_tool_names,
+            test_policies()
+                .policy(if requests[1].model_role == ModelRole::Plan {
+                    SessionMode::Plan
+                } else {
+                    SessionMode::Build
+                })
+                .allowed_tool_names
+        );
         assert_eq!(
             requests[2].history,
             vec![Message::user(format!(
@@ -785,7 +805,7 @@ async fn manual_local_compaction_installs_checkpoint_and_replaces_next_request_h
     }
 
     assert!(matches!(
-        engine.conversation().items()[2],
+        conversation_records(engine.conversation().items())[2],
         TranscriptItem::Compaction(_)
     ));
     let events = collect_events(&mut receiver).await;
@@ -867,7 +887,16 @@ async fn manual_compaction_uses_the_selected_mode_model_role() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].model_role, ModelRole::Build);
     assert_eq!(requests[1].model_role, ModelRole::Plan);
-    assert_eq!(requests[1].allowed_tool_names, Some(Vec::new()));
+    assert_eq!(
+        requests[1].allowed_tool_names,
+        test_policies()
+            .policy(if requests[1].model_role == ModelRole::Plan {
+                SessionMode::Plan
+            } else {
+                SessionMode::Build
+            })
+            .allowed_tool_names
+    );
 }
 
 #[tokio::test]
@@ -1245,7 +1274,9 @@ async fn prospective_overflow_compacts_then_rejects_without_committing_prompt_if
         assert_eq!(captured.len(), 1);
         assert_eq!(
             captured[0].prompt,
-            Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+            zevria_model::compaction::summary_request_message(
+                zevria_model::compaction::SUMMARIZATION_PROMPT
+            )
         );
     }
     assert!(
@@ -1312,7 +1343,9 @@ async fn automatic_compaction_triggers_at_the_exact_threshold_before_next_prompt
     assert_eq!(requests.len(), 3);
     assert_eq!(
         requests[1].prompt,
-        Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+        zevria_model::compaction::summary_request_message(
+            zevria_model::compaction::SUMMARIZATION_PROMPT
+        )
     );
     drop(requests);
     let checkpoint_index = engine
@@ -1617,7 +1650,8 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
         );
         let loaded =
             zevria_transcript::transcript::load(engine.conversation().path()).expect("reload");
-        assert_eq!(loaded, conversation_records(engine.conversation().items()));
+        assert_eq!(loaded, engine.conversation().items());
+        let loaded = conversation_records(&loaded);
         assert!(
             loaded
                 .iter()
@@ -1687,9 +1721,16 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
         assert_eq!(requests[0].history, vec![handoff.prompt.clone()]);
         assert_eq!(
             requests[0].prompt,
-            Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+            zevria_model::compaction::summary_request_message(
+                zevria_model::compaction::SUMMARIZATION_PROMPT
+            )
         );
-        assert_eq!(requests[0].allowed_tool_names, Some(Vec::new()));
+        assert_eq!(
+            requests[0].allowed_tool_names,
+            test_policies()
+                .policy(SessionMode::Build)
+                .allowed_tool_names
+        );
         if fits {
             assert!(matches!(
                 emitted.last(),
@@ -1791,10 +1832,7 @@ async fn resumed_plan_handoff_history_compacts_manually_or_before_a_new_prompt()
         engine.handle_command(command, &events).await.unwrap();
 
         let reloaded = zevria_transcript::transcript::load(&path).expect("reload checkpoint");
-        assert_eq!(
-            reloaded,
-            conversation_records(engine.conversation().items())
-        );
+        assert_eq!(reloaded, engine.conversation().items());
         assert_eq!(reloaded[..items.len()], items);
         let TranscriptItem::Compaction(checkpoint) = &reloaded[items.len()] else {
             panic!("compact the existing handoff/tool prefix before appending a prompt");
@@ -1827,7 +1865,9 @@ async fn resumed_plan_handoff_history_compacts_manually_or_before_a_new_prompt()
         );
         assert_eq!(
             requests[0].prompt,
-            Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+            zevria_model::compaction::summary_request_message(
+                zevria_model::compaction::SUMMARIZATION_PROMPT
+            )
         );
         if manual {
             assert_eq!(requests.len(), 1);
@@ -1933,7 +1973,8 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
         assert_eq!(*calls.lock().expect("calls"), ["one", "two"]);
         let loaded =
             zevria_transcript::transcript::load(engine.conversation().path()).expect("reload");
-        assert_eq!(loaded, conversation_records(engine.conversation().items()));
+        assert_eq!(loaded, engine.conversation().items());
+        let loaded = conversation_records(&loaded);
         assert!(
             loaded
                 .iter()
@@ -1992,9 +2033,20 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
             );
             assert_eq!(
                 requests[1].prompt,
-                Message::user(zevria_model::compaction::SUMMARIZATION_PROMPT)
+                zevria_model::compaction::summary_request_message(
+                    zevria_model::compaction::SUMMARIZATION_PROMPT
+                )
             );
-            assert_eq!(requests[1].allowed_tool_names, Some(Vec::new()));
+            assert_eq!(
+                requests[1].allowed_tool_names,
+                test_policies()
+                    .policy(if requests[1].model_role == ModelRole::Plan {
+                        SessionMode::Plan
+                    } else {
+                        SessionMode::Build
+                    })
+                    .allowed_tool_names
+            );
             assert!(requests[2].history.is_empty());
             assert_eq!(
                 requests[2].prompt,

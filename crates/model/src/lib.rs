@@ -10,13 +10,13 @@ mod anthropic_tests;
 pub mod compaction;
 pub mod config;
 pub mod estimates;
-pub mod maintenance;
 pub mod models;
 pub mod openai;
 pub mod provider_replay;
 pub mod record;
 pub mod request;
 pub mod telemetry;
+pub mod tools;
 pub use compaction::{
     CompactionBackend, CompactionCheckpoint, CompactionTrigger, ContextTokenEstimate,
     SUMMARIZATION_PROMPT, SUMMARY_PREFIX, estimate_message_tokens,
@@ -26,3 +26,4 @@ pub use provider_replay::*;
 pub use record::MessageRecord;
 pub use request::*;
 pub use telemetry::*;
+pub use tools::{ToolDeclaration, ToolDeclarations};

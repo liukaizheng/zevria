@@ -2153,7 +2153,8 @@ impl ConversationState {
                 TranscriptItem::SessionModels(_)
                 | TranscriptItem::SessionMode(_)
                 | TranscriptItem::Directive(_)
-                | TranscriptItem::RequestDirective(_) => {}
+                | TranscriptItem::RequestDirective(_)
+                | TranscriptItem::ToolDeclarations(_) => {}
                 TranscriptItem::CommandJobNotice(notice) => {
                     let header =
                         if notice.kind() == zevria_foundation::CommandJobNoticeKind::Continuation {

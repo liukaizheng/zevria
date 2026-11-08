@@ -45,6 +45,54 @@ fn arrived(receiver: &mpsc::Receiver<()>) {
     receiver.recv_timeout(Duration::from_secs(10)).unwrap();
 }
 
+fn wait_until(path: &Path, expectation: &str, timeout: Duration, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while !ready() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expectation}: {}",
+            path.display()
+        );
+        thread::sleep(COORDINATOR_POLL);
+    }
+}
+
+/// Drop and startup sweeping are both best-effort: an eligible sidecar can
+/// outlive its owner while an OS lock remains temporarily unavailable. Exercise
+/// the real sweep until reclamation is observable, rather than requiring one
+/// nonblocking attempt to succeed. A leaked live owner still times out.
+/// Only call this after all intended owners have been released.
+pub(crate) fn assert_reclaimed(transcript: &Path) {
+    assert_reclaimed_with_timeout(transcript, Duration::from_secs(5));
+}
+
+fn assert_reclaimed_with_timeout(transcript: &Path, timeout: Duration) {
+    let directory = transcript.parent().expect("session directory");
+    let sidecar = transcript.with_extension("jsonl.lock");
+    wait_until(
+        &sidecar,
+        "released session lease reclamation",
+        timeout,
+        || {
+            sweep_inactive(directory);
+            !sidecar.try_exists().expect("inspect lease sidecar")
+        },
+    );
+}
+
+#[test]
+fn reclamation_check_rejects_live_ownership_without_removing_its_sidecar() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("live.jsonl");
+    let lease = RootSessionLease::acquire(&path).unwrap();
+    let check = std::panic::catch_unwind(|| assert_reclaimed_with_timeout(&path, Duration::ZERO));
+    assert!(check.is_err(), "a leaked live owner must fail reclamation");
+    assert!(path.with_extension("jsonl.lock").exists());
+    assert!(RootSessionLease::acquire(&path).is_err());
+    drop(lease);
+    assert_reclaimed(&path);
+}
+
 #[test]
 fn last_arc_release_removes_sidecar_but_never_transcript_or_coordinator() {
     let directory = tempfile::tempdir().unwrap();
@@ -65,10 +113,12 @@ fn last_arc_release_removes_sidecar_but_never_transcript_or_coordinator() {
     assert!(sidecar.exists());
     assert!(RootSessionLease::acquire(&path).is_err());
     drop(engine);
+    assert_reclaimed(&path);
     assert!(!sidecar.exists());
     assert!(directory.path().join(COORDINATOR_NAME).is_file());
     assert_eq!(fs::read(&path).unwrap(), original);
     drop(RootSessionLease::acquire(&path).unwrap());
+    assert_reclaimed(&path);
     assert!(!sidecar.exists());
 }
 
@@ -86,14 +136,29 @@ fn release_closes_the_lock_handle_before_attempting_deletion() {
                 // This callback runs inside the remover's coordinator section.
                 // A separate open must already be able to acquire the OS lock.
                 let file = open_regular(&probe_path, false).unwrap();
-                file.try_lock()
-                    .expect("the lease handle must already be closed");
+                // A transient OS lock must not look like a leaked parent
+                // handle. This hook blocks the remover, so moving its close
+                // after this callback would still time out and fail.
+                wait_until(
+                    &probe_path,
+                    "lease handle close before deletion",
+                    Duration::from_secs(5),
+                    || match file.try_lock() {
+                        Ok(()) => true,
+                        Err(TryLockError::WouldBlock) => false,
+                        Err(TryLockError::Error(error)) => {
+                            panic!("cannot probe lease lock: {error}")
+                        }
+                    },
+                );
                 drop(file);
                 checked.send(()).unwrap();
             }
         }))
     });
     drop(lease);
+    // Keep the close-before-delete hook installed if Drop deferred cleanup.
+    assert_reclaimed(&path);
     HOOK.with_borrow_mut(|hook| *hook = None);
     arrived(&check);
     assert!(!sidecar.exists());
@@ -151,6 +216,7 @@ fn sweep_removes_only_inactive_eligible_sidecars_and_never_recurses() {
     );
     assert!(RootSessionLease::acquire(&root.join("live.jsonl")).is_err());
     drop(lease);
+    assert_reclaimed(&root.join("live.jsonl"));
     assert!(!root.join("live.jsonl.lock").exists());
 }
 
@@ -171,6 +237,7 @@ fn sweep_revalidates_stale_candidates_and_never_creates_disappeared_files() {
     sweep_candidate(&path).unwrap();
     assert!(path.exists(), "an owner acquired since enumeration");
     drop(lease);
+    assert_reclaimed(&path.with_extension(""));
     assert!(!path.exists());
 }
 
@@ -215,7 +282,7 @@ fn busy_coordinator_fails_closed_and_defers_release_without_waiting() {
     assert!(path.with_extension("jsonl.lock").exists());
     assert!(sweep_candidate(&path.with_extension("jsonl.lock")).is_err());
     drop(coordinator);
-    sweep_inactive(directory.path());
+    assert_reclaimed(&path);
     assert!(!path.with_extension("jsonl.lock").exists());
     drop(RootSessionLease::acquire(&path).unwrap());
 }
@@ -243,7 +310,7 @@ fn nonregular_paths_fail_closed_and_release_defers_when_coordinator_is_invalid()
     sweep_inactive(directory.path());
     assert!(other.with_extension("jsonl.lock").exists());
     fs::remove_dir(&coordinator_path).unwrap();
-    sweep_inactive(directory.path());
+    assert_reclaimed(&other);
     assert!(!other.with_extension("jsonl.lock").exists());
 }
 
@@ -335,7 +402,7 @@ fn permission_and_deletion_errors_leave_history_and_defer_reclamation() {
         fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    sweep_inactive(root);
+    assert_reclaimed(&path);
     assert!(!sidecar.exists());
     assert_eq!(fs::read(&path).unwrap(), b"history\n");
 }
@@ -359,6 +426,7 @@ fn removal_cannot_strand_a_contender_on_the_old_identity(sweep: bool) {
         } else {
             drop(lease);
         }
+        assert_reclaimed(&removal_path.with_extension(""));
     });
     arrived(&removing); // Old handle closed, path still exists, coordinator held.
     assert!(sidecar.exists());
@@ -372,6 +440,7 @@ fn removal_cannot_strand_a_contender_on_the_old_identity(sweep: bool) {
         owned.send(()).unwrap();
         released.recv_timeout(Duration::from_secs(10)).unwrap();
         drop(lease);
+        assert_reclaimed(&contender_path);
     });
     arrived(&blocked); // Deterministically attempted acquisition before unlink.
     remove.send(()).unwrap();
@@ -418,10 +487,11 @@ fn failed_contender_closes_before_release_or_sweep_can_delete() {
     assert!(sidecar.exists());
     finish.send(()).unwrap();
     contender.join().unwrap();
-    sweep_inactive(directory.path());
+    assert_reclaimed(&path);
     assert!(!sidecar.exists());
     let new_owner = RootSessionLease::acquire(&path).unwrap();
     assert!(RootSessionLease::acquire(&path).is_err());
     drop(new_owner);
+    assert_reclaimed(&path);
     assert!(!sidecar.exists());
 }

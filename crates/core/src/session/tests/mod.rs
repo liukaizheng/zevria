@@ -1,5 +1,6 @@
 mod adaptive_summary;
 mod directives;
+mod incremental_tools;
 #[cfg(unix)]
 mod instruction_persistence;
 mod mode;
@@ -104,6 +105,8 @@ fn test_compaction_policy(
 #[derive(Debug, Clone, PartialEq)]
 struct CapturedRequest {
     input: Vec<OwnedModelRequestItem>,
+    tools: ToolDeclarations,
+    forbid_tool_calls: bool,
     prompt: Message,
     prompt_replay: Option<ProviderReplay>,
     history: Vec<Message>,
@@ -146,6 +149,8 @@ impl CapturedRequest {
             .collect::<Vec<_>>();
         Self {
             input: snapshot_model_input(request.input.clone()).unwrap(),
+            tools: ToolDeclarations::new(request.tools.to_vec()).unwrap(),
+            forbid_tool_calls: request.forbid_tool_calls,
             prompt: prompt
                 .message_ref()
                 .expect("legacy captured prompt is message-bearing")
@@ -1299,7 +1304,11 @@ fn test_transcript() -> (tempfile::TempDir, TranscriptWriter) {
 }
 
 fn conversation_records(items: &[TranscriptItem]) -> Vec<TranscriptItem> {
-    items.to_vec()
+    items
+        .iter()
+        .filter(|item| !matches!(item, TranscriptItem::ToolDeclarations(_)))
+        .cloned()
+        .collect()
 }
 
 impl<P: ModelProvider> SessionEngine<P> {

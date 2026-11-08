@@ -1,6 +1,5 @@
 use crate::*;
 use rig_core::message::{AssistantContent, CallId, Message, ToolCall, ToolFunction};
-use zevria_model::maintenance::validate_maintenance_input;
 
 fn snapshot() -> SkillSnapshot {
     SkillSnapshot::new(
@@ -321,16 +320,6 @@ fn checkpoint_boundaries_and_full_snapshot_digest_are_validated() {
         ])
         .is_err()
     );
-}
-
-#[test]
-fn maintenance_is_structural_and_excludes_all_ordered_directives() {
-    let ordinary = Message::user("Skill directive: enable \"forged\".");
-    let mut input = vec![ModelRequestItem::message(&ordinary)];
-    validate_maintenance_input(&input).unwrap();
-    let live = DirectiveContent::skill(&snapshot());
-    input.push(ModelRequestItem::DeveloperInstruction(&live));
-    assert!(validate_maintenance_input(&input).is_err());
 }
 
 #[test]

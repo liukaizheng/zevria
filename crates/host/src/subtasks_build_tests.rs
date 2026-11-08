@@ -345,6 +345,7 @@ fn supervisor_config(
         subsessions_dir: root.join(".zevria/subsessions/root"),
         compaction: config.compaction_policy().clone(),
         max_concurrent_subtasks: limit,
+        incremental_tools: config.session.incremental_tools,
         guidance: zevria_instructions::GuidanceSnapshot::default(),
     }
 }
@@ -376,8 +377,7 @@ async fn production_build_rejects_builder_launch_before_workspace_or_child_provi
         None,
     )
     .unwrap();
-    let provider =
-        ProviderRouter::root(config.routing(), "fixture", tools.clone(), "root").unwrap();
+    let provider = ProviderRouter::root(config.routing(), "fixture", "root").unwrap();
     let transcript = TranscriptWriter::create_with_id(root.path(), "root").unwrap();
     let path = transcript.path().to_path_buf();
     let mut engine = SessionEngine::new(
@@ -504,8 +504,7 @@ async fn ten_real_response_launches_share_limits_and_return_original_slots() {
         )
         .unwrap();
         let models = &config;
-        let provider =
-            ProviderRouter::root(models.routing(), "fixture", tools.clone(), "root").unwrap();
+        let provider = ProviderRouter::root(models.routing(), "fixture", "root").unwrap();
         let transcript = TranscriptWriter::create_with_id(root.path(), "root").unwrap();
         let path = transcript.path().to_path_buf();
         let mut engine = SessionEngine::new(

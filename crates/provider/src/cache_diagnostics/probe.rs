@@ -70,11 +70,7 @@ async fn cache_preparation_probe() {
         "feature,items,json_bytes,operation,median_us,p95_us,allocation_calls,requested_bytes,snapshot_bytes,baseline_bytes"
     );
     for (base_count, text_bytes) in [(4, 128), (436, 1112)] {
-        let mut provider = connect_http_test_provider(
-            "http://127.0.0.1:9/responses".into(),
-            ToolServer::new().run(),
-        )
-        .await;
+        let mut provider = connect_http_test_provider("http://127.0.0.1:9/responses".into()).await;
         let text = "word".repeat(text_bytes / 4);
         let history: Vec<_> = (0..base_count)
             .map(|index| {
@@ -86,6 +82,8 @@ async fn cache_preparation_probe() {
             })
             .collect();
         let initial = ModelRequest {
+            tools: &[],
+            forbid_tool_calls: false,
             instructions: test_instructions(),
             input: history.iter().map(ModelRequestItem::message).collect(),
             model_role: ModelRole::Build,
@@ -120,6 +118,8 @@ async fn cache_preparation_probe() {
         input.push(replay.as_borrowed());
         input.push(ModelRequestItem::message(&prompt));
         let request = ModelRequest {
+            tools: &[],
+            forbid_tool_calls: false,
             instructions: test_instructions(),
             input,
             model_role: ModelRole::Build,
@@ -226,15 +226,13 @@ async fn cache_wire_equivalence_capture() {
         }
         requests
     });
-    let mut provider = connect_http_test_provider(
-        format!("http://{address}/responses"),
-        ToolServer::new().run(),
-    )
-    .await;
+    let mut provider = connect_http_test_provider(format!("http://{address}/responses")).await;
     let prompt = Message::user("HTTP equivalence prompt");
     provider
         .complete(
             ModelRequest {
+                tools: &[],
+                forbid_tool_calls: false,
                 instructions: test_instructions(),
                 input: vec![ModelRequestItem::message(&prompt)],
                 model_role: ModelRole::Build,

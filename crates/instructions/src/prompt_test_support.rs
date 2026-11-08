@@ -63,10 +63,6 @@ pub fn module_docs() -> Vec<(&'static str, &'static str)> {
             "ensemble-review-synthesis",
             include_str!("../../../docs/instructions/ensemble-review-synthesis.md"),
         ),
-        (
-            "maintenance-mode",
-            include_str!("../../../docs/instructions/maintenance-mode.md"),
-        ),
     ]
 }
 

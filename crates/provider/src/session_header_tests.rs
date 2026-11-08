@@ -25,16 +25,10 @@ fn session_profile(url: String, header: Option<&str>, websocket: bool) -> Resolv
 }
 
 async fn connect_profile(profile: &ResolvedModelProfile, session_id: &str) -> OpenAiProvider {
-    let tools = ToolServer::new()
-        .tool(CountTool {
-            executions: Arc::new(AtomicUsize::new(0)),
-        })
-        .run();
     OpenAiProvider::connect(
         profile,
         zevria_foundation::ReasoningLevel::Medium,
         "Session routing preamble",
-        tools,
         session_id,
         &profile_cache_key(session_id, profile),
     )
@@ -256,7 +250,6 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
             &profile,
             zevria_foundation::ReasoningLevel::Medium,
             "preamble",
-            ToolServer::new().run(),
             invalid,
             "valid-cache-key",
         )
@@ -275,7 +268,6 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
             &profile,
             zevria_foundation::ReasoningLevel::Medium,
             "preamble",
-            ToolServer::new().run(),
             SESSION_ID,
             "valid-cache-key",
         )
@@ -322,7 +314,6 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
             zevria_foundation::ReasoningLevel::Medium,
         )],
         "preamble",
-        ToolServer::new().run(),
         "\r\ninvalid",
     )
     .unwrap();
@@ -431,6 +422,8 @@ async fn configured_session_headers_cover_completion_count_and_remote_compaction
             });
             let mut provider = connect_profile(&profile, SESSION_ID).await;
             let parts = RequestParts {
+                tools: zevria_model::ToolDeclarations::default(),
+                forbid_tool_calls: false,
                 prompt: Message::user("count and compact"),
                 history: vec![Message::assistant("earlier")],
                 instructions: "Auxiliary request instructions".to_string(),
@@ -445,7 +438,7 @@ async fn configured_session_headers_cover_completion_count_and_remote_compaction
                 .await
                 .unwrap();
             assert!(matches!(
-                provider.compact(parts.maintenance_request()).await.unwrap(),
+                provider.compact(parts.compaction_request()).await.unwrap(),
                 CompactResult::Replacement(_)
             ));
             let mut requests = responses.await.unwrap();
@@ -725,12 +718,13 @@ async fn router_session_headers_are_provider_scoped_and_children_are_independent
             .clone()
             .map(|(role, profile)| (role, profile, zevria_foundation::ReasoningLevel::Medium)),
         "preamble",
-        ToolServer::new().run(),
         SESSION_ID,
     )
     .unwrap();
     assert_eq!(router.initialized_profile_count(), 0);
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("routing"),
         history: Vec::new(),
         instructions: "Routing test".to_string(),
@@ -763,7 +757,7 @@ async fn router_session_headers_are_provider_scoped_and_children_are_independent
         "preamble",
     );
     for id in ["child-one", "child-two"] {
-        let mut child = factory.create(id, ToolServer::new().run()).unwrap();
+        let mut child = factory.create(id).unwrap();
         child
             .complete(
                 parts.request_with_role(ModelRole::Explore),

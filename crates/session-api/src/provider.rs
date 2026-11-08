@@ -19,9 +19,12 @@ pub type InputTokenCountFuture<'a> =
 /// Implementations translate [`ModelRequest`] into their native protocol. They
 /// must map `request.model_role` to a concrete provider model, send
 /// `request.instructions` as the sole top-level instructions, project
-/// developer instructions in their recorded input positions, advertise only
-/// `request.allowed_tool_names` when an allow-list is present, and preserve
-/// that policy across native retries and continuations.
+/// directives and additional tool declarations at their recorded input positions,
+/// and render `request.tools` verbatim in wire order (subject only to explicit
+/// schema compatibility options). The allow-list enforces engine calls and gates
+/// hosted capabilities; it never filters function declarations. `forbid_tool_calls`
+/// suppresses calls without removing declarations. Preserve this immutable shape
+/// across native retries and continuations.
 /// `reset` reports that local history has diverged from any provider-side
 /// continuation state — the turn failed — so the next `complete` must send
 /// the full request history instead of continuing a server-side chain that

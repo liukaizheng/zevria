@@ -136,7 +136,7 @@ async fn guidance_resume_adopts_changes_and_clears_missing_empty_or_rejected_onc
         submit(&mut engine, "first", SessionMode::Build).await;
         let path = engine.conversation.path().to_path_buf();
         let old_bytes = std::fs::read(&path).unwrap();
-        let old = conversation_records(engine.conversation.items());
+        let old = engine.conversation.items().to_vec();
         assert!(!String::from_utf8_lossy(&old_bytes).contains("OLD_GLOBAL"));
         drop(engine);
         let mut unchanged = reopen_guided(path.clone(), roots.clone());
@@ -364,7 +364,7 @@ async fn first_direct_application_owns_pin_and_is_deduplicated_and_append_only()
     let serialized = std::fs::read(engine.conversation.path()).unwrap();
     assert_eq!(
         zevria_transcript::transcript::load(engine.conversation.path()).unwrap(),
-        conversation_records(engine.conversation.items())
+        engine.conversation.items()
     );
     let persisted = String::from_utf8(serialized).unwrap();
     assert!(!persisted.contains("zevria_directive"));
@@ -723,6 +723,6 @@ async fn failed_completed_activation_persistence_keeps_truthful_result_pin_and_b
     engine.conversation.ensure_durable().unwrap();
     assert_eq!(
         zevria_transcript::transcript::load(engine.conversation.path()).unwrap(),
-        conversation_records(engine.conversation.items())
+        engine.conversation.items()
     );
 }

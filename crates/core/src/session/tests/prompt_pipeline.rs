@@ -36,6 +36,8 @@ fn input(skill: bool, text: impl Into<zevria_content::UserPrompt>) -> PromptTurn
 fn committed_request(engine: &SessionEngine<ScriptedProvider>) -> CapturedRequest {
     let policy = engine.policies.policy(SessionMode::Build);
     CapturedRequest::of(&ModelRequest {
+        tools: &engine.request_tools(engine.conversation.items(), policy),
+        forbid_tool_calls: false,
         instructions: &engine.rendered_instructions(policy),
         input: engine.conversation.model_input(),
         model_role: policy.model_role,

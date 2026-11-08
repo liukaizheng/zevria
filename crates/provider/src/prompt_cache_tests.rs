@@ -74,7 +74,6 @@ async fn inactivity_replay_preserves_wire_prefix_controls_headers_and_cache_iden
         &profile,
         ReasoningEffort::Medium,
         "cache prefix",
-        policy_tools(),
         "stable-session",
         "stable-cache-key",
     )
@@ -87,7 +86,10 @@ async fn inactivity_replay_preserves_wire_prefix_controls_headers_and_cache_iden
     assert_eq!(provider.recovery.recovery_window.as_secs(), 123);
     assert_eq!(provider.recovery.max_attempts, 2);
     let prompt = Message::user("authoritative input");
+    let declared = declarations(&policy_tools(), None);
     let request = || ModelRequest {
+        tools: &declared,
+        forbid_tool_calls: false,
         instructions: test_instructions(),
         input: vec![ModelRequestItem::message(&prompt)],
         model_role: ModelRole::Build,
@@ -181,6 +183,8 @@ async fn comparison_id_changes_preserve_socket_continuation_but_cache_mode_does_
         let response = provider
             .complete(
                 ModelRequest {
+                    tools: &[],
+                    forbid_tool_calls: false,
                     instructions: test_instructions(),
                     input: history
                         .iter()

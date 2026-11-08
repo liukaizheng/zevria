@@ -257,9 +257,9 @@ I/O, or repeated warnings. Cached values flow into the deterministic instruction
 set used by admission, previews, dispatch and accounting.
 `refresh_application_guidance` only drains opening diagnostics; it is not a
 filesystem reload API.
-Normal resumed dispatch rebuilds instructions from captured guidance. Maintenance
-has a separate preparation path so immediate post-resume compaction is guided
-even before that first normal dispatch.
+Normal resumed dispatch and compaction use the same rendered active-policy
+instructions from captured guidance, including compaction before the first
+post-resume dispatch. Summarization only appends a trailing user instruction.
 
 The application preamble and nonempty `guidance:global`/`guidance:project`
 components render as Application guidance and File guidance in the stable prefix
@@ -1314,10 +1314,12 @@ independent safeguards. The engine resolves the submitted mode through the
 composition-supplied `SessionPolicies` once, then clones that immutable policy
 into preparation of every `ModelRequest` in the model/tool loop. Each request
 carries complete rendered `instructions`, ordered `input`, its provider-neutral
-`model_role`, and an optional `allowed_tool_names` list. Application, file
+`model_role`, explicit ordered `tools`, `forbid_tool_calls`, and an optional
+`allowed_tool_names` enforcement list. Providers render the supplied declarations,
+not a live registry snapshot. Application, file
 guidance, workflow policy, capability modules and the eligible catalog live in `instructions`; only
-skill bodies/revocations and typed request directives remain ordered developer
-input. Root Build selects Build; Plan selects Plan. Child kinds select Explore
+skill bodies/revocations, typed request directives, and additional tool declarations
+remain ordered input. Root Build selects Build; Plan selects Plan. Child kinds select Explore
 or Builder regardless of nominal Build session mode. Request-local orchestration
 adds no model role, route, or assignment. UI changes cannot alter an in-flight policy or catalog.
 
@@ -1359,8 +1361,9 @@ necessary changes. Unchanged bodies or revocations are not appended again. There
 is no separate instruction-state file; skill directives are part of the JSONL.
 Obsolete application/file guidance is not reconstructed.
 
-Tools retain per-mode lists and stable registration order. Catalog availability
-does not change skill-capable tool lists. Appended skill bodies/revocations
+Tools retain per-mode permission lists and stable registration order. Catalog
+availability does not change skill-capable tool lists. Advertised declarations
+are window-latched rather than rebuilt from each mode's permission list. Appended skill bodies/revocations
 preserve exact input-prefix continuity. Mode/synthesis switches and catalog
 mutations change instructions, requiring full replay even when tools are unchanged.
 Standard → orchestrated → Standard Build requests instead append typed request
@@ -1785,10 +1788,10 @@ bounded, cancellable source-profile completion produces a portable text summary.
 The dialog explains the token cost, possible detail loss, shared root-context
 change affecting both root modes, and selected persistence scope. The source must be configured, must read the entire
 effective checkpoint-aware conversation, and must fit its own admission policy.
-Typed live instructions are filtered structurally; application/trusted system
-components and explicit no-tool maintenance guidance are supplied separately in
-input. Active skill/synthesis guidance is excluded; remote opaque compaction
-is bypassed. Empty/oversized summaries and unavailable/multiple opaque sources
+The source completion reuses the active policy's rendered instructions, window
+function declarations, role, permissions, reasoning level and full ordered input,
+including directives and tool additions, then appends the summary instruction.
+Remote opaque compaction is bypassed. Empty/oversized summaries and unavailable/multiple opaque sources
 fail without switching. Stay with the source or start a fresh session to recover.
 Startup never spends tokens to convert a foreign model checkpoint.
 
@@ -1864,6 +1867,47 @@ and normal incremental continuation resumes afterward. The status displays the
 selected level beside the model. Genuine profile changes keep the existing reset
 behavior, and root selections never retarget child routes.
 
+## Incremental tool declarations
+
+`[session] incremental_tools = true` is the default for roots, ensemble workers
+and children. A window is all records after the latest `Compaction`, or the whole
+transcript before the first checkpoint. `zevria_tool_declarations` version 1 records
+persist provider-neutral `{name, description, parameters}` definitions without
+host-only annotations. Each window has at most one `Initial` (possibly empty),
+followed by nonempty `Additional` records. Records cannot split a pending tool
+call/result batch and are hidden from frontend history.
+
+Before directives are reconciled for dispatch, the engine snapshots definitions in
+registry order and filters them by the active policy. The first dispatch records
+`Initial`; it becomes the request's top-level function tools and is not an input
+item. New or changed definitions are appended once as `Additional`, in desired
+registry order, at their durable input positions. Earlier declarations never move
+or get rewritten. Removed permissions do not remove declarations: the engine's
+existing mode denial remains authoritative, and the rendered workflow policy lists
+permitted tools. Hosted `web_search` stays a separate policy-gated top-level
+capability and is never persisted because the engine cannot deny hosted calls.
+
+An `Initial` latches the layout for that entire window, even if incremental tools
+are later disabled. Without one, disabled windows render the current desired tools
+per request and write no records. Old logs need no migration and receive an
+`Initial` at their next enabled dispatch. A checkpoint starts a fresh window, whose
+next dispatch declares the current desired set anew.
+
+Responses renders additions as developer-role `additional_tools` items; Messages
+uses `tool_addition` blocks in its pending mid-conversation system message under
+`inline-tools-2026-09-15`. Compatibility switches can fold additions into top-level
+tools, replacing same-name entries in place and appending new names. Folding is
+correct but invalidates the cached tool prefix at that point. Active-policy B is
+still mode-specific: Plan/Build switches can change instructions independently of
+the append-only function tool layout.
+
+Top-level tool bytes alone participate in request-shape/usage-baseline identity.
+Recorded additions count as input items; prospective additions count toward fixed
+capacity until recorded. Admission and dispatch share the same declarations, and
+an exact count is reused only when the committed request identity matches.
+The irreducible-state guard uses a fresh desired set: old or prospective window
+declarations still affect ordinary admission, but compaction can discard them.
+
 ## Context measurement and capacity
 
 Context decisions use semantic token estimates rather than serialized
@@ -1921,9 +1965,11 @@ artifact's durable authority in its original typed handoff record.
 
 ### Adaptive local summaries and verbatim tails
 
-The immutable source is the effective `CompactionSource.input` model projection,
-not physical JSONL lifecycle records. It includes earlier checkpoint replacements
-and their complete tails. Starting with all `n` source items, local summarization
+The immutable source captures the normal request's instructions, top-level tools,
+and full ordered model input, not physical JSONL lifecycle records. A separate
+summarizable history omits directives and declarations and records each remaining
+item's position in that full input. It includes earlier checkpoint replacements
+and their complete tails. Starting with all `n` history items, local summarization
 considers exclusive prefix boundaries `n`, `n-1`, …, `1`, without halving, text
 fragmentation, or a separate retry cap. A call/result exchange may not straddle a
 cut: occurrence-based canonical/provider/native handles determine safe boundaries,
@@ -1932,21 +1978,29 @@ Self-contained native outputs do not require external results merely because the
 type ends in `_call`. Malformed original input is an error, not a reason to drop
 newer items; provider preflight validates source and replacement projections.
 
-Each candidate request carries the filtered conversation prefix and configured
-summary prompt, with no ordered directives. Its top-level maintenance instruction
-set contains captured application/file guidance and the no-tool summary policy. Typed live skill/workflow history is not summarized; ordinary
-user/tool text is never removed based on marker-like strings. Catalog-backed adapters
-use the same profile's exact-count/conservative admission; adapters without a
-catalog retain provider-owned admission. Negative local admission or the typed
+At history boundary `k`, the candidate is the full input up to the position of
+`history[k]` (or its entire length for `k = n`), plus one user message containing
+`docs/instructions/compact-request.md` and the configured summary prompt. Every
+candidate keeps the normal request's instructions, declarations, role, allow-list,
+reasoning level and cache key. Directives and additions stay at their original
+positions: shorter attempts are still exact prefixes, not filtered/rebuilt input.
+Ordinary user/tool text is never removed based on marker-like strings.
+Catalog-backed adapters count the real candidate request or conservatively estimate
+it including fixed instruction and tool tokens; adapters without a catalog retain
+provider-owned admission. Negative local admission or the typed
 `ModelInputTooLarge` provider error advances one item backward. Other errors and
 cancellation stop the operation. Attempts are bounded structurally by descending
 nonempty replay-safe source prefixes, not by a call counter. Local rejects and
 boundary checks make no model calls; a long descent can incur substantial counting
-latency and paid attempts. Continuation state is reset before and after synthetic
-completions, and synthetic streams and usage are not published as ordinary turn output.
+latency and paid attempts. Continuation state is reset after synthetic completions,
+not before: a full-history summary can extend a valid WebSocket chain with only
+the trailing instruction. Exact-prefix checks fall back to full replay when needed.
+Synthetic streams and usage are not published as ordinary turn output. A tool-call
+reply is never executed; that boundary is retried once with `forbid_tool_calls`
+(`tool_choice: none`), logging the potential cache miss. Repeated calls fail.
 
 On success at boundary `k`, the replacement is **summary first, then exact
-`source[k..n]`**. Full-history success has an empty source tail. Tail items retain
+`history[k..n]`** (directives and declarations removed). Full-history success has an empty source tail. Tail items retain
 value, variant, content, identifiers, replay envelopes, and order; they are not
 selected, truncated, or bounded by `retained_user_tokens` (including zero). The
 engine's task snapshot remains a separate suffix, followed by the exact current Plan text (the working copy in Planning, or the artifact in Ready/Published) with a fixed draft/revision label. Live, edited-prefix and manual compaction and portable `/model` conversion preserve this suffix; Idle and Resolved add nothing. Existing checkpoints are unchanged. Version-1 checkpoints contain
@@ -1956,9 +2010,10 @@ Projection places the effective boundary directives after replacement history
 and before subsequent input; an uncommitted prospective activation cannot enter
 it. Destination-fit checks include this live state, not just summary text.
 Loaded histories retain ordered directives and their effective state; current
-guidance is rebuilt before dispatch. Maintenance preparation uses captured current application/file guidance
-for both preflight and actual requests, including immediate post-resume and
-edited-prefix compaction; it never derives authority from source conversation.
+guidance is rebuilt before dispatch. Live, resumed and edited-prefix compaction
+share the normal-request builder; summary prose never supplies authority. Checkpoint
+replacement history excludes directives and tool declarations. A new tool window
+begins after every checkpoint.
 A local-summary checkpoint with a replay-only tail remains profile-bound:
 Both commands' preflight and explicit conversion still enforce opaque provenance.
 
@@ -1980,11 +2035,12 @@ second adapter and are not translated. HTTP-only providers set
 disabled independently under `providers.<key>.compatibility` in `models.jsonc`. See
 [Responses-compatible gateways](responses-compatible.md).
 
-Production allow-lists for ordinary turns are explicit. Build receives `web_search`, `command`, `task`, `edit`,
+Production allow-lists for ordinary turns are explicit and govern permitted calls,
+not removal of already advertised declarations. Build permits `web_search`, `command`, `task`, `edit`,
 `write`, `delete`, `launch_subtasks`, and eligible `skill` and `skill_read`
 tools. The two skill registrations are statically registered
-in root runtimes even when not advertised. Plan receives `command`, `web_search`, optional
-`launch_subtasks`, mode-enabled skill tools, `question`, `create_plan`, `update_plan`, `read_plan`, and `submit_plan`. The authoring registrations have this fixed order after `question`; they are absent from Build's allow-list, so Build's advertised definitions and instruction bytes are unchanged. Explore children
+in root runtimes even when not initially advertised. Plan permits `command`, `web_search`, optional
+`launch_subtasks`, mode-enabled skill tools, `question`, `create_plan`, `update_plan`, `read_plan`, and `submit_plan`. The authoring registrations have this fixed order after `question`; they are absent from Build's allow-list. Previously declared Plan tools may remain visible in Build, but the engine denies calls to them. Explore children
 receive only `command` plus an empty skill catalog. Build children receive exactly
 `command`, `task`, `edit`, `write`, and `delete`, rooted at their reserved directory.
 Both child registries omit interaction, skill, planning, reconciliation, and nested
@@ -2498,8 +2554,8 @@ suffix without rewriting earlier native output or skill directives.
 
 Both child factories capture their configured Explore/Builder assignment at session
 opening, independent of root Build/Plan switching and durable selections. They use
-`ProviderRouterFactory::new(role, profile, reasoning_level, preamble)` and `create(session_id, tools)`;
-provider and child engine receive the same tool handle. Children inherit the root's
+`ProviderRouterFactory::new(role, profile, reasoning_level, preamble)` and `create(session_id)`;
+the engine alone owns the tool handle and supplies explicit request declarations. Children inherit the root's
 opening/resume guidance, not active skills or child-local guidance. Like root
 sessions, children have no model-call count ceiling. Explore retains its
 inspection-only directive and shared command tool.

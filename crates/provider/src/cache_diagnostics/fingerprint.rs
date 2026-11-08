@@ -168,6 +168,7 @@ pub(super) enum ItemKind {
     FunctionOutput,
     Search,
     Compaction,
+    AdditionalTools,
     Other,
 }
 impl ItemKind {
@@ -180,6 +181,7 @@ impl ItemKind {
             Some("function_call_output") => Self::FunctionOutput,
             Some("web_search_call") => Self::Search,
             Some("compaction") => Self::Compaction,
+            Some("additional_tools") => Self::AdditionalTools,
             _ => Self::Other,
         }
     }

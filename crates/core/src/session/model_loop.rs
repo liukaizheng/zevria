@@ -166,7 +166,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                 return Err(anyhow::anyhow!("cannot run a model turn without model input").into());
             }
             let instructions = self.rendered_instructions(policy);
+            let tools = self.request_tools(self.conversation.items(), policy);
             let request = ModelRequest {
+                tools: &tools,
+                forbid_tool_calls: false,
                 instructions: &instructions,
                 input,
                 model_role: policy.model_role,

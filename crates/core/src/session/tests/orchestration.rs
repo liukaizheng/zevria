@@ -381,13 +381,11 @@ async fn mid_turn_compaction_preserves_correction_contract_and_accepted_launch_e
         );
         assert_eq!(*authorization.lock().unwrap(), [true]);
         let requests = engine.provider.requests.lock().unwrap();
+        assert_eq!(requests[1].instructions, requests[0].instructions);
+        assert_eq!(requests[1].tools, requests[0].tools);
+        assert!(requests[1].input.starts_with(&requests[0].input));
         assert!(
             requests[1]
-                .instructions
-                .contains("## Workflow policy: maintenance")
-        );
-        assert!(
-            !requests[1]
                 .input
                 .iter()
                 .any(|item| matches!(item, OwnedModelRequestItem::RequestInstruction(_)))

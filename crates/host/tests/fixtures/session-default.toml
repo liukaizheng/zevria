@@ -32,6 +32,7 @@ For any non-trivial task, investigation is a required first phase. Be thorough e
 
 Thorough investigation does not require verbose command output. Prefer several focused queries with bounded results over a single broad command that floods the context.
 """
+incremental_tools = true
 
 [plan]
 max_artifact_bytes = 131072

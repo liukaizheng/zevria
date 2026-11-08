@@ -33,8 +33,7 @@ impl ModelProvider for Provider {
     }
     fn compact<'a>(&'a mut self, request: ModelRequest<'a>) -> CompactFuture<'a> {
         Box::pin(async move {
-            zevria_model::maintenance::validate_maintenance_input(&request.input)?;
-            assert_eq!(request.allowed_tool_names, Some([].as_slice()));
+            assert!(!request.forbid_tool_calls);
             self.maintenance.push(CapturedRequest::of(&request));
             if self.native {
                 Ok(CompactResult::Replacement(vec![
@@ -126,14 +125,9 @@ fn inspect(engine: &SessionEngine<Provider>, pinned: bool) {
     }
 }
 fn assert_current_maintenance(request: &CapturedRequest) {
-    let borrowed = request
-        .input
-        .iter()
-        .map(OwnedModelRequestItem::as_borrowed)
-        .collect::<Vec<_>>();
-    zevria_model::maintenance::validate_maintenance_input(&borrowed).unwrap();
     let text = &request.instructions;
-    assert!(text.ends_with("## Eligible skills\nSkill selection is unavailable."));
+    assert!(text.contains("## Workflow policy:"));
+    assert!(!text.contains("## Workflow policy: maintenance"));
     for expected in [
         "CURRENT_APPLICATION_SENTINEL",
         "CURRENT_GLOBAL_SENTINEL",
@@ -146,7 +140,6 @@ fn assert_current_maintenance(request: &CapturedRequest) {
         "OLD_GLOBAL_SENTINEL",
         "OLD_PROJECT_SENTINEL",
         "Review instructions",
-        "Build test instructions",
     ] {
         assert!(!text.contains(excluded), "unexpected {excluded}");
     }
@@ -206,7 +199,7 @@ async fn scratch_prompt_skill_compact_quit_resume_and_submit_retains_pins_and_di
             )]
         );
         assert_eq!(resumed.active_skills().unwrap().len(), 1);
-        // Manual compaction uses current guidance and excludes restored directives.
+        // Manual compaction uses current guidance and preserves restored directives.
         run(&mut resumed, compact()).await;
         assert_current_maintenance(resumed.provider.maintenance.last().unwrap());
         if !native {
@@ -238,7 +231,6 @@ async fn scratch_prompt_skill_compact_quit_resume_and_submit_retains_pins_and_di
             "CURRENT_APPLICATION_SENTINEL",
             "CURRENT_GLOBAL_SENTINEL",
             "CURRENT_PROJECT_SENTINEL",
-            "Build test instructions",
             "## Eligible skills",
         ] {
             assert!(text.contains(expected));
@@ -548,9 +540,9 @@ async fn analysis_resume_and_compaction_keep_current_policy_and_scratch_as_histo
             assert_eq!(request.allowed_tool_names, Some(vec!["command".into()]));
         }
         run(&mut resumed, compact()).await;
-        // Maintenance has a separate tool-free policy, not analysis permissions.
+        // Compaction retains the active inspection policy and call permissions.
         let maintenance = format!("{:?}", resumed.provider.maintenance.last().unwrap());
-        assert!(!maintenance.contains("## Inspection and scratch policy"));
+        assert!(maintenance.contains("## Inspection and scratch policy"));
         run(&mut resumed, submit("after compaction")).await;
         let state = resumed.rendered_instructions(resumed.policies.policy(SessionMode::Build));
         assert!(state.contains("source-read-only with temporary investigative execution"));
@@ -709,7 +701,7 @@ async fn resumed_disabled_and_skill_free_scopes_keep_full_pins_but_not_active_bo
 }
 
 #[test]
-fn maintenance_preparation_uses_only_captured_guidance() {
+fn compaction_preparation_uses_only_captured_guidance() {
     let (directory, writer) = test_transcript();
     let captured = roots(directory.path(), "CURRENT");
     std::fs::remove_file(directory.path().join("global/AGENTS.md")).unwrap();
@@ -722,12 +714,12 @@ fn maintenance_preparation_uses_only_captured_guidance() {
     )
     .unwrap()
     .with_guidance_roots(captured);
-    let set = engine.prepare_maintenance_guidance();
+    let set = engine.instruction_set(engine.policies.policy(SessionMode::Build));
     assert!(set.system.iter().any(|(component, text)| component
         == zevria_instructions::GLOBAL_GUIDANCE_COMPONENT
         && text.is_empty()));
     assert!(set.render().contains("CURRENT_PROJECT_SENTINEL"));
     assert!(!set.render().contains("Scope: global"));
-    assert!(set.catalog.is_none());
+    assert!(set.catalog.is_some());
     assert!(engine.conversation.items().is_empty());
 }

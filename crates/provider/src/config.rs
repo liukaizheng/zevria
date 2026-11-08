@@ -474,6 +474,8 @@ impl ModeAssignments {
 pub struct ResponsesCompatibilityConfig {
     /// Explicit gateway workaround; user-role projection has weaker authority.
     pub developer_messages: bool,
+    /// Render persisted tool changes inline; false folds them into top-level tools.
+    pub additional_tools: bool,
     pub send_reasoning: bool,
     pub send_reasoning_encrypted_content: bool,
     pub strict_tools: bool,
@@ -485,6 +487,7 @@ impl Default for ResponsesCompatibilityConfig {
     fn default() -> Self {
         Self {
             developer_messages: true,
+            additional_tools: true,
             send_reasoning: true,
             send_reasoning_encrypted_content: true,
             strict_tools: true,

@@ -11,6 +11,8 @@ fn isolated(name: &str) -> bool {
 
 fn request(input: Vec<ModelRequestItem<'_>>) -> ModelRequest<'_> {
     ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: test_instructions(),
         input,
         model_role: ModelRole::Build,
@@ -45,7 +47,7 @@ async fn instructions_change_only_for_same_tool_workflow_switch_not_activation()
     let _lock = CAPTURED_LOG_TEST_LOCK.lock().await;
     let (logs, subscriber) = capture();
     async {
-        let mut provider = connect_http_test_provider("http://127.0.0.1:9/responses".into(), ToolServer::new().run()).await;
+        let mut provider = connect_http_test_provider("http://127.0.0.1:9/responses".into()).await;
         let mut history = Vec::<zevria_model::OwnedModelRequestItem>::new();
         let mut set = test_instruction_set("Application");
         let orchestrated = zevria_foundation::RequestMetadata::new(zevria_foundation::RequestBehavior::Orchestrate);
@@ -65,7 +67,7 @@ async fn instructions_change_only_for_same_tool_workflow_switch_not_activation()
                 set.workflow.instructions = "Plan policy".into();
             }
             let instructions = set.render();
-            let request = ModelRequest { instructions: &instructions, input: history.iter().map(zevria_model::OwnedModelRequestItem::as_borrowed).collect(), model_role: ModelRole::Build, allowed_tool_names: None };
+            let request = ModelRequest { tools: &[], forbid_tool_calls: false, instructions: &instructions, input: history.iter().map(zevria_model::OwnedModelRequestItem::as_borrowed).collect(), model_role: ModelRole::Build, allowed_tool_names: None };
             let prepared = crate::turn::prepare_turn_request(&request, &mut provider).await.unwrap();
             let prepared = dispatch(prepared, &mut provider);
             let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(provider.profile.clone(), vec![json!({"type":"message", "id":format!("reply-{index}"), "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":"done"}]})])).unwrap();
@@ -150,7 +152,6 @@ async fn reasoning_switch_changes_only_properties_with_exact_prefix_extension() 
                 zevria_foundation::ReasoningLevel::Medium,
             )],
             "application",
-            ToolServer::new().run(),
             "reasoning-root",
         )
         .unwrap();
@@ -365,11 +366,7 @@ async fn baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_rese
         provider.input_token_count_url = Some(format!("http://{address}/input_tokens").parse().unwrap());
         assert_eq!(provider.count_input_tokens(next_request()).await.unwrap(), InputTokenCount::Exact(42));
         provider.compaction_url = Some(format!("http://{address}/compact").parse().unwrap());
-        let no_tools = Vec::new();
-        let maintenance = zevria_instructions::InstructionSet::maintenance("", []).render();
-        let mut compact = next_request();
-        compact.instructions = &maintenance;
-        compact.allowed_tool_names = Some(&no_tools);
+        let compact = next_request();
         assert!(matches!(provider.compact(compact).await.unwrap(), CompactResult::Replacement(_)));
         assert_eq!(inspect(&provider), before, "maintenance cannot dispatch or advance diagnostic state");
         assert_eq!(saved(), before_disk, "maintenance cannot replace persistent state");
@@ -394,7 +391,7 @@ async fn baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_rese
         assert_eq!(inspect(&provider), (None, 0, 1, None));
         let prepared = crate::turn::prepare_turn_request(&next_request(), &mut provider).await.unwrap();
         let _ = dispatch(prepared, &mut provider);
-        let mut other = connect_http_test_provider(format!("http://{address}/responses"), ToolServer::new().run()).await;
+        let mut other = connect_http_test_provider(format!("http://{address}/responses")).await;
         crate::cache_diagnostics::configure(&mut other, &crate::CacheDiagnosticContext::new(&transcript_path, "test-session"));
         assert_eq!(inspect(&other), (None, 0, 0, None), "reset tombstone cannot be resurrected on a fresh provider");
         server.await.unwrap();
@@ -436,7 +433,7 @@ async fn large_history_logs_are_bounded_and_profiles_do_not_share_baselines() {
     let _lock = CAPTURED_LOG_TEST_LOCK.lock().await;
     let (logs, subscriber) = capture();
     async {
-        let mut provider = connect_http_test_provider("http://127.0.0.1:9/responses".into(), ToolServer::new().run()).await;
+        let mut provider = connect_http_test_provider("http://127.0.0.1:9/responses".into()).await;
         let messages = (0..1000).map(|_| Message::user("PRIVATE_PROMPT_ARGUMENT_CONTENT".repeat(40))).collect::<Vec<_>>();
         for count in [1, 1000] {
             let request = request(messages[..count].iter().map(ModelRequestItem::message).collect());
@@ -739,7 +736,7 @@ async fn http_wire_privacy_and_diagnostic_write_failures_do_not_change_completio
         });
         let mut profile = resolved_profile("test-provider", "gpt-test", format!("http://PRIVATE_USER:PRIVATE_PASSWORD@{address}/responses?token=PRIVATE_URL_TOKEN#PRIVATE_FRAGMENT"), "PRIVATE_CREDENTIAL", false, ReasoningSummaryLevel::Detailed, ResponsesCompatibilityConfig::default(), BTreeMap::new(), RemoteCompactionConfig::default(), 100_000);
         profile.responses_endpoint_mut().session_id_header = Some("X-Session-ID".into());
-        let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", ToolServer::new().run(), "PRIVATE_SESSION_VALUE", "PRIVATE_CACHE_KEY").await.unwrap();
+        let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", "PRIVATE_SESSION_VALUE", "PRIVATE_CACHE_KEY").await.unwrap();
         let directory = tempfile::tempdir().unwrap();
         let context = crate::CacheDiagnosticContext::new(&directory.path().join("session.jsonl"), "PRIVATE_SESSION_VALUE");
         crate::cache_diagnostics::configure(&mut provider, &context);
@@ -792,8 +789,7 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         let mut profile = resolved_profile("test-provider", "gpt-test", "http://127.0.0.1:9/responses".into(), "test-key", false, ReasoningSummaryLevel::Detailed, ResponsesCompatibilityConfig::default(), BTreeMap::new(), RemoteCompactionConfig::default(), 100_000);
         profile.responses_endpoint_mut().session_id_header = Some("X-Session-ID".into());
         profile.responses_endpoint_mut().input_token_count.enabled = false;
-        let tools = ToolServer::new().run();
-        let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", tools.clone(), "test-session", "cache-key").await.unwrap();
+        let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", "test-session", "cache-key").await.unwrap();
         crate::cache_diagnostics::configure(&mut provider, &context);
         let prompt = Message::user("first prompt");
         let prepared = crate::turn::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt)]), &mut provider).await.unwrap();
@@ -802,7 +798,7 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         crate::cache_diagnostics::finish(&prepared, &mut provider, Some(&response));
         drop(provider);
         // Load into a new diagnostic state before comparing a mutated wire body.
-        let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", tools.clone(), "changed-routing-value", "cache-key").await.unwrap();
+        let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", "changed-routing-value", "cache-key").await.unwrap();
         crate::cache_diagnostics::configure(&mut provider, &context);
         assert!(provider.ws.continuation.is_none());
         let reply = response.into_record().into_model_request_item();
@@ -833,11 +829,11 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         crate::cache_diagnostics::observe_raw(&mut provider, &event.to_string(), None, None);
         let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(provider.profile.clone(), event["response"]["output"].as_array().unwrap().clone())).unwrap();
         crate::cache_diagnostics::finish(&prepared, &mut provider, Some(&response));
-        let mut router = ProviderRouter::from_routes([(ModelRole::Build, profile, zevria_foundation::ReasoningLevel::Medium)], "", tools, "test-session").unwrap().with_cache_diagnostics(context.clone());
+        let mut router = ProviderRouter::from_routes([(ModelRole::Build, profile, zevria_foundation::ReasoningLevel::Medium)], "", "test-session").unwrap().with_cache_diagnostics(context.clone());
         assert_eq!(router.initialized_profile_count(), 0);
         router.reset();
         assert_eq!(router.initialized_profile_count(), 0);
-        let mut other = connect_http_test_provider("http://127.0.0.1:9/responses".into(), ToolServer::new().run()).await;
+        let mut other = connect_http_test_provider("http://127.0.0.1:9/responses".into()).await;
         crate::cache_diagnostics::configure(&mut other, &context);
         assert_eq!(inspect(&other).0, None);
     }.with_subscriber(subscriber).await;

@@ -1,6 +1,5 @@
 //! Responses transport lifecycle and provider construction.
 
-use rig_agent::tool::server::ToolServerHandle;
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
@@ -362,7 +361,6 @@ pub struct OpenAiProvider {
     pub(crate) profile: ModelProfileRef,
     #[allow(dead_code)]
     pub(crate) context_window_tokens: u64,
-    pub(crate) input_token_limit: u64,
     pub(crate) preamble: String,
     pub(crate) responses_parameters: Option<serde_json::Value>,
     pub(crate) reasoning_level: ReasoningLevel,
@@ -371,7 +369,6 @@ pub struct OpenAiProvider {
     pub(crate) web_search: crate::WebSearchConfig,
     pub(crate) additional_params: std::collections::BTreeMap<String, serde_json::Value>,
     pub(crate) prompt_cache_key: String,
-    pub(crate) tools: ToolServerHandle,
     pub(crate) ws: OpenAiParkedWebSocket,
     pub(crate) responses_url: reqwest::Url,
     pub(crate) transport: OpenAiTransport,
@@ -431,7 +428,6 @@ impl OpenAiProvider {
         profile: &ResolvedModelProfile,
         reasoning_level: ReasoningLevel,
         preamble: &str,
-        tools: ToolServerHandle,
         session_id: &str,
         cache_key: &str,
     ) -> anyhow::Result<Self> {
@@ -439,7 +435,6 @@ impl OpenAiProvider {
             profile,
             reasoning_level,
             preamble,
-            tools,
             session_id,
             cache_key,
             true,
@@ -453,7 +448,6 @@ impl OpenAiProvider {
         profile: &ResolvedModelProfile,
         reasoning_level: ReasoningLevel,
         preamble: &str,
-        tools: ToolServerHandle,
         session_id: &str,
         cache_key: &str,
     ) -> anyhow::Result<Self> {
@@ -461,7 +455,6 @@ impl OpenAiProvider {
             profile,
             reasoning_level,
             preamble,
-            tools,
             session_id,
             cache_key,
             false,
@@ -473,7 +466,6 @@ impl OpenAiProvider {
         profile: &ResolvedModelProfile,
         reasoning_level: ReasoningLevel,
         preamble: &str,
-        tools: ToolServerHandle,
         session_id: &str,
         cache_key: &str,
         preconnect: bool,
@@ -579,7 +571,6 @@ impl OpenAiProvider {
             ),
             profile: profile.profile.clone(),
             context_window_tokens: profile.context_window_tokens,
-            input_token_limit: profile.input_token_limit,
             preamble: preamble.to_string(),
             responses_parameters: Some(responses_parameters),
             reasoning_level,
@@ -594,7 +585,6 @@ impl OpenAiProvider {
             web_search: endpoint.web_search.clone(),
             additional_params: endpoint.additional_params.clone(),
             prompt_cache_key: cache_key.to_string(),
-            tools,
             ws: OpenAiParkedWebSocket {
                 session,
                 config: websocket_config,

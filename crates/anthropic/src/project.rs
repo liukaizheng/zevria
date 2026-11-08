@@ -254,10 +254,31 @@ pub fn project(
     tools: &Value,
     strip_all_thinking: bool,
 ) -> anyhow::Result<ProjectedMessages> {
+    project_with_compatibility(
+        input,
+        target,
+        &crate::Compatibility {
+            system_messages,
+            ..Default::default()
+        },
+        system,
+        tools,
+        strip_all_thinking,
+    )
+}
+
+pub fn project_with_compatibility(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+    system: &Value,
+    tools: &Value,
+    strip_all_thinking: bool,
+) -> anyhow::Result<ProjectedMessages> {
     project_impl(
         input,
         target,
-        system_messages,
+        compatibility,
         system,
         tools,
         strip_all_thinking,
@@ -268,12 +289,13 @@ pub fn project(
 fn project_impl(
     input: &[ModelRequestItem<'_>],
     target: &ModelProfileRef,
-    system_messages: bool,
+    compatibility: &crate::Compatibility,
     system: &Value,
     tools: &Value,
     strip_all_thinking: bool,
     completion: bool,
 ) -> anyhow::Result<ProjectedMessages> {
+    let system_messages = compatibility.system_messages;
     let mut projection = Projection::default();
     for replay in input.iter().filter_map(|item| item.replay_ref()) {
         if replay
@@ -290,6 +312,16 @@ fn project_impl(
     }
     for item in input {
         match item {
+            ModelRequestItem::AdditionalTools(tools) => {
+                tools.validate()?;
+                anyhow::ensure!(
+                    !tools.is_empty(),
+                    "additional tool declarations must not be empty"
+                );
+                if compatibility.inline_tools && system_messages {
+                    projection.directives.extend(tools.iter().map(|tool| json!({"type":"tool_addition", "tool":{"type":"tool_definition", "definition":crate::body::tool_definition(tool, compatibility.eager_tool_input_streaming)}})));
+                }
+            }
             ModelRequestItem::DeveloperInstruction(directive) => {
                 directive.validate()?;
                 projection
@@ -479,6 +511,21 @@ pub fn preflight(
     target: &ModelProfileRef,
     system_messages: bool,
 ) -> anyhow::Result<ReplayPreflight> {
+    preflight_with_compatibility(
+        input,
+        target,
+        &crate::Compatibility {
+            system_messages,
+            ..Default::default()
+        },
+    )
+}
+
+pub fn preflight_with_compatibility(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+) -> anyhow::Result<ReplayPreflight> {
     let mut sources = BTreeSet::new();
     for item in input {
         if let Some(replay) = item.replay_ref() {
@@ -502,13 +549,31 @@ pub fn preflight(
     let projected = project_impl(
         input,
         target,
-        system_messages,
+        compatibility,
         &json!([]),
         &json!([]),
         false,
         false,
     )?;
-    let tokens = zevria_model::compaction::estimate_responses_input_tokens(&projected.messages, 0);
+    let mut tokens =
+        zevria_model::compaction::estimate_responses_input_tokens(&projected.messages, 0);
+    if !(compatibility.inline_tools && compatibility.system_messages) {
+        // Folded declarations disappear from messages, not from capacity.
+        for item in input {
+            if let ModelRequestItem::AdditionalTools(tools) = item {
+                let rendered = tools
+                    .iter()
+                    .map(|tool| {
+                        crate::body::tool_definition(tool, compatibility.eager_tool_input_streaming)
+                    })
+                    .collect::<Vec<_>>();
+                tokens =
+                    tokens.saturating_add(zevria_model::compaction::approximate_tokens_from_bytes(
+                        serde_json::to_vec(&rendered)?.len(),
+                    ));
+            }
+        }
+    }
     Ok(ReplayPreflight::Compatible(
         zevria_model::ContextTokenEstimate::new(tokens, tokens),
     ))

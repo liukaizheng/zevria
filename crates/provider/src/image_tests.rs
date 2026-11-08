@@ -68,6 +68,8 @@ async fn image_websocket_delta_and_reconnect_keep_complete_occurrences() {
     let mut state = AttemptState::default();
     for _ in 0..2 {
         let parts = RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: prompt().to_message(),
             history: state.history.clone(),
             instructions: "Image test".into(),
@@ -111,13 +113,14 @@ async fn provider_error_diagnostics_do_not_echo_image_payloads() {
     });
     let mut provider = connect_http_test_provider_with_options(
         format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
         ResponsesCompatibilityConfig::default(),
         BTreeMap::new(),
         "image-error",
     )
     .await;
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: prompt().to_message(),
         history: vec![],
         instructions: "Image test".into(),
@@ -192,16 +195,6 @@ fn accounting_does_not_charge_base64_or_scrub_arbitrary_tool_json() {
         expected
     );
     assert!((3200..3500).contains(&expected));
-    let mut with_output = wire.clone();
-    with_output
-        .push(json!({"type":"function_call", "call_id":"x", "name":"read", "arguments":"{}"}));
-    with_output.push(
-        json!({"type":"function_call_output", "call_id":"x", "output":"keep this useful output"}),
-    );
-    assert_eq!(
-        crate::turn::trim_correlated_tool_outputs(&with_output, 0, 10_000),
-        with_output
-    );
     let literal = vec![
         json!({"type":"function_call_output", "call_id":"x", "output":{"type":"input_image", "image_url":"A".repeat(80_000)}}),
     ];
@@ -226,13 +219,14 @@ async fn full_http_sse_request_keeps_real_image_data() {
     });
     let mut provider = connect_http_test_provider_with_options(
         format!("http://{address}/v1/responses"),
-        ToolServer::new().run(),
         ResponsesCompatibilityConfig::default(),
         BTreeMap::new(),
         "image-session",
     )
     .await;
     let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: prompt().to_message(),
         history: vec![],
         instructions: "Image test".into(),

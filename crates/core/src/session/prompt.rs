@@ -34,9 +34,8 @@ pub(super) struct PromptContext {
     mode: SessionMode,
     pub(super) policy: TurnPolicy,
     instructions: super::directives::InstructionPreparation,
-    fixed_tokens: u64,
+    irreducible_tokens: u64,
     limits: ModelContextPolicy,
-    shape: RequestShapeFingerprint,
     request_boundaries: bool,
 }
 
@@ -216,12 +215,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             input,
         } = checked;
         let instructions = self.instruction_preparation(&policy)?;
-        let tools = self.filtered_tool_bytes(&policy);
         let limits = self.context_policy(policy.model_role).clone();
         let context = PromptContext {
             mode,
-            fixed_tokens: prepared_fixed_tokens(&instructions.rendered, &tools),
-            shape: prepared_request_shape(&policy, &limits, &instructions.rendered, &tools),
+            irreducible_tokens: self.irreducible_input_tokens(&instructions.rendered, &policy),
             policy,
             instructions,
             limits,
@@ -313,7 +310,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     context: &skills,
                     instructions: &context.instructions,
                     state: &before.state,
-                    fixed_tokens: context.fixed_tokens,
+                    fixed_tokens: context.irreducible_tokens,
                     input_token_limit: context.limits.input_token_limit,
                 }
                 .prepare(
@@ -342,7 +339,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 (display, PromptTurnKind::Skill, request)
             }
         };
-        before.ensure_capacity(&context.policy, &context.limits, context.fixed_tokens)?;
+        before.ensure_capacity(&context.policy, &context.limits, context.irreducible_tokens)?;
         // Validate only the prospective instruction tail. Final cross-domain
         // validation belongs to commit, after asynchronous counting/compaction.
         captured
@@ -464,7 +461,26 @@ impl<P: ModelProvider> SessionEngine<P> {
         let folded = checkpoint.and_then(CheckpointPlacement::folded);
         // The only projection for this measurement version. These are borrowed
         // model items, shared by estimation, active-image detection, and counting.
-        let input = prepared.project(self.conversation.items(), folded);
+        let mut input = prepared.project(self.conversation.items(), folded);
+        let source = if checkpoint.is_some() {
+            &[][..]
+        } else {
+            match prepared.anchor {
+                TurnAnchor::Append => self.conversation.items(),
+                TurnAnchor::ReplaceFrom(index) => &self.conversation.items()[..index],
+            }
+        };
+        let tools = self.request_tools(source, policy);
+        let tool_update = self.tool_declaration_update(source, policy);
+        input.extend(
+            tool_update
+                .as_ref()
+                .and_then(TranscriptItem::model_request_item),
+        );
+        let tool_bytes = serde_json::to_vec(&tools).expect("tools serialize");
+        let fixed_tokens = prepared_fixed_tokens(&context.instructions.rendered, &tool_bytes);
+        let shape =
+            prepared_request_shape(policy, limits, &context.instructions.rendered, &tool_bytes);
         let explicit = estimate_model_input_for_profile(input.clone(), &limits.profile)
             .map_err(|error| {
                 format!(
@@ -472,16 +488,14 @@ impl<P: ModelProvider> SessionEngine<P> {
                     limits.profile
                 )
             })?
-            .saturating_add(ContextTokenEstimate::new(
-                context.fixed_tokens,
-                context.fixed_tokens,
-            ));
+            .saturating_add(ContextTokenEstimate::new(fixed_tokens, fixed_tokens));
         // Only a compatible append baseline merits estimating the addition.
         // Never carry old provider usage through a checkpoint rebuild.
         let baseline = if prepared.anchor == TurnAnchor::Append && checkpoint.is_none() {
-            self.context.usage.get(&limits.profile).and_then(|tracker| {
-                tracker.projected_tokens_for(context.shape, context.fixed_tokens)
-            })
+            self.context
+                .usage
+                .get(&limits.profile)
+                .and_then(|tracker| tracker.projected_tokens_for(shape, fixed_tokens))
         } else {
             None
         };
@@ -496,7 +510,14 @@ impl<P: ModelProvider> SessionEngine<P> {
                         .payload_tokens
                 })
                 .fold(0_u64, u64::saturating_add);
-            existing.saturating_add(addition)
+            let prospective_tools = tool_update
+                .as_ref()
+                .and_then(TranscriptItem::model_request_item)
+                .map(estimate_model_request_item)
+                .map_or(0, |estimate| estimate.conservative_tokens);
+            existing
+                .saturating_add(addition)
+                .saturating_add(prospective_tools)
         });
         let candidates = |exact| CapacityCandidates {
             payload: explicit.payload_tokens,
@@ -519,6 +540,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         if has_images || assessment.needs_exact() || force_exact {
             let request = ModelRequest {
                 instructions: &context.instructions.rendered,
+                tools: &tools,
+                forbid_tool_calls: false,
                 input: input.clone(),
                 model_role: policy.model_role,
                 allowed_tool_names: policy.allowed_tool_names.as_deref(),
@@ -547,7 +570,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
         }
         let identity = exact.and_then(|_| {
-            prepared_request_identity(context.shape, &context.instructions.rendered, &input).ok()
+            prepared_request_identity(shape, &context.instructions.rendered, &input).ok()
         });
         Ok(PromptMeasurement {
             assessment,

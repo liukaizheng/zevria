@@ -27,7 +27,6 @@ async fn single_messages_router_uses_the_core_local_summary_path() {
             zevria_foundation::ReasoningLevel::High,
         )],
         "stable",
-        tools.clone(),
         "root",
     )
     .unwrap();

@@ -76,6 +76,8 @@ fn request_body_and_counting_cache_breakpoints() {
     let target = ModelProfileRef::new("anthropic", "claude-opus-5-5");
     let user = Message::user("hello");
     let request = ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: "stable",
         input: vec![ModelRequestItem::message(&user)],
         model_role: ModelRole::Build,
@@ -92,7 +94,7 @@ fn request_body_and_counting_cache_breakpoints() {
         compatibility: &compat,
         additional_params: &params,
     };
-    let built = body::build(&request, &[], &options).unwrap();
+    let built = body::build(&request, &options).unwrap();
     assert_eq!(
         built.body["system"][0]["cache_control"],
         json!({"type":"ephemeral"})

@@ -490,6 +490,8 @@ async fn exact_count_wait_observes_turn_cancellation() {
             &mut provider,
             &mut input_count,
             ModelRequest {
+                tools: &[],
+                forbid_tool_calls: false,
                 instructions: "test instructions",
                 input: vec![ModelRequestItem::message(&prompt)],
                 model_role: ModelRole::Build,
@@ -525,6 +527,8 @@ async fn transient_exact_count_failure_is_attempted_once_per_turn() {
         &mut provider,
         &mut input_count,
         ModelRequest {
+            tools: &[],
+            forbid_tool_calls: false,
             instructions: "test instructions",
             input: vec![ModelRequestItem::message(&prompt)],
             model_role: ModelRole::Build,
@@ -539,6 +543,8 @@ async fn transient_exact_count_failure_is_attempted_once_per_turn() {
             &mut provider,
             &mut input_count,
             ModelRequest {
+                tools: &[],
+                forbid_tool_calls: false,
                 instructions: "test instructions",
                 input: vec![ModelRequestItem::message(&prompt)],
                 model_role: ModelRole::Build,
@@ -562,6 +568,8 @@ async fn transient_exact_count_failure_is_attempted_once_per_turn() {
             &mut provider,
             &mut input_count,
             ModelRequest {
+                tools: &[],
+                forbid_tool_calls: false,
                 instructions: "test instructions",
                 input: vec![ModelRequestItem::message(&prompt)],
                 model_role: ModelRole::Build,

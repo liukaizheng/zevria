@@ -16,7 +16,6 @@ use crate::{
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
-use rig_agent::tool::server::ToolServerHandle;
 use serde_json::{Value, json};
 use std::time::Duration;
 use zevria_anthropic::{
@@ -39,7 +38,6 @@ pub struct AnthropicProvider {
     model: AnthropicModelConfig,
     reasoning_level: ReasoningLevel,
     preamble: String,
-    tools: ToolServerHandle,
     http: reqwest::Client,
     url: reqwest::Url,
     count_url: Option<reqwest::Url>,
@@ -83,6 +81,7 @@ impl AnthropicProvider {
             model.thinking_display,
             model.refusal_fallback,
             endpoint.compatibility.strict_thinking_binding,
+            endpoint.compatibility.inline_tools && endpoint.compatibility.system_messages,
         );
         if !betas.is_empty() {
             headers.insert("anthropic-beta", HeaderValue::from_str(&betas)?);
@@ -93,7 +92,6 @@ impl AnthropicProvider {
         profile: &ResolvedModelProfile,
         level: ReasoningLevel,
         preamble: &str,
-        tools: ToolServerHandle,
         session_id: &str,
     ) -> anyhow::Result<Self> {
         let headers = Self::validate_profile_settings(profile, level, session_id)?;
@@ -117,7 +115,6 @@ impl AnthropicProvider {
             model: model.clone(),
             reasoning_level: level,
             preamble: preamble.to_owned(),
-            tools,
             http,
             url,
             count_url,
@@ -129,11 +126,8 @@ impl AnthropicProvider {
         self.reasoning_level = level;
     }
     fn prepare(&self, request: &ModelRequest<'_>) -> anyhow::Result<PreparedRequest> {
-        let catalog = self.tools.snapshot();
-        let registry = catalog.definitions().iter().map(|tool| json!({"name":tool.name, "description":tool.description, "input_schema":tool.parameters})).collect::<Vec<_>>();
         body::build(
             request,
-            &registry,
             &RequestOptions {
                 target: &self.profile,
                 max_tokens: self.model.max_output_tokens,

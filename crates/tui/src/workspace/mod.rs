@@ -364,6 +364,7 @@ impl SessionViews {
                 | TranscriptItem::SessionMode(_)
                 | TranscriptItem::Directive(_)
                 | TranscriptItem::RequestDirective(_)
+                | TranscriptItem::ToolDeclarations(_)
                 | TranscriptItem::RequestPrompt { .. }
                 | TranscriptItem::Message(_)
                 | TranscriptItem::ProviderMessage(_)

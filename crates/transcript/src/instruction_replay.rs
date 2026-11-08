@@ -65,6 +65,7 @@ pub struct InstructionReplayState {
     directives: DirectiveState,
     requests: crate::request_replay::RequestReplayState,
     pending: BTreeSet<String>,
+    tool_initial: bool,
     header: SessionHeader,
     next_record_index: usize,
 }
@@ -123,6 +124,26 @@ impl InstructionReplayState {
         self.requests.apply(item, self.pending.is_empty())?;
         apply_skill_record(&mut self.skills, self.next_record_index, item)?;
         match item {
+            TranscriptItem::ToolDeclarations(record) => {
+                record.validate()?;
+                anyhow::ensure!(
+                    self.pending.is_empty(),
+                    "tool declarations cannot split a tool call/result batch"
+                );
+                match record.placement {
+                    crate::ToolDeclarationPlacement::Initial => {
+                        anyhow::ensure!(
+                            !self.tool_initial,
+                            "a tool window may have only one Initial declaration"
+                        );
+                        self.tool_initial = true;
+                    }
+                    crate::ToolDeclarationPlacement::Additional => anyhow::ensure!(
+                        self.tool_initial,
+                        "Additional tool declarations require an Initial in this window"
+                    ),
+                }
+            }
             TranscriptItem::Directive(directive) => {
                 directive.validate()?;
                 anyhow::ensure!(
@@ -149,10 +170,13 @@ impl InstructionReplayState {
                 self.pending.is_empty(),
                 "a command job notice cannot split a tool call/result batch"
             ),
-            TranscriptItem::Compaction(_) => anyhow::ensure!(
-                self.pending.is_empty(),
-                "a checkpoint cannot split a tool call/result batch"
-            ),
+            TranscriptItem::Compaction(_) => {
+                anyhow::ensure!(
+                    self.pending.is_empty(),
+                    "a checkpoint cannot split a tool call/result batch"
+                );
+                self.tool_initial = false;
+            }
             _ => {}
         }
         if let Some(message) = item.message() {

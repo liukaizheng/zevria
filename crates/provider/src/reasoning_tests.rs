@@ -48,7 +48,6 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
             zevria_foundation::ReasoningLevel::Medium,
         )],
         "unchanged application",
-        policy_tools(),
         "reasoning-root",
     )
     .unwrap();
@@ -83,6 +82,8 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
         let response = router
             .complete(
                 ModelRequest {
+                    tools: &[],
+                    forbid_tool_calls: false,
                     instructions: test_instructions(),
                     input: history
                         .iter()
@@ -171,7 +172,6 @@ async fn shared_slot_uses_role_levels_and_explicit_maintenance_uses_requested_le
             ),
         ],
         "preamble",
-        policy_tools(),
         "shared",
     )
     .unwrap();
@@ -181,6 +181,8 @@ async fn shared_slot_uses_role_levels_and_explicit_maintenance_uses_requested_le
     );
     let prompt = Message::user("same input");
     let request = |role| ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: test_instructions(),
         input: vec![ModelRequestItem::message(&prompt)],
         model_role: role,
@@ -360,7 +362,6 @@ async fn reasoning_validation_is_local_and_respects_capabilities_and_roles() {
             ),
         ],
         "preamble",
-        ToolServer::new().run(),
         "root",
     )
     .unwrap();
@@ -472,8 +473,7 @@ async fn all_five_roles_use_explicit_levels_on_one_profile_and_children_remain_i
     };
     let routing =
         ModelRouting::resolve(&BTreeMap::from([("p".into(), provider)]), &modes, 90).unwrap();
-    let tools = ToolServer::new().run();
-    let mut root = ProviderRouter::root(&routing, "stable", tools.clone(), "root").unwrap();
+    let mut root = ProviderRouter::root(&routing, "stable", "root").unwrap();
     let children = [ModelRole::Explore, ModelRole::Builder].map(|role| {
         ProviderRouterFactory::new(
             role,
@@ -484,6 +484,8 @@ async fn all_five_roles_use_explicit_levels_on_one_profile_and_children_remain_i
     });
     let prompt = Message::user("identical input");
     let request = |model_role| ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: test_instructions(),
         input: vec![ModelRequestItem::message(&prompt)],
         model_role,
@@ -506,7 +508,7 @@ async fn all_five_roles_use_explicit_levels_on_one_profile_and_children_remain_i
         .into_iter()
         .zip(children)
     {
-        let mut child = factory.create(role.name(), tools.clone()).unwrap();
+        let mut child = factory.create(role.name()).unwrap();
         assert_eq!(
             child.model_selection(role).unwrap(),
             *routing.selection_for_role(role)

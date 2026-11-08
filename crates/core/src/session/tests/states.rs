@@ -629,6 +629,8 @@ async fn stale_prepared_count_is_replaced_by_next_turn_failure_and_invalidation_
     let turn = TurnContext::new(TurnId::new(2), SessionMode::Build, CancellationToken::new());
     let prompt = Message::user("count");
     let request = || ModelRequest {
+        tools: &[],
+        forbid_tool_calls: false,
         instructions: "test instructions",
         input: vec![ModelRequestItem::message(&prompt)],
         model_role: ModelRole::Build,

@@ -14,6 +14,7 @@ pub enum ModelRequestItem<'session> {
     RequestInstruction(&'session zevria_instructions::RequestDirective),
     ReplayBacked(&'session crate::ReplayMessage),
     ReplayOnly(&'session ProviderReplay),
+    AdditionalTools(&'session crate::ToolDeclarations),
 }
 
 impl<'session> ModelRequestItem<'session> {
@@ -33,9 +34,10 @@ impl<'session> ModelRequestItem<'session> {
         match self {
             Self::Message(message) => Some(message),
             Self::ReplayBacked(content) => Some(content.message()),
-            Self::ReplayOnly(_) | Self::DeveloperInstruction(_) | Self::RequestInstruction(_) => {
-                None
-            }
+            Self::ReplayOnly(_)
+            | Self::DeveloperInstruction(_)
+            | Self::RequestInstruction(_)
+            | Self::AdditionalTools(_) => None,
         }
     }
 
@@ -43,7 +45,10 @@ impl<'session> ModelRequestItem<'session> {
         match self {
             Self::ReplayBacked(content) => Some(content.replay()),
             Self::ReplayOnly(replay) => Some(replay),
-            Self::Message(_) | Self::DeveloperInstruction(_) | Self::RequestInstruction(_) => None,
+            Self::Message(_)
+            | Self::DeveloperInstruction(_)
+            | Self::RequestInstruction(_)
+            | Self::AdditionalTools(_) => None,
         }
     }
 
@@ -52,6 +57,14 @@ impl<'session> ModelRequestItem<'session> {
     /// message; their constructor already established the invariant.
     pub fn to_owned_item(self) -> anyhow::Result<OwnedModelRequestItem> {
         match self {
+            Self::AdditionalTools(tools) => {
+                tools.validate()?;
+                anyhow::ensure!(
+                    !tools.is_empty(),
+                    "additional tool declarations must not be empty"
+                );
+                Ok(OwnedModelRequestItem::AdditionalTools(tools.clone()))
+            }
             Self::RequestInstruction(directive) => {
                 directive.validate()?;
                 Ok(OwnedModelRequestItem::RequestInstruction(directive.clone()))
@@ -82,6 +95,7 @@ pub enum OwnedModelRequestItem {
     RequestInstruction(zevria_instructions::RequestDirective),
     ReplayBacked(crate::ReplayMessage),
     ReplayOnly(ProviderReplay),
+    AdditionalTools(crate::ToolDeclarations),
 }
 
 impl OwnedModelRequestItem {
@@ -105,6 +119,7 @@ impl OwnedModelRequestItem {
 
     pub fn as_borrowed(&self) -> ModelRequestItem<'_> {
         match self {
+            Self::AdditionalTools(tools) => ModelRequestItem::AdditionalTools(tools),
             Self::Message(message) => ModelRequestItem::Message(message),
             Self::DeveloperInstruction(text) => ModelRequestItem::DeveloperInstruction(text),
             Self::RequestInstruction(text) => ModelRequestItem::RequestInstruction(text),
@@ -125,6 +140,9 @@ impl OwnedModelRequestItem {
 #[derive(serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum OwnedModelRequestItemRecord {
+    AdditionalTools {
+        tools: crate::ToolDeclarations,
+    },
     RequestInstruction {
         directive: zevria_instructions::RequestDirective,
     },
@@ -177,6 +195,9 @@ impl serde::Serialize for OwnedModelRequestItem {
         #[derive(serde::Serialize)]
         #[serde(tag = "type", rename_all = "snake_case")]
         enum BorrowedRecord<'a> {
+            AdditionalTools {
+                tools: &'a crate::ToolDeclarations,
+            },
             RequestInstruction {
                 directive: &'a zevria_instructions::RequestDirective,
             },
@@ -194,6 +215,15 @@ impl serde::Serialize for OwnedModelRequestItem {
             },
         }
         let record = match self {
+            Self::AdditionalTools(tools) => {
+                tools.validate().map_err(S::Error::custom)?;
+                if tools.is_empty() {
+                    return Err(S::Error::custom(
+                        "additional tool declarations must not be empty",
+                    ));
+                }
+                BorrowedRecord::AdditionalTools { tools }
+            }
             Self::RequestInstruction(directive) => {
                 directive.validate().map_err(S::Error::custom)?;
                 BorrowedRecord::RequestInstruction { directive }
@@ -225,6 +255,14 @@ impl<'de> serde::Deserialize<'de> for OwnedModelRequestItem {
         use serde::de::Error as _;
 
         match <OwnedModelRequestItemRecord as serde::Deserialize>::deserialize(deserializer)? {
+            OwnedModelRequestItemRecord::AdditionalTools { tools } => {
+                if tools.is_empty() {
+                    return Err(D::Error::custom(
+                        "additional tool declarations must not be empty",
+                    ));
+                }
+                Ok(Self::AdditionalTools(tools))
+            }
             OwnedModelRequestItemRecord::RequestInstruction { directive } => {
                 directive.validate().map_err(D::Error::custom)?;
                 Ok(Self::RequestInstruction(directive))
@@ -313,8 +351,10 @@ impl TryFrom<Message> for ModelResponse {
 /// including provider-native replay-only values that have no message view.
 /// `model_role` and `allowed_tool_names` are the immutable
 /// policy snapshot for the whole user submission, including provider retries
-/// and tool continuations. `None` allows every registered tool; `Some(names)`
-/// is an explicit allow-list. Requests carry nothing ephemeral: instructions
+/// and tool continuations. The allow-list enforces engine calls and gates hosted
+/// tools only; it never filters function declarations. `tools` is rendered in
+/// exactly the supplied order, with additions at their recorded input positions.
+/// Requests carry nothing ephemeral: instructions
 /// stay byte-stable within a workflow so providers keep a cacheable prefix, and
 /// the conversation fields hold exactly the messages the session holds.
 ///
@@ -327,6 +367,10 @@ pub struct ModelRequest<'session> {
     /// The complete engine instruction set for this request; byte-stable within
     /// a workflow so providers keep a cacheable prefix.
     pub instructions: &'session str,
+    /// Top-level function declarations, independent of current permissions.
+    pub tools: &'session [crate::ToolDeclaration],
+    /// Suppress calls without removing declarations (synthetic request fallback).
+    pub forbid_tool_calls: bool,
     pub input: Vec<ModelRequestItem<'session>>,
     pub model_role: ModelRole,
     pub allowed_tool_names: Option<&'session [String]>,

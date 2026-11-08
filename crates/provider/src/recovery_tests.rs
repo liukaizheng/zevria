@@ -81,11 +81,13 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
                 assert!(noise > 1);
             }
         });
-        let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+        let mut provider = connect_http_test_provider(url).await;
         let (sender, mut events) = session_event_channel(64);
         let mut state = AttemptState::default();
         run_turn_request_with_recovery(
             RequestParts {
+                tools: zevria_model::ToolDeclarations::default(),
+                forbid_tool_calls: false,
                 prompt: Message::user("authoritative input"),
                 history: vec![],
                 instructions: "Stable cache prefix".into(),
@@ -149,12 +151,14 @@ async fn warning_does_not_drop_a_partially_read_sse_event() {
         .await
         .unwrap();
     });
-    let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+    let mut provider = connect_http_test_provider(url).await;
     let (sender, mut receiver) = session_event_channel(32);
     let request = tokio::spawn(async move {
         let mut state = AttemptState::default();
         run_turn_request_with_recovery(
             RequestParts {
+                tools: zevria_model::ToolDeclarations::default(),
+                forbid_tool_calls: false,
                 prompt: Message::user("question"),
                 history: vec![],
                 instructions: "stable".into(),
@@ -238,6 +242,8 @@ async fn websocket_ping_metadata_and_prior_terminals_cannot_keep_an_attempt_aliv
     let mut state = AttemptState::default();
     run_turn_request_with_recovery(
         RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: Message::user("question"),
             history: vec![],
             instructions: "stable".into(),
@@ -288,10 +294,12 @@ async fn reasoning_arguments_and_hosted_search_keep_long_http_responses_alive() 
             .await
             .unwrap();
         });
-        let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+        let mut provider = connect_http_test_provider(url).await;
         let mut state = AttemptState::default();
         run_turn_request_with_recovery(
             RequestParts {
+                tools: zevria_model::ToolDeclarations::default(),
+                forbid_tool_calls: false,
                 prompt: Message::user("question"),
                 history: vec![],
                 instructions: "stable".into(),
@@ -371,8 +379,8 @@ async fn core_cancellation_interrupts_every_network_wait_and_next_turn_still_wor
             } else if websocket {
                 let profile = resolved_profile("test", "gpt-test", url, "key", true, ReasoningSummaryLevel::Detailed,
                     ResponsesCompatibilityConfig::default(), BTreeMap::new(), RemoteCompactionConfig::default(), 128_000);
-                OpenAiProvider::unconnected(&profile, ReasoningEffort::Medium, "", tools.clone(), "s", "cache").await.unwrap()
-            } else { connect_http_test_provider(url, tools.clone()).await };
+                OpenAiProvider::unconnected(&profile, ReasoningEffort::Medium, "", "s", "cache").await.unwrap()
+            } else { connect_http_test_provider(url).await };
             provider.input_token_count_url = None;
             provider.recovery = RecoveryPolicy { stall_warning: Duration::from_millis(30), backoff_base: Duration::from_secs(60),
                 backoff_cap: Duration::from_secs(60), ..RecoveryPolicy::default() };
@@ -467,7 +475,6 @@ async fn failed_lazy_handshakes_and_http_fallback_share_the_same_attempt_budget(
         &profile,
         zevria_foundation::ReasoningLevel::Medium,
         "",
-        ToolServer::new().run(),
         "session",
         "cache",
     )
@@ -476,6 +483,8 @@ async fn failed_lazy_handshakes_and_http_fallback_share_the_same_attempt_budget(
     let (sender, mut events) = session_event_channel(32);
     run_turn_request_with_recovery(
         RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
             prompt: Message::user("question"),
             history: vec![],
             instructions: "stable".into(),

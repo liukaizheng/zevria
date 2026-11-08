@@ -24,7 +24,6 @@ async fn runtime(profile: &ResolvedModelProfile) -> OpenAiProvider {
         profile,
         ReasoningEffort::Medium,
         "stable",
-        ToolServer::new().run(),
         "session",
         "stable-cache-key",
     )
@@ -33,6 +32,8 @@ async fn runtime(profile: &ResolvedModelProfile) -> OpenAiProvider {
 }
 fn parts() -> RequestParts {
     RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
         prompt: Message::user("hello"),
         history: vec![],
         instructions: "stable".into(),
@@ -334,7 +335,6 @@ async fn helper_failure_is_terminal_before_network_during_http_websocket_and_pre
                 &profile,
                 ReasoningEffort::Medium,
                 "stable",
-                ToolServer::new().run(),
                 "session",
                 "cache-key",
             )
@@ -505,7 +505,7 @@ async fn count_and_compaction_refresh_once_outside_their_deadlines() {
         provider.input_token_count_timeout = Duration::from_millis(150);
         if compact {
             provider
-                .compact(parts().maintenance_request())
+                .compact(parts().compaction_request())
                 .await
                 .unwrap();
         } else {
@@ -597,15 +597,14 @@ async fn routing_model_preparation_and_factory_children_share_a_lazy_provider_ca
     };
     let providers = BTreeMap::from([("shared".into(), config)]);
     let routing = ModelRouting::resolve(&providers, &modes, 90).unwrap();
-    let tools = ToolServer::new().run();
-    let mut root = ProviderRouter::root(&routing, "stable", tools.clone(), "session").unwrap();
+    let mut root = ProviderRouter::root(&routing, "stable", "session").unwrap();
     let factory = ProviderRouterFactory::new(
         ModelRole::Explore,
         routing.for_role(ModelRole::Explore).clone(),
         ReasoningEffort::Medium,
         "stable",
     );
-    let mut child = factory.clone().create("child-session", tools).unwrap();
+    let mut child = factory.clone().create("child-session").unwrap();
     root.prepare_model_update(
         ModelRole::Build,
         &zevria_model::models::ModelSelection::new(

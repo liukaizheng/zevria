@@ -2,7 +2,6 @@
 use super::*;
 use zevria_instructions::DirectiveContent;
 use zevria_instructions::DirectiveState;
-use zevria_instructions::InstructionSet;
 
 impl<P: ModelProvider> SessionEngine<P> {
     pub(super) fn request_boundaries_enabled(&self) -> bool {
@@ -125,11 +124,6 @@ impl<P: ModelProvider> SessionEngine<P> {
             .flat_map(zevria_instructions::GuidanceSnapshot::components)
     }
 
-    /// Maintenance uses captured guidance independently of transcript replay.
-    pub(super) fn prepare_maintenance_guidance(&self) -> InstructionSet {
-        InstructionSet::maintenance(&self.application_prompt, self.guidance_components())
-    }
-
     pub(super) fn directive_state(&self) -> Result<&DirectiveState, SessionReplayError> {
         match &self.replay {
             SessionReplayState::Valid { instructions, .. } => Ok(instructions.directives()),
@@ -149,7 +143,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         updates.ensure_capacity(
             policy,
             self.context_policy(policy.model_role),
-            prepared_fixed_tokens(&preparation.rendered, &self.filtered_tool_bytes(policy)),
+            self.irreducible_input_tokens(&preparation.rendered, policy),
         )?;
         Ok(updates.records)
     }
@@ -187,10 +181,26 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn reconcile_before_dispatch(&mut self, policy: &TurnPolicy) -> anyhow::Result<()> {
-        let records =
-            self.instruction_updates(self.conversation.items(), policy, self.active_skills()?)?;
+        let mut records = self
+            .tool_declaration_update(self.conversation.items(), policy)
+            .into_iter()
+            .collect::<Vec<_>>();
+        records.extend(self.instruction_updates(
+            self.conversation.items(),
+            policy,
+            self.active_skills()?,
+        )?);
         if !records.is_empty() {
+            let counted = self.context.input_count;
             self.record_required_items(records)?;
+            // Admission already counted prospective declarations at this exact
+            // position. Keep that result only if the committed request matches.
+            if let TurnInputCountState::Prepared { role, identity, .. } = counted
+                && role == policy.model_role
+                && self.logical_request_identity(policy)? == identity
+            {
+                self.context.input_count = counted;
+            }
         }
         Ok(())
     }

@@ -144,11 +144,7 @@ async fn comparison_only_wire_mutation_is_still_a_wire_mismatch() {
     let _lock = CAPTURED_LOG_TEST_LOCK.lock().await;
     let (logs, subscriber) = capture();
     async {
-        let mut provider = connect_http_test_provider(
-            "http://127.0.0.1:9/responses".into(),
-            ToolServer::new().run(),
-        )
-        .await;
+        let mut provider = connect_http_test_provider("http://127.0.0.1:9/responses".into()).await;
         provider.additional_params.insert(
             "prompt_cache_options".into(),
             json!({"comparison_response_id":"resp_operator"}),
@@ -227,7 +223,7 @@ async fn upstream_comparison_explains_only_its_own_scope_not_all_reported_input(
                 send_http_response(&mut stream, "200 OK", "text/event-stream", sse_data(event.to_string())).await;
             }
         });
-        let mut provider = connect_http_test_provider(url, ToolServer::new().run()).await;
+        let mut provider = connect_http_test_provider(url).await;
         provider.additional_params.insert("prompt_cache_options".into(), json!({"comparison_response_id":"resp_operator_baseline"}));
         let mut history = Vec::<zevria_model::OwnedModelRequestItem>::new();
         for index in 0..4 {

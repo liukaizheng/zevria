@@ -59,6 +59,7 @@ pub(crate) struct SubtaskSupervisorConfig {
     /// `{workspace}/.zevria/subsessions/{root_session_id}`.
     pub subsessions_dir: PathBuf,
     pub compaction: CompactionPolicy,
+    pub incremental_tools: bool,
     pub max_concurrent_subtasks: usize,
     /// The parent's opening/resume snapshot, even for late or queued children.
     pub guidance: zevria_instructions::GuidanceSnapshot,
@@ -278,7 +279,7 @@ async fn run_child_session(
             )
         }
     };
-    let provider = factory.create(id.as_str(), tools.clone())?;
+    let provider = factory.create(id.as_str())?;
     tokio::select! {
         () = abandoned.cancelled() => anyhow::bail!("subtask supervisor aborted"),
         () = set_running(&id, request.turn.id, config) => {}
@@ -291,6 +292,7 @@ async fn run_child_session(
         transcript,
         Arc::new(SkillCatalog::default()),
     )?
+    .with_incremental_tools(config.incremental_tools)
     .with_guidance_snapshot(config.guidance.clone())
     .with_compaction_policy(config.compaction.clone());
 
@@ -597,6 +599,7 @@ mod tests {
             )
             .expect("test compaction policy"),
             max_concurrent_subtasks: 4,
+            incremental_tools: true,
             guidance: zevria_instructions::GuidanceSnapshot::default(),
         }
     }

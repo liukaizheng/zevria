@@ -321,11 +321,13 @@ fn tool_results_precede_text_and_directives_and_images_documents_errors_map() {
     assert_eq!(content[4]["text"], directive.text);
 }
 #[test]
-fn maintenance_tools_cache_movement_and_golden_body() {
+fn declared_tools_cache_movement_and_golden_body() {
     let user = Message::user("hello");
-    let registry = vec![
-        json!({"name":"command","description":"Run a command","input_schema":{"type":"object","properties":{}}}),
-    ];
+    let tools = vec![zevria_model::ToolDeclaration {
+        name: "command".into(),
+        description: "Run a command".into(),
+        parameters: json!({"type":"object","properties":{}}),
+    }];
     let compat = Compatibility::default();
     let params = Default::default();
     let target = target();
@@ -339,20 +341,26 @@ fn maintenance_tools_cache_movement_and_golden_body() {
         additional_params: &params,
     };
     let mut request = ModelRequest {
+        tools: &tools,
+        forbid_tool_calls: false,
         instructions: "stable",
         input: vec![ModelRequestItem::message(&user)],
         model_role: ModelRole::Build,
         allowed_tool_names: None,
     };
-    let body = body::build(&request, &registry, &options).unwrap().body;
+    let body = body::build(&request, &options).unwrap().body;
     assert_eq!(
         format!("{}\n", serde_json::to_string_pretty(&body).unwrap()),
         include_str!("../tests/fixtures/messages-default.json")
     );
     let none = Vec::new();
     request.allowed_tool_names = Some(&none);
-    let maintenance = body::build(&request, &registry, &options).unwrap().body;
-    assert!(maintenance.get("tools").is_none());
+    let maintenance = body::build(&request, &options).unwrap().body;
+    assert_eq!(
+        maintenance, body,
+        "permissions alone never rewrite declarations"
+    );
+    request.forbid_tool_calls = true;
     let replay = ReplayMessage::new(ProviderReplay::anthropic_messages(
         target.clone(),
         vec![json!({"type":"tool_use","id":"toolu_1","name":"command","input":{}})],
@@ -371,7 +379,7 @@ fn maintenance_tools_cache_movement_and_golden_body() {
         ModelRequestItem::replay_backed(&replay),
         ModelRequestItem::message(&result),
     ];
-    let maintenance = body::build(&request, &registry, &options).unwrap().body;
+    let maintenance = body::build(&request, &options).unwrap().body;
     assert_eq!(maintenance["tool_choice"], json!({"type":"none"}));
     assert_eq!(maintenance["tools"].as_array().unwrap().len(), 1);
     assert!(

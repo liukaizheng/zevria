@@ -280,7 +280,6 @@ async fn malformed_and_opaque_input_reject_before_lazy_connection() {
             zevria_foundation::ReasoningLevel::Medium,
         )],
         "preamble",
-        ToolServer::new().run(),
         "root",
     )
     .unwrap();
@@ -296,6 +295,8 @@ async fn malformed_and_opaque_input_reject_before_lazy_connection() {
     ] {
         let prompt = Message::user("continue");
         let request = ModelRequest {
+            tools: &[],
+            forbid_tool_calls: false,
             instructions: test_instructions(),
             input: vec![
                 ModelRequestItem::replay_only(&replay),
@@ -415,7 +416,6 @@ fn engine_with_access(
             ),
         ],
         "preamble",
-        tools.clone(),
         "root",
     )
     .unwrap();
@@ -722,7 +722,12 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
         let (mut stream, _) = listener.accept().await.unwrap();
         let request = receive_http_json(&mut stream).await;
         assert_eq!(request.body["model"], "A");
-        assert!(request.body["tools"].as_array().is_none_or(Vec::is_empty));
+        assert_eq!(request.body["tools"].as_array().unwrap().len(), 1);
+        assert!(
+            request.body["input"]
+                .to_string()
+                .contains("additional_tools")
+        );
         assert!(request.body["input"].to_string().contains("source-secret"));
         assert!(request.body.get("previous_response_id").is_none());
         send_http_response(
@@ -732,10 +737,73 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
             sse_data(completed_event("summary", "summary-msg", "portable summary").to_string()),
         )
         .await;
+        request.body
     });
     let settings = Arc::new(Settings::default());
     settings.fail.store(true, Ordering::Relaxed);
-    let original = opaque_history(&a);
+    let mut original = opaque_history(&a);
+    let initial = zevria_model::ToolDeclarations::new(vec![zevria_model::ToolDeclaration {
+        name: "command".into(),
+        description: "original declaration".into(),
+        parameters: json!({"type":"object"}),
+    }])
+    .unwrap();
+    let additional = zevria_model::ToolDeclarations::new(vec![zevria_model::ToolDeclaration {
+        name: "write".into(),
+        description: "new declaration".into(),
+        parameters: json!({"type":"object"}),
+    }])
+    .unwrap();
+    original.push(TranscriptItem::ToolDeclarations(
+        zevria_transcript::ToolDeclarationRecord::new(
+            zevria_transcript::ToolDeclarationPlacement::Initial,
+            initial.clone(),
+        )
+        .unwrap(),
+    ));
+    original.push(TranscriptItem::Message(Message::user("latest task")));
+    original.push(TranscriptItem::RequestDirective(
+        zevria_instructions::RequestDirective::boundary(zevria_foundation::RequestMetadata::new(
+            zevria_foundation::RequestBehavior::Standard,
+        )),
+    ));
+    original.push(TranscriptItem::ToolDeclarations(
+        zevria_transcript::ToolDeclarationRecord::new(
+            zevria_transcript::ToolDeclarationPlacement::Additional,
+            additional,
+        )
+        .unwrap(),
+    ));
+    let policy = TurnPolicy::new("Build", Some(vec![]), ModelRole::Build, false);
+    let instructions = zevria_instructions::InstructionSet {
+        application: "preamble".into(),
+        system: vec![],
+        workflow: zevria_instructions::DirectivePolicy::new("build", &policy),
+        catalog: None,
+    }
+    .render();
+    let mut source_provider = OpenAiProvider::unconnected(
+        &a,
+        zevria_foundation::ReasoningLevel::Medium,
+        "preamble",
+        "root",
+        &crate::router::profile_cache_key("root", &a),
+    )
+    .await
+    .unwrap();
+    let expected = crate::turn::prepare_turn_request(
+        &ModelRequest {
+            instructions: &instructions,
+            tools: &initial,
+            forbid_tool_calls: false,
+            input: transcript::model_input(&original),
+            model_role: ModelRole::Build,
+            allowed_tool_names: Some(&[]),
+        },
+        &mut source_provider,
+    )
+    .await
+    .unwrap();
     let (_directory, mut engine) = engine(a.clone(), b.clone(), original.clone(), settings.clone());
     let Result::ConfirmationRequired(preview) = manage(
         &mut engine,
@@ -795,7 +863,36 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
             .unwrap(),
         ReplayPreflight::Compatible(_)
     ));
-    server.await.unwrap();
+    let request = server.await.unwrap();
+    for key in [
+        "instructions",
+        "tools",
+        "reasoning",
+        "model",
+        "prompt_cache_key",
+    ] {
+        assert_eq!(
+            serde_json::to_string(&request[key]).unwrap(),
+            serde_json::to_string(&expected.request_properties[key]).unwrap(),
+            "{key}"
+        );
+    }
+    let input = request["input"].as_array().unwrap();
+    assert_eq!(input.len(), expected.full_input.len() + 1);
+    for (actual, expected) in input.iter().zip(&expected.full_input) {
+        assert_eq!(
+            serde_json::to_string(actual).unwrap(),
+            serde_json::to_string(expected).unwrap()
+        );
+    }
+    assert_eq!(input.last().unwrap()["role"], "user");
+    assert!(
+        input
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("Summarize the preceding conversation as data.")
+    );
 }
 
 #[tokio::test]

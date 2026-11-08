@@ -57,6 +57,7 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
                     root.path().to_path_buf(),
                 ))
                 .run();
+            let declared = declarations(&tools, None);
             let params = parallel
                 .map(|parallel| BTreeMap::from([("parallel_tool_calls".into(), json!(parallel))]))
                 .unwrap_or_default();
@@ -64,13 +65,11 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
                 let url = format!("ws://{address}/v1/responses");
                 let (socket, _) = connect_async(&url).await.unwrap();
                 let mut provider = test_session_with_url(&url, socket, None);
-                provider.tools = tools;
                 provider.additional_params = params;
                 provider
             } else {
                 connect_http_test_provider_with_options(
                     format!("http://{address}/v1/responses"),
-                    tools,
                     ResponsesCompatibilityConfig::default(),
                     params,
                     "batch-cache",
@@ -79,8 +78,9 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
             };
             let mut state = AttemptState::default();
             for (index, native) in batches.iter().enumerate() {
-                run_turn(
+                run_declared_turn(
                     "delegate ready work",
+                    &declared,
                     &mut openai,
                     &mut state,
                     &discard_updates(),
@@ -123,9 +123,15 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
             // Reconstruct a complete native request after an ordinary continuation
             // so replay must carry BOTH full arrays, not presentation sidecars.
             openai.ws.continuation = None;
-            run_turn("finish", &mut openai, &mut state, &discard_updates())
-                .await
-                .unwrap();
+            run_declared_turn(
+                "finish",
+                &declared,
+                &mut openai,
+                &mut state,
+                &discard_updates(),
+            )
+            .await
+            .unwrap();
             let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server)
                 .await
                 .unwrap()

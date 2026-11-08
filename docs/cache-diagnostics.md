@@ -275,6 +275,17 @@ count, first differing zero-based index, and bounded old/new item-kind enums:
 | `mismatch` | An earlier item differs; inspect the first index and kinds. |
 | `truncated` | Input ends before the baseline ends; first index is the first missing item. |
 
+A full-history local summary now appends exactly one user instruction to the
+normal request's complete input (including its completed output), preserving
+instructions, tools and other cache-sensitive properties. With an unchanged
+active mode/profile it should report `exact_extension`; a valid WebSocket chain
+can transmit only that instruction. A shorter adaptive attempt is a truncated
+prefix by design. The post-summary reset/checkpoint starts a new window, and a
+one-time `tool_choice: none` fallback intentionally changes request properties.
+Mode switches still change the active-policy instruction block independently of
+append-only tool declarations. Inline additions have bounded item kind
+`AdditionalTools` in fingerprints.
+
 `instructions_changed`, `tools_changed`, and `remaining_properties_changed` are
 separate comparisons (`None` when unknown). The comparison projection excludes
 **only** `prompt_cache_options.comparison_response_id`. Empty options are removed
@@ -604,7 +615,7 @@ ordinary fixtures, `isolate_log_test` and its existing operational-log test call
 and the permanent release gates in `docs/transcript-performance.md`.
 Also **keep** `prompt_cache.rs`, its `lib.rs` module, the narrowly scoped
 `turn.rs` continuation/counting/compaction calls, `prompt_cache_tests.rs` and
-its `tests.rs` module, and the maintenance wire assertions. These are explicit
+its `tests.rs` module, and the prefix-sharing compaction wire assertions. These are explicit
 `additional_params` interoperability, required in **both feature configurations**,
 not observer infrastructure. They do not depend on the temporary module, add
 requests, insert IDs, or change requests lacking the comparison field. Keep the

@@ -1291,7 +1291,15 @@ async fn fatal_active_replay_bypasses_control_backpressure_and_discards_queued_w
     let bytes = std::fs::read_to_string(path).unwrap();
     assert!(!bytes.contains("pending must not run"));
     assert!(!bytes.contains("turn cancelled"));
-    let lines = bytes.lines().collect::<Vec<_>>();
+    let lines = bytes
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap()
+                .get("zevria_tool_declarations")
+                .is_none()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         lines.len(),
         4,

@@ -408,7 +408,7 @@ async fn removed_first_use_snapshot_survives_resume_and_edit_but_a_new_name_reso
     );
     assert!(engine.conversation.items().starts_with(&retained_prefix));
     let saved = zevria_transcript::transcript::load(&path).unwrap();
-    assert_eq!(saved, conversation_records(engine.conversation.items()));
+    assert_eq!(saved, engine.conversation.items());
     assert_eq!(
         replay_active_skills(&saved).unwrap().get(snapshot.name()),
         Some(&snapshot)
@@ -439,7 +439,7 @@ async fn removed_first_use_snapshot_survives_resume_and_edit_but_a_new_name_reso
     );
     assert_eq!(
         zevria_transcript::transcript::load(&path).unwrap(),
-        conversation_records(engine.conversation.items())
+        engine.conversation.items()
     );
 }
 

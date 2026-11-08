@@ -234,6 +234,7 @@ async fn replay_message_drives_tools_events_history_and_persistence() {
         .expect("transcript should be readable")
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL"))
+        .filter(|record| record.get("zevria_tool_declarations").is_none())
         .collect::<Vec<_>>();
     for index in [1, 3] {
         let record = lines[index]
@@ -243,8 +244,10 @@ async fn replay_message_drives_tools_events_history_and_persistence() {
         assert!(record.contains_key("zevria_provider_replay"));
         assert!(!record.contains_key("role"));
     }
-    let restored = zevria_transcript::transcript::load(&transcript_path)
-        .expect("replay-only transcript should restore");
+    let restored = conversation_records(
+        &zevria_transcript::transcript::load(&transcript_path)
+            .expect("replay-only transcript should restore"),
+    );
     assert_eq!(restored[1].message(), Some(&canonical_tool_message));
     assert_eq!(restored[3].message(), Some(&canonical_final));
 }

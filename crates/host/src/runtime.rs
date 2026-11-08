@@ -439,12 +439,7 @@ async fn start_worker_session(
     let (event_tx, event_rx) = session_event_channel(config.session.event_queue_capacity);
     let questions = question_channels(event_tx.clone());
     let tools = worker_tools(&workspace, questions.requester, config)?;
-    let provider = ProviderRouter::root(
-        &models.routing,
-        &model_config.session.preamble,
-        tools.clone(),
-        &id,
-    )?;
+    let provider = ProviderRouter::root(&models.routing, &model_config.session.preamble, &id)?;
     let writer = if loaded.is_some() {
         transcript::TranscriptWriter::append_to(path.clone())?
     } else {
@@ -461,6 +456,7 @@ async fn start_worker_session(
         writer.recovered_malformed_lines(),
     ));
     let mut engine = SessionEngine::new(provider, tools, worker_policies(), writer, skills)?
+        .with_incremental_tools(config.session.incremental_tools)
         .with_transcript_items(items.clone())?
         .with_guidance_roots(guidance_roots(&workspace))
         .with_compaction_policy(models.compaction)
@@ -949,7 +945,6 @@ pub async fn start_session(
     let provider = ProviderRouter::root(
         &session_models.routing,
         &model_config.session.preamble,
-        tools.clone(),
         &root_session_id,
     )?;
 
@@ -1011,6 +1006,7 @@ pub async fn start_session(
         ensemble_questions,
     )?);
     let mut engine = SessionEngine::new(provider, tools, policies, transcript, skills.clone())?
+        .with_incremental_tools(app_config.session.incremental_tools)
         .with_skill_catalog(skill_catalog.clone())?
         .with_transcript_items(transcript_items.clone())?
         .with_mode_management()
@@ -1083,6 +1079,7 @@ pub async fn start_session(
             subsessions_dir: subsessions_dir.clone(),
             compaction: session_models.compaction.clone(),
             max_concurrent_subtasks: app_config.session.max_concurrent_subtasks,
+            incremental_tools: app_config.session.incremental_tools,
             guidance: engine
                 .guidance_snapshot()
                 .expect("root captured guidance")
@@ -1234,6 +1231,13 @@ mod tests {
     use zevria_workflow::PlanWorkflowState;
 
     use super::*;
+
+    async fn assert_session_lease_reclaimed(path: &Path) {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::session_lease::tests::assert_reclaimed(&path))
+            .await
+            .expect("session lease reclamation check");
+    }
 
     #[test]
     fn ordinary_plan_keeps_shared_inspection_policy_with_every_optional_setting() {
@@ -1405,6 +1409,7 @@ mod tests {
         );
         worker.shutdown().await.unwrap();
         assert!(!path.exists());
+        assert_session_lease_reclaimed(&path).await;
         assert!(!path.with_extension("jsonl.lock").exists());
         assert!(crate::session_lease::RootSessionLease::acquire(&path).is_ok());
         let directory = path.parent().unwrap();
@@ -1495,6 +1500,7 @@ mod tests {
             );
             assert!(receive.recv().await.is_none(), "one runtime exit");
             assert_eq!(weak.strong_count(), 0);
+            assert_session_lease_reclaimed(&path).await;
             assert!(!path.with_extension("jsonl.lock").exists());
             assert!(!transcript::is_abandoned_root(&path));
             assert_eq!(std::fs::read(path).unwrap(), bytes);
@@ -1547,6 +1553,7 @@ mod tests {
             );
             worker.shutdown().await.unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_session_lease_reclaimed(&path).await;
             assert!(!path.with_extension("jsonl.lock").exists());
         }
     }
@@ -1589,6 +1596,7 @@ mod tests {
                 observer.await.unwrap();
             }
             assert_eq!(lease.strong_count(), 0);
+            assert_session_lease_reclaimed(&path).await;
             assert!(!sidecar.exists());
             assert!(
                 !path.exists(),
@@ -1653,13 +1661,29 @@ mod tests {
             )
             .await
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !directory.path().join("job-pid").exists() {
+        // Shell redirection creates the file before echo writes the PID. Do
+        // not kill the job in that interval and mistake an empty file for a
+        // completed readiness handshake.
+        let _pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match std::fs::read_to_string(directory.path().join("job-pid")) {
+                    Ok(text) if text.ends_with('\n') => {
+                        let pid = text
+                            .trim()
+                            .parse::<i32>()
+                            .expect("valid background job PID");
+                        assert!(pid > 0, "background job PID must be positive");
+                        break pid;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("cannot read background job PID: {error}"),
+                }
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .unwrap();
+        .expect("background job must publish its PID before shutdown");
         let running = RunningSession {
             command_jobs: Some(jobs),
             cleanup_abandoned_history: true,
@@ -1699,6 +1723,7 @@ mod tests {
             ["engine", "supervisor"]
         );
         assert!(!transcript_path.exists());
+        assert_session_lease_reclaimed(&transcript_path).await;
         assert!(!sidecar.exists());
         tokio::time::sleep(std::time::Duration::from_millis(650)).await;
         assert!(
@@ -1707,13 +1732,8 @@ mod tests {
         );
         #[cfg(unix)]
         {
-            let pid: i32 = std::fs::read_to_string(directory.path().join("job-pid"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
             // SAFETY: signal zero only probes whether this recorded child remains.
-            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(unsafe { libc::kill(_pid, 0) }, -1);
         }
     }
 

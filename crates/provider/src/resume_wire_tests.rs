@@ -177,7 +177,6 @@ pub(super) async fn flow() -> Vec<String> {
                 zevria_foundation::ReasoningLevel::Medium,
             )],
             "Stable application",
-            tools.clone(),
             "fixed-resume-session",
         )
         .unwrap();

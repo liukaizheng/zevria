@@ -264,13 +264,25 @@ pub fn project(
     input: &[ModelRequestItem<'_>],
     target: &ModelProfileRef,
 ) -> anyhow::Result<(Vec<serde_json::Value>, ReplaySource)> {
-    project_with_compatibility(input, target, true)
+    project_with_compatibility(
+        input,
+        target,
+        true,
+        crate::tools::ToolRendererOptions::default(),
+        true,
+    )
 }
 pub fn preflight(
     input: &[ModelRequestItem<'_>],
     target: &ModelProfileRef,
 ) -> anyhow::Result<ReplayPreflight> {
-    preflight_with_compatibility(input, target, true)
+    preflight_with_compatibility(
+        input,
+        target,
+        true,
+        crate::tools::ToolRendererOptions::default(),
+        true,
+    )
 }
 
 /// Opaque compatibility is a structured result, not a plain-message fallback.
@@ -278,6 +290,8 @@ pub fn preflight_with_compatibility(
     input: &[ModelRequestItem<'_>],
     target: &ModelProfileRef,
     developer_messages: bool,
+    tool_options: crate::tools::ToolRendererOptions,
+    additional_tools: bool,
 ) -> anyhow::Result<ReplayPreflight> {
     let sources = input
         .iter()
@@ -302,8 +316,27 @@ pub fn preflight_with_compatibility(
             sources: sources.into_iter().collect(),
         });
     }
-    let (projected, _) = project_with_compatibility(input, target, developer_messages)?;
-    let tokens = zevria_model::compaction::estimate_responses_input_tokens(&projected, 0);
+    let (projected, _) = project_with_compatibility(
+        input,
+        target,
+        developer_messages,
+        tool_options,
+        additional_tools,
+    )?;
+    let mut tokens = zevria_model::compaction::estimate_responses_input_tokens(&projected, 0);
+    if !additional_tools {
+        // Projection omits inline items in fold mode, but their declarations
+        // still consume capacity in the request's top-level tools.
+        for item in input {
+            if let ModelRequestItem::AdditionalTools(tools) = item {
+                let rendered = crate::tools::render(tools, tool_options)?;
+                tokens =
+                    tokens.saturating_add(zevria_model::compaction::approximate_tokens_from_bytes(
+                        serde_json::to_vec(&rendered)?.len(),
+                    ));
+            }
+        }
+    }
     Ok(ReplayPreflight::Compatible(
         zevria_model::ContextTokenEstimate::new(tokens, tokens),
     ))
@@ -313,6 +346,8 @@ pub fn project_with_compatibility(
     input: &[ModelRequestItem<'_>],
     target: &ModelProfileRef,
     developer_messages: bool,
+    tool_options: crate::tools::ToolRendererOptions,
+    additional_tools: bool,
 ) -> anyhow::Result<(Vec<serde_json::Value>, ReplaySource)> {
     let mut projection = Projection::default();
     // Reserve future native wire handles before minting neutral ones. A
@@ -328,6 +363,16 @@ pub fn project_with_compatibility(
     }
     for item in input {
         match item {
+            ModelRequestItem::AdditionalTools(tools) => {
+                tools.validate()?;
+                anyhow::ensure!(
+                    !tools.is_empty(),
+                    "additional tool declarations must not be empty"
+                );
+                if additional_tools {
+                    projection.input.push(serde_json::json!({"type":"additional_tools", "role":"developer", "tools":crate::tools::render(tools, tool_options)?}));
+                }
+            }
             ModelRequestItem::RequestInstruction(directive) => {
                 directive.validate()?;
                 projection.input.push(serde_json::json!({"type": "message", "role": if developer_messages { "developer" } else { "user" }, "content": [{"type": "input_text", "text": directive.render()}]}));
