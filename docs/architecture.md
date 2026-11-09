@@ -190,10 +190,10 @@ engine dependency. Session API has no storage dependency, neither codec has a
 runtime/storage dependency, and host has no terminal frontend/widgets/input
 dependency. Desktop must remain a leaf, cannot reach any TUI crate, and has no
 ratatui/crossterm dependency. Integration tests may depend upward through explicit
-dev-dependencies. The binary's manifest-boundary tests discover `crates/*` and
-enforce these rules, including target-specific production edges, without invoking Cargo.
-See [the crate-split report](crate-split/README.md) for exact resolved edges,
-source/test accounting and validation evidence.
+dev-dependencies. The binary's
+[manifest-boundary tests](../crates/zevria/tests/crate_boundaries.rs) discover
+`crates/*` and enforce these rules, including target-specific production edges,
+without invoking Cargo.
 
 ## Native GPUI desktop
 

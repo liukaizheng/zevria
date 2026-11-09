@@ -1,10 +1,42 @@
-# Anchored prompt admission: replay reuse
+# Prompt admission performance
 
-This is the historical synchronous-admission report. The subsequent staged
-preparation/measurement/acceptance refactor and extended benchmark boundaries
-are documented in `staged-prompt-admission-performance.md`.
+This report preserves two historical measurement stages:
 
-## Measurement boundary
+- [Stage 1: synchronous admission replay reuse](#stage-1-synchronous-admission-replay-reuse),
+  measured on September 19, 2026, against baseline `f570674`.
+- [Stage 2: staged preparation, measurement and acceptance](#stage-2-staged-preparation-measurement-and-acceptance),
+  a follow-up against baseline `9119791`.
+
+The stages have different measurement boundaries and local baselines; their
+figures are not a continuous before/after comparison or a measurement of current
+latency. Historical commands, timings, allocation counts and caveats are retained
+below. Transcript-format results remain separate in
+[transcript-performance.md](transcript-performance.md).
+
+## Current benchmark boundaries
+
+The current [`AdmissionFixture`](../crates/core/src/session/benchmark.rs)
+wrappers exercise production paths in
+[`session/prompt.rs`](../crates/core/src/session/prompt.rs):
+
+- `admit_prompt`: preflight and synchronous preparation, including rendered
+  instructions, context limits and an irreducible-input estimate. No
+  checkpoint-aware projection or durable mutation is included.
+- `admit_prompt_pipeline/measure`: adds projection, tool selection/serialization,
+  fixed-token and request-shape computation, and deterministic exact counting.
+- `admit_prompt_pipeline/accept`: the async acceptance pipeline, including normal
+  measurement/compaction decisions, authoritative replay validation, persistence,
+  replay installation, accounting and acceptance events. No completion or tool
+  execution is included.
+
+Tool serialization and request-shape fingerprinting now happen during
+measurement, not synchronous preparation. Stage 2 below records the earlier
+boundary, which included those costs in preparation; its figures have not been
+remeasured for the current implementation.
+
+## Stage 1: synchronous admission replay reuse
+
+### Measurement boundary
 
 Local measurements on September 19, 2026, based on `f570674`. The baseline was
 captured **before changing production behavior**, after adding the synthetic
@@ -34,7 +66,7 @@ results in `transcript-performance.md`.
   include allocations/reallocations and their cumulative requested bytes,
   **not** live heap size, retained memory, or peak RSS.
 
-## Timings
+### Timings
 
 Microseconds per synchronous admission. Baseline → refactored:
 
@@ -65,7 +97,7 @@ threshold. The new path also carries structural reducer state and validates the
 prospective suffix before commit; reduced historical pass counts alone are not
 a guarantee of faster small-message edits. No wall-clock assertions were added.
 
-## Allocations
+### Allocations
 
 For 1,000 requested historical records and 8,192-byte payloads:
 
@@ -85,7 +117,7 @@ cost for arbitrary instruction state. More pins, larger pinned bodies/catalogs,
 more pending calls, or larger Plan artifacts can still increase reducer-state
 copying and reconciliation work. Edits still scan their retained history.
 
-## Structural assertions and unchanged boundaries
+### Structural assertions and unchanged boundaries
 
 Feature-gated, admission-scoped replay probes assert for messages, activation,
 and reapplication:
@@ -110,7 +142,7 @@ Existing core compaction/resume/persistence suites remain the checks on the
 asynchronous and authoritative boundaries. Admission never installs its staged
 reducer state after asynchronous work; commit still performs full validation.
 
-## Reproduction
+### Reproduction
 
 Capture the baseline with the benchmark-only changes, before the production
 refactor; then compare using the same fixture and feature flags:
@@ -125,3 +157,118 @@ Criterion samples and the named local baseline are under `target/criterion`;
 allocation results are printed by the separate executable. Neither is a CI
 performance threshold. Token measurement, projection, persistence, compaction,
 and commit processing retain their own costs and are outside this optimization.
+
+## Stage 2: staged preparation, measurement and acceptance
+
+Follow-up to the [replay-reuse stage](#stage-1-synchronous-admission-replay-reuse),
+implementing plan `689bf902-427e-4ef4-a84f-6ec813272ccd@1` against baseline `9119791`.
+
+### Boundaries and reproducibility
+
+At this measured stage, the `admit_prompt` matrix exercised append/edit ×
+message/activation/reapplication at 10/1,000 records and 128/8,192-byte native
+replay payloads. It called the production preflight and preparation stages.
+Preparation then included the immutable counting context: validated/rendered
+instructions, fixed overhead, filtered tool serialization, and request-shape
+fingerprinting. These costs must not be mistaken for projection or persistence;
+the [current benchmark boundaries](#current-benchmark-boundaries) differ.
+
+Two additional matrices made the broader boundaries explicit:
+
+- `admit_prompt_pipeline/measure`: preflight, preparation, one borrowed
+  checkpoint-aware projection, local estimation, deterministic exact counting,
+  and the first-dispatch identity. No durable mutation. Exact counting is forced
+  here so every sample exercises the identity handoff work.
+- `admit_prompt_pipeline/accept`: the actual async acceptance pipeline, including
+  authoritative cross-domain validation, persistence, replay installation,
+  accounting, and acceptance events. Exact counting uses normal admission
+  thresholds. Fixture creation and initial transcript writes are outside timing.
+  Single-record appends use append/fsync; multi-record activation and edits use
+  atomic rewrites. No completion or tool execution is included.
+
+The provider performs no network operations and returns `Exact(1)` whenever
+counting is requested. The matrices do not benchmark compaction inference.
+Compaction work is covered by deterministic regression tests instead.
+
+Commands used for the local before/after run:
+
+```text
+rtk cargo bench -p zevria-core --bench transcript --features test-support -- admit_prompt --quick --save-baseline staged-before
+rtk cargo bench -p zevria-core --bench transcript --features test-support -- admit_prompt --quick
+```
+
+The before run completed before production edits. Its printed results were
+retained, but the generated Criterion baseline directory was unavailable when
+attempting `--baseline staged-before`. Consequently the tables below compare
+captured point estimates, **not a paired Criterion significance analysis**.
+Both runs used `--quick`; local microsecond results and filesystem timings are
+noisy and are not CI performance thresholds. All 72 final cases completed.
+
+### Synchronous preparation: before → after
+
+Microseconds, using the middle estimate printed by Criterion:
+
+| Records / payload bytes | Input | Append (µs) | Edit (µs) |
+| --- | --- | ---: | ---: |
+| 10 / 128 | Message | 2.607 → 4.975 | 2.704 → 4.974 |
+| 10 / 128 | Activation | 9.662 → 9.536 | 9.614 → 9.629 |
+| 10 / 128 | Reapplication | 8.965 → 9.414 | 10.467 → 10.983 |
+| 10 / 8192 | Message | 2.555 → 4.997 | 2.570 → 5.020 |
+| 10 / 8192 | Activation | 9.295 → 9.637 | 9.541 → 9.676 |
+| 10 / 8192 | Reapplication | 8.869 → 9.449 | 10.554 → 10.971 |
+| 1000 / 128 | Message | 2.850 → 5.016 | 8.577 → 10.795 |
+| 1000 / 128 | Activation | 9.492 → 9.601 | 15.184 → 15.390 |
+| 1000 / 128 | Reapplication | 9.136 → 9.322 | 16.464 → 17.161 |
+| 1000 / 8192 | Message | 2.910 → 4.985 | 8.534 → 10.854 |
+| 1000 / 8192 | Activation | 9.457 → 9.668 | 15.156 → 15.297 |
+| 1000 / 8192 | Reapplication | 8.910 → 9.518 | 16.395 → 16.853 |
+
+**This narrow preparation benchmark does not improve overall.** Message
+preparation adds roughly 2–2.5 µs while skill preparation is approximately flat
+to modestly slower. At this historical stage, preparation eagerly built counting
+material that was formerly recomputed later; reducing total pipeline work did
+not imply speeding up this isolated stage. No end-to-end before/after latency
+improvement is claimed.
+
+### Extended pipeline samples
+
+Final-run milliseconds for 1,000 records × 8,192-byte payloads:
+
+| Input | Measure append | Measure edit | Accept append | Accept edit |
+| --- | ---: | ---: | ---: | ---: |
+| Message | 13.921 | 13.875 | 19.768 | 56.455 |
+| Activation | 14.241 | 14.243 | 35.713 | 57.187 |
+| Reapplication | 14.276 | 13.956 | 18.991 | 55.263 |
+
+These lanes distinguish preparation/projection/count-identity costs from
+acceptance with durable I/O; they are not an algebraic decomposition of I/O
+alone because acceptance also validates and updates accounting. They have no
+pre-refactor timing baseline. They explicitly demonstrate that the complete
+workflow is **not constant-time**: projection, hashing, final replay validation,
+usage reestimation, and durable rewrites still scale with history/payload size.
+
+### Structural regression coverage
+
+Task-scoped core counters and poll-scoped transcript counters exercise the
+actual async `prepare_and_accept_prompt` boundary, including interleaved tasks:
+
+- One instruction snapshot and one prompt preparation per attempt.
+- One legitimate pre-prompt reconciliation; skill input additionally has one
+  post-invocation update, shared with its irreducible-capacity check.
+- Append borrows committed replay; edit reduces the retained instruction and
+  Plan prefixes once each. No pin-only replay on successful admission.
+- One projection/measurement for an unchanged request, including unavailable
+  compaction and unsupported/failed counts. Two only after a checkpoint changes
+  the request. A prior exact count forces recount; old usage/exact values do not
+  survive rebuilding. The failed-count latch does survive.
+- One proposal construction, authoritative replay validation, and replay
+  installation per successful commit. Installed append compaction is counted
+  as a separate durable mutation; rejected edit checkpoints install nothing.
+- No history scan solely to select mode or discover historical request
+  boundaries. Orchestration eligibility runs once, before persistence repair.
+
+Tests compare actual count requests with committed model input and first
+dispatch, preserve retained prefixes, and check that remeasurement does not
+regenerate request identities, invocation records, or body directives. Existing
+resume/reconnect/cache-prefix, image, Ready Plan, ensemble, persistence, and
+malformed-history suites continue to cover their respective boundaries.

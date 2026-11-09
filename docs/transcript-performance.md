@@ -19,14 +19,14 @@ the current response-attempt format or restore boundary.
 ## Ownership after the domain-crate split (historical stage)
 
 The historical transcript-refactor measurements below and their CSV files are
-unchanged. The subsequent structural crate split is measured separately in the
-[crate-split report](crate-split/README.md); those before/after runs must not be
-substituted for the older format/ownership stages recorded here.
+unchanged. They do not measure the later domain-crate split. See
+[dependency direction](architecture.md#dependency-direction) for current crate
+ownership; these timings must not be read as measurements of that split.
 
-The later synchronous prompt-admission replay optimization is measured in
-[prompt-admission-performance.md](prompt-admission-performance.md), including
-its own before/after `admit_prompt` timings and allocation counts. It does not
-replace the historical format/ownership measurements below.
+The later prompt-admission replay and staged-pipeline optimizations are recorded
+in [prompt-admission-performance.md](prompt-admission-performance.md), with
+separate historical timings, allocation counts and measurement boundaries. They
+do not replace the older format/ownership measurements below.
 
 The end-to-end `transcript` benchmark remains in **zevria-core**, alongside its
 feature-gated synthetic fixture builders and opaque engine-admission helpers.
