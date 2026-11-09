@@ -135,7 +135,7 @@ pub(crate) fn render_job_notice(
     append_native_header(&mut title, header);
     lines.push(title);
     let start = lines.len();
-    for line in notice.summary_lines() {
+    for line in zevria_presentation::jobs::display_notice_lines(notice) {
         lines.push(Line::styled(line, Style::default().fg(theme().text.muted)));
     }
     if folded {
@@ -866,7 +866,7 @@ fn render_presentation_block(
                 lines.push(Line::styled("reasoning", muted));
             }
             for part in parts {
-                lines.extend(crate::markdown::markdown_lines(
+                lines.extend(crate::markdown::markdown_lines_toned(
                     part,
                     muted,
                     usize::from(wrap_width),
@@ -1178,8 +1178,9 @@ fn render_tool_call(
         if call.function.name == COMMAND_TOOL_NAME
             && let Some(command) = command_from_arguments(state)
         {
+            let display = zevria_presentation::shell::display(&command);
             let mut command_lines = crate::syntax::highlighted_code_lines(
-                &command,
+                &display.text,
                 Some("bash"),
                 Style::default().fg(theme().roles.tools),
             );

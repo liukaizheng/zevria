@@ -17,8 +17,13 @@ use gpui_kit::component::{
     text::TextViewState,
 };
 use gpui_kit::{prelude::*, *};
-use std::sync::Arc;
-use zevria_presentation::{blocks::*, conversation::HistoryEntry, status_icon::StatusIcon};
+use std::{ops::Range, sync::Arc};
+use zevria_presentation::{
+    blocks::*,
+    conversation::HistoryEntry,
+    shell::{self, ShellToken},
+    status_icon::StatusIcon,
+};
 
 pub fn tool_label(name: &str) -> &str {
     match name {
@@ -94,6 +99,7 @@ pub enum BlockKind {
         status: StatusIcon,
         name: String,
         summary: String,
+        highlights: Vec<(Range<usize>, ShellToken)>,
         meta: ToolMeta,
     },
     Subtask {
@@ -249,10 +255,18 @@ impl BlockData {
                             }
                         }
                         let (added, removed) = tools::counts(&data.changes);
+                        let highlights = if call.function.name.as_str() == "command" {
+                            let display = shell::display(&summary);
+                            summary = display.text;
+                            display.spans
+                        } else {
+                            Vec::new()
+                        };
                         data.kind = BlockKind::Tool {
                             status,
                             name: call.function.name.to_string(),
                             summary,
+                            highlights,
                             meta: ToolMeta {
                                 added,
                                 removed,
@@ -273,6 +287,7 @@ impl BlockData {
                             status,
                             name: tool.title.clone(),
                             summary: String::new(),
+                            highlights: Vec::new(),
                             meta: ToolMeta::default(),
                         };
                         data.gutter = Gutter::Glyph(status);
@@ -444,7 +459,7 @@ pub fn entry(
                 Gutter::Label(Speaker::System),
                 format!(
                     "Background jobs finished\n{}",
-                    notice.summary_lines().join("\n")
+                    zevria_presentation::jobs::display_notice_lines(notice).join("\n")
                 ),
                 true,
             );
@@ -770,7 +785,7 @@ impl BlockView {
                 .small(),
             )
             .when(self.disclosure_focus.is_focused(window), |trigger| {
-                trigger.child(style::focus_ring(cx))
+                trigger.child(style::focus_ring(6., cx))
             })
     }
     fn actions(&self, window: &Window, _cx: &mut Context<Self>) -> Div {
@@ -850,8 +865,13 @@ impl BlockView {
             } else {
                 style::UI_FONT
             })
-            .text_size(px(16.))
-            .line_height(px(if document { 27. } else { 26. }))
+            .map(|view| {
+                if document {
+                    style::DOCUMENT.apply(view)
+                } else {
+                    style::READING.apply(view)
+                }
+            })
     }
 }
 impl Render for BlockView {
@@ -877,16 +897,20 @@ impl Render for BlockView {
         gutter = match self.data.gutter {
             Gutter::None => gutter,
             Gutter::Label(speaker) => gutter
-                .text_color(if speaker == Speaker::Plan {
-                    t.workflow.plan
-                } else {
-                    t.text.muted
+                .text_color(match speaker {
+                    Speaker::You | Speaker::Task => t.roles.you,
+                    Speaker::Zevria if matches!(self.data.kind, BlockKind::Reasoning) => {
+                        tones(cx).pencil
+                    }
+                    Speaker::Zevria => t.roles.assistant,
+                    Speaker::System => t.roles.system,
+                    Speaker::Plan => t.workflow.plan,
                 })
                 .child(speaker.label()),
             Gutter::Glyph(_) | Gutter::Live => gutter,
         };
         if matches!(self.data.kind, BlockKind::Web) {
-            gutter = gutter.child(Icon::new(IconName::Globe).small().text_color(t.text.muted));
+            gutter = gutter.child(Icon::new(IconName::Globe).small().text_color(t.roles.tools));
         }
         let mut content = div()
             .flex_1()
@@ -912,7 +936,12 @@ impl Render for BlockView {
                         .relative()
                         .group("log-block")
                         .when(prompt, |d| d.font_weight(FontWeight::MEDIUM))
-                        .child(self.rich_text(false, cx))
+                        .child(
+                            self.rich_text(false, cx)
+                                .when(*role == PresentationRole::System, |view| {
+                                    style::SECONDARY.apply(view)
+                                }),
+                        )
                         .child(
                             div()
                                 .absolute()
@@ -983,6 +1012,7 @@ impl Render for BlockView {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
+                                .italic()
                                 .text_color(tones(cx).pencil)
                                 .child(preview),
                         )
@@ -997,7 +1027,7 @@ impl Render for BlockView {
                         );
                 }
                 if self.disclosure_focus.is_focused(window) {
-                    header = header.child(style::focus_ring(cx));
+                    header = header.child(style::focus_ring(6., cx));
                 }
                 content = content.max_w(px(style::PROSE)).child(
                     div()
@@ -1010,16 +1040,15 @@ impl Render for BlockView {
                 );
                 if self.data.expanded {
                     content = content.child(
-                        self.rich_text(false, cx)
-                            .style(
-                                style::markdown(cx, true)
-                                    .with_foreground(tones(cx).pencil)
-                                    .with_muted_foreground(tones(cx).pencil),
-                            )
-                            .font_family(style::DOCUMENT_FONT)
-                            .text_size(px(14.))
-                            .line_height(px(23.))
-                            .text_color(tones(cx).pencil),
+                        div().pl(px(24.)).child(
+                            self.rich_text(false, cx)
+                                .style(style::thought_markdown(cx))
+                                .code_block_highlighter(|_| Vec::new())
+                                .font_family(style::DOCUMENT_FONT)
+                                .map(|view| style::PENCIL.apply(view))
+                                .italic()
+                                .text_color(tones(cx).pencil),
+                        ),
                     );
                 }
             }
@@ -1027,8 +1056,43 @@ impl Render for BlockView {
                 status,
                 name,
                 summary,
+                highlights,
                 meta,
             } => {
+                let path = matches!(name.as_str(), "edit" | "write" | "read" | "delete");
+                let displayed = if path {
+                    super::sidebar::middle_path(summary, 64)
+                } else {
+                    summary.clone()
+                };
+                let header_highlights: Vec<_> = if path {
+                    displayed
+                        .rfind('/')
+                        .map(|end| {
+                            (
+                                0..end + 1,
+                                HighlightStyle {
+                                    color: Some(t.text.muted),
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .into_iter()
+                        .collect()
+                } else {
+                    highlights
+                        .iter()
+                        .map(|(range, token)| {
+                            (
+                                range.clone(),
+                                HighlightStyle {
+                                    color: Some(style::shell_ink(*token, &t)),
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .collect()
+                };
                 let mut row = div()
                     .min_h(px(28.))
                     .flex()
@@ -1040,13 +1104,14 @@ impl Render for BlockView {
                             .text_color(t.text.secondary)
                             .child(tool_label(name).to_owned()),
                     )
-                    .child(style::mono().flex_1().min_w_0().truncate().child(
-                        if matches!(name.as_str(), "edit" | "write" | "read" | "delete") {
-                            super::sidebar::middle_path(summary, 64)
-                        } else {
-                            summary.clone()
-                        },
-                    ));
+                    .child(
+                        style::mono()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(t.text.primary)
+                            .truncate()
+                            .child(StyledText::new(displayed).with_highlights(header_highlights)),
+                    );
                 if meta.added > 0 {
                     row = row.child(
                         style::meta()
@@ -1062,7 +1127,7 @@ impl Render for BlockView {
                     );
                 }
                 if meta.background {
-                    row = row.child(style::tag("background", t.text.secondary, cx));
+                    row = row.child(style::tag("background", t.feedback.info, cx));
                 }
                 match status {
                     StatusIcon::Denied => {
@@ -1104,9 +1169,27 @@ impl Render for BlockView {
                         .child(style::label().text_color(t.text.muted).child("Input"))
                         .child(
                             self.rich_text(false, cx)
+                                .when(name == "command", |view| {
+                                    view.code_block_highlighter(move |block| {
+                                        if block.lang().as_deref() != Some("sh") {
+                                            return Vec::new();
+                                        }
+                                        shell::tokens(&block.code())
+                                            .into_iter()
+                                            .map(|(range, token)| {
+                                                (
+                                                    range,
+                                                    HighlightStyle {
+                                                        color: Some(style::shell_ink(token, &t)),
+                                                        ..Default::default()
+                                                    },
+                                                )
+                                            })
+                                            .collect()
+                                    })
+                                })
                                 .font_family(style::MONO_FONT)
-                                .text_size(px(13.))
-                                .line_height(px(20.)),
+                                .map(|view| style::CODE.apply(view)),
                         );
                     if !self.data.changes.is_empty() {
                         well = well.child(
@@ -1123,8 +1206,7 @@ impl Render for BlockView {
                                     .style(style::markdown(cx, false))
                                     .scrollable(false)
                                     .font_family(style::MONO_FONT)
-                                    .text_size(px(13.))
-                                    .line_height(px(20.)),
+                                    .map(|view| style::CODE.apply(view)),
                             );
                     }
                     if let Some(output) = &self.data.secondary {
@@ -1161,8 +1243,7 @@ impl Render for BlockView {
                     }
                     if let Some(error) = &self.diff_error {
                         well = well.child(
-                            div()
-                                .text_size(px(12.))
+                            style::mono()
                                 .text_color(t.feedback.warning)
                                 .child(error.clone()),
                         );
@@ -1190,7 +1271,7 @@ impl Render for BlockView {
                             div()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(14.))
+                                .map(|view| style::SECONDARY.apply(view))
                                 .child(title.clone()),
                         )
                         .child(
@@ -1227,8 +1308,7 @@ impl Render for BlockView {
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(px(16.))
-                                    .line_height(px(22.))
+                                    .map(|view| style::HEADINGS[1].apply(view))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(title.clone()),
                             )
@@ -1303,8 +1383,7 @@ impl Render for BlockView {
             BlockKind::Notice { level } => {
                 content = content.child(
                     self.rich_text(false, cx)
-                        .text_size(px(14.))
-                        .line_height(px(20.))
+                        .map(|view| style::SECONDARY.apply(view))
                         .text_color(match level {
                             NoticeLevel::Error => t.feedback.error,
                             NoticeLevel::Warning => t.feedback.warning,
@@ -1316,8 +1395,7 @@ impl Render for BlockView {
                 let controller = self.controller.read(cx);
                 content = content
                     .text_color(t.text.secondary)
-                    .text_size(px(14.))
-                    .line_height(px(20.))
+                    .map(|view| style::SECONDARY.apply(view))
                     .child(super::status::working_activity(
                         controller.model.visible(),
                         controller.cancelling,
@@ -1326,8 +1404,7 @@ impl Render for BlockView {
             BlockKind::Web | BlockKind::Ensemble => {
                 content = content.child(
                     self.rich_text(false, cx)
-                        .text_size(px(14.))
-                        .line_height(px(20.)),
+                        .map(|view| style::SECONDARY.apply(view)),
                 );
             }
         }
@@ -1429,6 +1506,42 @@ mod tests {
         assert!(matches!(data.kind,BlockKind::Tool { summary,.. } if summary == "src/lib.rs"));
     }
     #[::core::prelude::v1::test]
+    fn command_header_is_stripped_and_highlighted_but_input_and_copy_stay_exact() {
+        use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
+        let command = "rtk proxy gh api x";
+        let args = serde_json::json!({"command": command});
+        let block = PresentationBlock {
+            id: PresentationBlockId(1),
+            revision: 0,
+            role: Some(PresentationRole::Assistant),
+            prompt_group: None,
+            prompt: None,
+            visibility: BlockVisibility::Always,
+            kind: PresentationBlockKind::Tool(PresentedTool::Native {
+                call: Box::new(ToolCall::new(
+                    CallId::from_wire("command"),
+                    ToolFunction::new(ToolName::new("command").unwrap(), args.clone()),
+                )),
+                state: Box::new(NativeToolState::new(NativeToolCallStatus::Finished, &args)),
+            }),
+        };
+        let data = BlockData::block("epoch", &block);
+        assert_eq!(data.primary, block.primary_copy());
+        assert_eq!(data.primary, args.to_string());
+        assert_eq!(data.body, format!("```sh\n{command}\n```"));
+        let BlockKind::Tool {
+            summary,
+            highlights,
+            ..
+        } = data.kind
+        else {
+            panic!("tool")
+        };
+        assert_eq!(summary, "gh api x");
+        assert_eq!(highlights, [(0..2, ShellToken::Program)]);
+    }
+
+    #[::core::prelude::v1::test]
     fn job_notices_map_to_system_prose_and_copy_verbatim_text() {
         use zevria_foundation::*;
         let notice = CommandJobNotice::new(
@@ -1436,7 +1549,7 @@ mod tests {
             vec![CommandJobSnapshot {
                 id: CommandJobId::new("job-view"),
                 call_id: None,
-                command: "test".into(),
+                command: "rtk proxy cargo test".into(),
                 mode: CommandJobMode::Background,
                 status: CommandJobStatus::Exited {
                     code: Some(1),
@@ -1449,7 +1562,7 @@ mod tests {
                 stderr_bytes: 0,
             }],
             vec![],
-            "Command job update: full output".into(),
+            "Command job update: full output from rtk proxy cargo test".into(),
         );
         let history = HistoryEntry::JobNotice(notice.clone(), None);
         let data = entry("epoch", 1, &history, 0, false, false);
@@ -1463,6 +1576,8 @@ mod tests {
         assert_eq!(data[0].gutter, Gutter::Label(Speaker::System));
         assert_eq!(data[0].primary, notice.text());
         assert!(!data[0].body.contains("full output"));
+        assert!(data[0].body.ends_with("cargo test"));
+        assert!(!data[0].body.contains("rtk"));
     }
     #[::core::prelude::v1::test]
     fn child_prompts_use_task_gutters_and_prompt_boundaries() {

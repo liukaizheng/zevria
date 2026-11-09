@@ -171,11 +171,13 @@ pub struct CommandJobDetail {
 
 /// The common compact job-line format used by notices, tools, and frontends.
 pub fn command_job_line(snapshot: &CommandJobSnapshot) -> String {
-    let collapsed = snapshot
-        .command
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    command_job_line_for(snapshot, &snapshot.command)
+}
+
+/// Format a compact job line using a frontend's display command. The default
+/// formatter above always keeps the original command (including for ACP).
+pub fn command_job_line_for(snapshot: &CommandJobSnapshot, command: &str) -> String {
+    let collapsed = command.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = collapsed.chars();
     let mut preview: String = chars.by_ref().take(120).collect();
     if chars.next().is_some() {
@@ -254,10 +256,13 @@ impl CommandJobNotice {
         &self.model_message
     }
     pub fn summary_lines(&self) -> Vec<String> {
-        let mut lines: Vec<_> = self.jobs.iter().map(command_job_line).collect();
+        self.summary_lines_with(command_job_line)
+    }
+    pub fn summary_lines_with(&self, line: impl Fn(&CommandJobSnapshot) -> String) -> Vec<String> {
+        let mut lines: Vec<_> = self.jobs.iter().map(&line).collect();
         if !self.running.is_empty() {
             lines.push("Still running:".into());
-            lines.extend(self.running.iter().map(command_job_line));
+            lines.extend(self.running.iter().map(line));
         }
         lines
     }
@@ -317,6 +322,47 @@ impl<'de> Deserialize<'de> for CommandJobNotice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_lines_and_default_notices_keep_exact_commands() {
+        let job = CommandJobSnapshot {
+            id: CommandJobId::new("job-line"),
+            call_id: None,
+            command: "rtk proxy cargo\n test".into(),
+            mode: CommandJobMode::Background,
+            status: CommandJobStatus::Exited {
+                code: Some(0),
+                success: true,
+                signal: None,
+            },
+            started_at: SystemTime::UNIX_EPOCH,
+            finished_at: Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2)),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        };
+        let exact = "job-line · exited 0 · 2.0s · rtk proxy cargo test";
+        assert_eq!(command_job_line(&job), exact);
+        assert_eq!(command_job_line_for(&job, &job.command), exact);
+        assert_eq!(
+            command_job_line_for(&job, "cargo test"),
+            "job-line · exited 0 · 2.0s · cargo test"
+        );
+        let notice = CommandJobNotice::new(
+            CommandJobNoticeKind::Update,
+            vec![job.clone()],
+            vec![job],
+            "exact model text".into(),
+        );
+        assert_eq!(notice.summary_lines(), [exact, "Still running:", exact]);
+        assert_eq!(
+            notice.summary_lines_with(|job| format!("custom {}", job.id)),
+            ["custom job-line", "Still running:", "custom job-line"]
+        );
+        assert_eq!(notice.text(), "exact model text");
+        let mut long = notice.jobs()[0].clone();
+        long.command = "🐚".repeat(121);
+        assert!(command_job_line(&long).ends_with(&format!("{}…", "🐚".repeat(119))));
+    }
 
     #[test]
     fn status_display_phrases() {

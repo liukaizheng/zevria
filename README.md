@@ -33,7 +33,9 @@ Install these prerequisites before running Zevria; its installer does not bundle
   for locating relevant files and code; by default it respects ignore rules.
 - **[RTK](https://github.com/rtk-ai/rtk)** routes shell commands and filters or
   compresses their output, keeping command results concise. Zevria's command
-  workflow expects it; for example, search with `rtk rg "pattern" src`.
+  workflow expects it; for example, search with `rtk rg "pattern" src`. Both
+  frontends hide `rtk` routing when displaying commands, while copies and the
+  model see the exact command.
 - **Windows only — [Git for Windows](https://gitforwindows.org/)** provides Git
   Bash, the shell Zevria uses for native Windows commands. You do not need Git
   Bash when running Zevria in WSL.

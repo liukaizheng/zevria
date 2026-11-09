@@ -276,7 +276,8 @@ impl JobsOverlay {
             if let Some(detail) = &self.detail {
                 lines.push(Line::from(format!(
                     "{} · {}",
-                    detail.snapshot.command, detail.snapshot.status
+                    display_command(&detail.snapshot.command),
+                    detail.snapshot.status
                 )));
                 lines.push(Line::from("stdout (tail):"));
                 lines.extend(
@@ -312,7 +313,7 @@ impl JobsOverlay {
                     },
                     job.status,
                     elapsed,
-                    job.command.split_whitespace().collect::<Vec<_>>().join(" ")
+                    display_command(&job.command)
                 )));
             }
             if self.jobs.is_empty() {
@@ -356,6 +357,13 @@ impl JobsOverlay {
         }
         crate::viewport::render_scrollbar(frame, area, &self.nav.viewport);
     }
+}
+fn display_command(command: &str) -> String {
+    zevria_presentation::shell::display(command)
+        .text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 fn clean(text: &str) -> String {
     text.chars()
@@ -426,6 +434,47 @@ mod tests {
         });
         assert!(!overlay.is_open());
     }
+    #[test]
+    fn jobs_list_and_inspect_headers_hide_routing_without_mutating_the_job() {
+        let job = CommandJobSnapshot {
+            id: CommandJobId::new("job-display"),
+            call_id: None,
+            command: "rtk proxy cargo\n test".into(),
+            mode: CommandJobMode::Background,
+            status: zevria_foundation::CommandJobStatus::Running,
+            started_at: std::time::SystemTime::now(),
+            finished_at: None,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        };
+        let mut overlay = JobsOverlay::default();
+        overlay.show();
+        overlay.update(job.clone());
+        for inspect in [false, true] {
+            overlay.inspect = inspect.then(|| job.id.clone());
+            overlay.detail = inspect.then(|| CommandJobView {
+                snapshot: job.clone(),
+                stdout_tail: String::new(),
+                stderr_tail: String::new(),
+            });
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 28)).unwrap();
+            terminal
+                .draw(|frame| overlay.render(frame, frame.area()))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("cargo test"), "{text}");
+            assert!(!text.contains("rtk"), "{text}");
+            assert_eq!(overlay.jobs[0].command, job.command);
+        }
+    }
+
     #[test]
     fn jobs_list_and_inspection_render_in_tiny_and_normal_terminals() {
         let mut overlay = JobsOverlay::default();

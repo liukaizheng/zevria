@@ -5,7 +5,7 @@ use super::{
 };
 use crate::controller::Phase;
 use gpui_kit::component::{
-    Disableable, IconName, Sizable,
+    Disableable, IconName, Sizable, ThemeStyled,
     button::{Button, ButtonVariants, Toggle, ToggleGroup},
     input::Textarea,
     switch::Switch,
@@ -80,11 +80,6 @@ impl DesktopWindow {
             && controller.model.question.is_none();
         let orchestrate = controller.orchestrate;
         let mode_disabled = !editable || busy;
-        let mode_ink = if mode == SessionMode::Build {
-            t.workflow.build
-        } else {
-            t.workflow.plan
-        };
         let cancelling = controller.cancelling;
         let recovery = controller.recovery.last().is_some();
         let measure = style::Measure {
@@ -211,19 +206,8 @@ impl DesktopWindow {
             .bg(t.surfaces.panel)
             .rounded(px(12.))
             .border_1()
-            .border_l_2()
             .border_color(t.surfaces.border)
             .track_focus(&focus)
-            .focus(move |s| s.border_color(tone.focus))
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(12.))
-                    .bottom(px(12.))
-                    .w(px(2.))
-                    .bg(mode_ink),
-            )
             .px(px(14.))
             .py(px(12.))
             .child(
@@ -367,7 +351,7 @@ impl DesktopWindow {
             );
         }
         if focus.contains_focused(window, cx) {
-            field = field.child(style::focus_ring(cx));
+            field = field.focus_ring_style(window, cx);
         }
         div()
             .px(px(16.))

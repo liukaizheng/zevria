@@ -1,6 +1,16 @@
 //! Ephemeral root command jobs, never restored from transcript or turn-gated.
 use std::collections::{BTreeMap, HashMap};
-use zevria_foundation::{CommandJobId, CommandJobMode, CommandJobSnapshot};
+use zevria_foundation::{
+    CommandJobId, CommandJobMode, CommandJobNotice, CommandJobSnapshot, command_job_line_for,
+};
+
+/// Frontend-only compact lines. The notice's text and default ACP summary stay exact.
+pub fn display_job_line(snapshot: &CommandJobSnapshot) -> String {
+    command_job_line_for(snapshot, &crate::shell::display(&snapshot.command).text)
+}
+pub fn display_notice_lines(notice: &CommandJobNotice) -> Vec<String> {
+    notice.summary_lines_with(display_job_line)
+}
 #[derive(Debug, Default)]
 pub struct CommandJobsState {
     jobs: BTreeMap<CommandJobId, CommandJobSnapshot>,
@@ -60,6 +70,38 @@ impl CommandJobsState {
 mod tests {
     use super::*;
     use zevria_foundation::CommandJobStatus;
+    #[test]
+    fn notice_display_elides_routing_without_changing_default_summary_or_model_text() {
+        let job = CommandJobSnapshot {
+            id: CommandJobId::new("job-display"),
+            call_id: None,
+            command: "rtk proxy cargo test".into(),
+            mode: CommandJobMode::Background,
+            status: CommandJobStatus::Running,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            finished_at: Some(std::time::SystemTime::UNIX_EPOCH),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        };
+        let notice = CommandJobNotice::new(
+            zevria_foundation::CommandJobNoticeKind::Update,
+            vec![job.clone()],
+            vec![job],
+            "model sees rtk proxy cargo test".into(),
+        );
+        let lines = display_notice_lines(&notice);
+        assert_eq!(
+            lines,
+            [
+                "job-display · running · 0.0s · cargo test",
+                "Still running:",
+                "job-display · running · 0.0s · cargo test"
+            ]
+        );
+        assert!(notice.summary_lines()[0].ends_with("rtk proxy cargo test"));
+        assert_eq!(notice.text(), "model sees rtk proxy cargo test");
+    }
+
     #[test]
     fn updates_are_runtime_only_and_retention_is_bounded() {
         let mut model = crate::SessionModel::default();

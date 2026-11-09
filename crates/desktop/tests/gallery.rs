@@ -356,7 +356,7 @@ mod native {
     fn thinking_message() -> Message {
         Message::Assistant(AssistantMessage::new(vec![AssistantContent::Reasoning(
             rig_core::message::Reasoning::new(
-                "The restored preview only scans sixteen lines, so metadata can hide the first prompt.\n\nI'll trace the transcript reader and use the first readable user message as the boundary. The new test should include a long metadata prefix and a Unicode prompt, without changing the persisted transcript.",
+                "**Preparing notes**\n\nThe restored preview only scans sixteen lines, so metadata can hide the first prompt.\n\n### Trace the restore boundary\n\nI'll trace the transcript reader and use the first readable user message as the boundary. The new test should include a long metadata prefix and a Unicode prompt, without changing the persisted transcript.\n\n```rust\nlet preview = items.iter().find_map(readable_prompt);\n```",
             ),
         )]))
     }
@@ -391,10 +391,10 @@ mod native {
             c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
             c.fixture_event(E::Intermediate { turn_id,message: Message::assistant("I'll reproduce the failure, then trace the restored prompt."),attempt_id: None },cx);
             for (id,name,args) in [
-                ("command-ok","command",serde_json::json!({"command":"cargo test -p zevria-transcript"})),
-                ("command-fail","command",serde_json::json!({"command":"cargo test restore_roundtrip"})),
+                ("command-ok","command",serde_json::json!({"command":"rtk cargo test -p zevria-transcript"})),
+                ("command-fail","command",serde_json::json!({"command":"rtk proxy cargo test restore_roundtrip -- --nocapture 2>&1 | tail -20"})),
                 ("edit","edit",serde_json::json!({"file_path":"crates/transcript/src/transcript.rs"})),
-                ("command-live","command",serde_json::json!({"command":"cargo test -p zevria-transcript restore_roundtrip"})),
+                ("command-live","command",serde_json::json!({"command":"rtk cargo test -p zevria-transcript restore_roundtrip"})),
             ] {
                 let call = ToolCall::new(CallId::from_wire(id),ToolFunction::new(ToolName::new(name).unwrap(),args));
                 c.fixture_event(E::Intermediate { turn_id,message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(call)])),attempt_id: None },cx);

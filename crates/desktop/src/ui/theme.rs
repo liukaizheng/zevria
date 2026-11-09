@@ -40,17 +40,45 @@ impl Tones {
                 contrast(t.surfaces.canvas, bg) >= 4.5
             }),
         };
+        let pencil = seek(t.text.secondary, t.text.primary, |ink| {
+            apca(ink, t.surfaces.canvas).abs() >= 75.
+        });
+        // Role/syntax inks are validated on shared surfaces, not arbitrary
+        // derived hover washes. Retreat toward the panel when a wash would
+        // weaken any transcript ink (notably roles.you in Zevria Dark).
+        let transcript_surface = |surface| {
+            seek(surface, t.surfaces.panel, |background| {
+                [
+                    pencil,
+                    t.text.primary,
+                    t.text.secondary,
+                    t.text.muted,
+                    t.roles.you,
+                    t.roles.assistant,
+                    t.roles.system,
+                    t.roles.tools,
+                    t.syntax.function,
+                    t.syntax.keyword,
+                    t.syntax.string,
+                    t.syntax.constant,
+                    t.syntax.comment,
+                    t.content.heading,
+                    t.feedback.success,
+                    t.feedback.info,
+                ]
+                .into_iter()
+                .all(|ink| contrast(ink, background) >= 4.5)
+            })
+        };
         Self {
-            pencil: seek(t.text.secondary, t.text.primary, |ink| {
-                apca(ink, t.surfaces.canvas).abs() >= 75.
-            }),
+            pencil,
             thread: seek(t.surfaces.border, t.surfaces.border_strong, |ink| {
                 contrast(ink, t.surfaces.canvas) >= 3.
             }),
             focus: t.surfaces.selection_background,
             hairline: t.surfaces.border.mix_oklab(t.surfaces.canvas, 0.55),
-            hover: t.surfaces.overlay.mix_oklab(t.surfaces.border, 0.65),
-            pressed: t.surfaces.overlay.mix_oklab(t.surfaces.border, 0.45),
+            hover: transcript_surface(t.surfaces.overlay.mix_oklab(t.surfaces.border, 0.65)),
+            pressed: transcript_surface(t.surfaces.overlay.mix_oklab(t.surfaces.border, 0.45)),
             build_tint: seek(
                 t.surfaces.panel.mix_oklab(t.workflow.build, 0.86),
                 t.surfaces.panel,
@@ -244,9 +272,10 @@ pub fn apply(tokens: ZevriaTheme, cx: &mut App) {
         c.chart_4 = t.workflow.explore;
         c.chart_5 = t.roles.tools;
         theme.font_family = ".SystemUIFont".into();
+        // Kit Root uses this as the window's rem base, not the reading size.
         theme.font_size = px(14.);
         theme.mono_font_family = "Menlo".into();
-        theme.mono_font_size = px(13.);
+        theme.mono_font_size = px(super::style::CODE.size);
         theme.radius = px(6.);
         theme.radius_lg = px(10.);
         theme.shadow = true;
@@ -420,7 +449,7 @@ mod tests {
             assert_eq!(theme.font_size, px(14.));
             // GPUI's fake test text system only offers .SystemUIFont; Kit
             // legitimately resolves Menlo to that fallback in unit tests.
-            assert_eq!(theme.mono_font_size, px(13.));
+            assert_eq!(theme.mono_font_size, px(12.));
             assert_eq!(theme.mode, ThemeMode::Dark);
         });
     }
@@ -462,6 +491,7 @@ mod tests {
         for tokens in [
             zevria_theme::ZEVRIA_GRAPHITE,
             zevria_theme::ZEVRIA_GRAPHITE_LIGHT,
+            zevria_theme::ZEVRIA_DARK,
             generated,
         ] {
             let t = tokens.map(color);
@@ -480,6 +510,29 @@ mod tests {
             ] {
                 assert!(contrast(t.surfaces.canvas, interaction.hover) >= 4.5);
                 assert!(contrast(t.surfaces.canvas, interaction.active) >= 4.5);
+            }
+            for background in [t.surfaces.canvas, t.surfaces.panel, tones.hover] {
+                for (name, ink) in [
+                    ("pencil", tones.pencil),
+                    ("you", t.roles.you),
+                    ("assistant", t.roles.assistant),
+                    ("system", t.roles.system),
+                    ("tools", t.roles.tools),
+                    ("function", t.syntax.function),
+                    ("keyword", t.syntax.keyword),
+                    ("string", t.syntax.string),
+                    ("constant", t.syntax.constant),
+                    ("comment", t.syntax.comment),
+                    ("heading", t.content.heading),
+                    ("success", t.feedback.success),
+                    ("info", t.feedback.info),
+                ] {
+                    assert!(
+                        contrast(ink, background) >= 4.5,
+                        "{name} on {background:?}: {}",
+                        contrast(ink, background)
+                    );
+                }
             }
             for surface in [t.surfaces.canvas, t.surfaces.panel, t.surfaces.overlay] {
                 assert!(contrast(tones.pencil, surface) >= 4.5);

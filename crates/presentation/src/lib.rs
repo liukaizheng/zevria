@@ -12,6 +12,7 @@ pub mod session;
 pub mod session_model;
 #[cfg(test)]
 mod session_model_tests;
+pub mod shell;
 pub mod status_icon;
 pub mod workflow;
 pub use blocks::{TURN_CANCELLED, incomplete_response_outcome};

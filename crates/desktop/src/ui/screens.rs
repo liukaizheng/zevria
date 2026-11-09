@@ -68,13 +68,7 @@ impl DesktopWindow {
                 .child(title),
         );
         if !body.is_empty() {
-            block = block.child(
-                div()
-                    .text_size(px(16.))
-                    .line_height(px(26.))
-                    .text_color(t.text.secondary)
-                    .child(body),
-            );
+            block = block.child(style::body().text_color(t.text.secondary).child(body));
         }
         if let Some((_, text)) = &self.screen_error {
             block = block.child(
@@ -88,8 +82,7 @@ impl DesktopWindow {
                         TextView::new(text)
                             .style(style::markdown(cx, false))
                             .font_family(style::MONO_FONT)
-                            .text_size(px(12.))
-                            .line_height(px(18.)),
+                            .map(|view| style::CODE.apply(view)),
                     ),
             );
         }

@@ -22,7 +22,19 @@ const LIST_INDENT: &str = "  ";
 /// `Wrap` would restart them at column 0. Everything else is emitted at full
 /// length for the caller to wrap. A `wrap_width` of `0` disables wrapping.
 pub fn markdown_lines(input: &str, base: Style, wrap_width: usize) -> Vec<Line<'static>> {
+    render(input, MarkdownRenderer::new(base, wrap_width))
+}
+
+/// Render pencil-note Markdown: inherit the current ink/style, adding only
+/// semantic modifiers (bold headings/strong text and underlined links).
+/// Fenced code deliberately has no syntax accents in this mode.
+pub fn markdown_lines_toned(input: &str, base: Style, wrap_width: usize) -> Vec<Line<'static>> {
     let mut renderer = MarkdownRenderer::new(base, wrap_width);
+    renderer.inherit_tone = true;
+    render(input, renderer)
+}
+
+fn render(input: &str, mut renderer: MarkdownRenderer) -> Vec<Line<'static>> {
     let parser = Parser::new_ext(
         input,
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
@@ -35,6 +47,7 @@ pub fn markdown_lines(input: &str, base: Style, wrap_width: usize) -> Vec<Line<'
 
 struct MarkdownRenderer {
     base: Style,
+    inherit_tone: bool,
     /// Display width the produced lines must fit in; list-item lines longer
     /// than this are wrapped with a hanging indent. `0` disables wrapping.
     wrap_width: usize,
@@ -151,6 +164,7 @@ impl MarkdownRenderer {
     fn new(base: Style, wrap_width: usize) -> Self {
         Self {
             base,
+            inherit_tone: false,
             wrap_width,
             lines: Vec::new(),
             current_spans: Vec::new(),
@@ -169,6 +183,22 @@ impl MarkdownRenderer {
 
     fn current_style(&self) -> Style {
         *self.style_stack.last().unwrap_or(&self.base)
+    }
+
+    fn ink(&self, color: ratatui::style::Color) -> Style {
+        if self.inherit_tone {
+            self.current_style()
+        } else {
+            self.current_style().fg(color)
+        }
+    }
+
+    fn quote_style(&self) -> Style {
+        if self.inherit_tone {
+            self.base
+        } else {
+            Style::default().fg(theme().text.muted)
+        }
     }
 
     fn push_span(&mut self, text: impl Into<String>, style: Style) {
@@ -192,21 +222,18 @@ impl MarkdownRenderer {
     }
 
     /// Build the visual prefix for `depth` nested block quotes.
-    fn quote_prefix_for_depth(depth: usize) -> Vec<Span<'static>> {
+    fn quote_prefix_for_depth(depth: usize, style: Style) -> Vec<Span<'static>> {
         if depth == 0 {
             Vec::new()
         } else {
-            vec![Span::styled(
-                "▎ ".repeat(depth),
-                Style::default().fg(theme().text.muted),
-            )]
+            vec![Span::styled("▎ ".repeat(depth), style)]
         }
     }
 
     /// Prefix every rendered row with the current block-quote marker. List
     /// layouts keep a copy so their continuation rows retain quote prefixing.
     fn quote_prefix(&self) -> Vec<Span<'static>> {
-        Self::quote_prefix_for_depth(self.quote_depth)
+        Self::quote_prefix_for_depth(self.quote_depth, self.quote_style())
     }
 
     /// Extend an item-line layout with quotes entered after the item opened.
@@ -215,13 +242,14 @@ impl MarkdownRenderer {
     fn extend_layout_to_quote_depth(
         layout: &mut ItemLayout,
         quote_depth: usize,
+        style: Style,
     ) -> Vec<Span<'static>> {
         let added_depth = quote_depth.saturating_sub(layout.quote_depth);
         if added_depth == 0 {
             return Vec::new();
         }
 
-        let prefix = Self::quote_prefix_for_depth(added_depth);
+        let prefix = Self::quote_prefix_for_depth(added_depth, style);
         layout.hang_width += prefix.iter().map(|span| span.width()).sum::<usize>();
         layout.continuation_prefix.extend(prefix.iter().cloned());
         layout.quote_depth = quote_depth;
@@ -247,7 +275,7 @@ impl MarkdownRenderer {
             let Some(mut layout) = self.open_items.last().cloned() else {
                 return;
             };
-            Self::extend_layout_to_quote_depth(&mut layout, self.quote_depth);
+            Self::extend_layout_to_quote_depth(&mut layout, self.quote_depth, self.quote_style());
             let prefix = self.continuation_prefix(&layout);
             let prefix_span_count = prefix.len();
             self.current_spans.extend(prefix);
@@ -262,10 +290,15 @@ impl MarkdownRenderer {
         // block quote (`- > quoted`). Add only quote levels that were entered
         // after that marker was built, and treat them as part of the line prefix
         // for hanging-wrap calculations.
+        let quote_style = self.quote_style();
         let Some(item_line) = self.current_item_line.as_mut() else {
             return;
         };
-        let prefix = Self::extend_layout_to_quote_depth(&mut item_line.layout, self.quote_depth);
+        let prefix = Self::extend_layout_to_quote_depth(
+            &mut item_line.layout,
+            self.quote_depth,
+            quote_style,
+        );
         item_line.prefix_span_count += prefix.len();
         self.current_spans.extend(prefix);
     }
@@ -381,7 +414,7 @@ impl MarkdownRenderer {
             Event::End(tag) => self.end_tag(tag),
             Event::Text(text) => self.text(&text),
             Event::Code(code) => {
-                let style = self.current_style().fg(theme().content.code);
+                let style = self.ink(theme().content.code);
                 self.push_span(code.to_string(), style);
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -396,13 +429,20 @@ impl MarkdownRenderer {
             Event::Rule => {
                 self.separate();
                 self.start_line();
-                self.push_span("────────", Style::default().fg(theme().surfaces.border));
+                self.push_span(
+                    "────────",
+                    if self.inherit_tone {
+                        self.current_style()
+                    } else {
+                        Style::default().fg(theme().surfaces.border)
+                    },
+                );
                 self.end_block();
             }
             // Inline/block HTML and other events are rendered as their raw text
             // so nothing is silently dropped.
             Event::Html(html) | Event::InlineHtml(html) => {
-                let style = self.current_style().fg(theme().text.muted);
+                let style = self.ink(theme().text.muted);
                 self.push_span(html.to_string(), style);
             }
             _ => {}
@@ -417,8 +457,7 @@ impl MarkdownRenderer {
             }
             Tag::Heading { level, .. } => {
                 let style = self
-                    .current_style()
-                    .fg(theme().content.heading)
+                    .ink(theme().content.heading)
                     .add_modifier(Modifier::BOLD);
                 self.style_stack.push(style);
                 self.separate();
@@ -430,7 +469,7 @@ impl MarkdownRenderer {
                 self.quote_depth += 1;
             }
             Tag::CodeBlock(kind) => {
-                let style = self.current_style().fg(theme().content.code);
+                let style = self.ink(theme().content.code);
                 self.style_stack.push(style);
                 self.code_block = Some(CodeBlockState::new(kind));
                 self.separate();
@@ -483,16 +522,19 @@ impl MarkdownRenderer {
             Tag::Emphasis => self.push_style(Modifier::ITALIC),
             Tag::Strong => {
                 let style = self
-                    .current_style()
-                    .fg(theme().content.strong)
+                    .ink(theme().content.strong)
                     .add_modifier(Modifier::BOLD);
                 self.style_stack.push(style);
             }
             Tag::Strikethrough => self.push_style(Modifier::CROSSED_OUT),
             Tag::Link { dest_url, .. } => {
                 self.pending_link_url = Some(dest_url.to_string());
-                self.style_stack
-                    .push(self.current_style().fg(theme().content.link));
+                let style = self.ink(theme().content.link);
+                self.style_stack.push(if self.inherit_tone {
+                    style.add_modifier(Modifier::UNDERLINED)
+                } else {
+                    style
+                });
             }
             Tag::Table(alignments) => {
                 self.separate();
@@ -557,7 +599,11 @@ impl MarkdownRenderer {
                 if let Some(url) = self.pending_link_url.take() {
                     self.push_span(
                         format!(" ({url})"),
-                        Style::default().fg(theme().content.link),
+                        if self.inherit_tone {
+                            self.current_style().add_modifier(Modifier::UNDERLINED)
+                        } else {
+                            Style::default().fg(theme().content.link)
+                        },
                     );
                 }
             }
@@ -605,8 +651,15 @@ impl MarkdownRenderer {
     fn emit_code_block(&mut self, code_block: CodeBlockState) {
         let fallback = self.current_style();
         let trailing_line_ending = code_block.text.ends_with('\n');
-        let highlighted =
-            highlighted_code_lines(&code_block.text, code_block.language.as_deref(), fallback);
+        let highlighted = highlighted_code_lines(
+            &code_block.text,
+            if self.inherit_tone {
+                None
+            } else {
+                code_block.language.as_deref()
+            },
+            fallback,
+        );
         let line_count = highlighted.len();
         for (index, line) in highlighted.into_iter().enumerate() {
             for span in line.spans {
@@ -660,7 +713,11 @@ impl MarkdownRenderer {
             }
         }
 
-        let muted = Style::default().fg(theme().surfaces.border_strong);
+        let muted = if self.inherit_tone {
+            self.base
+        } else {
+            Style::default().fg(theme().surfaces.border_strong)
+        };
         for (index, row) in table.rows.iter().enumerate() {
             // Each cell becomes one or more lines: its content wrapped to the
             // column width when the table was narrowed, or a single line as-is.
@@ -942,6 +999,59 @@ mod tests {
         let text = line_text(line);
         let byte_index = text.find(needle).expect("content should be present");
         display_width(&text[..byte_index])
+    }
+
+    #[test]
+    fn toned_markdown_preserves_ink_and_italic_including_code_and_links() {
+        let base = Style::default()
+            .fg(theme().text.muted)
+            .add_modifier(Modifier::ITALIC);
+        let input = "**Title**\n\n# H\n\n`code` and [link](https://example.com) <em>html</em>\n\n```rust\nlet n = 42;\n```\n\n> quote\n\n---\n\n| H |\n|---|\n| cell |";
+        let lines = markdown_lines_toned(input, base, NO_WRAP);
+        for span in lines.iter().flat_map(|line| &line.spans) {
+            assert_eq!(span.style.fg, base.fg, "{span:?}");
+            assert!(
+                span.style.add_modifier.contains(Modifier::ITALIC),
+                "{span:?}"
+            );
+            assert!(
+                (span.style.add_modifier
+                    - base.add_modifier
+                    - Modifier::BOLD
+                    - Modifier::UNDERLINED)
+                    .is_empty(),
+                "{span:?}"
+            );
+        }
+        for title in ["Title", "H"] {
+            assert!(
+                lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .any(|span| span.content == title
+                        && span.style.add_modifier.contains(Modifier::BOLD))
+            );
+        }
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content == "link"
+                    && span.style.add_modifier.contains(Modifier::UNDERLINED))
+        );
+        // The default mode still promotes answer emphasis and grammar colors.
+        let default = markdown_lines(input, base, NO_WRAP);
+        assert!(
+            default.iter().flat_map(|line| &line.spans).any(
+                |span| span.content == "Title" && span.style.fg == Some(theme().content.strong)
+            )
+        );
+        assert!(
+            default
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.style.fg != base.fg)
+        );
     }
 
     #[test]

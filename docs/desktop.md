@@ -59,22 +59,43 @@ or log name.
 The transcript is one left-aligned working thread, not message bubbles or a
 stack of cards. Its line and nodes record what happened, in provider order:
 
-- **Pencil:** a dashed thread, Charter 14/23 and readable pencil ink for
-  provider-supplied thinking. Charter 16/27 also marks Plan documents.
-- **Carbon:** lifecycle nodes and Menlo 13/20 for commands, paths, code, literal
+- **Pencil:** a dashed thread and Charter italic 13/21 in graphite pencil ink
+  for provider-supplied thinking. Expanded notes are indented 24 px under the
+  gray Thinking label; the folded preview is also italic. Plan documents use
+  upright Charter 15/24 instead.
+- **Carbon:** lifecycle nodes and Menlo 12/18 for commands, paths, code, literal
   output and diffs. Expanded tools use recessed 8 px wells, with input before
   output and then the native diff. Output opens at 16 lines; **Show all N lines**
   expands in the transcript rather than creating another output scroll trap.
-- **Ink:** the solid thread and SF Pro (`.SystemUIFont`) 16/26 for answers;
+- **Ink:** the solid thread and SF Pro (`.SystemUIFont`) 14/22 for answers;
   prompts use the same size with medium weight and a hanging **You** label.
-- **Signal:** Build mint and Plan blue mark live work, mode controls and Send.
-  A quiet ✓ means success, ✗ means failure, ⊘ means denied and ◼ means stopped
-  or interrupted. Shapes and words always accompany state colors.
+  You/Task, Zevria and System labels use their semantic role inks; the Plan
+  label uses the Plan workflow ink. Lavender belongs to the Zevria answer label,
+  not thoughts; answer headings use `content.heading`.
+
+Build mint and Plan blue mark live work, mode controls and Send. A green ✓ means
+success, ✗ means failure, ⊘ means denied and ◼ means stopped or interrupted.
+Shapes and words always accompany state colors. Tool labels remain secondary
+ink; shell syntax, not the label, carries color. Background tags use info ink.
 
 SF Pro, Charter and Menlo are public macOS-bundled font families, with native
-fallback. The type scale is 11, 12, 14, 16, 18, 21, 24 and 36 px, plus Menlo's
-13 px optical exception. Metadata uses tabular numerals. Prose/thinking measure
-600 px; expanded machine work measures 720 px. The 96 px gutter, thread and
+fallback. Transcript typography is centralized as `Type { size, leading }` in
+`ui/style.rs` (all values below are size/line height in pixels):
+
+| Role | Size/leading | Use |
+| --- | --- | --- |
+| `READING` | 14/22 | Answers, prompts, empty-state and screen body text |
+| `DOCUMENT` | 15/24 | Charter Plan documents, in the thread and review sheet |
+| `PENCIL` | 13/21 | Italic Charter thinking previews and expanded notes |
+| `CODE` | 12/18 | Menlo command headers, wells, code, completions and mono errors |
+| `SECONDARY` | 13/20 | In-thread notices, live tail, web/ensemble text, subtask titles |
+| `HEADINGS` | 18/24, 16/22, 15/21 | Markdown h1, h2, h3+; Plan card title uses h2 |
+| `LABEL`, `META` | 12/16, 11/14 | Gutter/tool labels and tabular metadata (unchanged) |
+
+Kit's window/rem base remains 14 px; its mono size follows `CODE`. Sidebar,
+title/status bars, composer text (14/20), question dock, sheets and Kit controls
+keep their chrome sizes. Prose/thinking measure 600 px; expanded machine work
+measures 720 px. The 96 px gutter, thread and
 composer share one axis. Spacing follows a 4 px grid; turn boundaries add a
 32 px gap and a hairline. Tags, controls, carbon wells, the composer and decision
 sheets have distinct 4/6/8/12/14 px radii.
@@ -116,6 +137,13 @@ summaries can therefore show no section. The UI does not infer missing thoughts.
   **Stopped before the response finished** or **The response failed before it
   finished**. Actual failures remain red. Copy payloads are unchanged.
 
+Thinking Markdown stays pencil-toned: headings are semibold at the pencil size,
+inline code and unhighlighted code blocks use pencil on the panel, and only
+links retain `content.link` for affordance. No extra vertical rule is added
+beside the existing dashed thread. In the TUI, reasoning Markdown inherits its
+muted italic tone throughout, including bold titles, headings, inline/fenced
+code and underlined links; ordinary answer Markdown keeps its accents.
+
 Thinking headers are full-width, at least 28 px tall, focusable native Button
 roles with an expanded state, the accessible name **Thinking**, and the preview
 as their description. Enter and Space activate them. Copy and text selection
@@ -125,6 +153,33 @@ The thread's live tip and the status bar share one vocabulary: **Waiting for the
 model**, **Thinking**, **Writing**, **Running command** (or another tool name),
 **Reconnecting** with attempt/countdown, **Compacting context**, and **Stopping**.
 Opaque-only progress cannot be called thinking, so it remains waiting.
+
+### Commands: display without routing, copy exactly
+
+Both frontends share the renderer-free `zevria_presentation::shell` display rule.
+At command positions (including after shell separators and inside substitutions),
+`rtk`, its recognized global options and an optional `proxy`/`run` are hidden only
+when another command word follows. Standalone `rtk`, `rtk --version`, argument
+text such as `echo rtk`, `./rtk` and uppercase `RTK` remain unchanged. Quoted
+strings, comments and heredoc bodies are not stripped. The lexer is tolerant of
+incomplete/streaming input; it is a presentation heuristic, not a shell parser.
+
+Desktop command headers, every TUI command row/fold header, both frontends' job
+notices, and the TUI jobs list/inspect header use the stripped display. The TUI
+runs its existing Bash grammar on that text, so the real program gets function
+ink. Desktop maps shell spans onto existing semantic tokens: programs to
+`syntax.function`; flags, numbers and expansions to `syntax.constant`; strings
+and heredocs to `syntax.string`; operators/keywords to `syntax.keyword`; comments
+and routing to `syntax.comment`; leading assignments to secondary ink. Ordinary
+arguments keep primary ink. Path headers mute the directory and retain primary
+ink for the file name.
+
+Desktop's expanded Input retains the exact `sh` fence with routing dimmed in
+comment ink. Desktop Copy input/code-block Copy, TUI `y`/`yy`, stored transcripts,
+execution and model-facing text all retain the original bytes. ACP tool titles
+and job notices also remain exact, as do agent-supplied titles in TUI ACP worker
+rows. Native terminal mouse selection naturally copies rendered, stripped text;
+the TUI's own copy actions are the exact-source route.
 
 ### Appearance, focus and motion
 
@@ -144,9 +199,14 @@ color-keyed math raster inputs, without changing transcript or provider data.
 
 The only ambient motion is the shared ◐◓◑◒ work glyph on the existing 250 ms
 clock. **Reduce Motion** freezes it at ◐ and makes Plan-sheet opening instant;
-disclosures are instant in either setting. Focus uses a 2 px selection-ink ring
-with a 2 px offset. Icon controls have accessible names; thinking and tool
-headers expose their expanded state. GPUI Kit has no Increase Contrast signal,
+disclosures are instant in either setting. Text fields use Kit's tinted border
+plus one concentric 3 px halo at 50% alpha, touching the border and accounting for
+its width. The composer has a uniform 1 px border with a 12 px radius, no mode
+stripe and no second focus outline; mode stays on the gutter selector/compact
+toggle and Send. Custom disclosures use a concentric 2 px selection-ink ring
+with a 2 px offset (outer radius = control radius + 4 px). Ancestors leave room
+for the halo instead of clipping it. Icon controls have accessible names;
+thinking and tool headers expose their expanded state. GPUI Kit has no Increase Contrast signal,
 so that separate macOS preference is not implemented.
 
 ### Screenshot gallery

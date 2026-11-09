@@ -7,7 +7,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::*, *};
 use std::{sync::Arc, time::Instant};
-use zevria_presentation::status_icon::StatusIcon;
+use zevria_presentation::{shell::ShellToken, status_icon::StatusIcon};
+use zevria_theme::ZevriaTheme;
 
 pub const SIDEBAR: f32 = 256.;
 pub const TITLE: f32 = 40.;
@@ -18,6 +19,62 @@ pub const PROSE: f32 = 600.;
 pub const UI_FONT: &str = ".SystemUIFont";
 pub const MONO_FONT: &str = "Menlo";
 pub const DOCUMENT_FONT: &str = "Charter";
+
+/// Transcript typography in physical pixels; Kit's 14 px rem base is separate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Type {
+    pub size: f32,
+    pub leading: f32,
+}
+impl Type {
+    pub fn apply<E: Styled>(self, element: E) -> E {
+        element
+            .text_size(px(self.size))
+            .line_height(px(self.leading))
+    }
+}
+pub const READING: Type = Type {
+    size: 14.,
+    leading: 22.,
+};
+pub const DOCUMENT: Type = Type {
+    size: 15.,
+    leading: 24.,
+};
+pub const PENCIL: Type = Type {
+    size: 13.,
+    leading: 21.,
+};
+pub const CODE: Type = Type {
+    size: 12.,
+    leading: 18.,
+};
+pub const SECONDARY: Type = Type {
+    size: 13.,
+    leading: 20.,
+};
+pub const HEADINGS: [Type; 3] = [
+    Type {
+        size: 18.,
+        leading: 24.,
+    },
+    Type {
+        size: 16.,
+        leading: 22.,
+    },
+    Type {
+        size: 15.,
+        leading: 21.,
+    },
+];
+pub const LABEL: Type = Type {
+    size: 12.,
+    leading: 16.,
+};
+pub const META: Type = Type {
+    size: 11.,
+    leading: 14.,
+};
 pub fn kind_label(kind: zevria_foundation::SubtaskKind) -> &'static str {
     match kind {
         zevria_foundation::SubtaskKind::Explore => "Explore",
@@ -53,33 +110,21 @@ impl Measure {
     }
 }
 pub fn body() -> Div {
-    div().text_size(px(16.)).line_height(px(26.))
+    READING.apply(div())
 }
 pub fn label() -> Div {
-    div()
-        .text_size(px(12.))
-        .line_height(px(16.))
-        .font_weight(FontWeight::MEDIUM)
+    LABEL.apply(div()).font_weight(FontWeight::MEDIUM)
 }
 pub fn meta() -> Div {
-    div()
-        .text_size(px(11.))
-        .line_height(px(14.))
-        .font_features(tnum())
+    META.apply(div()).font_features(tnum())
 }
 pub fn mono() -> Div {
-    div()
-        .font_family(MONO_FONT)
-        .text_size(px(13.))
-        .line_height(px(20.))
+    CODE.apply(div()).font_family(MONO_FONT)
 }
 pub fn pencil() -> Div {
-    div()
-        .font_family(DOCUMENT_FONT)
-        .text_size(px(14.))
-        .line_height(px(23.))
+    PENCIL.apply(div()).font_family(DOCUMENT_FONT)
 }
-pub fn focus_ring(cx: &App) -> Div {
+pub fn focus_ring(radius: f32, cx: &App) -> Div {
     div()
         .absolute()
         .top(px(-4.))
@@ -88,7 +133,7 @@ pub fn focus_ring(cx: &App) -> Div {
         .right(px(-4.))
         .border_2()
         .border_color(tones(cx).focus)
-        .rounded(px(8.))
+        .rounded(px(radius + 4.))
 }
 /// The line covers the entire block, including its vertical padding.
 pub fn thread_segment(dashed: bool, cx: &App) -> Div {
@@ -132,10 +177,7 @@ pub fn key_hint(key: &'static str, label: &'static str, cx: &App) -> Div {
         .child(label)
 }
 pub fn document() -> Div {
-    div()
-        .font_family(DOCUMENT_FONT)
-        .text_size(px(16.))
-        .line_height(px(27.))
+    DOCUMENT.apply(div()).font_family(DOCUMENT_FONT)
 }
 pub fn tnum() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
@@ -214,6 +256,7 @@ pub fn glyph_color(status: StatusIcon, ink: Hsla, cx: &App) -> Hsla {
     let t = palette(cx);
     match status {
         StatusIcon::Running => ink,
+        StatusIcon::Done => t.feedback.success,
         StatusIcon::Failed => t.feedback.error,
         StatusIcon::Denied | StatusIcon::Interrupted => t.feedback.warning,
         StatusIcon::Updated => t.feedback.info,
@@ -248,34 +291,26 @@ pub fn markdown(cx: &App, is_document: bool) -> TextViewStyle {
         .with_border(tone.hairline)
         .with_paragraph_gap(rems(12. / 14.))
         .with_heading(move |level| {
-            StyleRefinement::default()
-                .font_family(if is_document { DOCUMENT_FONT } else { UI_FONT })
-                .text_size(px(match level {
-                    1 => 21.,
-                    2 => 18.,
-                    _ => 16.,
-                }))
-                .line_height(px(match level {
-                    1 => 28.,
-                    2 => 24.,
-                    _ => 22.,
-                }))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(t.text.primary)
+            HEADINGS[match level {
+                1 => 0,
+                2 => 1,
+                _ => 2,
+            }]
+            .apply(StyleRefinement::default())
+            .font_family(if is_document { DOCUMENT_FONT } else { UI_FONT })
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(t.content.heading)
         })
         .with_code_block(
-            StyleRefinement::default()
+            CODE.apply(StyleRefinement::default())
                 .bg(t.surfaces.panel)
                 .rounded(px(8.))
                 .p(px(12.))
-                .font_family(MONO_FONT)
-                .text_size(px(13.))
-                .line_height(px(20.)),
+                .font_family(MONO_FONT),
         )
         .with_inline_code_style(
-            StyleRefinement::default()
+            CODE.apply(StyleRefinement::default())
                 .font_family(MONO_FONT)
-                .text_size(px(13.))
                 .text_color(t.content.code)
                 .bg(t.surfaces.overlay)
                 .rounded(px(4.))
@@ -298,4 +333,110 @@ pub fn markdown(cx: &App, is_document: bool) -> TextViewStyle {
                 .text_color(t.text.secondary),
         )
         .with_table_cell(StyleRefinement::default().border_color(tone.hairline))
+}
+
+/// Reasoning is an indented graphite note, never answer-colored Markdown.
+pub fn thought_markdown(cx: &App) -> TextViewStyle {
+    let t = palette(cx);
+    let tone = tones(cx);
+    markdown(cx, true)
+        .with_foreground(tone.pencil)
+        .with_muted_foreground(tone.pencil)
+        .with_heading(move |_| {
+            PENCIL
+                .apply(StyleRefinement::default())
+                .font_family(DOCUMENT_FONT)
+                .italic()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tone.pencil)
+        })
+        .with_inline_code_style(
+            CODE.apply(StyleRefinement::default())
+                .font_family(MONO_FONT)
+                .text_color(tone.pencil)
+                .bg(t.surfaces.panel)
+                .rounded(px(4.))
+                .px(px(4.)),
+        )
+        .with_code_block(
+            CODE.apply(StyleRefinement::default())
+                .font_family(MONO_FONT)
+                .text_color(tone.pencil)
+                .bg(t.surfaces.panel)
+                .rounded(px(8.))
+                .p(px(12.)),
+        )
+        .with_blockquote_style(
+            StyleRefinement::default()
+                .border_l_2()
+                .border_color(tone.hairline)
+                .text_color(tone.pencil),
+        )
+        .with_table_head(
+            StyleRefinement::default()
+                .bg(t.surfaces.panel)
+                .text_color(tone.pencil),
+        )
+}
+
+pub fn shell_ink(token: ShellToken, t: &ZevriaTheme<Hsla>) -> Hsla {
+    match token {
+        ShellToken::Program => t.syntax.function,
+        ShellToken::Flag | ShellToken::Number | ShellToken::Variable => t.syntax.constant,
+        ShellToken::String => t.syntax.string,
+        ShellToken::Operator | ShellToken::Keyword => t.syntax.keyword,
+        ShellToken::Comment | ShellToken::Routing => t.syntax.comment,
+        ShellToken::Assignment => t.text.secondary,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CODE, HEADINGS, PENCIL, focus_ring, glyph_color, markdown, palette, shell_ink,
+        thought_markdown, tones,
+    };
+    use gpui_kit::{FontStyle, FontWeight, Styled, TestAppContext, px};
+    use zevria_presentation::{shell::ShellToken, status_icon::StatusIcon};
+
+    #[gpui_kit::test]
+    fn markdown_voices_use_the_type_scale_and_semantic_inks(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::super::theme::apply(zevria_theme::ZEVRIA_GRAPHITE, cx);
+            let t = palette(cx);
+            let pencil = tones(cx).pencil;
+            let answer = markdown(cx, false);
+            let thought = thought_markdown(cx);
+            assert_eq!(thought.foreground(), pencil);
+            assert_eq!(thought.muted_foreground(), pencil);
+            assert_eq!(thought.link(), t.content.link);
+            for level in 1..=6 {
+                let heading = answer.heading(level);
+                assert_eq!(heading.text.color, Some(t.content.heading));
+                assert_eq!(
+                    heading.text.font_size,
+                    Some(px(HEADINGS[(level as usize - 1).min(2)].size).into())
+                );
+                let note = thought.heading(level);
+                assert_eq!(note.text.color, Some(pencil));
+                assert_eq!(note.text.font_size, Some(px(PENCIL.size).into()));
+                assert_eq!(note.text.font_weight, Some(FontWeight::SEMIBOLD));
+                assert_eq!(note.text.font_style, Some(FontStyle::Italic));
+            }
+            for code in [thought.code_block(), thought.inline_code_style()] {
+                assert_eq!(code.text.color, Some(pencil));
+                assert_eq!(code.text.font_size, Some(px(CODE.size).into()));
+                assert_eq!(code.background, Some(t.surfaces.panel.into()));
+            }
+            assert_eq!(
+                glyph_color(StatusIcon::Done, t.text.primary, cx),
+                t.feedback.success
+            );
+            assert_eq!(shell_ink(ShellToken::Program, &t), t.syntax.function);
+            assert_eq!(shell_ink(ShellToken::Routing, &t), t.syntax.comment);
+            let mut ring = focus_ring(6., cx);
+            assert_eq!(ring.style().corner_radii.top_left, Some(px(10.).into()));
+        });
+    }
 }

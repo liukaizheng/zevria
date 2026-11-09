@@ -313,7 +313,8 @@ fn command_tool_renders_shell_grammar_without_argument_wrapper() {
     assert_eq!(lines.len(), 2);
     let row = &lines[1];
     let rendered: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
-    assert_eq!(rendered, "◆ rtk git log -1 --format=fuller ◐");
+    assert_eq!(rendered, "◆ git log -1 --format=fuller ◐");
+    assert!(row.spans.iter().any(|span| span.content == "git" && span.style.fg == Some(ZEVRIA_DARK.syntax.function)));
     assert_eq!(
         row.spans.first().unwrap().style.fg,
         Some(ZEVRIA_DARK.roles.tools)
@@ -327,6 +328,92 @@ fn command_tool_renders_shell_grammar_without_argument_wrapper() {
             .iter()
             .any(|span| matches!(span.style.fg, Some(Color::Rgb(_, _, _)))),
         "command text should use the Syntect shell grammar"
+    );
+}
+
+#[test]
+fn command_display_elision_keeps_y_copy_payload_exact() {
+    let command = "rtk git log -1 --format=fuller";
+    let args = json!({"command": command});
+    let mut app = App::new();
+    apply_turn_event(
+        &mut app,
+        SessionEvent::Intermediate {
+            attempt_id: None,
+            turn_id: TEST_TURN_ID,
+            message: assistant_message(vec![tool_call("fc-copy", None, "command", args.clone())]),
+        },
+    );
+    app.select_for_test(cursor(0, 0));
+    let rendered = rendered_text(&mut app, 120, 16);
+    assert!(rendered.contains("◆ git log -1 --format=fuller ◐"));
+    assert!(!rendered.contains("rtk"));
+    // Native tool copies are the exact original argument payload, not the row.
+    assert_eq!(
+        app.handle_event(key(KeyCode::Char('y'))),
+        Some(UiAction::Copy {
+            text: args.to_string()
+        })
+    );
+}
+
+#[test]
+fn reasoning_markdown_is_uniform_muted_italic_even_for_bold_titles() {
+    let message = assistant_message(vec![AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
+        "**Preparing notes**\n\nBody with `code` and [link](https://example.com).\n\n# Heading\n\n```rust\nlet n = 42;\n```".into(),
+    ]))]);
+    let mut lines = Vec::new();
+    layout_native_message(&message, None, &mut lines, 120, None);
+    for line in lines.iter().skip(1) {
+        for span in &line.spans {
+            let style = line.style.patch(span.style);
+            assert_eq!(style.fg, Some(ZEVRIA_DARK.text.muted), "{span:?}");
+            assert!(style.add_modifier.contains(Modifier::ITALIC), "{span:?}");
+        }
+    }
+    assert!(
+        lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| span.content == "Preparing notes"
+                && span.style.add_modifier.contains(Modifier::BOLD))
+    );
+}
+
+#[test]
+fn job_notice_rows_hide_routing_and_copy_exact_notice_text() {
+    use zevria_foundation::*;
+    let job = CommandJobSnapshot {
+        id: CommandJobId::new("job-display"),
+        call_id: None,
+        command: "rtk proxy cargo test".into(),
+        mode: CommandJobMode::Background,
+        status: CommandJobStatus::Exited {
+            code: Some(0),
+            success: true,
+            signal: None,
+        },
+        started_at: SystemTime::UNIX_EPOCH,
+        finished_at: Some(SystemTime::UNIX_EPOCH),
+        stdout_bytes: 0,
+        stderr_bytes: 0,
+    };
+    let exact = "model notice: rtk proxy cargo test";
+    let notice = CommandJobNotice::new(
+        CommandJobNoticeKind::Update,
+        vec![job],
+        vec![],
+        exact.into(),
+    );
+    let mut app = App::new();
+    app.seed_history_entry(HistoryEntry::JobNotice(notice, None));
+    app.select_for_test(cursor(0, 0));
+    let rendered = rendered_text(&mut app, 120, 16);
+    assert!(rendered.contains("cargo test"));
+    assert!(!rendered.contains("rtk"));
+    assert_eq!(
+        app.handle_event(key(KeyCode::Char('y'))),
+        Some(UiAction::Copy { text: exact.into() })
     );
 }
 

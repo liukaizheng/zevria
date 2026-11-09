@@ -111,8 +111,7 @@ impl DesktopWindow {
                             .size_full()
                             .style(style::markdown(cx, true))
                             .font_family(style::DOCUMENT_FONT)
-                            .text_size(px(16.))
-                            .line_height(px(27.)),
+                            .map(|view| style::DOCUMENT.apply(view)),
                     ),
             )
             .child(
