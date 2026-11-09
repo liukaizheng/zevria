@@ -42,9 +42,12 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/responses", listener.local_addr().unwrap());
         let duplicate = sse_data(created.to_string());
+        let (release_headers, headers_released) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut old, _) = listener.accept().await.unwrap();
             let first = receive_http_json(&mut old).await;
+            // Exercise a slow header phase without scheduler-dependent sleeps.
+            headers_released.await.unwrap();
             sse_headers(&mut old).await;
             if !prefix.is_empty() {
                 chunk(&mut old, &prefix).await.unwrap();
@@ -83,6 +86,25 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
         });
         let mut provider = connect_http_test_provider(url).await;
         let (sender, mut events) = session_event_channel(64);
+        let collect_updates = tokio::spawn(async move {
+            let mut release_headers = Some(release_headers);
+            let mut updates = Vec::new();
+            while let Some(update) = events.recv().await {
+                if matches!(
+                    &update,
+                    SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+                        attempt: 1,
+                        status: NetworkStatus::Quiet { .. },
+                        ..
+                    })
+                ) && let Some(release_headers) = release_headers.take()
+                {
+                    release_headers.send(()).unwrap();
+                }
+                updates.push(update);
+            }
+            updates
+        });
         let mut state = AttemptState::default();
         run_turn_request_with_recovery(
             RequestParts {
@@ -101,29 +123,49 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
         )
         .await
         .unwrap();
-        let updates = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-        assert_eq!(
-            updates
-                .iter()
-                .filter(|u| matches!(
+        let updates = collect_updates.await.unwrap();
+        let response_started = updates
+            .iter()
+            .position(|u| {
+                matches!(
                     u,
                     SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
-                        status: NetworkStatus::Quiet { .. },
+                        attempt: 1,
+                        status: NetworkStatus::AwaitingResponse,
                         ..
                     })
-                ))
-                .count(),
-            1
-        );
-        assert_eq!(
-            updates
-                .iter()
-                .filter(|u| matches!(
-                    u,
-                    SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { attempt: 2, .. })
-                ))
-                .count(),
-            1
+                )
+            })
+            .expect("the first attempt must reach the response stream");
+        // Quiet is per phase/idle period, not per request: header waits and
+        // meaningful progress can rearm it. Require a response-stream warning
+        // without depending on the scheduler-sensitive total warning count.
+        assert!(updates[response_started..].iter().any(|u| matches!(
+            u,
+            SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+                attempt: 1,
+                transport: NetworkTransport::Http,
+                status: NetworkStatus::Quiet {
+                    will_retry: true,
+                    ..
+                },
+                ..
+            })
+        )));
+        let retries = updates
+            .iter()
+            .filter_map(|u| match u {
+                SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { attempt, error, .. }) => {
+                    Some((*attempt, error.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retries.len(), 1, "{retries:?}");
+        assert_eq!(retries[0].0, 2);
+        assert!(
+            retries[0].1.starts_with("response_idle_timeout:"),
+            "{retries:?}"
         );
         assert_eq!(state.history.len(), 2);
         server.await.unwrap();
