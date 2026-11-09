@@ -67,6 +67,196 @@ async fn image_only_messages_and_skill_arguments_are_durable_before_provider_fai
 }
 
 #[tokio::test]
+async fn ready_message_revision_commits_before_feedback_and_runs_only_in_plan_mode() {
+    for text in ["revise it", "/literal feedback", "$literal feedback"] {
+        let (artifact, mut items) = ready_plan_fixture();
+        items.insert(0, TranscriptItem::SessionMode(SessionMode::Plan));
+        let (_directory, mut transcript) = test_transcript();
+        persist_fixture(&mut transcript, &items);
+        let mut engine = SessionEngine::new(
+            ScriptedProvider::new([Ok(Message::assistant("Still revising."))]),
+            test_skill_tools(),
+            test_policies(),
+            transcript,
+            test_skills(),
+        )
+        .unwrap()
+        .with_fixture(items.clone())
+        .unwrap()
+        .with_mode_management()
+        .with_subtask_concurrency(1);
+        assert_eq!(engine.selected_mode(), SessionMode::Plan);
+        let (events, mut receiver) = session_event_channel(128);
+        engine
+            .handle_command(
+                SessionCommand::Turn(TurnCommand::RevisePlanWithMessage {
+                    expected: artifact.version,
+                    text: text.into(),
+                }),
+                &events,
+            )
+            .await
+            .unwrap();
+        let tail = &engine.conversation.items()[items.len()..];
+        assert!(
+            matches!(&tail[0], TranscriptItem::Plan(PlanRecord::RevisionRequested { artifact: revised }) if revised == &artifact)
+        );
+        let prompt_index = tail.iter().position(|item| matches!(item,
+            TranscriptItem::RequestPrompt { message, request }
+                if message == &Message::user(text) && request.behavior == zevria_foundation::RequestBehavior::Standard
+        )).unwrap();
+        assert!(prompt_index > 0);
+        assert!(
+            matches!(&tail[prompt_index + 1], TranscriptItem::RequestDirective(directive)
+            if directive.request.behavior == zevria_foundation::RequestBehavior::Standard)
+        );
+        assert_eq!(
+            engine.plan_state().unwrap(),
+            &PlanWorkflowState::Planning {
+                id: artifact.version.id,
+                previous: Some(artifact.clone()),
+                draft: None,
+            }
+        );
+        assert_eq!(engine.selected_mode(), SessionMode::Plan);
+        assert!(!tail.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Plan(PlanRecord::Resolved { .. } | PlanRecord::Handoff { .. })
+        )));
+        let requests = engine.provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model_role, ModelRole::Plan);
+        assert!(requests[0].instructions.contains("Plan test instructions"));
+        drop(requests);
+        let updates = collect_events(&mut receiver).await;
+        let started = updates.iter().position(|event| matches!(event,
+            SessionEvent::TurnStarted { mode: SessionMode::Plan, message, .. }
+                if message == &Message::user(if text.starts_with('/') || text.starts_with('$') {
+                    format!(" {text}")
+                } else { text.to_string() })
+        )).unwrap();
+        let planning = updates.iter().position(|event| matches!(event,
+            SessionEvent::PlanStateChanged { state: PlanWorkflowState::Planning { previous: Some(previous), draft: None, .. } }
+                if previous == &artifact
+        )).unwrap();
+        assert!(started < planning);
+        assert!(updates[..started].iter().any(|event| matches!(
+            event,
+            SessionEvent::ModeChanged {
+                mode: SessionMode::Plan
+            }
+        )));
+        assert!(!updates.iter().any(|event| matches!(
+            event,
+            SessionEvent::PlanHandoffStarted { .. }
+                | SessionEvent::FreshPlanHandoffRequested { .. }
+                | SessionEvent::ModeChanged {
+                    mode: SessionMode::Build
+                }
+        )));
+    }
+}
+
+#[tokio::test]
+async fn ready_message_revision_rejections_preserve_plan_and_durable_history() {
+    for case in [
+        "stale",
+        "blank",
+        "planning",
+        "published",
+        "idle",
+        "cancelled",
+        "persistence",
+        "capacity",
+    ] {
+        let (artifact, ready) = ready_plan_fixture();
+        let items = match case {
+            "planning" => ready[..1].to_vec(),
+            "published" => super::mode::published_history(&artifact),
+            "idle" => Vec::new(),
+            _ => ready,
+        };
+        let (_directory, mut transcript) = test_transcript();
+        persist_fixture(&mut transcript, &items);
+        let path = transcript.path().to_path_buf();
+        let before_bytes = std::fs::read(&path).unwrap();
+        let mut engine = SessionEngine::new(
+            ScriptedProvider::new([]),
+            test_skill_tools(),
+            test_policies(),
+            transcript,
+            test_skills(),
+        )
+        .unwrap()
+        .with_fixture(items.clone())
+        .unwrap()
+        .with_mode_management();
+        if case == "capacity" {
+            engine = engine.with_compaction_policy(test_compaction_policy(1, 80, 0));
+        }
+        let before_plan = engine.plan_state().unwrap().clone();
+        let before_mode = engine.selected_mode();
+        let mut expected = artifact.version;
+        if case == "stale" {
+            expected.revision += 1;
+        }
+        let backup = path.with_extension("saved");
+        if case == "persistence" {
+            std::fs::rename(&path, &backup).unwrap();
+            std::fs::create_dir(&path).unwrap();
+        }
+        let turn = TurnContext::new(TurnId::new(77), SessionMode::Plan, CancellationToken::new());
+        if case == "cancelled" {
+            turn.cancellation().cancel();
+        }
+        let (events, mut receiver) = session_event_channel(64);
+        engine
+            .handle_turn(
+                TurnCommand::RevisePlanWithMessage {
+                    expected,
+                    text: if case == "blank" { " \n " } else { "revise it" }.into(),
+                },
+                &turn,
+                &events,
+            )
+            .await
+            .unwrap();
+        assert_eq!(engine.conversation.items(), items, "{case}");
+        assert_eq!(engine.plan_state().unwrap(), &before_plan, "{case}");
+        assert_eq!(engine.selected_mode(), before_mode, "{case}");
+        assert!(
+            engine.provider.requests.lock().unwrap().is_empty(),
+            "{case}"
+        );
+        let updates = collect_events(&mut receiver).await;
+        assert!(
+            !updates.iter().any(|event| matches!(
+                event,
+                SessionEvent::TurnStarted { .. } | SessionEvent::PlanStateChanged { .. }
+            )),
+            "{case}: {updates:?}"
+        );
+        assert!(
+            updates.iter().any(|event| matches!(
+                event,
+                SessionEvent::TurnRejected { .. } | SessionEvent::TurnCancelled { .. }
+            )),
+            "{case}: {updates:?}"
+        );
+        if case == "persistence" {
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::rename(&backup, &path).unwrap();
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes, "{case}");
+        assert_eq!(
+            zevria_transcript::transcript::load(&path).unwrap(),
+            items,
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn skill_revision_is_not_committed_when_prompt_admission_fails() {
     let (artifact, items) = ready_plan_fixture();
     let (_directory, mut transcript) = test_transcript();

@@ -48,7 +48,8 @@ Editing, work submission, control eligibility, transcript rewriting, management,
 and navigation are independent capabilities. Root and live-worker drafts remain
 editable during work. Historical/frozen panes cannot compose. Engine work admission
 locks before acknowledgement; root prompt-like follow-ups can instead enter a local
-queue. A hidden Ready Plan still blocks both submission and queueing.
+queue. A hidden Ready Plan admits only direct, exact-version message or `$skill`
+revision feedback from an idle root composer; queueing and other work stay blocked.
 
 ## Transactions and activation
 
@@ -120,8 +121,13 @@ Plan review defaults to **Revise**. Arrows clamp; numbers and `n` only select.
 Enter explicitly activates the selected eligible action against its exact version.
 Esc/Ctrl-C hide initial or recovery review without deciding. `p` reopens Ready or
 retained review. Repeated snapshots preserve local dismissal/choice; a new version
-can open a new review. Hiding an already-dispatched decision does not retract it.
-Recovery Revise returns to the existing revision flow. Publication, prose,
+can open a new review. With Ready review hidden and the root idle, **Insert
+Ctrl-Enter** sends ordinary feedback or `$skill` as an exact-version Plan revision;
+the hint reads **revise plan**. Admission failure keeps Ready and review hidden and
+restores the draft. Other work (queue dispatch, compaction, ensembles, edits and
+mode/model management) stays blocked while Ready; `/orchestrate` and ensemble
+sends explain the block and retain the draft. Hiding an already-dispatched decision
+does not retract it. Recovery Revise returns to the existing revision flow. Publication, prose,
 protocol completion, passive highlighting, text-only completion and dismissal
 are never confirmation or implementation authority. Explicit keyboard activation
 of an eligible choice or parameterless command is a user action, not implicit
@@ -200,6 +206,9 @@ Only explicit actions that start work now resume the queue:
   the current selection; this explicit consent can change the persisted mode.
 - While idle and paused, a direct prompt, `/orchestrate`, `$skill` or ensemble send
   runs ahead of the paused items and resumes the queue after that work settles.
+  Ordinary feedback or `$skill` sent as a revision of a hidden Ready Plan also
+  resumes the queue, like any direct prompt; queued work itself stays blocked
+  until the plan is no longer Ready.
 
 In Normal mode, **e** moves the newest queued item back into an editable, empty
 composer in Insert mode, restoring the exact draft. It is unavailable during

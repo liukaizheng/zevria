@@ -214,6 +214,16 @@ impl<P: ModelProvider> SessionEngine<P> {
                 )
                 .await
             }
+            TurnCommand::RevisePlanWithMessage { expected, text } => {
+                self.run_prompt_turn(
+                    TurnAnchor::Append,
+                    PromptTurnInput::RevisionMessage { expected, text },
+                    SessionMode::Plan,
+                    events,
+                    turn,
+                )
+                .await
+            }
             TurnCommand::RevisePlanWithSkill {
                 expected,
                 name,

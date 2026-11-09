@@ -397,6 +397,193 @@ fn ready_forces_plan_mode_even_if_restore_metadata_disagrees() {
     );
 }
 #[test]
+fn hidden_ready_admits_only_direct_versioned_revision_feedback() {
+    use crate::PaneScope;
+    let mut model = SessionModel::default();
+    let artifact = artifact();
+    model.apply_plan_snapshot(PlanWorkflowState::Ready {
+        artifact: artifact.clone(),
+    });
+    assert_eq!(model.ready_revision_target(), None);
+    assert!(
+        model
+            .submit("feedback".into(), RequestBehavior::Standard)
+            .is_none()
+    );
+    assert!(
+        model
+            .invoke_skill("review".parse().unwrap(), "feedback".into())
+            .is_none()
+    );
+    model.workflow.hide();
+    assert_eq!(model.ready_revision_target(), Some(artifact.version));
+    assert!(
+        model
+            .submit(" ".into(), RequestBehavior::Standard)
+            .is_none()
+    );
+    assert!(
+        model
+            .submit("feedback".into(), RequestBehavior::Orchestrate)
+            .is_none()
+    );
+    for mode in SessionMode::ALL {
+        assert!(
+            model
+                .submit_in_mode("queued".into(), RequestBehavior::Standard, mode)
+                .is_none()
+        );
+        assert!(
+            model
+                .invoke_skill_in_mode("review".parse().unwrap(), "queued".into(), mode)
+                .is_none()
+        );
+        assert!(model.select_mode(mode).is_none());
+    }
+    assert!(model.compact().is_none());
+    assert!(
+        model
+            .run_ensemble(zevria_workflow::EnsembleWorkflow::Plan, "ensemble".into())
+            .is_none()
+    );
+    assert!(
+        model
+            .edit_transcript(
+                TranscriptEdit {
+                    target: TranscriptEditTarget::PromptOrdinal(0),
+                    replacement: TranscriptEditReplacement::Message {
+                        text: "edit".into(),
+                        mode: SessionMode::Plan,
+                        behavior: RequestBehavior::Standard,
+                    },
+                },
+                0
+            )
+            .is_none()
+    );
+    model.reduce(E::JobContinuationChanged {
+        mode: Some(SessionMode::Plan),
+    });
+    assert!(model.continue_after_jobs().is_none());
+    model.set_scope(PaneScope::Inspect { role: None });
+    assert_eq!(model.ready_revision_target(), None);
+    assert!(
+        model
+            .submit("feedback".into(), RequestBehavior::Standard)
+            .is_none()
+    );
+    assert!(
+        model
+            .invoke_skill("review".parse().unwrap(), "feedback".into())
+            .is_none()
+    );
+    model.set_scope(PaneScope::Root);
+    assert!(model.begin_operation(
+        OperationKind::Submit,
+        SessionMode::Plan,
+        zevria_foundation::ModelRole::Plan
+    ));
+    assert_eq!(model.ready_revision_target(), None);
+    assert!(
+        model
+            .submit("feedback".into(), RequestBehavior::Standard)
+            .is_none()
+    );
+    assert!(
+        model
+            .invoke_skill("review".parse().unwrap(), "feedback".into())
+            .is_none()
+    );
+}
+
+#[test]
+fn hidden_ready_revision_uses_prompt_operations_without_restoring_review() {
+    use crate::session::SessionActivity;
+    use zevria_foundation::ModelRole;
+    use zevria_session_api::TurnCommand;
+    for skill in [false, true] {
+        for rejected in [false, true] {
+            let mut model = SessionModel::default();
+            let artifact = artifact();
+            let ready = PlanWorkflowState::Ready {
+                artifact: artifact.clone(),
+            };
+            model.apply_plan_snapshot(ready.clone());
+            model.workflow.hide();
+            let kind = if skill {
+                OperationKind::Skill
+            } else {
+                OperationKind::Submit
+            };
+            let command = if skill {
+                model
+                    .invoke_skill("review".parse().unwrap(), "feedback".into())
+                    .unwrap()
+            } else {
+                model
+                    .submit("feedback".into(), RequestBehavior::Standard)
+                    .unwrap()
+            };
+            if skill {
+                assert!(
+                    matches!(command, TurnCommand::RevisePlanWithSkill { expected, name, args }
+                    if expected == artifact.version && name.as_str() == "review" && args.display_projection() == "feedback")
+                );
+            } else {
+                assert!(
+                    matches!(command, TurnCommand::RevisePlanWithMessage { expected, text }
+                    if expected == artifact.version && text.display_projection() == "feedback")
+                );
+            }
+            assert_eq!(model.session.operation_kind(), Some(kind));
+            let SessionActivity::Pending(pending) = model.session.activity() else {
+                panic!("pending")
+            };
+            assert_eq!(
+                (pending.mode, pending.role),
+                (SessionMode::Plan, ModelRole::Plan)
+            );
+            if rejected {
+                let reduction = model.reduce(E::TurnRejected {
+                    turn_id: TURN,
+                    error: "stale".into(),
+                });
+                let (settled, settlement) = reduction.settled.unwrap();
+                assert_eq!(settled, kind);
+                assert!(settlement.restores_draft());
+                assert_eq!(model.workflow.snapshot(), &ready);
+                assert!(!model.is_busy());
+            } else {
+                let reduction = model.reduce(E::TurnStarted {
+                    turn_id: TURN,
+                    message: Message::user("feedback"),
+                    mode: SessionMode::Plan,
+                });
+                assert_eq!(reduction.accepted, Some(kind));
+                model.reduce(E::PlanStateChanged {
+                    state: PlanWorkflowState::Planning {
+                        id: artifact.version.id,
+                        previous: Some(artifact),
+                        draft: None,
+                    },
+                });
+                assert!(model.is_busy());
+                assert_eq!(model.next_mode(), SessionMode::Plan);
+                assert!(matches!(
+                    model.workflow.snapshot(),
+                    PlanWorkflowState::Planning {
+                        previous: Some(_),
+                        draft: None,
+                        ..
+                    }
+                ));
+            }
+            assert!(model.workflow.dialog().is_none());
+        }
+    }
+}
+
+#[test]
 fn accepted_edit_replaces_tail_before_appending_the_new_prompt() {
     let mut model = SessionModel::default();
     model.conversation.restore(vec![

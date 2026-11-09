@@ -497,6 +497,56 @@ fn failed_and_rejected_direct_or_queued_work_pause_the_remaining_queue_and_recov
 }
 
 #[test]
+fn hidden_ready_direct_revision_resumes_but_never_dispatches_the_paused_queue() {
+    for skill in [false, true] {
+        let mut app = busy();
+        app.set_mode_for_test(SessionMode::Plan);
+        enqueue(&mut app, "queued plan feedback");
+        complete(&mut app, TEST_TURN_ID);
+        let artifact = test_plan_artifact();
+        let expected = artifact.version;
+        app.reduce_without_effects(SessionEvent::PlanStateChanged {
+            state: PlanWorkflowState::Ready {
+                artifact: artifact.clone(),
+            },
+        });
+        idle(&mut app);
+        assert_eq!(pause_label(&app), Some("Plan decision required"));
+        app.handle_event(key(KeyCode::Esc));
+        assert_eq!(app.dispatch_next_queued(), None);
+        enter_insert(&mut app);
+        app.handle_event(Event::Paste(
+            if skill {
+                "$review feedback"
+            } else {
+                "feedback"
+            }
+            .into(),
+        ));
+        let action = app.handle_event(ctrl_enter());
+        assert!(matches!(action,
+            Some(UiAction::RevisePlanWithMessage { expected: target, .. }
+                | UiAction::RevisePlanWithSkill { expected: target, .. }) if target == expected
+        ));
+        assert_eq!(pause_label(&app), None);
+        assert_eq!(app.queue_for_test().len, 1);
+        start_empty_turn(&mut app, TurnId::new(803), SessionMode::Plan);
+        app.reduce_without_effects(SessionEvent::PlanStateChanged {
+            state: PlanWorkflowState::Planning {
+                id: expected.id,
+                previous: Some(artifact),
+                draft: None,
+            },
+        });
+        complete(&mut app, TurnId::new(803));
+        idle(&mut app);
+        assert!(
+            matches!(app.dispatch_next_queued(), Some(UiAction::Submit { mode: SessionMode::Plan, text, .. }) if text == "queued plan feedback".into())
+        );
+    }
+}
+
+#[test]
 fn a_direct_prompt_like_send_while_paused_runs_ahead_and_resumes_followups() {
     for text in [
         "direct",

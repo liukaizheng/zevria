@@ -84,6 +84,14 @@ pub enum TurnCommand {
         args: UserPrompt,
         mode: SessionMode,
     },
+    /// Exact-version, Standard-only feedback on a Ready Plan. Admission is checked before
+    /// the Ready plan changes; a single commit records the revision request and feedback.
+    /// The turn runs under the same tracked turn and cancellation scope and never approves
+    /// the plan or starts implementation.
+    RevisePlanWithMessage {
+        expected: PlanVersion,
+        text: UserPrompt,
+    },
     /// Validate name resolution and capacity before changing a Ready Plan, then run the typed
     /// revision input under the same tracked turn and cancellation scope.
     RevisePlanWithSkill {
@@ -119,7 +127,9 @@ impl TurnCommand {
             | Self::InvokeSkill { mode, .. }
             | Self::Compact { mode }
             | Self::ContinueAfterJobs { mode } => *mode,
-            Self::RevisePlanWithSkill { .. } => SessionMode::Plan,
+            Self::RevisePlanWithMessage { .. } | Self::RevisePlanWithSkill { .. } => {
+                SessionMode::Plan
+            }
             Self::EditTranscript(edit) => edit.replacement.mode(),
             Self::RunEnsemble { workflow, .. } => match workflow {
                 EnsembleWorkflow::Plan => SessionMode::Plan,

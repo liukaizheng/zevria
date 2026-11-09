@@ -98,6 +98,18 @@ impl App {
         &mut self,
         classified: ClassifiedInput,
     ) -> Option<UiAction> {
+        if self.model.ready_revision_target().is_some()
+            && matches!(
+                &classified,
+                ClassifiedInput::Orchestrate(_) | ClassifiedInput::Ensemble { .. }
+            )
+        {
+            self.push_error(
+                "This plan is awaiting review; send ordinary feedback to revise it, or reopen the review with p."
+                    .into(),
+            );
+            return None;
+        }
         let behavior = if matches!(&classified, ClassifiedInput::Orchestrate(_)) {
             zevria_foundation::RequestBehavior::Orchestrate
         } else {
@@ -105,22 +117,25 @@ impl App {
         };
         match classified {
             ClassifiedInput::Message(text) | ClassifiedInput::Orchestrate(text) => {
-                let TurnCommand::Submit {
-                    text,
-                    mode,
-                    behavior,
-                } = self.model.submit(text, behavior)?
-                else {
-                    unreachable!("submit admission")
+                let action = match self.model.submit(text, behavior)? {
+                    TurnCommand::Submit {
+                        text,
+                        mode,
+                        behavior,
+                    } => UiAction::Submit {
+                        text,
+                        mode,
+                        behavior,
+                    },
+                    TurnCommand::RevisePlanWithMessage { expected, text } => {
+                        UiAction::RevisePlanWithMessage { expected, text }
+                    }
+                    _ => unreachable!("submit admission"),
                 };
                 self.after_admission();
                 self.stage_draft();
                 self.queue.resume();
-                Some(UiAction::Submit {
-                    text,
-                    mode,
-                    behavior,
-                })
+                Some(action)
             }
             ClassifiedInput::Builtin(SlashCommand::Build) => {
                 self.begin_mode_selection(SessionMode::Build, true)
@@ -166,15 +181,25 @@ impl App {
                 Some(UiAction::RunCommand(command))
             }
             ClassifiedInput::Skill { name, args } => {
-                let TurnCommand::InvokeSkill { name, args, mode } =
-                    self.model.invoke_skill(name, args)?
-                else {
-                    unreachable!("skill admission")
+                let action = match self.model.invoke_skill(name, args)? {
+                    TurnCommand::InvokeSkill { name, args, mode } => {
+                        UiAction::InvokeSkill { name, args, mode }
+                    }
+                    TurnCommand::RevisePlanWithSkill {
+                        expected,
+                        name,
+                        args,
+                    } => UiAction::RevisePlanWithSkill {
+                        expected,
+                        name,
+                        args,
+                    },
+                    _ => unreachable!("skill admission"),
                 };
                 self.after_admission();
                 self.stage_draft();
                 self.queue.resume();
-                Some(UiAction::InvokeSkill { name, args, mode })
+                Some(action)
             }
         }
     }

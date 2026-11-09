@@ -502,6 +502,128 @@ fn escaped_plan_approval_reopens_with_p_and_keeps_revision_drafts_explicit() {
 }
 
 #[test]
+fn dismissed_ready_plan_composer_feedback_is_a_revision_not_a_decision() {
+    for rejected in [false, true] {
+        let mut app = App::new();
+        let artifact = test_plan_artifact();
+        let expected = artifact.version;
+        let ready = PlanWorkflowState::Ready {
+            artifact: artifact.clone(),
+        };
+        app.reduce_without_effects(SessionEvent::PlanStateChanged {
+            state: ready.clone(),
+        });
+        app.handle_event(key(KeyCode::Esc));
+        enter_insert(&mut app);
+        app.handle_event(Event::Paste("next draft".into()));
+        assert!(
+            app.hint_eligibility()
+                .labels
+                .contains(&(crate::input::Action::Submit, "revise plan"))
+        );
+        assert_eq!(
+            app.handle_event(ctrl_enter()),
+            Some(UiAction::RevisePlanWithMessage {
+                expected,
+                text: "next draft".into(),
+            })
+        );
+        assert!(app.is_busy());
+        assert!(app.interaction().is_normal());
+        assert_eq!(app.in_flight_mode(), Some(SessionMode::Plan));
+        assert_eq!(app.in_flight_role(), Some(ModelRole::Plan));
+        assert!(app.input().is_empty());
+        assert!(app.render_parts().plan_dialog.is_none());
+        if rejected {
+            app.reduce_without_effects(SessionEvent::TurnRejected {
+                turn_id: TEST_TURN_ID,
+                error: "revision changed".into(),
+            });
+            assert_eq!(app.plan_state(), ready);
+            assert!(!app.is_busy());
+            assert_eq!(app.input(), "next draft");
+            assert!(app.render_parts().plan_dialog.is_none());
+            assert!(app.history().iter().any(|entry| matches!(entry, HistoryEntry::Error(error) if error.contains("revision changed"))));
+        } else {
+            app.reduce_without_effects(SessionEvent::TurnStarted {
+                turn_id: TEST_TURN_ID,
+                message: Message::user("next draft"),
+                mode: SessionMode::Plan,
+            });
+            app.reduce_without_effects(SessionEvent::PlanStateChanged {
+                state: PlanWorkflowState::Planning {
+                    id: expected.id,
+                    previous: Some(artifact),
+                    draft: None,
+                },
+            });
+            assert_eq!(app.next_mode(), SessionMode::Plan);
+            assert!(app.render_parts().plan_dialog.is_none());
+            assert!(rendered_text(&mut app, 120, 30).contains("next draft"));
+            app.handle_event(key(KeyCode::Char('p')));
+            assert!(app.plan_recovery_open());
+            assert!(rendered_text(&mut app, 120, 30).contains("Continue revising the plan"));
+        }
+    }
+}
+
+#[test]
+fn hidden_ready_skill_feedback_is_atomic_but_visible_review_requires_a_choice() {
+    let mut app = app_with_skills();
+    let artifact = test_plan_artifact();
+    let expected = artifact.version;
+    app.reduce_without_effects(SessionEvent::PlanStateChanged {
+        state: PlanWorkflowState::Ready { artifact },
+    });
+    app.set_input_for_test("$review the edge cases", "$review the edge cases".len());
+    assert_eq!(app.handle_event(ctrl_enter()), None);
+    assert!(!app.is_busy());
+    assert_eq!(app.input(), "$review the edge cases");
+    assert!(app.render_parts().plan_dialog.is_some());
+    app.handle_event(key(KeyCode::Esc));
+    enter_insert(&mut app);
+    assert_eq!(
+        app.handle_event(ctrl_enter()),
+        Some(UiAction::RevisePlanWithSkill {
+            expected,
+            name: "review".parse().unwrap(),
+            args: "the edge cases".into(),
+        })
+    );
+    assert!(app.is_busy());
+    assert!(app.interaction().is_normal());
+    assert!(app.input().is_empty());
+    assert!(app.render_parts().plan_dialog.is_none());
+}
+
+#[test]
+fn hidden_ready_orchestration_and_ensembles_show_a_notice_and_keep_the_draft() {
+    for text in [
+        "/orchestrate revise it",
+        "/ensemble-plan revise it",
+        "/ensemble-review review it",
+    ] {
+        let mut app = App::new();
+        app.reduce_without_effects(SessionEvent::PlanStateChanged {
+            state: PlanWorkflowState::Ready {
+                artifact: test_plan_artifact(),
+            },
+        });
+        app.handle_event(key(KeyCode::Esc));
+        enter_insert(&mut app);
+        app.handle_event(Event::Paste(text.into()));
+        assert_eq!(app.handle_event(ctrl_enter()), None);
+        assert_eq!(app.input(), text);
+        assert!(app.interaction().is_insert());
+        assert!(!app.is_busy());
+        assert!(app.render_parts().plan_dialog.is_none());
+        assert!(app.history().iter().any(|entry| matches!(entry, HistoryEntry::Error(error)
+            if error == "This plan is awaiting review; send ordinary feedback to revise it, or reopen the review with p."
+        )));
+    }
+}
+
+#[test]
 fn plan_review_can_reopen_while_busy_but_cannot_dispatch_another_decision() {
     let artifact = test_plan_artifact();
     let state = PlanWorkflowState::Planning {

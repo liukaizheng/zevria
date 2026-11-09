@@ -25,11 +25,11 @@ fn replaced_projection_retires_old_selection_anchors_even_when_ids_are_reused() 
 }
 
 #[test]
-fn hidden_ready_blocks_work_and_identical_snapshots_preserve_dismissal() {
+fn hidden_ready_revises_feedback_and_identical_snapshots_preserve_dismissal() {
     let mut app = App::new();
-    let state = PlanWorkflowState::Ready {
-        artifact: test_plan_artifact(),
-    };
+    let artifact = test_plan_artifact();
+    let expected = artifact.version;
+    let state = PlanWorkflowState::Ready { artifact };
     app.reduce_without_effects(SessionEvent::PlanStateChanged {
         state: state.clone(),
     });
@@ -39,13 +39,28 @@ fn hidden_ready_blocks_work_and_identical_snapshots_preserve_dismissal() {
     assert!(app.render_parts().plan_dialog.is_none());
     enter_insert(&mut app);
     app.handle_event(Event::Paste("next draft".into()));
-    assert_eq!(app.handle_event(ctrl_enter()), None);
-    assert!(app.interaction().is_insert());
-    assert_eq!(app.input(), "next draft");
+    assert_eq!(app.capabilities().submit_work, Ok(()));
+    for capability in [
+        app.capabilities().edit_transcript,
+        app.capabilities().manage_session,
+        app.capabilities().queue_work,
+    ] {
+        assert_eq!(
+            capability,
+            Err(crate::input::DisabledReason::PlanDecisionRequired)
+        );
+    }
     assert_eq!(
-        app.capabilities().submit_work,
-        Err(crate::input::DisabledReason::PlanDecisionRequired)
+        app.handle_event(ctrl_enter()),
+        Some(UiAction::RevisePlanWithMessage {
+            expected,
+            text: "next draft".into(),
+        })
     );
+    assert!(app.interaction().is_normal());
+    assert!(app.is_busy());
+    assert!(app.input().is_empty());
+    assert!(app.render_parts().plan_dialog.is_none());
 }
 
 #[test]

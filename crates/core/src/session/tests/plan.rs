@@ -1656,6 +1656,116 @@ async fn editing_earlier_prompt_truncates_later_plan_records_and_recomputes_stat
 }
 
 #[tokio::test]
+async fn atomic_revision_feedback_edits_retain_the_planning_prefix() {
+    for is_skill in [false, true] {
+        let (artifact, items) = ready_plan_fixture();
+        let (_directory, mut transcript) = test_transcript();
+        persist_fixture(&mut transcript, &items);
+        let mut engine = SessionEngine::new(
+            ScriptedProvider::new([
+                Ok(Message::assistant("Revising.")),
+                Ok(Message::assistant("Revising edited feedback.")),
+            ]),
+            test_skill_tools(),
+            test_policies(),
+            transcript,
+            test_skills(),
+        )
+        .unwrap()
+        .with_fixture(items.clone())
+        .unwrap();
+        let policy = engine.policies.policy_mut(SessionMode::Plan);
+        policy.skills_enabled = true;
+        policy.allowed_tool_names = Some(vec!["command".into(), "skill".into()]);
+        let (events, mut receiver) = session_event_channel(128);
+        engine
+            .handle_command(
+                SessionCommand::Turn(TurnCommand::Submit {
+                    text: "untyped feedback is still blocked".into(),
+                    mode: SessionMode::Plan,
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                }),
+                &events,
+            )
+            .await
+            .unwrap();
+        assert_eq!(engine.conversation.items(), items);
+        assert!(engine.provider.requests.lock().unwrap().is_empty());
+        assert!(
+            collect_events(&mut receiver)
+                .await
+                .iter()
+                .any(|event| matches!(event, SessionEvent::TurnRejected { .. }))
+        );
+        let revision = if is_skill {
+            TurnCommand::RevisePlanWithSkill {
+                expected: artifact.version,
+                name: "review".parse().unwrap(),
+                args: "feedback".into(),
+            }
+        } else {
+            TurnCommand::RevisePlanWithMessage {
+                expected: artifact.version,
+                text: "feedback".into(),
+            }
+        };
+        engine
+            .handle_command(SessionCommand::Turn(revision), &events)
+            .await
+            .unwrap();
+        assert!(matches!(&engine.conversation.items()[items.len()],
+            TranscriptItem::Plan(PlanRecord::RevisionRequested { artifact: previous }) if previous == &artifact
+        ));
+        collect_events(&mut receiver).await;
+        let replacement = if is_skill {
+            TranscriptEditReplacement::Skill {
+                name: "review".parse().unwrap(),
+                args: "edited feedback".into(),
+                mode: SessionMode::Plan,
+            }
+        } else {
+            TranscriptEditReplacement::Message {
+                text: "edited feedback".into(),
+                mode: SessionMode::Plan,
+                behavior: zevria_foundation::RequestBehavior::Standard,
+            }
+        };
+        engine
+            .handle_command(
+                SessionCommand::Turn(TurnCommand::EditTranscript(TranscriptEdit {
+                    target: TranscriptEditTarget::PromptOrdinal(0),
+                    replacement,
+                })),
+                &events,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.plan_state().unwrap(),
+            &PlanWorkflowState::Planning {
+                id: artifact.version.id,
+                previous: Some(artifact),
+                draft: None,
+            }
+        );
+        assert_eq!(engine.provider.requests.lock().unwrap().len(), 2);
+        let updates = collect_events(&mut receiver).await;
+        assert!(updates.iter().any(|event| matches!(
+            event,
+            SessionEvent::TurnStarted {
+                mode: SessionMode::Plan,
+                ..
+            }
+        )));
+        assert!(
+            !updates
+                .iter()
+                .any(|event| matches!(event, SessionEvent::TurnRejected { .. }))
+        );
+    }
+}
+
+#[tokio::test]
 async fn plan_revision_retains_id_path_and_increments_revision() {
     let first_title = "Durable approval workflow";
     let first = valid_plan_markdown(first_title, "First version.");
@@ -1664,8 +1774,6 @@ async fn plan_revision_retains_id_path_and_increments_revision() {
     let provider = ScriptedProvider::new([
         Ok(create_and_submit_plan_call(first_title, &first)),
         Ok(Message::assistant("Ready one.")),
-        Ok(create_and_submit_plan_call(second_title, &second)),
-        Ok(Message::assistant("Ready two.")),
     ]);
     let tools = ToolServer::new()
         .tool(CreatePlanStubTool)
@@ -1711,53 +1819,93 @@ async fn plan_revision_retains_id_path_and_increments_revision() {
         std::fs::read_to_string(&projection).unwrap(),
         format!("{first}\n")
     );
-    std::fs::write(&projection, "manual content is not canonical").unwrap();
-    engine
-        .handle_command(
-            SessionCommand::Turn(crate::session::TurnCommand::ResolvePlan {
-                expected: first_version,
-                decision: PlanDecision::Revise,
-            }),
-            &events,
+    // Both branches start from the exact same model-visible history, including
+    // artifact/tool identities, so request equality also checks the cacheable prefix.
+    let ready_items = engine.conversation.items().to_vec();
+    let mut explicit_request: Option<CapturedRequest> = None;
+    for atomic in [false, true] {
+        let (_directory, mut transcript) = test_transcript();
+        persist_fixture(&mut transcript, &ready_items);
+        let directory = plans_dir.join(transcript.session_id());
+        std::fs::create_dir_all(&directory).unwrap();
+        let projection =
+            directory.join(format!("{}-durable-approval-workflow.md", first_version.id));
+        std::fs::write(&projection, "manual content is not canonical").unwrap();
+        let tools = ToolServer::new()
+            .tool(CreatePlanStubTool)
+            .tool(UpdatePlanStubTool)
+            .tool(ReadPlanStubTool)
+            .tool(SubmitPlanStubTool)
+            .run();
+        let mut engine = SessionEngine::new(
+            ScriptedProvider::new([
+                Ok(create_and_submit_plan_call(second_title, &second)),
+                Ok(Message::assistant("Ready two.")),
+            ]),
+            tools,
+            plan_submission_policies(),
+            transcript,
+            Arc::new(SkillCatalog::default()),
         )
-        .await
-        .unwrap();
-    engine
-        .handle_command(
-            SessionCommand::Turn(crate::session::TurnCommand::Submit {
+        .unwrap()
+        .with_fixture(ready_items.clone())
+        .unwrap()
+        .with_plans_dir(plans_dir.clone());
+        let command = if atomic {
+            TurnCommand::RevisePlanWithMessage {
+                expected: first_version,
+                text: "revise it".into(),
+            }
+        } else {
+            engine
+                .handle_command(
+                    SessionCommand::Turn(TurnCommand::ResolvePlan {
+                        expected: first_version,
+                        decision: PlanDecision::Revise,
+                    }),
+                    &events,
+                )
+                .await
+                .unwrap();
+            TurnCommand::Submit {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "revise it".into(),
                 mode: SessionMode::Plan,
-            }),
-            &events,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        engine.plan_state().unwrap().artifact().unwrap().markdown,
-        second
-    );
-    let second_version = engine
-        .plan_state()
-        .unwrap()
-        .version()
-        .expect("second version");
-    assert_eq!(second_version.id, first_version.id);
-    assert_eq!(second_version.revision, 2);
-    let directory = plans_dir.join(session_id);
-    let files = std::fs::read_dir(&directory)
-        .expect("projection directory")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("entries");
-    assert_eq!(files.len(), 1);
-    assert!(
-        files[0]
-            .file_name()
-            .to_string_lossy()
-            .ends_with("-durable-approval-workflow.md")
-    );
-    assert_eq!(
-        std::fs::read_to_string(files[0].path()).expect("revised projection"),
-        format!("{second}\n")
-    );
+            }
+        };
+        engine
+            .handle_command(SessionCommand::Turn(command), &events)
+            .await
+            .unwrap();
+        let request = engine.provider.requests.lock().unwrap()[0].clone();
+        if let Some(explicit) = &explicit_request {
+            assert_eq!(request.input, explicit.input);
+            assert_eq!(request.instructions, explicit.instructions);
+            assert_eq!(request.tools, explicit.tools);
+            assert_eq!(request.model_role, explicit.model_role);
+        } else {
+            explicit_request = Some(request);
+        }
+        assert_eq!(
+            engine.plan_state().unwrap().artifact().unwrap().markdown,
+            second
+        );
+        let second_version = engine
+            .plan_state()
+            .unwrap()
+            .version()
+            .expect("second version");
+        assert_eq!(second_version.id, first_version.id);
+        assert_eq!(second_version.revision, 2);
+        let files = std::fs::read_dir(&directory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), projection);
+        assert_eq!(
+            std::fs::read_to_string(&projection).unwrap(),
+            format!("{second}\n")
+        );
+    }
 }

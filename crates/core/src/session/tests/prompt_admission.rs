@@ -224,52 +224,61 @@ async fn ready_revision_preserves_exact_records_and_checks_before_staging() {
     let policy = engine.policies.policy_mut(SessionMode::Plan);
     policy.skills_enabled = true;
     policy.allowed_tool_names = Some(vec!["command".into(), "skill".into()]);
-    let input = || PromptTurnInput::RevisionSkill {
-        expected: artifact.version,
-        name: "review".parse().unwrap(),
-        args: "revise".into(),
-    };
-    let admitted = assert_equivalent(
-        &engine,
-        TurnAnchor::Append,
-        SessionMode::Plan,
-        input,
-        Some(PlanRecord::RevisionRequested {
-            artifact: artifact.clone(),
-        }),
-    );
-    assert!(
-        admitted
-            .records
-            .iter()
-            .any(|item| matches!(item, TranscriptItem::SkillInvocation(_)))
-    );
-    let before = engine.conversation.items().to_vec();
-    for (anchor, mode) in [
-        (TurnAnchor::ReplaceFrom(0), SessionMode::Plan),
-        (TurnAnchor::Append, SessionMode::Build),
-    ] {
+    for is_skill in [false, true] {
+        let input = |expected| {
+            if is_skill {
+                PromptTurnInput::RevisionSkill {
+                    expected,
+                    name: "review".parse().unwrap(),
+                    args: "revise".into(),
+                }
+            } else {
+                PromptTurnInput::RevisionMessage {
+                    expected,
+                    text: "revise".into(),
+                }
+            }
+        };
+        let admitted = assert_equivalent(
+            &engine,
+            TurnAnchor::Append,
+            SessionMode::Plan,
+            || input(artifact.version),
+            Some(PlanRecord::RevisionRequested {
+                artifact: artifact.clone(),
+            }),
+        );
+        assert!(admitted.records.iter().any(|item| if is_skill {
+            matches!(item, TranscriptItem::SkillInvocation(_))
+        } else {
+            matches!(item, TranscriptItem::Message(message) if message == &Message::user("revise"))
+        }));
+        let before = engine.conversation.items().to_vec();
+        let before_bytes = std::fs::read(engine.conversation.path()).unwrap();
+        let before_plan = engine.plan_state().unwrap().clone();
+        for (anchor, mode) in [
+            (TurnAnchor::ReplaceFrom(0), SessionMode::Plan),
+            (TurnAnchor::Append, SessionMode::Build),
+        ] {
+            assert!(matches!(
+                engine.prepare_test_prompt(anchor, input(artifact.version), mode),
+                Err(Rejection::Rejected(_))
+            ));
+        }
+        let mut stale = artifact.version;
+        stale.revision += 1;
         assert!(matches!(
-            engine.prepare_test_prompt(anchor, input(), mode),
+            engine.prepare_test_prompt(TurnAnchor::Append, input(stale), SessionMode::Plan),
             Err(Rejection::Rejected(_))
         ));
+        assert_eq!(engine.conversation.items(), before);
+        assert_eq!(
+            std::fs::read(engine.conversation.path()).unwrap(),
+            before_bytes
+        );
+        assert_eq!(engine.plan_state().unwrap(), &before_plan);
+        assert!(engine.active_skills().unwrap().is_empty());
     }
-    let mut stale = artifact.version;
-    stale.revision += 1;
-    assert!(matches!(
-        engine.prepare_test_prompt(
-            TurnAnchor::Append,
-            PromptTurnInput::RevisionSkill {
-                expected: stale,
-                name: "review".parse().unwrap(),
-                args: "revise".into(),
-            },
-            SessionMode::Plan
-        ),
-        Err(Rejection::Rejected(_))
-    ));
-    assert_eq!(engine.conversation.items(), before);
-    assert!(engine.active_skills().unwrap().is_empty());
 }
 
 #[cfg(feature = "test-support")]

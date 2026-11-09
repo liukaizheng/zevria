@@ -797,8 +797,11 @@ independent of engine events.
 transition; it is not a startup readiness signal. A newly published ordinary Plan
 Ready version opens review with **Revise** selected. Arrows clamp; `n` and numbers
 select only; Enter activates an eligible exact-version decision. Esc/Ctrl+C hide
-review without deciding, and `p` reopens it. Hidden Ready still blocks new work;
-identical snapshots neither reopen it nor reset the choice. Ensemble `Published` displays the canonical artifact without a
+review without deciding, and `p` reopens it. In an idle root with hidden Ready,
+composer feedback or `$skill` uses an exact-version typed revision command in Plan
+mode; it never approves or implements. Visible review still requires an explicit
+choice, and queued work, compaction, ensembles, edits and mode/model management
+remain blocked while Ready. Identical snapshots neither reopen it nor reset the choice. Ensemble `Published` displays the canonical artifact without a
 dialog, implicit approval, Build transition or fresh-session handoff. Matching revision and fresh-session decisions settle their
 pending operation; current-session implementation remains pending/active
 through `PlanHandoffStarted` and the Build turn. While a decision is pending,
@@ -2731,11 +2734,18 @@ TUI drafts, CLI inspection and ACP invocation are name-only; the engine resolves
 at admission. ACP skill capability, requests, responses and notifications are v1;
 all other extension versions are rejected. Invocation retains ordered text/image
 arguments, `PendingPrompt` cancellation and Plan readiness tracking. A Ready Plan
-uses `RevisePlanWithSkill { expected, name, args }`: version, permission, skill
-and capacity checks precede the single commit of revision transition, invocation
-and directives. Rejection or pre-commit cancellation leaves Ready unchanged with
-no pin or invocation. This cannot approve/implement a Plan or bypass ensemble
-restrictions. Generic ACP prompt text remains literal with respect to skills.
+skill invocation uses `RevisePlanWithSkill { expected, name, args }`; native
+composer feedback also uses `RevisePlanWithMessage { expected, text }` after review
+is dismissed. Both are Standard-only, exact-version inputs: validation, permission,
+capacity, persistence and cancellation checks precede a single commit. The commit
+orders `RevisionRequested` before the feedback's directive updates and prompt or
+invocation, matching explicit Revise followed by feedback so transcript edits see
+a Planning prefix. The transition is not model-visible and preserves request bytes
+and the cacheable prefix. Started/Abandoned transitions still follow their prompt.
+Rejection or pre-commit cancellation leaves Ready unchanged with no feedback or
+new pin. Neither command can approve/implement a Plan or bypass ensemble
+restrictions. Generic ACP prompt text remains literal with respect to skills;
+ACP message revision retains its deferred `ResolvePlan(Revise)` then `Submit` flow.
 
 Reload replaces the installed catalog, never the historical ledger. Pins are
 replayed from records rather than copied into installed definitions; changed/missing
@@ -3259,14 +3269,19 @@ artifact version and approval controls. Every action
 sends `ResolvePlan { expected: PlanVersion, decision }`; stale versions are
 rejected without changing state. Revision retains the ID, projection path, and
 last submitted artifact and increments the next artifact's revision. `Esc`
-enters that revision state and returns the composer to Normal mode; `p` reopens
-the three-choice dialog for the retained version. `/implement` resolves it in
+hides review without changing Ready and returns the composer to Normal mode;
+`p` reopens the three-choice dialog for the retained version. `/implement` resolves it in
 the current conversation and `/implement-fresh` resolves it through a fresh
 typed handoff, even after additional unfinished revision discussion. When a newer unsubmitted draft exists, the recovery dialog explicitly warns that its changes are not included: implementation still uses the retained submitted revision. An accepted
 Standard Build prompt while Planning still abandons the unfinished thread;
 simply selecting Build does not. Explicit orchestration is rejected while Planning
-or Ready, without revising, abandoning, or approving the Plan. Ordinary submissions while Ready are rejected,
-and mode commands cannot substitute for the version-checked decision.
+or Ready, without revising, abandoning, or approving the Plan. Untyped submissions
+while Ready are rejected. Only exact-version typed revision commands can move Ready
+to Planning: idle root native composers send ordinary feedback or `$skill` this way
+when review is hidden. Admission failure keeps Ready and the hidden review unchanged
+and restores the draft. Queue dispatch, continuations, ensembles, compaction, edits
+whose retained prefix is Ready, and mode/model management remain blocked; mode
+commands cannot substitute for the version-checked decision.
 
 Current-session approval atomically appends `Resolved` and a typed `Handoff`
 record, emits a semantic handoff row, and starts an ordinary Build turn. Fresh

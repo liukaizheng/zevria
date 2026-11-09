@@ -395,6 +395,10 @@ parser boundary separately from the fully covered proof fixture.
   targets the pending operation or the learned active turn, never a guessed ID.
 - Plan review: Implement, Implement in fresh session, Revise / recovery Close,
   Copy plan as Markdown and reopen Review plan. Every decision includes the authoritative version.
+  After Escape dismisses the sheet, Send submits ordinary feedback or `$skill` as
+  a Plan revision of that reviewed version, never as approval or implementation.
+  Rejection restores the draft and keeps review hidden. Cmd-Enter implements only
+  while the review sheet is visible.
 - Text, single-select, Other, multi-select and optional-skip questions. Native
   answers use strings; ACP multi-select uses arrays. Dismiss is available only
   when the request permits it. Terminal/close correlation cannot dismiss a newer

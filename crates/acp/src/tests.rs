@@ -1118,6 +1118,9 @@ impl SessionRuntimeFactory for FakeFactory {
                             ..
                         })
                         | SessionCommand::Turn(
+                            zevria_session_api::TurnCommand::RevisePlanWithMessage { .. },
+                        )
+                        | SessionCommand::Turn(
                             zevria_session_api::TurnCommand::RevisePlanWithSkill { .. },
                         ) => {
                             unreachable!("handled before fake prompt routing")

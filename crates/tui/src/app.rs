@@ -122,6 +122,15 @@ pub enum UiAction {
         args: zevria_content::UserPrompt,
         mode: SessionMode,
     },
+    RevisePlanWithMessage {
+        expected: PlanVersion,
+        text: zevria_content::UserPrompt,
+    },
+    RevisePlanWithSkill {
+        expected: PlanVersion,
+        name: zevria_instructions::SkillName,
+        args: zevria_content::UserPrompt,
+    },
     Compact {
         mode: SessionMode,
     },
@@ -616,7 +625,8 @@ impl App {
             } else if matches!(
                 self.model.workflow.snapshot(),
                 zevria_workflow::PlanWorkflowState::Ready { .. }
-            ) {
+            ) && self.model.workflow.dialog().is_some()
+            {
                 Err(PlanDecisionRequired)
             } else {
                 Ok(())
@@ -625,6 +635,11 @@ impl App {
         let management = work.and_then(|()| {
             if !self.pane.is_root() {
                 Err(ReadOnly)
+            } else if matches!(
+                self.model.workflow.snapshot(),
+                zevria_workflow::PlanWorkflowState::Ready { .. }
+            ) {
+                Err(PlanDecisionRequired)
             } else if !self.edit.is_none() {
                 Err(RecallActive)
             } else {
@@ -774,6 +789,8 @@ impl App {
             }
         } else if self.capabilities().queue_work.is_ok() {
             hints.labels.push((Action::Submit, "queue"));
+        } else if self.model.ready_revision_target().is_some() {
+            hints.labels.push((Action::Submit, "revise plan"));
         }
         hints.labels.push((
             Action::Diagnostics,

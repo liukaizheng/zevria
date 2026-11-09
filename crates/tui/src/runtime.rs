@@ -52,6 +52,22 @@ fn send_turn_action(
             TurnCommand::InvokeSkill { name, args, mode },
             "the skill invocation",
         ),
+        UiAction::RevisePlanWithMessage { expected, text } => (
+            TurnCommand::RevisePlanWithMessage { expected, text },
+            "the Plan revision",
+        ),
+        UiAction::RevisePlanWithSkill {
+            expected,
+            name,
+            args,
+        } => (
+            TurnCommand::RevisePlanWithSkill {
+                expected,
+                name,
+                args,
+            },
+            "the Plan revision",
+        ),
         UiAction::Compact { mode } => (TurnCommand::Compact { mode }, "compaction"),
         UiAction::RunEnsemble { workflow, prompt } => (
             TurnCommand::RunEnsemble { workflow, prompt },
@@ -205,6 +221,8 @@ pub async fn run_ui(
                         Some(action @ (UiAction::ContinueAfterJobs { .. } | UiAction::Submit { .. }
                             | UiAction::EditTranscript(_)
                             | UiAction::InvokeSkill { .. }
+                            | UiAction::RevisePlanWithMessage { .. }
+                            | UiAction::RevisePlanWithSkill { .. }
                             | UiAction::Compact { .. }
                             | UiAction::RunEnsemble { .. }
                             | UiAction::ResolvePlan { .. })) => send_turn_action(commands, action)?,

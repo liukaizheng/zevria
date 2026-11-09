@@ -619,7 +619,24 @@ impl SessionModel {
             .then_some(TurnCommand::ContinueAfterJobs { mode })
     }
 
+    pub fn ready_revision_target(&self) -> Option<PlanVersion> {
+        if !self.scope.is_root() || self.is_busy() || self.workflow.dialog().is_some() {
+            return None;
+        }
+        match self.workflow.snapshot() {
+            PlanWorkflowState::Ready { artifact } => Some(artifact.version),
+            _ => None,
+        }
+    }
     pub fn submit(&mut self, text: UserPrompt, behavior: RequestBehavior) -> Option<TurnCommand> {
+        if let Some(expected) = self.ready_revision_target() {
+            if text.is_blank() || behavior != RequestBehavior::Standard {
+                return None;
+            }
+            return self
+                .begin_operation(OperationKind::Submit, SessionMode::Plan, ModelRole::Plan)
+                .then_some(TurnCommand::RevisePlanWithMessage { expected, text });
+        }
         self.submit_in_mode(text, behavior, self.next_mode())
     }
     pub fn submit_in_mode(
@@ -643,6 +660,15 @@ impl SessionModel {
         name: zevria_instructions::SkillName,
         args: UserPrompt,
     ) -> Option<TurnCommand> {
+        if let Some(expected) = self.ready_revision_target() {
+            return self
+                .begin_operation(OperationKind::Skill, SessionMode::Plan, ModelRole::Plan)
+                .then_some(TurnCommand::RevisePlanWithSkill {
+                    expected,
+                    name,
+                    args,
+                });
+        }
         self.invoke_skill_in_mode(name, args, self.next_mode())
     }
     pub fn invoke_skill_in_mode(

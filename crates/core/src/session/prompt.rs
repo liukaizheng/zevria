@@ -48,6 +48,10 @@ pub(super) enum PromptTurnInput {
         name: SkillName,
         args: UserPrompt,
     },
+    RevisionMessage {
+        expected: PlanVersion,
+        text: UserPrompt,
+    },
     RevisionSkill {
         expected: PlanVersion,
         name: SkillName,
@@ -227,9 +231,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             request_boundaries: self.request_boundaries_enabled(),
         };
         let captured = self.prompt_anchor_state(anchor)?;
-        let plan_transition = if let PromptTurnInput::RevisionSkill { expected, .. } = &input {
+        let plan_transition = if let PromptTurnInput::RevisionMessage { expected, .. }
+        | PromptTurnInput::RevisionSkill { expected, .. } = &input
+        {
             if anchor != TurnAnchor::Append || mode != SessionMode::Plan {
-                return Err("Ready Plan skill revisions must append in Plan mode"
+                return Err("Ready Plan revisions must append in Plan mode"
                     .to_string()
                     .into());
             }
@@ -239,7 +245,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 }
                 _ => {
                     return Err(Rejection::Rejected(
-                        "the Ready Plan revision changed; refresh before invoking the skill".into(),
+                        "the Ready Plan revision changed; refresh before revising it".into(),
                     ));
                 }
             };
@@ -252,8 +258,13 @@ impl<P: ModelProvider> SessionEngine<P> {
             captured.instructions.skills(),
         )?;
         let mut records = std::mem::take(&mut before.records);
+        let behavior = match &input {
+            PromptTurnInput::Message { behavior, .. } => *behavior,
+            _ => zevria_foundation::RequestBehavior::Standard,
+        };
         let (display, kind, request) = match input {
-            PromptTurnInput::Message { text, behavior } => {
+            PromptTurnInput::Message { text, .. }
+            | PromptTurnInput::RevisionMessage { text, .. } => {
                 text.validate().map_err(|error| error.to_string())?;
                 if text.is_blank() {
                     return Err("a message turn requires text or an image"
@@ -681,10 +692,15 @@ impl<P: ModelProvider> SessionEngine<P> {
         } else {
             None
         };
-        records.extend(prepared.records);
-        if let Some(record) = prepared.plan_transition {
-            records.push(TranscriptItem::Plan(record));
+        let mut plan_transition = prepared.plan_transition;
+        if matches!(plan_transition, Some(PlanRecord::RevisionRequested { .. })) {
+            // Match an explicit Revise followed by a prompt so editing the feedback
+            // sees a Planning prefix. The record is not model-visible, so request
+            // bytes are unchanged. Started/Abandoned still follow their prompt.
+            records.extend(plan_transition.take().map(TranscriptItem::Plan));
         }
+        records.extend(prepared.records);
+        records.extend(plan_transition.map(TranscriptItem::Plan));
         let previous = match self.commit_anchored_records(prepared.anchor, records, context.mode) {
             Ok(previous) => previous,
             Err(error) => {

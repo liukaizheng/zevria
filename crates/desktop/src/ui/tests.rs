@@ -156,6 +156,97 @@ fn plan_panel_emits_versioned_resolution(cx: &mut TestAppContext) {
     );
 }
 #[gpui_kit::test]
+fn dismissed_ready_plan_send_revises_and_rejection_restores_the_draft(cx: &mut TestAppContext) {
+    let (window, view, controller, mut receiver) = setup(cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.input("next draft", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let version = PlanVersion {
+        id: PlanId::new(),
+        revision: 4,
+    };
+    let ready = PlanWorkflowState::Ready {
+        artifact: PlanArtifact {
+            version,
+            title: "Plan".into(),
+            markdown: "# Plan".into(),
+            source_turn_id: TurnId::new(1),
+        },
+    };
+    event(
+        &controller,
+        E::PlanStateChanged {
+            state: ready.clone(),
+        },
+        cx,
+    );
+    controller.update(cx, |this, cx| this.submit(cx));
+    assert!(
+        receiver.try_recv().is_err(),
+        "visible review requires an explicit choice"
+    );
+    assert!(!controller.read_with(cx, |this, _| this.model.root.is_busy()));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(controller.read_with(cx, |this, _| this.model.root.workflow.dialog().is_none()));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("cmd-enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(
+        receiver.try_recv().is_err(),
+        "hidden review cannot implement with cmd-enter"
+    );
+    // Ready forces Plan mode even if the old Build orchestration toggle remains set.
+    controller.update(cx, |this, _| this.orchestrate = true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("send", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        SessionCommand::Turn(TurnCommand::RevisePlanWithMessage {
+            expected: version,
+            text: "next draft".into(),
+        })
+    );
+    assert!(receiver.try_recv().is_err());
+    assert!(controller.read_with(cx, |this, _| this.model.root.is_busy()));
+    event(
+        &controller,
+        E::TurnRejected {
+            turn_id: TurnId::new(10),
+            error: "revision changed".into(),
+        },
+        cx,
+    );
+    assert_eq!(
+        controller.read_with(cx, |this, _| this.draft.clone()),
+        "next draft"
+    );
+    assert_eq!(
+        view.read_with(cx, |this, cx| this.composer.read(cx).value().to_string()),
+        "next draft"
+    );
+    assert!(!controller.read_with(cx, |this, _| this.model.root.is_busy()));
+    assert!(controller.read_with(cx, |this, _| this.model.root.workflow.dialog().is_none()));
+    assert_eq!(
+        controller.read_with(cx, |this, _| this.model.root.workflow.snapshot().clone()),
+        ready
+    );
+}
+
+#[gpui_kit::test]
 fn blank_plan_panel_click_clears_button_focus(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_reduce_motion(true));
     for width in [1240., 1920.] {
