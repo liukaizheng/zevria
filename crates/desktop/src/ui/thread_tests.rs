@@ -199,6 +199,57 @@ fn untouched_thinking_folds_only_after_turn_end_and_tail_following(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn blank_click_clears_block_focus_and_keeps_window_shortcuts(cx: &mut TestAppContext) {
+    let (window, view, controller, mut receiver) = setup_at_size(cx, 1920., 1080.);
+    controller.update(cx, |controller, cx| {
+        controller
+            .model
+            .root
+            .conversation
+            .restore(vec![TranscriptItem::Message(thinking("Read the source"))]);
+        cx.notify();
+    });
+    render(window, cx);
+    let thought = thoughts(&view, cx).remove(0);
+    cx.update_window(window.into(), |_, window, cx| {
+        let disclosure_focus = view
+            .read(cx)
+            .transcript
+            .read(cx)
+            .test_focus(&thought.key, cx);
+        window
+            .within(thought.key.clone())
+            .click("thinking-disclosure", cx);
+        assert!(disclosure_focus.is_focused(window));
+        assert!(!view.read(cx).window_focus.is_focused(window));
+
+        // The centered column ends at x = 1588; this is empty pane space.
+        let blank = gpui_kit::point(px(1800.), px(300.));
+        window.click_at("zevria-desktop", blank, cx);
+        assert!(!disclosure_focus.is_focused(window));
+        assert!(view.read(cx).window_focus.is_focused(window));
+        window.press("shift-cmd-m", cx);
+
+        window.click_at("composer-panel", gpui_kit::point(px(4.), px(4.)), cx);
+        assert_eq!(window.find("composer-panel").focused(), Some(true));
+        assert!(!view.read(cx).window_focus.is_focused(window));
+        window.click_at("zevria-desktop", blank, cx);
+        assert_eq!(window.find("composer-panel").focused(), Some(false));
+        assert!(view.read(cx).window_focus.is_focused(window));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionCommand::Manage(zevria_session_api::ManagementCommand::SetMode {
+            mode: SessionMode::Plan,
+            ..
+        })
+    ));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[gpui_kit::test]
 fn restored_thinking_starts_folded_and_keyboard_disclosures_work(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup(cx);
     controller.update(cx, |c, cx| {

@@ -636,6 +636,7 @@ impl Render for TranscriptView {
                         owner.update(cx, |this, cx| this.row(index, window, cx))
                     },
                 )
+                .with_row_style(StyleRefinement::default().px_0())
                 .jump_button(true)
                 .with_jump_button_label("Jump to latest")
                 .size_full(),

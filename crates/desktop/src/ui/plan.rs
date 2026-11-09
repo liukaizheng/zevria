@@ -20,6 +20,7 @@ impl DesktopWindow {
         let recovering = dialog.recovering();
         let (_, text) = self.plan.as_ref()?;
         let t = palette(cx);
+        let window_focus = self.window_focus.clone();
         let panel = div()
             .id("plan-review")
             .test_support()
@@ -42,6 +43,12 @@ impl DesktopWindow {
             .rounded(px(14.))
             .border_l_1()
             .border_color(tones(cx).hairline)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                // The overlay occludes the root; descendants still claim focus first.
+                if !window.default_prevented() {
+                    window.focus(&window_focus, cx);
+                }
+            })
             .child(
                 div()
                     .p(px(24.))

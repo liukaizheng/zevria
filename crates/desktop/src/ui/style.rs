@@ -14,8 +14,8 @@ pub const SIDEBAR: f32 = 256.;
 pub const TITLE: f32 = 40.;
 pub const GUTTER: f32 = 96.;
 pub const GAP: f32 = 24.;
-pub const CONTENT: f32 = 720.;
-pub const PROSE: f32 = 600.;
+pub const CONTENT: f32 = 880.;
+pub const PROSE: f32 = 680.;
 pub const UI_FONT: &str = ".SystemUIFont";
 pub const MONO_FONT: &str = "Menlo";
 pub const DOCUMENT_FONT: &str = "Charter";
@@ -82,6 +82,8 @@ pub fn kind_label(kind: zevria_foundation::SubtaskKind) -> &'static str {
     }
 }
 
+/// Shared column geometry: at most GUTTER + GAP + CONTENT (1000 px), with
+/// extra pane width split into equal side margins.
 #[derive(Clone, Copy, Default)]
 pub struct Measure {
     pub compact: bool,
@@ -95,6 +97,7 @@ impl Measure {
             } else {
                 GUTTER + GAP + CONTENT
             }))
+            .mx_auto()
             .min_w_0()
     }
     pub fn row(self) -> Div {

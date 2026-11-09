@@ -197,6 +197,7 @@ impl DesktopWindow {
         let focus = self.composer.focus_handle(cx);
         let mut field = div()
             .id("composer-panel")
+            .test_support()
             .relative()
             .flex_1()
             .min_w_0()
@@ -360,6 +361,8 @@ impl DesktopWindow {
             .child(
                 measure
                     .row()
+                    .id("composer-column")
+                    .test_support()
                     .when(!self.compact, |row| row.gap(px(8.)).child(modes))
                     .child(field),
             )

@@ -156,6 +156,56 @@ fn plan_panel_emits_versioned_resolution(cx: &mut TestAppContext) {
     );
 }
 #[gpui_kit::test]
+fn blank_plan_panel_click_clears_button_focus(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    for width in [1240., 1920.] {
+        let (window, view, controller, _) = setup_at_size(cx, width, 840.);
+        event(
+            &controller,
+            E::PlanStateChanged {
+                state: PlanWorkflowState::Ready {
+                    artifact: PlanArtifact {
+                        version: PlanVersion {
+                            id: PlanId::new(),
+                            revision: 1,
+                        },
+                        title: "Plan".into(),
+                        markdown: "Review the source".into(),
+                        source_turn_id: TurnId::new(1),
+                    },
+                },
+            },
+            cx,
+        );
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).plan_overlay, width == 1240.);
+            window.click("plan-copy", cx);
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("Review the source".to_owned())
+            );
+            // Kit buttons suppress mouse-down focus; exercise an active ring via Tab.
+            for _ in 0..32 {
+                if window.find("plan-copy").focused() == Some(true) {
+                    break;
+                }
+                window.focus_next(cx);
+                window.render_frame(cx);
+            }
+            assert_eq!(window.find("plan-copy").focused(), Some(true));
+            window.click("plan-copy", cx);
+            assert_eq!(window.find("plan-copy").focused(), Some(true));
+            assert!(!view.read(cx).window_focus.is_focused(window));
+            window.click_at("plan-review", gpui_kit::point(px(6.), px(6.)), cx);
+            assert!(!window.find("plan-copy").focused().unwrap());
+            assert!(view.read(cx).window_focus.is_focused(window));
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
 fn restored_math_and_plan_document_and_panel_render_at_both_widths(cx: &mut TestAppContext) {
     const PROOF: &str = include_str!("../../tests/fixtures/holder-proof.md");
     for width in [1240., 720.] {
@@ -656,6 +706,113 @@ fn width_class_changes_remeasure_retained_gutter_rows(cx: &mut TestAppContext) {
         .unwrap();
     assert!(!view.read_with(cx, |v, _| v.compact));
     assert_eq!(restored, wide);
+}
+
+#[gpui_kit::test]
+fn wide_window_centers_transcript_and_composer_on_one_axis(cx: &mut TestAppContext) {
+    let (window, view, controller, _) = setup_at_size(cx, 1920., 1080.);
+    controller.update(cx, |c, cx| {
+        c.model.root.conversation.restore(vec![
+            zevria_transcript::transcript::TranscriptItem::Message(Message::user("A short prompt")),
+        ]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let key = controller.read_with(cx, |c, _| {
+        let conversation = &c.model.root.conversation;
+        let zevria_presentation::conversation::HistoryEntry::Conversation(entry) =
+            &conversation.history()[0]
+        else {
+            panic!("prompt entry");
+        };
+        format!("{:?}-{}", conversation.epoch(), entry.blocks[0].id.0)
+    });
+    let assert_column = |pane_left: f32, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App| {
+        window.render_frame(cx);
+        assert!(!view.read(cx).compact);
+        let assert_close = |actual: gpui_kit::Pixels, expected: f32| {
+            assert!(
+                (f32::from(actual) - expected).abs() <= 1.,
+                "expected {expected}px, got {actual:?}"
+            );
+        };
+        let pane_right = f32::from(window.viewport_size().width);
+        let expected_width = 1000_f32.min(pane_right - pane_left - 32.);
+        let row = window.find(key.clone()).bounds();
+        let composer = window.find("composer-column").bounds();
+        assert_close(row.size.width, expected_width);
+        assert_close(
+            row.origin.x - px(pane_left),
+            pane_right - f32::from(row.right()),
+        );
+        assert_close(composer.origin.x, f32::from(row.origin.x));
+        assert_close(composer.size.width, f32::from(row.size.width));
+        assert_close(
+            window.find("composer-panel").bounds().size.width,
+            expected_width - 104.,
+        );
+    };
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_column(256., window, cx)
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.press("ctrl-cmd-s", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| assert_column(0., window, cx))
+        .unwrap();
+    cx.simulate_window_resize(window.into(), size(px(1240.), px(840.)));
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| assert_column(0., window, cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.press("ctrl-cmd-s", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_column(256., window, cx)
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn non_live_sessions_keep_resting_window_focus_and_shortcuts(cx: &mut TestAppContext) {
+    let (window, view, controller, _) = setup(cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("composer-panel").focused(), Some(true));
+    })
+    .unwrap();
+    controller.update(cx, |controller, cx| {
+        controller.phase = crate::controller::Phase::Starting;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).window_focus.is_focused(window));
+        window.press("ctrl-cmd-s", cx);
+    })
+    .unwrap();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.sidebar_override),
+        Some(false)
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.blur(cx);
+        assert!(window.focused(cx).is_none());
+    })
+    .unwrap();
+    controller.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).window_focus.is_focused(window));
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

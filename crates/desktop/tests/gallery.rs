@@ -139,6 +139,21 @@ mod native {
                 )?;
             }
         }
+        for scene in [
+            Scene::Empty,
+            Scene::Working,
+            Scene::Question,
+            Scene::Plan,
+            Scene::Completion,
+        ] {
+            capture(
+                scene,
+                1920.,
+                1080.,
+                zevria_theme::ZEVRIA_GRAPHITE,
+                &directory.join(format!("{}-1920x1080.png", scene.name())),
+            )?;
+        }
         for scene in [Scene::ThinkingLive, Scene::Question, Scene::Plan] {
             for (name, tokens) in [("dark", zevria_theme::ZEVRIA_GRAPHITE), ("light", light)] {
                 capture(

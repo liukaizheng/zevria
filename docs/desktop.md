@@ -24,7 +24,7 @@ From the Zevria repository root:
 cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace
 cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace --continue
 # -c is the short form; omit WORKSPACE to use cwd (a root cwd opens the picker).
-cargo run -p zevria-desktop --locked -- --help
+cargo run -p zevria-desktop --locked --release -- --help
 ```
 
 Usage is `zevria-desktop [WORKSPACE] [--continue|-c]`. Use `--` before a workspace
@@ -56,8 +56,9 @@ or log name.
 
 ### One working thread, three voices
 
-The transcript is one left-aligned working thread, not message bubbles or a
-stack of cards. Its line and nodes record what happened, in provider order:
+The transcript is one left-aligned working thread within a centered column, not
+message bubbles or a stack of cards. Its line and nodes record what happened,
+in provider order:
 
 - **Pencil:** a dashed thread and Charter italic 13/21 in graphite pencil ink
   for provider-supplied thinking. Expanded notes are indented 24 px under the
@@ -94,11 +95,12 @@ fallback. Transcript typography is centralized as `Type { size, leading }` in
 
 Kit's window/rem base remains 14 px; its mono size follows `CODE`. Sidebar,
 title/status bars, composer text (14/20), question dock, sheets and Kit controls
-keep their chrome sizes. Prose/thinking measure 600 px; expanded machine work
-measures 720 px. The 96 px gutter, thread and
-composer share one axis. Spacing follows a 4 px grid; turn boundaries add a
-32 px gap and a hairline. Tags, controls, carbon wells, the composer and decision
-sheets have distinct 4/6/8/12/14 px radii.
+keep their chrome sizes. Prose and thinking measure up to 680 px; machine work
+measures up to 880 px. The 1000 px column (96 px gutter plus 24 px gap and content)
+centers on wide panes and fills narrower ones with a 16 px inset. The gutter,
+thread and composer share one axis at every width. Spacing follows a 4 px grid;
+turn boundaries add a 32 px gap and a hairline. Tags, controls, carbon wells, the
+composer and decision sheets have distinct 4/6/8/12/14 px radii.
 
 The sidebar pins **This session**, using its first prompt, with subtasks nested
 beneath it. Earlier sessions are single-line titles with aligned relative times.
@@ -209,6 +211,14 @@ for the halo instead of clipping it. Icon controls have accessible names;
 thinking and tool headers expose their expanded state. GPUI Kit has no Increase Contrast signal,
 so that separate macOS preference is not implemented.
 
+Clicking blank space moves focus to the window, clearing disclosure, Copy,
+sidebar and Kit button focus indicators and blurring the composer. Window
+shortcuts keep working. Clicking anywhere inside the composer panel focuses it
+again; typing alone does not. Focus rings still appear on clicked controls, not
+only during keyboard navigation. The window also holds resting focus while the
+session is not Live, so shortcuts and menu actions work on start, stop and
+no-workspace screens and during session switches.
+
 ### Screenshot gallery
 
 The opt-in gallery renders the **real DesktopWindow** without a provider or
@@ -216,14 +226,16 @@ credentials, using macOS's text system and the Metal headless renderer:
 
 ```sh
 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-cargo test --locked -p zevria-desktop --features fixtures --test gallery
+cargo test --release --locked -p zevria-desktop --features fixtures --test gallery
 # Optional output-directory override (absolute paths are easiest):
 ZEVRIA_DESKTOP_GALLERY_DIR=/tmp/zevria-gallery \
-cargo test --locked -p zevria-desktop --features fixtures --test gallery
+cargo test --release --locked -p zevria-desktop --features fixtures --test gallery
 ```
 
 PNGs are written to the repository's `target/desktop-gallery/`. The 1240×840 and
 720×840 logical viewports are captured at the native test renderer's 2× scale.
+Empty, working, question, Plan and completion scenes also have wide Graphite
+1920×1080 captures named `{scene}-1920x1080.png`, showing the centered column.
 Thinking-live, question-dock and Plan-overlay scenes also have dark/light
 720×520 minimum-window captures.
 The gallery covers configuration errors, no workspace, starting, stopping,
@@ -241,7 +253,7 @@ For an opt-in, **read-only** capture of an existing session:
 ```sh
 rtk proxy env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
   ZEVRIA_DESKTOP_GALLERY_SESSION=/absolute/path/to/session.jsonl \
-  cargo test --locked -p zevria-desktop --features fixtures --test gallery
+  cargo test --release --locked -p zevria-desktop --features fixtures --test gallery
 ```
 
 This adds `session-1240.png` and `session-720.png`. The gallery calls
@@ -523,15 +535,16 @@ Run from the workspace root on macOS:
 
 ```sh
 rtk cargo fmt --all -- --check
-rtk cargo check --locked --workspace --all-targets
-rtk cargo build --locked -p zevria
-rtk cargo test --locked --workspace
-rtk cargo test --locked -p zevria-desktop --test markdown_math
-rtk cargo test --locked -p zevria-desktop
-rtk cargo test --locked -p zevria-desktop --features fixtures --test gallery
-rtk cargo test --locked -p zevria --test crate_boundaries
-rtk cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics
-rtk cargo clippy --locked -p zevria-desktop --all-targets --no-deps -- -D warnings
+rtk cargo check --release --locked --workspace --all-targets
+rtk cargo build --release --locked -p zevria
+rtk cargo test --release --locked --workspace
+rtk cargo test --release --locked -p zevria-desktop --test markdown_math
+rtk cargo test --release --locked -p zevria-desktop
+rtk cargo test --release --locked -p zevria-desktop --features fixtures --test gallery
+rtk cargo test --release --locked -p zevria --test crate_boundaries
+rtk cargo test --release --locked -p zevria-provider -p zevria-host --features cache-diagnostics
+rtk cargo clippy --release --locked -p zevria-desktop --all-targets -- -D warnings
+rtk cargo clippy --release --locked -p zevria-desktop --all-targets --features fixtures -- -D warnings
 rtk cargo build --locked --release -p zevria-desktop
 rtk proxy target/release/zevria-desktop --help
 rtk cargo tree --locked -p zevria-desktop -i ratatui
@@ -602,6 +615,28 @@ Kit's public test context cannot retrieve the internal TestWindow needed by
 adapter invoked by the installed window observer. **Real-provider sessions,
 macOS preference switching, VoiceOver and human visual acceptance are not
 claimed by these automated checks.** Use the manual checklist below.
+
+### Centered column and blank-click focus validation
+
+Release-mode validation for the wider column and neutral window focus:
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | Passed |
+| Desktop release tests | **98 passed**, including four new layout/focus regressions |
+| Strict Desktop Clippy with `--no-deps` | Passed, default features and `fixtures`, all targets, `-D warnings` |
+| Strict Clippy including dependencies | Blocked by seven existing diagnostics in unchanged `session-api`, `responses` and `transcript` files, with both feature sets |
+| Release workspace check, all targets | Passed |
+| Opt-in Metal gallery | **64 PNGs**, including five new Graphite 1920×1080 scenes |
+
+The bounds regression checks the centered 1000 px column, its shared composer
+axis and 896 px composer field, then toggles the sidebar and resizes through all
+four planned wide/default states. Focus regressions cover thinking disclosures,
+composer blur/refocus, Plan Copy in both overlay and docked panels, and non-Live
+resting focus. The gallery's wide/default/compact composer surfaces also match
+the expected 896/848/688 px widths in the rendered PNGs. No shared-crate lint
+policy was weakened. Human visual acceptance, real maximize/full-screen
+interaction and the no-workspace file picker remain manual checks below.
 
 ### Historical pre-merge validation ledger
 
@@ -848,6 +883,8 @@ release:
 
 - [ ] First-run config error, Show config in Finder and Try again.
 - [ ] Drag the title strip; double-click to zoom; check traffic-light placement.
+- [ ] Maximize and full screen keep one centered axis.
+- [ ] Click a chevron, then empty space: the ring clears and ⇧⌘M still works.
 - [ ] Toggle the sidebar with ⌃⌘S; resize to 720×520; inspect Graphite Light and
   a generated named theme. Change macOS appearance while streaming; the default
   pair must switch live and a named theme must stay pinned.
@@ -858,7 +895,8 @@ release:
   description and expanded state; Copy and Jump to latest have meaningful names.
 - [ ] Test Reduce Motion on and off: the live tip stays at ◐ and Plan opening is
   instant when enabled.
-- [ ] Open workspace, new session, streamed Markdown and native command/edit rows.
+- [ ] Open workspace (including ⌘O on the no-workspace screen), new session,
+  streamed Markdown and native command/edit rows.
 - [ ] Real Anthropic session: live thinking starts expanded; manual collapse
   survives deltas and commit; Stop mid-thinking keeps the marked **unsaved**
   partial before a neutral Stopped node. Restore and confirm it is absent.

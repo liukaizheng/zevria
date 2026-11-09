@@ -41,6 +41,7 @@ pub struct DesktopWindow {
     pub(super) plan_width: f32,
     pub(super) plan_overlay: bool,
     pub(super) question_focus: FocusHandle,
+    pub(super) window_focus: FocusHandle,
     picker: Option<Task<()>>,
     was_live: bool,
     _input: Subscription,
@@ -134,6 +135,7 @@ impl DesktopWindow {
             plan_width: 400.,
             plan_overlay: false,
             question_focus: cx.focus_handle(),
+            window_focus: cx.focus_handle(),
             picker: None,
             was_live: false,
             _input: input,
@@ -197,6 +199,8 @@ impl DesktopWindow {
         if live && !self.was_live {
             self.composer
                 .update(cx, |input, cx| input.focus(window, cx));
+        } else if !live && (self.was_live || window.focused(cx).is_none()) {
+            window.focus(&self.window_focus, cx);
         }
         self.was_live = live;
         if let Some((version, markdown)) = plan
@@ -510,6 +514,8 @@ impl Render for DesktopWindow {
         }
         let mut root = div()
             .id("zevria-desktop")
+            .test_support()
+            .track_focus(&self.window_focus)
             .key_context(if self.completions(cx).is_empty() {
                 "ZevriaDesktop"
             } else {
