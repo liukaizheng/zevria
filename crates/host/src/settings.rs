@@ -2,6 +2,10 @@
 use anyhow::Context as _;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;
+
 pub(crate) fn transaction<T>(
     path: &Path,
     prepare: impl FnOnce(&str) -> anyhow::Result<(String, T)>,
@@ -30,7 +34,26 @@ pub(crate) fn transaction_for<T>(
     Ok(prepared)
 }
 
-fn lock_configuration(path: &Path) -> anyhow::Result<std::fs::File> {
+struct ConfigurationLock {
+    file: std::fs::File,
+}
+
+impl Drop for ConfigurationLock {
+    fn drop(&mut self) {
+        // A concurrent process spawn can temporarily inherit the open file
+        // description until exec, even with close-on-exec. Closing only our
+        // handle would leave the lock busy until that inherited copy closes.
+        if let Err(error) = self.file.unlock() {
+            tracing::warn!(
+                target: "zevria::settings",
+                %error,
+                "failed to release configuration lock"
+            );
+        }
+    }
+}
+
+fn lock_configuration(path: &Path) -> anyhow::Result<ConfigurationLock> {
     // Compatibility: all writers keep the original stable skill-lock inode.
     let mut name = path.as_os_str().to_os_string();
     name.push(".skills.lock");
@@ -63,7 +86,7 @@ fn lock_configuration(path: &Path) -> anyhow::Result<std::fs::File> {
     );
     lock.try_lock()
         .context("configuration is busy in another process; retry")?;
-    Ok(lock)
+    Ok(ConfigurationLock { file: lock })
 }
 
 fn regular_writable(path: &Path) -> anyhow::Result<()> {
@@ -171,7 +194,7 @@ pub(crate) struct PreparedUpdate {
     before: Option<String>,
     after: String,
     staged: tempfile::NamedTempFile,
-    _lock: std::fs::File,
+    _lock: ConfigurationLock,
 }
 
 impl PreparedUpdate {
