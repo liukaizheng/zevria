@@ -18,6 +18,7 @@ use zevria_responses::replay;
 mod attempt;
 mod recovery;
 mod router;
+mod streaming;
 mod turn;
 
 mod websocket_session;

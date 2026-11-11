@@ -193,6 +193,7 @@ pub(crate) struct ContinuationState {
     pub(crate) socket_generation: u64,
     pub(crate) response_id: String,
     pub(crate) request_properties: serde_json::Value,
+    pub(crate) lineage: Option<crate::turn::ContinuationLineage>,
     pub(crate) request_input: Vec<serde_json::Value>,
     pub(crate) response_output: Vec<serde_json::Value>,
 }
@@ -359,6 +360,7 @@ pub struct OpenAiProvider {
     #[cfg(feature = "cache-diagnostics")]
     pub(crate) cache_diagnostics: crate::cache_diagnostics::DiagnosticState,
     pub(crate) profile: ModelProfileRef,
+    pub(crate) input_projection: Option<crate::turn::ProjectionCache>,
     #[allow(dead_code)]
     pub(crate) context_window_tokens: u64,
     pub(crate) preamble: String,
@@ -570,6 +572,7 @@ impl OpenAiProvider {
                 transport == OpenAiTransport::Http && endpoint.supports_websockets,
             ),
             profile: profile.profile.clone(),
+            input_projection: None,
             context_window_tokens: profile.context_window_tokens,
             preamble: preamble.to_string(),
             responses_parameters: Some(responses_parameters),

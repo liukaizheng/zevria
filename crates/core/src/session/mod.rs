@@ -140,6 +140,7 @@ pub struct SessionEngine<P> {
     replay: SessionReplayState,
     phase: EnginePhase,
     context: ContextState,
+    prepared_policies: Mutex<Vec<Arc<PreparedPolicy>>>,
     skills: SkillState,
     capabilities: RootCapabilities,
     next_turn_id: u64,
@@ -154,17 +155,42 @@ impl<P: ModelProvider> SessionEngine<P> {
         transcript: TranscriptWriter,
         skills: Arc<SkillCatalog>,
     ) -> anyhow::Result<Self> {
-        let application_prompt = provider.application_prompt().to_string();
-        // A pending writer is an explicitly allocated new session, not a
-        // missing resume file. Existing writers must still load successfully.
-        let initial = if transcript.is_pending() {
-            Vec::new()
+        let conversation = if transcript.is_pending() {
+            Conversation::new(transcript)
         } else {
-            zevria_transcript::transcript::load(transcript.path())?
+            let outcome = zevria_transcript::transcript::load_report(transcript.path())?;
+            Conversation::from_loaded(transcript, outcome)?
         };
-        let replay = validate_session_replay(&initial)?;
-        let mut conversation = Conversation::new(transcript);
-        conversation.adopt_persisted(initial);
+        Self::from_conversation(provider, tools, policies, conversation, skills)
+    }
+
+    /// Resume from startup's one validated load, preserving its exact evidence.
+    pub fn from_loaded(
+        provider: P,
+        tools: ToolServerHandle,
+        policies: SessionPolicies,
+        transcript: TranscriptWriter,
+        skills: Arc<SkillCatalog>,
+        loaded: zevria_transcript::transcript::TranscriptLoadOutcome,
+    ) -> anyhow::Result<Self> {
+        Self::from_conversation(
+            provider,
+            tools,
+            policies,
+            Conversation::from_loaded(transcript, loaded)?,
+            skills,
+        )
+    }
+
+    fn from_conversation(
+        provider: P,
+        tools: ToolServerHandle,
+        policies: SessionPolicies,
+        mut conversation: Conversation,
+        skills: Arc<SkillCatalog>,
+    ) -> anyhow::Result<Self> {
+        let application_prompt = provider.application_prompt().to_string();
+        let replay = conversation.validated_replay()?.into();
         let mut engine = Self {
             application_prompt,
             guidance: GuidanceState::default(),
@@ -184,6 +210,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             replay,
             phase: EnginePhase::Idle,
             context: ContextState::default(),
+            prepared_policies: Mutex::new(Vec::new()),
             capabilities: RootCapabilities::default(),
             next_turn_id: 1,
             plan_projection_warnings: HashSet::new(),
@@ -207,9 +234,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         items: Vec<TranscriptItem>,
     ) -> Result<Self, SessionReplayError> {
         self.ensure_replay_valid()?;
-        let replay = validate_session_replay(&items)?;
-        self.conversation.adopt_persisted(items);
-        self.install_replay(replay)?;
+        let replay = zevria_transcript::validate_session_replay(&items)?;
+        self.conversation.adopt_validated(items, replay.clone());
+        self.install_replay(replay.into())?;
         self.invalidate_model_preview();
         self.context.invalidate_prepared_count();
         self.context.last_snapshots.clear();
@@ -254,7 +281,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     /// child composition path.
     pub fn with_compaction_policy(mut self, compaction: CompactionPolicy) -> Self {
         self.compaction = compaction;
-        self.reestimate_context_usage();
+        self.invalidate_mode_accounting();
         self
     }
 
@@ -284,6 +311,10 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub fn with_incremental_tools(mut self, enabled: bool) -> Self {
+        self.prepared_policies
+            .get_mut()
+            .expect("policy cache poisoned")
+            .clear();
         self.incremental_tools = enabled;
         self
     }
@@ -300,6 +331,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         items: &[TranscriptItem],
         policy: &TurnPolicy,
     ) -> ToolDeclarations {
+        if std::ptr::eq(items, self.conversation.items()) {
+            return self.prepared_policy(policy).tools.clone();
+        }
         tool_window(items)
             .initial
             .cloned()
@@ -307,6 +341,17 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn tool_declaration_update(
+        &self,
+        items: &[TranscriptItem],
+        policy: &TurnPolicy,
+    ) -> Option<TranscriptItem> {
+        if std::ptr::eq(items, self.conversation.items()) {
+            return self.prepared_policy(policy).tool_update.clone();
+        }
+        self.uncached_tool_declaration_update(items, policy)
+    }
+
+    fn uncached_tool_declaration_update(
         &self,
         items: &[TranscriptItem],
         policy: &TurnPolicy,
@@ -369,8 +414,48 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
     }
 
+    fn prepared_policy(&self, policy: &TurnPolicy) -> Arc<PreparedPolicy> {
+        let mut cache = self
+            .prepared_policies
+            .lock()
+            .expect("policy cache poisoned");
+        if let Some(prepared) = cache.iter().find(|prepared| {
+            prepared.policy == *policy
+                && prepared.application == self.application_prompt
+                && prepared.context == *self.context_policy(policy.model_role)
+        }) {
+            return prepared.clone();
+        }
+        let instructions = self.instruction_set(policy).render();
+        let tools = tool_window(self.conversation.items())
+            .initial
+            .cloned()
+            .unwrap_or_else(|| self.desired_tool_declarations(policy));
+        let tool_bytes = serde_json::to_vec(&tools).expect("tools serialize");
+        let prepared = Arc::new(PreparedPolicy {
+            policy: policy.clone(),
+            application: self.application_prompt.clone(),
+            context: self.context_policy(policy.model_role).clone(),
+            shape: prepared_request_shape(
+                policy,
+                self.context_policy(policy.model_role),
+                &instructions,
+                &tool_bytes,
+            ),
+            instructions,
+            tools,
+            tool_bytes,
+            tool_update: self.uncached_tool_declaration_update(self.conversation.items(), policy),
+        });
+        if cache.len() >= 8 {
+            cache.clear();
+        }
+        cache.push(prepared.clone());
+        prepared
+    }
+
     pub(super) fn rendered_instructions(&self, policy: &TurnPolicy) -> String {
-        self.instruction_set(policy).render()
+        self.prepared_policy(policy).instructions.clone()
     }
 
     pub fn context_tokens(&self) -> Result<u64, SessionReplayError> {
@@ -546,6 +631,8 @@ use zevria_session_api::turn::*;
 mod orchestration;
 mod state;
 use state::*;
+mod timing;
+use timing::LifecycleTiming;
 
 mod capacity;
 mod directives;

@@ -29,6 +29,7 @@ fn inline_additions_merge_with_directives_in_order_and_fold_only_when_ineffectiv
             .unwrap(),
     );
     let request = ModelRequest {
+        input_identity: None,
         instructions: "stable",
         tools: &initial,
         forbid_tool_calls: false,
@@ -109,6 +110,7 @@ fn inline_additions_merge_with_directives_in_order_and_fold_only_when_ineffectiv
         }
         let fallback = body::build(
             &ModelRequest {
+                input_identity: None,
                 forbid_tool_calls: true,
                 ..request.clone()
             },
@@ -139,6 +141,7 @@ fn summary_extension_keeps_tools_properties_and_historical_thinking_binding() {
     };
     let first = Message::user("first task");
     let mut request = ModelRequest {
+        input_identity: None,
         instructions: "stable",
         tools: &initial,
         forbid_tool_calls: false,

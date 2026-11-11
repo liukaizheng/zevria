@@ -99,6 +99,26 @@ fn early_instruction_failure_does_not_hide_later_skill_or_plan_errors() {
     }
 }
 
+#[test]
+fn prepared_policy_cache_tracks_context_limits_without_changing_the_wire_prefix() {
+    let (_directory, mut engine) = engine();
+    let policy = engine.policies.policy(SessionMode::Build).clone();
+    let first = engine.prepared_policy(&policy);
+    assert!(Arc::ptr_eq(&first, &engine.prepared_policy(&policy)));
+    engine.compaction = test_compaction_policy(12_000, 90, 128);
+    let updated = engine.prepared_policy(&policy);
+    assert!(!Arc::ptr_eq(&first, &updated));
+    assert_ne!(first.shape.0, updated.shape.0);
+    assert_eq!(first.instructions, updated.instructions);
+    assert_eq!(first.tools, updated.tools);
+    assert_eq!(updated.context, *engine.context_policy(policy.model_role));
+    engine = engine.with_compaction_policy(test_compaction_policy(24_000, 90, 128));
+    let replaced = engine.prepared_policy(&policy);
+    assert_ne!(updated.shape.0, replaced.shape.0);
+    assert_eq!(updated.instructions, replaced.instructions);
+    assert_eq!(updated.tools, replaced.tools);
+}
+
 #[cfg(feature = "test-support")]
 #[test]
 fn authoritative_replay_uses_one_reduction_and_failure_only_pin_fallback() {
@@ -119,6 +139,43 @@ fn authoritative_replay_uses_one_reduction_and_failure_only_pin_fallback() {
     assert_eq!(counts.full_replays, 1);
     assert_eq!(counts.pin_replays, 1);
     assert_eq!(counts.pin_records, invalid.len());
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn loaded_report_writer_and_engine_share_one_load_and_validation() {
+    use zevria_transcript::replay_probe::measure_instruction_replay;
+    let (_directory, mut writer) = test_transcript();
+    let expected = vec![
+        TranscriptItem::SessionMode(SessionMode::Build),
+        TranscriptItem::Message(Message::user("restored prompt")),
+        TranscriptItem::Message(Message::assistant("restored answer")),
+    ];
+    for item in &expected {
+        writer.append(item).unwrap();
+    }
+    let path = writer.path().to_path_buf();
+    drop(writer);
+    let (engine, counts) = measure_instruction_replay(|| {
+        let loaded = zevria_transcript::transcript::load_report(&path).unwrap();
+        let writer = TranscriptWriter::append_loaded(&loaded).unwrap();
+        SessionEngine::from_loaded(
+            ScriptedProvider::new([]),
+            ToolServer::new().run(),
+            test_policies(),
+            writer,
+            test_skills(),
+            loaded,
+        )
+        .unwrap()
+    });
+    assert_eq!(engine.conversation.items(), expected);
+    assert_eq!(counts.loads, 1);
+    assert_eq!(counts.validations, 1);
+    assert_eq!(counts.full_replays, 1);
+    assert_eq!(counts.full_records, expected.len());
+    assert_eq!(counts.pin_replays, 0);
+    assert_eq!(engine.conversation.input_identity().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -629,6 +686,7 @@ async fn stale_prepared_count_is_replaced_by_next_turn_failure_and_invalidation_
     let turn = TurnContext::new(TurnId::new(2), SessionMode::Build, CancellationToken::new());
     let prompt = Message::user("count");
     let request = || ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: "test instructions",

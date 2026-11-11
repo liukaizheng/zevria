@@ -453,7 +453,48 @@ fn image_accounting_projection(message: &Message) -> (Message, usize) {
 /// JSON/string lookalikes are ordinary text and are never recursively scrubbed.
 /// The 1,600/image component is explicitly approximate, even when protocol
 /// overhead uses the historical `conservative_tokens` field.
+/// Exact additive form of the local Responses estimate. Only newly projected
+/// items need sanitization/serialization when validating an append lineage.
+#[derive(Default)]
+pub struct ResponsesInputEstimate {
+    payload_bytes: usize,
+    items: usize,
+    images: u64,
+}
+
+impl ResponsesInputEstimate {
+    pub fn append(&mut self, input: &[serde_json::Value]) {
+        if input.is_empty() {
+            return;
+        }
+        let (bytes, images) = responses_input_size(input);
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(bytes.saturating_sub(2))
+            .saturating_add(usize::from(self.items > 0));
+        self.items = self.items.saturating_add(input.len());
+        self.images = self.images.saturating_add(images);
+    }
+    pub fn tokens(&self, property_bytes: usize) -> u64 {
+        approximate_tokens_from_bytes(
+            self.payload_bytes
+                .saturating_add(2)
+                .saturating_add(property_bytes),
+        )
+        .saturating_add(
+            self.images
+                .saturating_mul(crate::prompt::ESTIMATED_IMAGE_TOKENS as u64),
+        )
+    }
+}
+
 pub fn estimate_responses_input_tokens(input: &[serde_json::Value], property_bytes: usize) -> u64 {
+    let mut estimate = ResponsesInputEstimate::default();
+    estimate.append(input);
+    estimate.tokens(property_bytes)
+}
+
+fn responses_input_size(input: &[serde_json::Value]) -> (usize, u64) {
     let mut projected = input.to_vec();
     let mut images = 0u64;
     for item in &mut projected {
@@ -489,12 +530,10 @@ pub fn estimate_responses_input_tokens(input: &[serde_json::Value], property_byt
             }
         }
     }
-    approximate_tokens_from_bytes(
-        serde_json::to_vec(&projected)
-            .map_or(usize::MAX, |bytes| bytes.len())
-            .saturating_add(property_bytes),
+    (
+        serde_json::to_vec(&projected).map_or(usize::MAX, |bytes| bytes.len()),
+        images,
     )
-    .saturating_add(images.saturating_mul(crate::prompt::ESTIMATED_IMAGE_TOKENS as u64))
 }
 
 /// Whether `message` is one of our generated summary user messages.

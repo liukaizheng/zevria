@@ -82,6 +82,7 @@ async fn explicit_a_b_a_switches_send_full_websocket_input_and_clear_all_continu
             .provider_mut()
             .complete(
                 ModelRequest {
+                    input_identity: None,
                     tools: &[],
                     forbid_tool_calls: false,
                     instructions: test_instructions(),
@@ -534,7 +535,7 @@ async fn maintenance_handles_cancellation_shutdown_and_never_queues_competing_ma
         }
         assert!(busy && cancelled);
         assert_eq!(
-            &transcript::load_report(&path).unwrap().items[1..],
+            &transcript::load_report(&path).unwrap().items()[1..],
             original
         );
         server.abort();
@@ -582,6 +583,7 @@ reasoning_summary_level = "detailed"
         let error = root
             .complete(
                 ModelRequest {
+                    input_identity: None,
                     tools: &[],
                     forbid_tool_calls: false,
                     instructions: test_instructions(),

@@ -59,6 +59,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         progress: &ProgressReporter,
         state: &mut DispatchState,
     ) -> Result<(), Failure> {
+        let _timing = LifecycleTiming::new("prepare_dispatch", self.conversation.items().len());
         loop {
             if progress.turn().is_cancelled() {
                 return Err(anyhow::anyhow!("turn cancelled").into());
@@ -149,28 +150,19 @@ impl<P: ModelProvider> SessionEngine<P> {
                     .await?;
             }
             self.prepare_dispatch(policy, &progress, &mut state).await?;
-            // Immutable owned input releases the conversation borrow while the
-            // provider runs. Only display checkpoints may be appended below;
-            // they cannot change this request, capacity or workflow state.
-            let owned_input = self
-                .conversation
-                .model_input()
-                .into_iter()
-                .map(ModelRequestItem::to_owned_item)
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            let input = owned_input
-                .iter()
-                .map(OwnedModelRequestItem::as_borrowed)
-                .collect::<Vec<_>>();
+            let prepared = self.prepared_policy(policy);
+            // The provider borrows items, while attempt checkpoints use only
+            // the disjoint writer. Install their display-only records afterward.
+            let (input, input_identity, mut checkpoint_writer) =
+                self.conversation.borrow_for_dispatch();
             if input.is_empty() {
                 return Err(anyhow::anyhow!("cannot run a model turn without model input").into());
             }
-            let instructions = self.rendered_instructions(policy);
-            let tools = self.request_tools(self.conversation.items(), policy);
             let request = ModelRequest {
-                tools: &tools,
+                input_identity,
+                tools: &prepared.tools,
                 forbid_tool_calls: false,
-                instructions: &instructions,
+                instructions: &prepared.instructions,
                 input,
                 model_role: policy.model_role,
                 allowed_tool_names: policy.allowed_tool_names.as_deref(),
@@ -205,7 +197,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                             } else {
                                 zevria_transcript::IncompleteResponse::from_attempt(&attempt).and_then(|record| {
                                     match record {
-                                        Some(record) => self.conversation.push_completed(TranscriptItem::IncompleteResponse(record)),
+                                        Some(record) => checkpoint_writer.append(record),
                                         None => Ok(()),
                                     }
                                 })
@@ -219,6 +211,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                     }
                 }
             };
+            let checkpoint_records = checkpoint_writer.into_records();
+            self.conversation
+                .install_attempt_checkpoints(checkpoint_records);
             // No provider future or request borrow survives this point. Cancellation
             // also wins if it arrived just as the provider returned a completed response.
             let completion_result = if progress.turn().is_cancelled() {
@@ -417,10 +412,12 @@ impl<P: ModelProvider> SessionEngine<P> {
                     .cloned()
                     .map(|draft| TranscriptItem::Plan(PlanRecord::DraftSaved { draft })),
             );
-            let mut source = self.conversation.items().to_vec();
-            source.extend(records.iter().cloned());
-            let active = replay_active_skills(&source)?;
-            records.extend(self.instruction_updates(&source, policy, &active)?);
+            let staged = self.instruction_replay()?.clone().apply_suffix(&records)?;
+            records.extend(self.instruction_updates_from_state(
+                staged.directives(),
+                policy,
+                staged.skills(),
+            )?);
             let persistence = self.record_completed_items(records);
             self.ensure_replay_valid()?;
             persistence?;

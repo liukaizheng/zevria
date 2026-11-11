@@ -82,6 +82,7 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
         let response = router
             .complete(
                 ModelRequest {
+                    input_identity: None,
                     tools: &[],
                     forbid_tool_calls: false,
                     instructions: test_instructions(),
@@ -181,6 +182,7 @@ async fn shared_slot_uses_role_levels_and_explicit_maintenance_uses_requested_le
     );
     let prompt = Message::user("same input");
     let request = |role| ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: test_instructions(),
@@ -484,6 +486,7 @@ async fn all_five_roles_use_explicit_levels_on_one_profile_and_children_remain_i
     });
     let prompt = Message::user("identical input");
     let request = |model_role| ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: test_instructions(),

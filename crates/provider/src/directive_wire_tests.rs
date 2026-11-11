@@ -79,6 +79,7 @@ async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_a
                 ));
             }
             let request = ModelRequest {
+                input_identity: None,
                 tools: &declarations,
                 forbid_tool_calls: false,
                 instructions: &instructions,
@@ -622,6 +623,7 @@ async fn directive_only_preflight_count_and_http_use_identical_input_without_rig
         })
         .unwrap();
         let request = ModelRequest {
+            input_identity: None,
             tools: &[],
             forbid_tool_calls: false,
             instructions: &instructions,
@@ -705,6 +707,7 @@ async fn unsupported_developer_role_does_not_silently_retry_as_user() {
     let mut provider = connect_http_test_provider(format!("http://{address}/v1/responses")).await;
     let instruction = test_skill("Pinned body");
     let request = ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: test_instructions(),

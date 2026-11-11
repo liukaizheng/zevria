@@ -69,6 +69,7 @@ fn runtime(profile: &ResolvedModelProfile) -> AnthropicProvider {
 }
 fn request(user: &Message) -> ModelRequest<'_> {
     ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: "stable",
@@ -306,6 +307,7 @@ async fn binding_mismatch_retries_once_with_thinking_removed_and_new_binding() {
         zevria_model::ReplayMessage::new(first.record().provider_replay().unwrap().clone())
             .unwrap();
     let req = ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: "stable",

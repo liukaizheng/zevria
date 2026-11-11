@@ -14,6 +14,8 @@ mod directive_wire;
 mod incremental_tools;
 #[path = "inline_search_tests.rs"]
 mod inline_search_tests;
+#[path = "lifecycle_cache_tests.rs"]
+mod lifecycle_cache;
 #[path = "model_tests.rs"]
 mod models;
 #[path = "outage_tests.rs"]
@@ -203,6 +205,7 @@ impl RequestParts {
             input.push(ModelRequestItem::DeveloperInstruction(test_skill(body)));
         }
         ModelRequest {
+            input_identity: None,
             tools: &self.tools,
             forbid_tool_calls: self.forbid_tool_calls,
             instructions: rendered_test_instructions(&self.instructions),
@@ -235,6 +238,7 @@ fn request_with_replays<'a>(
         input.push(ModelRequestItem::DeveloperInstruction(test_skill(body)));
     }
     ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: rendered_test_instructions(instructions),
@@ -620,6 +624,7 @@ fn test_session_with_pump(
     OpenAiProvider {
         #[cfg(feature = "cache-diagnostics")]
         cache_diagnostics: Default::default(),
+        input_projection: None,
         profile: zevria_foundation::ModelProfileRef::new("test-provider", "gpt-test"),
         context_window_tokens: 272_000,
         preamble: "Test instructions".to_string(),
@@ -1247,6 +1252,7 @@ async fn exact_input_count_posts_the_complete_logical_request_without_touching_c
         json!({"comparison_response_id":"resp_synthetic_baseline", "mode":"implicit", "ttl":"30m"}),
     );
     openai.ws.continuation = Some(ContinuationState {
+        lineage: None,
         socket_generation: 0,
         response_id: "resp_preserved".to_string(),
         request_properties: json!({"preserve": true}),
@@ -1729,6 +1735,7 @@ async fn provider_cancellation_terminates_the_socket_and_invalidates_continuatio
         .expect("client should connect");
     let mut openai = test_session(socket, Some("pending-done"));
     openai.ws.continuation = Some(ContinuationState {
+        lineage: None,
         socket_generation: 0,
         response_id: "response-before-cancel".to_string(),
         request_properties: json!({"model": "gpt-test"}),
@@ -2284,6 +2291,7 @@ async fn foreign_replay_only_checkpoint_fails_before_network() {
     );
     let prompt = Message::user("continue");
     let request = ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: test_instructions(),
@@ -2386,6 +2394,7 @@ async fn foreign_replay_uses_portable_text_and_correlated_tool_projection() {
     let trusted = zevria_model::ReplayMessage::new(replay.clone()).unwrap();
     let prompt = Message::user("continue elsewhere");
     let request = ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: test_instructions(),
@@ -3450,6 +3459,7 @@ async fn native_output_items_survive_capture_and_full_replay_after_reconnect() {
         .collect::<Vec<_>>();
     resumed_input.push(ModelRequestItem::message(&resumed_prompt));
     let resumed_request = ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: test_instructions(),
@@ -4520,6 +4530,7 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
     let openai = OpenAiProvider {
         #[cfg(feature = "cache-diagnostics")]
         cache_diagnostics: Default::default(),
+        input_projection: None,
         profile: test_profile_ref(),
         context_window_tokens: 272_000,
         preamble: "Test instructions".to_string(),
@@ -7206,6 +7217,7 @@ async fn cancelling_an_http_completion_drops_the_live_sse_stream() {
         let mut openai = openai;
         let prompt = Message::user("cancel HTTP");
         let request = ModelRequest {
+            input_identity: None,
             tools: &[],
             forbid_tool_calls: false,
             instructions: test_instructions(),
@@ -7864,6 +7876,7 @@ async fn router_keeps_profile_local_continuations_across_switches_and_active_can
     let response_a = router
         .complete(
             ModelRequest {
+                input_identity: None,
                 tools: &[],
                 forbid_tool_calls: false,
                 instructions: test_instructions(),
@@ -7882,6 +7895,7 @@ async fn router_keeps_profile_local_continuations_across_switches_and_active_can
     let response_b = router
         .complete(
             ModelRequest {
+                input_identity: None,
                 tools: &[],
                 forbid_tool_calls: false,
                 instructions: test_instructions(),
@@ -7923,6 +7937,7 @@ async fn router_keeps_profile_local_continuations_across_switches_and_active_can
     router
         .complete(
             ModelRequest {
+                input_identity: None,
                 tools: &[],
                 forbid_tool_calls: false,
                 instructions: test_instructions(),

@@ -43,8 +43,8 @@ use crate::{
     websocket_session::{OpenAiWebSocketInbound, OpenAiWebSocketTerminalCategory},
 };
 use zevria_responses::{
-    accumulator::{response_cache_write_tokens, response_token_usage},
-    protocol::parse_server_event,
+    accumulator::{response_cache_write_tokens_value, response_token_usage},
+    protocol::parse_server_event_value,
 };
 
 /// Marks a turn that failed because a websocket connection was lost rather
@@ -250,11 +250,30 @@ fn log_terminal_response(
 /// A complete logical request. Every retry and stale-ID fallback derives its
 /// transmitted payload from this snapshot, so recovery cannot accidentally
 /// rebuild a different history or tool set.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContinuationLineage {
+    input_count: usize,
+    input_digest: [u8; 32],
+    projected_prefix_len: usize,
+}
+
+pub(crate) struct ProjectionCache {
+    profile: zevria_foundation::ModelProfileRef,
+    compatibility: [bool; 3],
+    input_count: usize,
+    input_digest: [u8; 32],
+    projection: zevria_responses::replay::InputProjection,
+    input: std::sync::Arc<Vec<serde_json::Value>>,
+}
+
 pub(crate) struct PreparedRequest {
     #[cfg(feature = "cache-diagnostics")]
     pub(crate) cache_diagnostics: Option<crate::cache_diagnostics::RequestSnapshot>,
     pub(crate) request_properties: serde_json::Value,
-    pub(crate) full_input: Vec<serde_json::Value>,
+    pub(crate) full_input: std::sync::Arc<Vec<serde_json::Value>>,
+    input_count: usize,
+    input_digest: [u8; 32],
+    input_matches_continuation: bool,
     history_message_count: usize,
     replay_source: ReplaySource,
 }
@@ -265,27 +284,6 @@ struct Transmission {
     previous_response_id: Option<String>,
     input: Vec<serde_json::Value>,
     mode: RequestMode,
-}
-
-fn complete_provider_input(
-    model_request: &ModelRequest<'_>,
-    target_profile: &zevria_foundation::ModelProfileRef,
-    developer_messages: bool,
-    tool_options: ToolRendererOptions,
-    additional_tools: bool,
-) -> anyhow::Result<(Vec<serde_json::Value>, ReplaySource)> {
-    let projected = zevria_responses::replay::project_with_compatibility(
-        &model_request.input,
-        target_profile,
-        developer_messages,
-        tool_options,
-        additional_tools,
-    )?;
-    anyhow::ensure!(
-        !projected.0.is_empty(),
-        "the OpenAI Responses request contained no input items"
-    );
-    Ok(projected)
 }
 
 pub(crate) async fn prepare_turn_request(
@@ -360,18 +358,83 @@ pub(crate) async fn prepare_turn_request(
         ))?;
     }
 
-    let (full_input, replay_source) = complete_provider_input(
-        model_request,
+    let fallback_identity;
+    let identity = match model_request.input_identity {
+        Some(identity) if identity.len() == model_request.input.len() => identity,
+        _ => {
+            fallback_identity = zevria_model::ModelInputIdentity::from_items(&model_request.input)?;
+            &fallback_identity
+        }
+    };
+    let input_matches_continuation = openai
+        .ws
+        .continuation
+        .as_ref()
+        .and_then(|continuation| continuation.lineage)
+        .is_some_and(|lineage| {
+            identity.len() > lineage.input_count
+                && identity.prefix(lineage.input_count) == Some(lineage.input_digest)
+        });
+    let compatibility = [
+        openai.compatibility.developer_messages,
+        tool_options.strict_tools,
+        openai.compatibility.additional_tools,
+    ];
+    let cached = openai.input_projection.take().filter(|cache| {
+        cache.profile == openai.profile
+            && cache.compatibility == compatibility
+            && identity.prefix(cache.input_count) == Some(cache.input_digest)
+    });
+    let (mut projection, start, projection_extended) = match cached {
+        Some(cache)
+            if cache
+                .projection
+                .can_extend(&model_request.input[cache.input_count..], &openai.profile)? =>
+        {
+            let mut projection = cache.projection;
+            projection.restore_input(
+                std::sync::Arc::try_unwrap(cache.input)
+                    .unwrap_or_else(|shared| shared.as_ref().clone()),
+            );
+            (projection, cache.input_count, true)
+        }
+        _ => (
+            zevria_responses::replay::InputProjection::default(),
+            0,
+            false,
+        ),
+    };
+    projection.extend(
+        &model_request.input[start..],
         &openai.profile,
         openai.compatibility.developer_messages,
         tool_options,
         openai.compatibility.additional_tools,
     )?;
+    let replay_source = projection.source();
+    let full_input = std::sync::Arc::new(projection.take_input());
+    anyhow::ensure!(
+        !full_input.is_empty(),
+        "the OpenAI Responses request contained no input items"
+    );
+    openai.input_projection = Some(ProjectionCache {
+        profile: openai.profile.clone(),
+        compatibility,
+        input_count: identity.len(),
+        input_digest: identity.digest(),
+        projection,
+        input: full_input.clone(),
+    });
     Ok(PreparedRequest {
         #[cfg(feature = "cache-diagnostics")]
         cache_diagnostics: None,
         request_properties,
         full_input,
+        input_count: identity.len(),
+        input_digest: identity.digest(),
+        // Rebuilding may rename portable call IDs to reserve new native
+        // handles, or change projection compatibility. Never chain that prefix.
+        input_matches_continuation: input_matches_continuation && projection_extended,
         history_message_count: model_request.input.len().saturating_sub(1),
         replay_source,
     })
@@ -445,7 +508,10 @@ async fn count_full_input_tokens(
     properties.remove("prompt_cache_key");
     properties.insert(
         "input".to_string(),
-        serde_json::Value::Array(prepared.full_input),
+        serde_json::Value::Array(
+            std::sync::Arc::try_unwrap(prepared.full_input)
+                .unwrap_or_else(|shared| shared.as_ref().clone()),
+        ),
     );
 
     let log_url = crate::connection::redacted_url_for_logging(url.as_str());
@@ -527,7 +593,10 @@ async fn run_remote_compaction(
         .or_insert(serde_json::Value::Bool(true));
     properties.insert(
         "input".to_string(),
-        serde_json::Value::Array(prepared.full_input),
+        serde_json::Value::Array(
+            std::sync::Arc::try_unwrap(prepared.full_input)
+                .unwrap_or_else(|shared| shared.as_ref().clone()),
+        ),
     );
 
     let log_url = crate::connection::redacted_url_for_logging(url.as_str());
@@ -608,18 +677,25 @@ fn select_transmission(prepared: &PreparedRequest, openai: &mut OpenAiProvider) 
         ) {
             return Err("request_properties_changed");
         }
-        if continuation.response_output.is_empty() {
+        if continuation.lineage.is_none() && continuation.response_output.is_empty() {
             return Err("missing_native_output");
         }
 
-        let prefix_len = continuation.request_input.len() + continuation.response_output.len();
-        let has_exact_prefix = prepared.full_input.len() > prefix_len
-            && prepared.full_input.get(..continuation.request_input.len())
-                == Some(continuation.request_input.as_slice())
-            && prepared
-                .full_input
-                .get(continuation.request_input.len()..prefix_len)
-                == Some(continuation.response_output.as_slice());
+        let prefix_len = continuation.lineage.map_or_else(
+            || continuation.request_input.len() + continuation.response_output.len(),
+            |lineage| lineage.projected_prefix_len,
+        );
+        let has_exact_prefix = if continuation.lineage.is_some() {
+            prepared.input_matches_continuation && prepared.full_input.len() > prefix_len
+        } else {
+            prepared.full_input.len() > prefix_len
+                && prepared.full_input.get(..continuation.request_input.len())
+                    == Some(continuation.request_input.as_slice())
+                && prepared
+                    .full_input
+                    .get(continuation.request_input.len()..prefix_len)
+                    == Some(continuation.response_output.as_slice())
+        };
         if !has_exact_prefix {
             return Err("history_mismatch");
         }
@@ -644,7 +720,7 @@ fn select_transmission(prepared: &PreparedRequest, openai: &mut OpenAiProvider) 
                 #[cfg(feature = "cache-diagnostics")]
                 full_reason: Some(crate::cache_diagnostics::FullReason::selection(reason)),
                 previous_response_id: None,
-                input: prepared.full_input.clone(),
+                input: prepared.full_input.as_ref().clone(),
                 mode: RequestMode::Full,
             }
         }
@@ -652,7 +728,7 @@ fn select_transmission(prepared: &PreparedRequest, openai: &mut OpenAiProvider) 
             #[cfg(feature = "cache-diagnostics")]
             full_reason: Some(crate::cache_diagnostics::no_continuation_reason(openai)),
             previous_response_id: None,
-            input: prepared.full_input.clone(),
+            input: prepared.full_input.as_ref().clone(),
             mode: RequestMode::Full,
         },
     }
@@ -747,7 +823,7 @@ fn full_transmission(prepared: &PreparedRequest) -> Transmission {
         #[cfg(feature = "cache-diagnostics")]
         full_reason: Some(crate::cache_diagnostics::FullReason::StaleResponseId),
         previous_response_id: None,
-        input: prepared.full_input.clone(),
+        input: prepared.full_input.as_ref().clone(),
         mode: RequestMode::Full,
     }
 }
@@ -791,8 +867,16 @@ fn successful_model_response(
         socket_generation: openai.ws.socket_generation,
         response_id,
         request_properties: prepared.request_properties.clone(),
-        request_input: prepared.full_input.clone(),
-        response_output,
+        lineage: Some(ContinuationLineage {
+            input_count: prepared.input_count + 1,
+            input_digest: zevria_model::ModelInputIdentity::appended_digest(
+                prepared.input_digest,
+                response.record().model_request_item(),
+            )?,
+            projected_prefix_len: prepared.full_input.len() + response_output.len(),
+        }),
+        request_input: Vec::new(),
+        response_output: Vec::new(),
     });
     Ok(response)
 }
@@ -945,6 +1029,7 @@ async fn run_model_request(
         .then(|| crate::attempt::AttemptStream::new(openai.profile.clone(), progress));
     let result =
         run_model_request_inner(prepared, openai, state, progress, policy, attempt_progress).await;
+    state.flush_stream(progress);
     let result = match result {
         Ok(response) => response.with_attempt_id(
             state
@@ -1007,7 +1092,13 @@ async fn run_model_request_inner(
     }
 
     loop {
-        let inbound = match clock.next(openai.ws.session.next(), attempt_progress).await {
+        let inbound = match state
+            .next_event(
+                clock.next(openai.ws.session.next(), attempt_progress),
+                progress,
+            )
+            .await
+        {
             Ok(inbound) => inbound,
             Err(error) => {
                 openai
@@ -1098,17 +1189,17 @@ async fn run_model_request_inner(
         if message.trim().is_empty() || message.trim() == "[DONE]" {
             continue;
         }
+        let raw: serde_json::Value =
+            serde_json::from_str(&message).map_err(CompletionError::from)?;
         #[cfg(feature = "cache-diagnostics")]
-        crate::cache_diagnostics::observe_raw(openai, &message, prior_terminal_id.as_deref(), None);
-
-        let event = match parse_server_event(&message) {
-            Ok(event) => event,
-            Err(error) => {
-                abandon_attempt(openai, state);
-                return Err(error.into());
-            }
-        };
-        let raw: serde_json::Value = serde_json::from_str(&message)?;
+        crate::cache_diagnostics::observe_value(
+            openai,
+            &raw,
+            message.len(),
+            prior_terminal_id.as_deref(),
+            None,
+        );
+        let cache_write_tokens = response_cache_write_tokens_value(&raw);
         match response_progress.observe(&raw) {
             ProgressObservation::OtherResponse => continue,
             ProgressObservation::Advanced => {
@@ -1123,13 +1214,24 @@ async fn run_model_request_inner(
             ProgressObservation::Unchanged => {}
         }
         match raw["type"].as_str() {
-            Some("response.output_item.done") => state.record_native_output_item_done(&message),
-            Some("response.completed") => state.record_native_terminal_output(&message),
+            Some("response.output_item.done") => {
+                state.native_output.record_output_item_done_value(&raw)
+            }
+            Some("response.completed" | "response.done") => {
+                state.native_output.record_terminal_output_value(&raw)
+            }
             _ => {}
         }
-        state.observe_attempt(&message, progress).await;
-
+        state.observe_attempt_value(&raw);
+        let event = match parse_server_event_value(raw) {
+            Ok(event) => event,
+            Err(error) => {
+                abandon_attempt(openai, state);
+                return Err(error.into());
+            }
+        };
         let Some(event) = event else {
+            state.publish_stream(progress);
             continue;
         };
 
@@ -1146,7 +1248,6 @@ async fn run_model_request_inner(
                 match chunk.kind {
                     ResponseChunkKind::ResponseCompleted => {
                         let response_id = chunk.response.id.clone();
-                        let cache_write_tokens = response_cache_write_tokens(&message);
                         let token_usage = response_token_usage(&chunk.response);
                         log_terminal_response(
                             openai,
@@ -1176,7 +1277,6 @@ async fn run_model_request_inner(
                     }
                     ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete => {
                         let response_id = chunk.response.id.clone();
-                        let cache_write_tokens = response_cache_write_tokens(&message);
                         let token_usage = response_token_usage(&chunk.response);
                         let response_status = match chunk.kind {
                             ResponseChunkKind::ResponseFailed => "failed",
@@ -1271,7 +1371,6 @@ async fn run_model_request_inner(
             }
             ResponsesWebSocketEvent::Done(done) => {
                 let response_id = done.response_id().map(ToOwned::to_owned);
-                state.record_native_terminal_output(&message);
 
                 let status = match done.response.get("status").cloned() {
                     Some(status) => match serde_json::from_value::<ResponseStatus>(status) {
@@ -1300,7 +1399,6 @@ async fn run_model_request_inner(
                         };
                         let response =
                             serde_json::from_value::<OpenAiCompletionResponse>(done.response).ok();
-                        let cache_write_tokens = response_cache_write_tokens(&message);
                         let token_usage = response.as_ref().and_then(response_token_usage);
                         log_terminal_response(
                             openai,
@@ -1341,7 +1439,6 @@ async fn run_model_request_inner(
                             done.response.clone(),
                         )
                         .ok();
-                        let cache_write_tokens = response_cache_write_tokens(&message);
                         let token_usage = response.as_ref().and_then(response_token_usage);
                         log_terminal_response(
                             openai,
@@ -1386,7 +1483,7 @@ fn http_request_body(prepared: &PreparedRequest) -> anyhow::Result<serde_json::V
     body.remove("previous_response_id");
     body.insert(
         "input".to_string(),
-        serde_json::Value::Array(prepared.full_input.clone()),
+        serde_json::Value::Array(prepared.full_input.as_ref().clone()),
     );
     body.insert("stream".to_string(), serde_json::Value::Bool(true));
     Ok(serde_json::Value::Object(body))
@@ -1429,6 +1526,7 @@ async fn run_http_model_request(
         request_start_deadline,
     )
     .await;
+    state.flush_stream(progress);
     let result = match result {
         Ok(response) => response
             .with_attempt_id(
@@ -1615,8 +1713,8 @@ async fn run_http_model_request_inner(
     let mut response_progress = ResponseProgress::default();
 
     loop {
-        let event = clock
-            .next(events.next(), attempt_progress)
+        let event = state
+            .next_event(clock.next(events.next(), attempt_progress), progress)
             .await
             .map_err(|error| {
                 HttpAttemptError::retryable_response(
@@ -1657,31 +1755,38 @@ async fn run_http_model_request_inner(
             continue;
         }
 
+        let raw: serde_json::Value = serde_json::from_str(payload).map_err(|error| {
+            HttpAttemptError::terminal_response(CompletionError::from(error), &upstream_request_id)
+        })?;
         #[cfg(feature = "cache-diagnostics")]
-        crate::cache_diagnostics::observe_raw(
+        crate::cache_diagnostics::observe_value(
             openai,
-            payload,
+            &raw,
+            payload.len(),
             None,
             upstream_request_id.as_deref(),
         );
-
-        let event = parse_server_event(payload).map_err(|error| {
-            HttpAttemptError::terminal_response(anyhow::Error::from(error), &upstream_request_id)
-        })?;
-        let raw: serde_json::Value = serde_json::from_str(payload)
-            .map_err(|error| HttpAttemptError::terminal_response(error, &upstream_request_id))?;
+        let cache_write_tokens = response_cache_write_tokens_value(&raw);
         match response_progress.observe(&raw) {
             ProgressObservation::OtherResponse => continue,
             ProgressObservation::Advanced => clock.advanced(attempt_progress).await,
             ProgressObservation::Unchanged => {}
         }
         match raw["type"].as_str() {
-            Some("response.output_item.done") => state.record_native_output_item_done(payload),
-            Some("response.completed") => state.record_native_terminal_output(payload),
+            Some("response.output_item.done") => {
+                state.native_output.record_output_item_done_value(&raw)
+            }
+            Some("response.completed" | "response.done") => {
+                state.native_output.record_terminal_output_value(&raw)
+            }
             _ => {}
         }
-        state.observe_attempt(payload, progress).await;
+        state.observe_attempt_value(&raw);
+        let event = parse_server_event_value(raw).map_err(|error| {
+            HttpAttemptError::terminal_response(anyhow::Error::from(error), &upstream_request_id)
+        })?;
         let Some(event) = event else {
+            state.publish_stream(progress);
             continue;
         };
 
@@ -1697,7 +1802,6 @@ async fn run_http_model_request_inner(
                 match chunk.kind {
                     ResponseChunkKind::ResponseCompleted => {
                         let response_id = chunk.response.id.clone();
-                        let cache_write_tokens = response_cache_write_tokens(payload);
                         let token_usage = response_token_usage(&chunk.response);
                         log_terminal_response(
                             openai,
@@ -1727,7 +1831,6 @@ async fn run_http_model_request_inner(
                             ResponseChunkKind::ResponseIncomplete => "incomplete",
                             _ => unreachable!("matched terminal failure chunk"),
                         };
-                        let cache_write_tokens = response_cache_write_tokens(payload);
                         let token_usage = response_token_usage(&chunk.response);
                         log_terminal_response(
                             openai,
@@ -1781,7 +1884,6 @@ async fn run_http_model_request_inner(
             }
             ResponsesWebSocketEvent::Done(done) => {
                 let response_id = done.response_id().map(ToOwned::to_owned);
-                state.record_native_terminal_output(payload);
                 let status = done
                     .response
                     .get("status")
@@ -1813,7 +1915,7 @@ async fn run_http_model_request_inner(
                                 None,
                                 upstream_request_id.as_deref(),
                                 None,
-                                response_cache_write_tokens(payload),
+                                cache_write_tokens,
                             );
                             return Err(HttpAttemptError::terminal_response(
                                 anyhow::anyhow!(
@@ -1824,7 +1926,6 @@ async fn run_http_model_request_inner(
                         }
                         let response =
                             serde_json::from_value::<OpenAiCompletionResponse>(done.response).ok();
-                        let cache_write_tokens = response_cache_write_tokens(payload);
                         let token_usage = response.as_ref().and_then(response_token_usage);
                         log_terminal_response(
                             openai,
@@ -1861,7 +1962,6 @@ async fn run_http_model_request_inner(
                             done.response.clone(),
                         )
                         .ok();
-                        let cache_write_tokens = response_cache_write_tokens(payload);
                         let token_usage = response.as_ref().and_then(response_token_usage);
                         log_terminal_response(
                             openai,
@@ -2166,6 +2266,7 @@ pub(crate) async fn run_turn(
     input.push(zevria_model::ModelRequestItem::message(&prompt));
     run_turn_request(
         ModelRequest {
+            input_identity: None,
             tools: &[],
             forbid_tool_calls: false,
             instructions: crate::tests::test_instructions(),

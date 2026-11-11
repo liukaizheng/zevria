@@ -295,6 +295,7 @@ async fn malformed_and_opaque_input_reject_before_lazy_connection() {
     ] {
         let prompt = Message::user("continue");
         let request = ModelRequest {
+            input_identity: None,
             tools: &[],
             forbid_tool_calls: false,
             instructions: test_instructions(),
@@ -793,6 +794,7 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
     .unwrap();
     let expected = crate::turn::prepare_turn_request(
         &ModelRequest {
+            input_identity: None,
             instructions: &instructions,
             tools: &initial,
             forbid_tool_calls: false,
@@ -833,7 +835,7 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
     );
     let restored = transcript::load_report(engine.conversation().path()).unwrap();
     restored.ensure_resumable().unwrap();
-    assert_eq!(restored.items, engine.conversation().items());
+    assert_eq!(restored.items(), engine.conversation().items());
     assert!(
         matches!(manage(&mut engine,Request::List { scope: Scope::SessionAndDefault, mode:SessionMode::Build }).await, Result::Catalog { current, .. } if current.profile == a.profile)
     );
@@ -879,7 +881,7 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
     }
     let input = request["input"].as_array().unwrap();
     assert_eq!(input.len(), expected.full_input.len() + 1);
-    for (actual, expected) in input.iter().zip(&expected.full_input) {
+    for (actual, expected) in input.iter().zip(expected.full_input.iter()) {
         assert_eq!(
             serde_json::to_string(actual).unwrap(),
             serde_json::to_string(expected).unwrap()

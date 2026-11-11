@@ -403,6 +403,7 @@ pub(super) async fn execute_tool_calls(
     active_skills: ActiveSkills,
     submission_gate: &PlanSubmissionGate,
 ) -> ToolResultBatch {
+    let _timing = LifecycleTiming::new("execute_tool_calls", calls.len());
     // Validate the entire response before constructing concurrent futures or
     // launching any call. A failed boundary may not partially apply a skill.
     if calls

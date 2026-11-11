@@ -2,6 +2,17 @@
 
 use super::*;
 
+pub(super) struct PreparedPolicy {
+    pub(super) policy: TurnPolicy,
+    pub(super) application: String,
+    pub(super) context: ModelContextPolicy,
+    pub(super) instructions: String,
+    pub(super) tools: ToolDeclarations,
+    pub(super) tool_bytes: Vec<u8>,
+    pub(super) tool_update: Option<TranscriptItem>,
+    pub(super) shape: RequestShapeFingerprint,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RequestShapeFingerprint(pub(super) [u8; 32]);
 
@@ -137,12 +148,6 @@ impl ContextUsageTracker {
 }
 
 use zevria_transcript::SessionReplayError;
-
-pub(super) fn validate_session_replay(
-    items: &[TranscriptItem],
-) -> Result<SessionReplayState, SessionReplayError> {
-    zevria_transcript::validate_session_replay(items).map(SessionReplayState::from)
-}
 
 // Instruction and Plan replay succeed together, or neither payload is available.
 pub(super) enum SessionReplayState {

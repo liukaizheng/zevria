@@ -71,20 +71,24 @@ pub(super) fn prepared_request_identity(
     instructions: &str,
     input: &[ModelRequestItem<'_>],
 ) -> anyhow::Result<RequestShapeFingerprint> {
+    let identity = ModelInputIdentity::from_items(input)?;
+    Ok(prepared_identity_from_digest(
+        shape,
+        instructions,
+        identity.digest(),
+    ))
+}
+
+fn prepared_identity_from_digest(
+    shape: RequestShapeFingerprint,
+    instructions: &str,
+    digest: [u8; 32],
+) -> RequestShapeFingerprint {
     let mut hash = Sha256::new();
     hash.update(shape.0);
     hash.update(instructions.as_bytes());
-    // Same canonical array encoding as snapshot_model_input, without holding
-    // an owned copy of the complete history just to compute an identity.
-    hash.update(b"[");
-    for (index, item) in input.iter().enumerate() {
-        if index != 0 {
-            hash.update(b",");
-        }
-        hash.update(serde_json::to_vec(&item.to_owned_item()?)?);
-    }
-    hash.update(b"]");
-    Ok(RequestShapeFingerprint(hash.finalize().into()))
+    hash.update(digest);
+    RequestShapeFingerprint(hash.finalize().into())
 }
 
 impl<P: ModelProvider> SessionEngine<P> {
@@ -97,12 +101,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         policy: &TurnPolicy,
     ) -> Result<RequestShapeFingerprint, SessionReplayError> {
         self.ensure_replay_valid()?;
-        Ok(prepared_request_shape(
-            policy,
-            self.context_policy(policy.model_role),
-            &self.rendered_instructions(policy),
-            &self.request_tool_bytes(self.conversation.items(), policy),
-        ))
+        Ok(self.prepared_policy(policy).shape)
     }
 
     pub(super) fn logical_request_identity(
@@ -110,28 +109,31 @@ impl<P: ModelProvider> SessionEngine<P> {
         policy: &TurnPolicy,
     ) -> anyhow::Result<RequestShapeFingerprint> {
         self.ensure_replay_valid()?;
-        let instructions = self.rendered_instructions(policy);
-        let shape = prepared_request_shape(
-            policy,
-            self.context_policy(policy.model_role),
-            &instructions,
-            &self.request_tool_bytes(self.conversation.items(), policy),
-        );
-        prepared_request_identity(shape, &instructions, &self.conversation.model_input())
-    }
-
-    pub(super) fn request_tool_bytes(
-        &self,
-        items: &[TranscriptItem],
-        policy: &TurnPolicy,
-    ) -> Vec<u8> {
-        serde_json::to_vec(&self.request_tools(items, policy)).expect("tools serialize")
+        let prepared = self.prepared_policy(policy);
+        let instructions = &prepared.instructions;
+        let shape = prepared.shape;
+        match self.conversation.input_identity() {
+            Some(identity) => Ok(prepared_identity_from_digest(
+                shape,
+                instructions,
+                identity.digest(),
+            )),
+            None => {
+                prepared_request_identity(shape, instructions, &self.conversation.model_input())
+            }
+        }
     }
 
     /// Recorded additions are input; only a not-yet-recorded addition is fixed
     /// overhead. An Initial is already represented by request_tools.
     pub(super) fn fixed_tool_tokens(&self, items: &[TranscriptItem], policy: &TurnPolicy) -> u64 {
-        let top_level = self.request_tools(items, policy).approximate_tokens();
+        let top_level = if std::ptr::eq(items, self.conversation.items()) {
+            zevria_model::compaction::approximate_tokens_from_bytes(
+                self.prepared_policy(policy).tool_bytes.len(),
+            )
+        } else {
+            self.request_tools(items, policy).approximate_tokens()
+        };
         let prospective = self
             .tool_declaration_update(items, policy)
             .as_ref()
@@ -142,7 +144,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn fixed_input_tokens(&self, policy: &TurnPolicy) -> u64 {
-        zevria_model::compaction::approximate_tokens(&self.rendered_instructions(policy))
+        zevria_model::compaction::approximate_tokens(&self.prepared_policy(policy).instructions)
             .saturating_add(self.fixed_tool_tokens(self.conversation.items(), policy))
     }
 
@@ -222,7 +224,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         if items.iter().any(|item| {
             matches!(
                 item,
-                TranscriptItem::Directive(_) | TranscriptItem::ToolDeclarations(_)
+                TranscriptItem::Directive(_)
+                    | TranscriptItem::ToolDeclarations(_)
+                    | TranscriptItem::Compaction(_)
             )
         }) {
             self.context.last_snapshots.clear();
@@ -273,7 +277,15 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .collect(),
         )
         .conservative_tokens;
-        let estimate = match self.provider.preflight_input(&context.profile, &input)? {
+        let identity = updates
+            .is_empty()
+            .then(|| self.conversation.input_identity())
+            .flatten();
+        let estimate = match self.provider.preflight_input_with_identity(
+            &context.profile,
+            &input,
+            identity,
+        )? {
             zevria_model::models::ReplayPreflight::Compatible(estimate) => estimate,
             zevria_model::models::ReplayPreflight::ConversionRequired { sources } => anyhow::bail!(
                 "destination {} cannot read opaque history from {}; use /model to select its source or confirm conversion, or start a fresh session",
@@ -325,12 +337,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             input_limit,
         );
         let (mut projected_input_tokens, mut source) = (assessment.tokens, assessment.source);
-        let has_images = self
-            .conversation
-            .model_input()
-            .into_iter()
-            .filter_map(ModelRequestItem::message_ref)
-            .any(zevria_content::prompt::message_has_images);
+        let has_images = self.conversation.has_images();
         if allow_exact_count
             && (has_images || force_exact_count || assessment.needs_exact())
             && pending_exact.is_none()
@@ -339,6 +346,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             let instructions = self.rendered_instructions(policy);
             let tools = self.request_tools(self.conversation.items(), policy);
             let request = ModelRequest {
+                input_identity: self.conversation.input_identity(),
                 instructions: &instructions,
                 tools: &tools,
                 forbid_tool_calls: false,

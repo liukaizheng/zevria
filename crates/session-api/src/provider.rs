@@ -83,6 +83,17 @@ pub trait ModelProvider: Send + 'static {
         ))
     }
 
+    /// Optional local append lineage for adapters with incremental validation.
+    /// Synthetic/prospective callers retain the ordinary full preflight path.
+    fn preflight_input_with_identity(
+        &self,
+        target: &ModelProfileRef,
+        input: &[ModelRequestItem<'_>],
+        _identity: Option<&zevria_model::ModelInputIdentity>,
+    ) -> anyhow::Result<crate::models::ReplayPreflight> {
+        self.preflight_input(target, input)
+    }
+
     /// Explicit-profile maintenance never temporarily changes a role route.
     fn complete_profile<'a>(
         &'a mut self,

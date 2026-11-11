@@ -6,6 +6,16 @@ use zevria_session_api::ProgressReporter;
 
 pub(crate) struct AttemptStream {
     state: AttemptReducer,
+    collector: zevria_session_api::ResponseAttemptCollector,
+}
+
+impl Drop for AttemptStream {
+    fn drop(&mut self) {
+        // Cancellation drops the provider future before its ordinary terminal
+        // flush. Retain the latest ingested evidence without cloning on every
+        // stream delta or publishing an out-of-cadence frontend snapshot.
+        self.collector.collect(self.state.attempt().clone());
+    }
 }
 impl AttemptStream {
     pub(crate) fn new(
@@ -14,7 +24,10 @@ impl AttemptStream {
     ) -> Self {
         let state = AttemptReducer::new(profile);
         progress.collect_attempt(state.attempt().clone());
-        Self { state }
+        Self {
+            state,
+            collector: progress.attempt_collector(),
+        }
     }
     pub(crate) fn state(&self) -> &AttemptReducer {
         &self.state

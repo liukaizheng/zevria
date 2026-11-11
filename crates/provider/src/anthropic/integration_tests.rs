@@ -205,6 +205,7 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
     let second = router
         .complete(
             ModelRequest {
+                input_identity: None,
                 tools: &declared,
                 forbid_tool_calls: false,
                 instructions: "stable",
@@ -238,6 +239,7 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
     router
         .complete(
             ModelRequest {
+                input_identity: None,
                 tools: &declared,
                 forbid_tool_calls: false,
                 instructions: "stable",
@@ -418,6 +420,7 @@ async fn engine_tool_loop_persists_signed_thinking_and_reload_reproduces_request
     resumed
         .complete(
             ModelRequest {
+                input_identity: None,
                 tools: zevria_transcript::tool_window(&loaded[..final_index])
                     .initial
                     .unwrap(),

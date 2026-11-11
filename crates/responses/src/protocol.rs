@@ -8,7 +8,6 @@ use rig_core::{
         ToolResultContent, UserContent,
     },
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// Convert one legacy/provider-neutral message with Rig's normal Responses
@@ -351,21 +350,29 @@ impl ResponseProgress {
 pub fn parse_server_event(
     payload: &str,
 ) -> Result<Option<ResponsesWebSocketEvent>, CompletionError> {
-    #[derive(Deserialize)]
-    struct EventType {
-        #[serde(rename = "type")]
-        kind: String,
-    }
+    parse_server_event_value(serde_json::from_str(payload)?)
+}
 
-    let event_type = serde_json::from_str::<EventType>(payload)?;
-    match event_type.kind.as_str() {
-        "error" => serde_json::from_str(payload)
+/// Decode typed routing from the already-parsed lossless frame. Ledgers and
+/// progress observers inspect this same value before it is consumed here.
+pub fn parse_server_event_value(
+    payload: Value,
+) -> Result<Option<ResponsesWebSocketEvent>, CompletionError> {
+    let kind = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            <serde_json::Error as serde::de::Error>::custom("response event requires a string type")
+        })?
+        .to_owned();
+    match kind.as_str() {
+        "error" => serde_json::from_value(payload)
             .map(|e| Some(ResponsesWebSocketEvent::Error(e)))
             .map_err(CompletionError::from),
         // AttemptReducer owns these events and has already observed their raw
         // payloads. They must not enter Rig's function-tool stream conversion.
         kind if is_hosted_progress_event(kind) => Ok(None),
-        "response.done" => serde_json::from_str(payload)
+        "response.done" => serde_json::from_value(payload)
             .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
             .map_err(CompletionError::from),
         kind if matches!(
@@ -377,11 +384,11 @@ pub fn parse_server_event(
                 | "response.incomplete"
         ) =>
         {
-            serde_json::from_str::<ResponseChunk>(payload)
+            serde_json::from_value::<ResponseChunk>(payload)
                 .map(|chunk| Some(ResponsesWebSocketEvent::Response(Box::new(chunk))))
                 .map_err(CompletionError::from)
         }
-        kind if is_known_streaming_event(kind) => serde_json::from_str(payload)
+        kind if is_known_streaming_event(kind) => serde_json::from_value(payload)
             .map(|item| Some(ResponsesWebSocketEvent::Item(item)))
             .map_err(CompletionError::from),
         kind => {

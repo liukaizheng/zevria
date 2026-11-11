@@ -243,6 +243,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .map(OwnedModelRequestItem::as_borrowed)
                 .collect::<Vec<_>>();
             let request = ModelRequest {
+                input_identity: None,
                 instructions: &source.request.instructions,
                 tools: &source.request.tools,
                 forbid_tool_calls: false,

@@ -19,6 +19,7 @@ async fn additions_share_strict_renderer_fold_in_place_and_keep_tools_when_forbi
     let additions = tools(vec![tool("command", "new"), tool("read", "new tool")]);
     let user = Message::user("continue");
     let request = ModelRequest {
+        input_identity: None,
         instructions: "stable",
         tools: &initial,
         forbid_tool_calls: false,
@@ -67,6 +68,7 @@ async fn additions_share_strict_renderer_fold_in_place_and_keep_tools_when_forbi
         }
         let fallback = crate::turn::prepare_turn_request(
             &ModelRequest {
+                input_identity: None,
                 forbid_tool_calls: true,
                 ..request.clone()
             },
@@ -124,6 +126,7 @@ async fn http_summary_is_exact_normal_request_extension_including_directives_and
     let answer = Message::assistant("historical answer");
     let next = Message::user("continue");
     let request = ModelRequest {
+        input_identity: None,
         instructions: test_instructions(),
         tools: &initial,
         forbid_tool_calls: false,
@@ -315,6 +318,7 @@ async fn remote_compaction_keeps_normal_prefix_and_filters_only_engine_owned_out
         "x".repeat(1_100_000),
     );
     let request = ModelRequest {
+        input_identity: None,
         instructions: test_instructions(),
         tools: &initial,
         forbid_tool_calls: false,

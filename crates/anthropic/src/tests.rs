@@ -76,6 +76,7 @@ fn request_body_and_counting_cache_breakpoints() {
     let target = ModelProfileRef::new("anthropic", "claude-opus-5-5");
     let user = Message::user("hello");
     let request = ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: "stable",

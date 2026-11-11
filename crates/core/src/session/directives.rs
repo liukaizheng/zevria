@@ -138,8 +138,17 @@ impl<P: ModelProvider> SessionEngine<P> {
         active: &ActiveSkills,
     ) -> anyhow::Result<Vec<TranscriptItem>> {
         let state = zevria_transcript::replay_directives(source)?;
+        self.instruction_updates_from_state(&state, policy, active)
+    }
+
+    pub(super) fn instruction_updates_from_state(
+        &self,
+        state: &DirectiveState,
+        policy: &TurnPolicy,
+        active: &ActiveSkills,
+    ) -> anyhow::Result<Vec<TranscriptItem>> {
         let preparation = self.instruction_preparation(policy)?;
-        let updates = preparation.prepare_updates(&state, active)?;
+        let updates = preparation.prepare_updates(state, active)?;
         updates.ensure_capacity(
             policy,
             self.context_policy(policy.model_role),
@@ -185,8 +194,8 @@ impl<P: ModelProvider> SessionEngine<P> {
             .tool_declaration_update(self.conversation.items(), policy)
             .into_iter()
             .collect::<Vec<_>>();
-        records.extend(self.instruction_updates(
-            self.conversation.items(),
+        records.extend(self.instruction_updates_from_state(
+            self.directive_state()?,
             policy,
             self.active_skills()?,
         )?);

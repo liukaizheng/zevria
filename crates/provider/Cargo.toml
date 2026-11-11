@@ -22,7 +22,7 @@ eventsource-stream = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
 rig-core = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }

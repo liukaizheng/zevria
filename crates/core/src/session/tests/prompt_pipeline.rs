@@ -36,6 +36,7 @@ fn input(skill: bool, text: impl Into<zevria_content::UserPrompt>) -> PromptTurn
 fn committed_request(engine: &SessionEngine<ScriptedProvider>) -> CapturedRequest {
     let policy = engine.policies.policy(SessionMode::Build);
     CapturedRequest::of(&ModelRequest {
+        input_identity: None,
         tools: &engine.request_tools(engine.conversation.items(), policy),
         forbid_tool_calls: false,
         instructions: &engine.rendered_instructions(policy),
@@ -280,9 +281,15 @@ async fn checkpoint_versions_reuse_preparation_and_identity_with_one_remeasureme
             let commits = usize::from(!edit) + usize::from(!rejected);
             assert_eq!(work.replay_installations, commits);
             assert_eq!(replay.proposals, commits);
-            assert_eq!(replay.validations, commits);
-            assert_eq!(replay.full_replays, commits + usize::from(edit));
-            assert_eq!(replay.suffix_applications, 1);
+            // Appended checkpoints now reduce only their suffix. The accepted
+            // prompt still validates a full proposal when adding its mode
+            // header (or replacing the edited prefix).
+            assert_eq!(replay.validations, usize::from(!rejected));
+            assert_eq!(
+                replay.full_replays,
+                usize::from(!rejected) + usize::from(edit)
+            );
+            assert_eq!(replay.suffix_applications, 1 + usize::from(!edit));
             assert_eq!(replay.header_scans, 0);
             assert_eq!(engine.provider.input_count_calls.load(Ordering::SeqCst), 2);
             {

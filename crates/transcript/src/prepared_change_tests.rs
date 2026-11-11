@@ -52,9 +52,12 @@ fn authoritative_proposal_is_built_and_validated_once_and_returns_the_installed_
             });
             let replay = result.unwrap();
             assert_eq!(counts.proposals, 1);
-            assert_eq!(counts.validations, 1);
-            assert_eq!(counts.full_replays, 1);
-            assert_eq!(counts.full_records, conversation.items().len());
+            assert_eq!(counts.validations, usize::from(edit));
+            assert_eq!(counts.full_replays, usize::from(edit));
+            assert_eq!(
+                counts.full_records,
+                if edit { conversation.items().len() } else { 0 }
+            );
             assert_eq!(counts.header_scans, 0);
             assert_eq!(
                 replay.instructions,

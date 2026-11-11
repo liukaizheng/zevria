@@ -14,4 +14,6 @@ pub use web_search_config::{
 #[cfg(test)]
 mod anthropic_tests;
 #[cfg(test)]
+mod replay_cache_tests;
+#[cfg(test)]
 mod tests;

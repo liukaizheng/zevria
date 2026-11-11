@@ -248,7 +248,7 @@ fn incomplete_trailing_skill_directives_are_recoverable_without_losing_pins() {
             std::fs::write(&path, &original).unwrap();
             let outcome = load_report(&path).unwrap();
             outcome.ensure_resumable().unwrap();
-            assert_eq!(outcome.items, vec![invocation()]);
+            assert_eq!(outcome.items(), &[invocation()]);
             assert_eq!(outcome.source_lines, vec![1]);
             assert_eq!(outcome.recoverable_lines, 1);
             assert_eq!(outcome.diagnostics.len(), 1);
@@ -257,9 +257,9 @@ fn incomplete_trailing_skill_directives_are_recoverable_without_losing_pins() {
                 TranscriptDamage::IncompleteTail
             );
             assert_eq!(outcome.diagnostics[0].line, Some(2));
-            assert_eq!(replay_active_skills(&outcome.items).unwrap().len(), 1);
+            assert_eq!(replay_active_skills(outcome.items()).unwrap().len(), 1);
             assert!(
-                replay_directives(&outcome.items)
+                replay_directives(outcome.items())
                     .unwrap()
                     .snapshot()
                     .directives

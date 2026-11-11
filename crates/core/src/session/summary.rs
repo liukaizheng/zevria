@@ -68,6 +68,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             let mut input = full[..source.cut(k)].to_vec();
             input.push(ModelRequestItem::message(&prompt));
             let request = ModelRequest {
+                input_identity: None,
                 instructions: &source.request.instructions,
                 tools: &source.request.tools,
                 forbid_tool_calls: false,

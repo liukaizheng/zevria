@@ -28,6 +28,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn record_required(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
+        let _timing = LifecycleTiming::new("record_required", 1);
         self.ensure_replay_valid()?;
         let estimated = item.clone();
         let replay = self.conversation.commit_anchored(None, vec![item], None)?;
@@ -44,6 +45,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         if items.is_empty() {
             return Ok(());
         }
+        let _timing = LifecycleTiming::new("record_required_items", items.len());
         if items.len() == 1 {
             self.record_required(items.into_iter().next().expect("one item"))
         } else {
@@ -56,6 +58,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn record_completed(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
+        let _timing = LifecycleTiming::new("record_completed", 1);
         self.ensure_replay_valid()?;
         let estimated = item.clone();
         let model_visible = item.model_request_item().is_some()
@@ -78,6 +81,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         &mut self,
         items: Vec<TranscriptItem>,
     ) -> anyhow::Result<()> {
+        let _timing = LifecycleTiming::new("record_completed_items", items.len());
         self.ensure_replay_valid()?;
         let model_visible = items.iter().any(|item| {
             item.model_request_item().is_some()
@@ -108,6 +112,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         records: Vec<TranscriptItem>,
         mode: SessionMode,
     ) -> anyhow::Result<PlanWorkflowState> {
+        let _timing = LifecycleTiming::new("commit_anchored_records", records.len());
         self.ensure_replay_valid()?;
         let previous_state = self.plan_state()?.clone();
         let persist_mode = self.capabilities.mode_management
@@ -146,8 +151,8 @@ impl<P: ModelProvider> SessionEngine<P> {
     /// never retains a stale payload.
     pub(super) fn refresh_replay(&mut self) -> Result<(), SessionReplayError> {
         self.ensure_replay_valid()?;
-        match validate_session_replay(self.conversation.items()) {
-            Ok(replay) => self.install_replay(replay),
+        match self.conversation.validated_replay() {
+            Ok(replay) => self.install_replay(replay.into()),
             Err(error) => {
                 self.replay = SessionReplayState::Failed(error.clone());
                 self.exit_turn();

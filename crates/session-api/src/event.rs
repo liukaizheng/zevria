@@ -1025,6 +1025,44 @@ pub struct AttemptCheckpoint {
     pub ack: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
+/// Cancellation-safe evidence collection without retaining event-channel
+/// senders. A provider guard can own this until drop without keeping frontend
+/// receivers alive after a request returns.
+#[derive(Clone)]
+pub struct ResponseAttemptCollector {
+    attempts: Arc<Mutex<Vec<crate::ResponseAttempt>>>,
+    suppressed: bool,
+}
+
+impl ResponseAttemptCollector {
+    pub fn collect(&self, attempt: crate::ResponseAttempt) {
+        collect_response_attempt(&self.attempts, self.suppressed, attempt);
+    }
+}
+
+fn collect_response_attempt(
+    attempts: &Mutex<Vec<crate::ResponseAttempt>>,
+    suppressed: bool,
+    attempt: crate::ResponseAttempt,
+) {
+    if suppressed {
+        return;
+    }
+    let mut collected = attempts
+        .lock()
+        .expect("response attempt collector poisoned");
+    if let Some(existing) = collected
+        .iter_mut()
+        .find(|existing| existing.id == attempt.id)
+    {
+        if attempt.revision >= existing.revision {
+            *existing = attempt;
+        }
+    } else {
+        collected.push(attempt);
+    }
+}
+
 /// A provider's narrow channel for streaming progress.
 #[derive(Clone)]
 pub struct ProgressReporter {
@@ -1127,22 +1165,13 @@ impl ProgressReporter {
     }
 
     pub fn collect_attempt(&self, attempt: crate::ResponseAttempt) {
-        if self.suppressed {
-            return;
-        }
-        let mut collected = self
-            .attempts
-            .lock()
-            .expect("response attempt collector poisoned");
-        if let Some(existing) = collected
-            .iter_mut()
-            .find(|existing| existing.id == attempt.id)
-        {
-            if attempt.revision >= existing.revision {
-                *existing = attempt;
-            }
-        } else {
-            collected.push(attempt);
+        collect_response_attempt(&self.attempts, self.suppressed, attempt);
+    }
+
+    pub fn attempt_collector(&self) -> ResponseAttemptCollector {
+        ResponseAttemptCollector {
+            attempts: self.attempts.clone(),
+            suppressed: self.suppressed,
         }
     }
 

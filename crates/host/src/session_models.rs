@@ -23,7 +23,7 @@ pub(crate) fn resolve(
         Some(outcome) => {
             outcome.ensure_resumable()?;
             let saved = outcome.session_models()?.ok_or_else(|| zevria_transcript::transcript::UnsupportedHistory::new(
-                &outcome.path, Some(1), "version 1 Build/Plan model metadata with explicit reasoning levels; launch an independent new session or explicitly repair the saved metadata",
+                outcome.path(), Some(1), "version 1 Build/Plan model metadata with explicit reasoning levels; launch an independent new session or explicitly repair the saved metadata",
             ))?.clone();
             (saved, "saved")
         }

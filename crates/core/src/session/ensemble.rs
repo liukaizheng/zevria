@@ -238,6 +238,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             ));
         let mut measurement = "estimated";
         let request = ModelRequest {
+            input_identity: None,
             instructions: &instructions,
             tools: &tools,
             forbid_tool_calls: false,

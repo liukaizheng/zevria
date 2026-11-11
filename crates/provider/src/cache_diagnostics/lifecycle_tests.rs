@@ -11,6 +11,7 @@ fn isolated(name: &str) -> bool {
 
 fn request(input: Vec<ModelRequestItem<'_>>) -> ModelRequest<'_> {
     ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: test_instructions(),
@@ -67,7 +68,7 @@ async fn instructions_change_only_for_same_tool_workflow_switch_not_activation()
                 set.workflow.instructions = "Plan policy".into();
             }
             let instructions = set.render();
-            let request = ModelRequest { tools: &[], forbid_tool_calls: false, instructions: &instructions, input: history.iter().map(zevria_model::OwnedModelRequestItem::as_borrowed).collect(), model_role: ModelRole::Build, allowed_tool_names: None };
+            let request = ModelRequest { input_identity: None, tools: &[], forbid_tool_calls: false, instructions: &instructions, input: history.iter().map(zevria_model::OwnedModelRequestItem::as_borrowed).collect(), model_role: ModelRole::Build, allowed_tool_names: None };
             let prepared = crate::turn::prepare_turn_request(&request, &mut provider).await.unwrap();
             let prepared = dispatch(prepared, &mut provider);
             let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(provider.profile.clone(), vec![json!({"type":"message", "id":format!("reply-{index}"), "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":"done"}]})])).unwrap();

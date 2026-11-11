@@ -11295,6 +11295,7 @@ name = "zevria-responses"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "criterion",
  "rig-core",
  "serde",
  "serde_json",

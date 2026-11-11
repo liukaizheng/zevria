@@ -466,6 +466,61 @@ mod tests {
     }
 
     #[test]
+    fn incremental_replay_and_identity_match_full_benchmark_histories() {
+        for workload in [
+            Workload::Plain,
+            Workload::Replay,
+            Workload::Mixed,
+            Workload::Images,
+        ] {
+            let fixture = fixture(workload, 100, 128);
+            let full = zevria_transcript::validate_session_replay(&fixture.items).unwrap();
+            let identity = zevria_model::ModelInputIdentity::from_items(&transcript::model_input(
+                &fixture.items,
+            ))
+            .unwrap();
+            for split in 0..=fixture.items.len() {
+                let Ok(prefix) =
+                    zevria_transcript::validate_session_replay(&fixture.items[..split])
+                else {
+                    continue;
+                };
+                let incremental = prefix.apply_suffix(&fixture.items[split..]).unwrap();
+                assert_eq!(
+                    incremental.instructions,
+                    full.instructions,
+                    "{} split {split}",
+                    workload.name()
+                );
+                assert_eq!(
+                    incremental.plan,
+                    full.plan,
+                    "{} split {split}",
+                    workload.name()
+                );
+                let mut prefix_identity = zevria_model::ModelInputIdentity::from_items(
+                    &transcript::model_input(&fixture.items[..split]),
+                )
+                .unwrap();
+                if fixture.items[split..]
+                    .iter()
+                    .any(|item| matches!(item, TranscriptItem::Compaction(_)))
+                {
+                    continue;
+                }
+                prefix_identity
+                    .extend(
+                        fixture.items[split..]
+                            .iter()
+                            .filter_map(TranscriptItem::model_request_item),
+                    )
+                    .unwrap();
+                assert_eq!(prefix_identity, identity);
+            }
+        }
+    }
+
+    #[test]
     fn instruction_set_bytes_are_pinned() {
         let set = zevria_instructions::InstructionSet {
             application: String::new(),

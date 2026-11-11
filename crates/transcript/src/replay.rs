@@ -21,18 +21,14 @@ impl fmt::Display for SessionReplayError {
             Self::Skills(error) => write!(f, "invalid skill replay: {error}"),
             Self::Plan(error) => write!(f, "invalid Plan replay: {error}"),
             Self::Ensemble(error) => write!(f, "invalid ensemble replay: {error}"),
-            Self::Both { skills, plan } => {
-                write!(
-                    f,
-                    "invalid skill replay: {skills}; invalid Plan replay: {plan}"
-                )
-            }
+            Self::Both { skills, plan } => write!(
+                f,
+                "invalid skill replay: {skills}; invalid Plan replay: {plan}"
+            ),
         }
     }
 }
-
 impl std::error::Error for SessionReplayError {}
-
 impl SessionReplayError {
     /// Preflight replay linkage and reducers before opening writable handles or publishing projections.
     pub fn validate(items: &[TranscriptItem]) -> Result<(), Self> {
@@ -40,10 +36,32 @@ impl SessionReplayError {
     }
 }
 
-/// All reducers validated together; no writable handle or engine state is retained.
+/// All reducers validated together, including the context needed for suffix replay.
+#[derive(Debug, Clone, Default)]
 pub struct ValidatedSessionReplay {
     pub instructions: InstructionReplayState,
     pub plan: PlanWorkflowState,
+    ensemble: crate::ensemble_review_history::EnsembleReviewReplay,
+}
+
+impl ValidatedSessionReplay {
+    /// Consume staging state: partially failed reductions can never be installed.
+    /// Failure is deliberately not a classified SessionReplayError: independent
+    /// Skills/Plan/Both precedence requires the full committed evidence. Owners
+    /// must fall back to validate_session_replay before exposing such an error.
+    pub fn apply_suffix(mut self, items: &[TranscriptItem]) -> anyhow::Result<Self> {
+        self.ensemble = self
+            .ensemble
+            .apply_suffix(items)
+            .map_err(anyhow::Error::msg)?;
+        self.instructions = self.instructions.apply_suffix(items)?;
+        for item in items {
+            if let TranscriptItem::Plan(record) = item {
+                self.plan = zevria_workflow::plan::apply_plan_record(self.plan, record)?;
+            }
+        }
+        Ok(self)
+    }
 }
 
 pub fn validate_session_replay(
@@ -51,7 +69,9 @@ pub fn validate_session_replay(
 ) -> Result<ValidatedSessionReplay, SessionReplayError> {
     #[cfg(feature = "test-support")]
     crate::replay_probe::record(|counts| counts.validations += 1);
-    crate::validate_ensemble_review_history(items).map_err(SessionReplayError::Ensemble)?;
+    let ensemble = crate::ensemble_review_history::EnsembleReviewReplay::default()
+        .apply_suffix(items)
+        .map_err(SessionReplayError::Ensemble)?;
     let instructions = InstructionReplayState::replay(items);
     let plan = replay_plan_state(items.iter().filter_map(|item| match item {
         TranscriptItem::Plan(record) => Some(record),
@@ -62,11 +82,10 @@ pub fn validate_session_replay(
         Ok(instructions) => Ok(ValidatedSessionReplay {
             instructions,
             plan: plan.map_err(SessionReplayError::Plan)?,
+            ensemble,
         }),
         Err(error) => {
-            // A directive/header failure may precede a later invalid pin. Only
-            // failed histories pay for this independent full-ledger check, which
-            // preserves Skills/Plan/Both priority over directive failures.
+            // Preserve Skills/Plan/Both priority for invalid committed evidence.
             let skills = replay_active_skills(items).map_err(|error| format!("{error:#}"));
             match (skills, plan) {
                 (Err(skills), Err(plan)) => Err(SessionReplayError::Both { skills, plan }),

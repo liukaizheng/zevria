@@ -286,6 +286,20 @@ impl SessionViews {
         }
     }
 
+    /// Move restored history into the root after seeding child order, without
+    /// cloning all restored message and native replay payloads in the frontend.
+    pub fn new_restored(
+        root: App,
+        startup_workspace: PathBuf,
+        input: crate::RestorationInput,
+    ) -> Self {
+        let mut views = Self::new(root, startup_workspace);
+        views.seed_child_creation_order(&input.items);
+        views.root.restore_session(input);
+        views.model_profiles = views.root.shared_model_profiles();
+        views
+    }
+
     /// Seed the shared child creation clock from durable root records before
     /// loading any child transcript files. Subtask launch metadata and ACP
     /// ensemble starts are the authoritative cross-source ordering available

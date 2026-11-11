@@ -36,17 +36,18 @@ struct Call {
 }
 
 #[derive(Default)]
-struct Projection {
+pub struct InputProjection {
     input: Vec<serde_json::Value>,
     calls: ToolCorrelations<Call>,
     native_ids: HashSet<String>,
+    minted_ids: HashSet<String>,
     reserved_native_ids: HashSet<String>,
     used_native: bool,
     used_portable: bool,
     used_untagged: bool,
 }
 
-impl Projection {
+impl InputProjection {
     fn call(
         &mut self,
         handles: BTreeSet<String>,
@@ -74,6 +75,9 @@ impl Projection {
                 id
             }))
         };
+        if !native && let Some(id) = &output {
+            self.minted_ids.insert(id.clone());
+        }
         self.calls.call(
             handles,
             Call {
@@ -342,6 +346,114 @@ pub fn preflight_with_compatibility(
     ))
 }
 
+/// Capacity validation retains correlation context, not old projected payloads.
+#[derive(Default)]
+pub struct PreflightCache {
+    prefix: Option<PreflightPrefix>,
+}
+
+struct PreflightPrefix {
+    target: ModelProfileRef,
+    compatibility: [bool; 3],
+    count: usize,
+    digest: [u8; 32],
+    projection: InputProjection,
+    estimate: zevria_model::compaction::ResponsesInputEstimate,
+    folded_tools: u64,
+}
+
+impl PreflightCache {
+    pub fn assess(
+        &mut self,
+        input: &[ModelRequestItem<'_>],
+        identity: &zevria_model::ModelInputIdentity,
+        target: &ModelProfileRef,
+        developer_messages: bool,
+        tool_options: crate::tools::ToolRendererOptions,
+        additional_tools: bool,
+    ) -> anyhow::Result<ReplayPreflight> {
+        anyhow::ensure!(
+            identity.len() == input.len(),
+            "preflight identity length mismatch"
+        );
+        let compatibility = [
+            developer_messages,
+            tool_options.strict_tools,
+            additional_tools,
+        ];
+        let cached = self.prefix.take().filter(|prefix| {
+            prefix.target == *target
+                && prefix.compatibility == compatibility
+                && identity.prefix(prefix.count) == Some(prefix.digest)
+        });
+        let mut prefix = match cached {
+            Some(prefix)
+                if prefix
+                    .projection
+                    .can_extend(&input[prefix.count..], target)? =>
+            {
+                prefix
+            }
+            _ => PreflightPrefix {
+                target: target.clone(),
+                compatibility,
+                count: 0,
+                digest: [0; 32],
+                projection: InputProjection::default(),
+                estimate: Default::default(),
+                folded_tools: 0,
+            },
+        };
+        let suffix = &input[prefix.count..];
+        let mut sources = BTreeSet::new();
+        for item in suffix {
+            if let Some(replay) = item.replay_ref() {
+                replay.portable_projection()?;
+            }
+            if let ModelRequestItem::ReplayOnly(replay) = item
+                && (&replay.source_profile != target
+                    || replay.protocol() != Some(ReplayProtocol::Responses))
+            {
+                sources.insert(replay.source_profile.clone());
+            }
+        }
+        if !sources.is_empty() {
+            return Ok(ReplayPreflight::ConversionRequired {
+                sources: sources.into_iter().collect(),
+            });
+        }
+        prefix.projection.extend(
+            suffix,
+            target,
+            developer_messages,
+            tool_options,
+            additional_tools,
+        )?;
+        prefix.estimate.append(&prefix.projection.take_input());
+        if !additional_tools {
+            for item in suffix {
+                if let ModelRequestItem::AdditionalTools(tools) = item {
+                    prefix.folded_tools = prefix.folded_tools.saturating_add(
+                        zevria_model::compaction::approximate_tokens_from_bytes(
+                            serde_json::to_vec(&crate::tools::render(tools, tool_options)?)?.len(),
+                        ),
+                    );
+                }
+            }
+        }
+        prefix.count = identity.len();
+        prefix.digest = identity.digest();
+        let tokens = prefix
+            .estimate
+            .tokens(0)
+            .saturating_add(prefix.folded_tools);
+        self.prefix = Some(prefix);
+        Ok(ReplayPreflight::Compatible(
+            zevria_model::ContextTokenEstimate::new(tokens, tokens),
+        ))
+    }
+}
+
 pub fn project_with_compatibility(
     input: &[ModelRequestItem<'_>],
     target: &ModelProfileRef,
@@ -349,62 +461,110 @@ pub fn project_with_compatibility(
     tool_options: crate::tools::ToolRendererOptions,
     additional_tools: bool,
 ) -> anyhow::Result<(Vec<serde_json::Value>, ReplaySource)> {
-    let mut projection = Projection::default();
-    // Reserve future native wire handles before minting neutral ones. A
-    // configured provider may itself emit IDs using Zevria's neutral prefix.
-    for replay in input.iter().filter_map(|item| item.replay_ref()) {
-        if let Some(items) = replay.native_items_for(target, ReplayProtocol::Responses)? {
-            projection.reserved_native_ids.extend(
-                items
+    let mut projection = InputProjection::default();
+    projection.extend(
+        input,
+        target,
+        developer_messages,
+        tool_options,
+        additional_tools,
+    )?;
+    let source = projection.source();
+    Ok((projection.take_input(), source))
+}
+
+impl InputProjection {
+    /// A future native handle can force a different neutral ID in the old
+    /// portable prefix. In that rare case callers must rebuild from history.
+    pub fn can_extend(
+        &self,
+        input: &[ModelRequestItem<'_>],
+        target: &ModelProfileRef,
+    ) -> anyhow::Result<bool> {
+        for replay in input.iter().filter_map(|item| item.replay_ref()) {
+            if let Some(items) = replay.native_items_for(target, ReplayProtocol::Responses)?
+                && items
                     .iter()
-                    .filter_map(|item| item.get("call_id")?.as_str().map(str::to_owned)),
-            );
+                    .filter_map(|item| item.get("call_id")?.as_str())
+                    .any(|id| self.minted_ids.contains(id))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub fn take_input(&mut self) -> Vec<serde_json::Value> {
+        std::mem::take(&mut self.input)
+    }
+    pub fn restore_input(&mut self, input: Vec<serde_json::Value>) {
+        self.input = input;
+    }
+    pub fn source(&self) -> ReplaySource {
+        if self.used_portable {
+            ReplaySource::PortableAssistant
+        } else if self.used_untagged {
+            ReplaySource::GenericAssistant
+        } else if self.used_native {
+            ReplaySource::Native
+        } else {
+            ReplaySource::None
         }
     }
-    for item in input {
-        match item {
-            ModelRequestItem::AdditionalTools(tools) => {
-                tools.validate()?;
-                anyhow::ensure!(
-                    !tools.is_empty(),
-                    "additional tool declarations must not be empty"
+
+    pub fn extend(
+        &mut self,
+        input: &[ModelRequestItem<'_>],
+        target: &ModelProfileRef,
+        developer_messages: bool,
+        tool_options: crate::tools::ToolRendererOptions,
+        additional_tools: bool,
+    ) -> anyhow::Result<()> {
+        // Reserve future native wire handles before minting neutral ones. A
+        // configured provider may itself emit IDs using Zevria's neutral prefix.
+        for replay in input.iter().filter_map(|item| item.replay_ref()) {
+            if let Some(items) = replay.native_items_for(target, ReplayProtocol::Responses)? {
+                self.reserved_native_ids.extend(
+                    items
+                        .iter()
+                        .filter_map(|item| item.get("call_id")?.as_str().map(str::to_owned)),
                 );
-                if additional_tools {
-                    projection.input.push(serde_json::json!({"type":"additional_tools", "role":"developer", "tools":crate::tools::render(tools, tool_options)?}));
+            }
+        }
+        for item in input {
+            match item {
+                ModelRequestItem::AdditionalTools(tools) => {
+                    tools.validate()?;
+                    anyhow::ensure!(
+                        !tools.is_empty(),
+                        "additional tool declarations must not be empty"
+                    );
+                    if additional_tools {
+                        self.input.push(serde_json::json!({"type":"additional_tools", "role":"developer", "tools":crate::tools::render(tools, tool_options)?}));
+                    }
                 }
+                ModelRequestItem::RequestInstruction(directive) => {
+                    directive.validate()?;
+                    self.input.push(serde_json::json!({"type": "message", "role": if developer_messages { "developer" } else { "user" }, "content": [{"type": "input_text", "text": directive.render()}]}));
+                }
+                ModelRequestItem::DeveloperInstruction(directive) => {
+                    directive.validate()?;
+                    self.input.push(serde_json::json!({"type": "message", "role": if developer_messages { "developer" } else { "user" }, "content": [{"type": "input_text", "text": directive.text}]}));
+                }
+                ModelRequestItem::ReplayOnly(replay) => {
+                    anyhow::ensure!(
+                        replay
+                            .native_items_for(target, ReplayProtocol::Responses)?
+                            .is_some(),
+                        "cannot send replay-only openai.responses history from source profile {} to foreign target profile {target}: conversion required; select its source with /model, confirm a portable summary, or start a fresh session",
+                        replay.source_profile
+                    );
+                    self.replay(replay, target)?;
+                }
+                ModelRequestItem::ReplayBacked(content) => self.replay(content.replay(), target)?,
+                ModelRequestItem::Message(message) => self.message(message)?,
             }
-            ModelRequestItem::RequestInstruction(directive) => {
-                directive.validate()?;
-                projection.input.push(serde_json::json!({"type": "message", "role": if developer_messages { "developer" } else { "user" }, "content": [{"type": "input_text", "text": directive.render()}]}));
-            }
-            ModelRequestItem::DeveloperInstruction(directive) => {
-                directive.validate()?;
-                projection.input.push(serde_json::json!({"type": "message", "role": if developer_messages { "developer" } else { "user" }, "content": [{"type": "input_text", "text": directive.text}]}));
-            }
-            ModelRequestItem::ReplayOnly(replay) => {
-                anyhow::ensure!(
-                    replay
-                        .native_items_for(target, ReplayProtocol::Responses)?
-                        .is_some(),
-                    "cannot send replay-only openai.responses history from source profile {} to foreign target profile {target}: conversion required; select its source with /model, confirm a portable summary, or start a fresh session",
-                    replay.source_profile
-                );
-                projection.replay(replay, target)?;
-            }
-            ModelRequestItem::ReplayBacked(content) => {
-                projection.replay(content.replay(), target)?
-            }
-            ModelRequestItem::Message(message) => projection.message(message)?,
         }
+        Ok(())
     }
-    let source = if projection.used_portable {
-        ReplaySource::PortableAssistant
-    } else if projection.used_untagged {
-        ReplaySource::GenericAssistant
-    } else if projection.used_native {
-        ReplaySource::Native
-    } else {
-        ReplaySource::None
-    };
-    Ok((projection.input, source))
 }

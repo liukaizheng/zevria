@@ -246,51 +246,75 @@ impl AnthropicProvider {
         let mut events = response.bytes_stream().eventsource();
         let mut accumulator = MessageAccumulator::default();
         let mut clock = ProgressClock::new(&self.recovery);
-        loop {
-            let event = clock.next(events.next(), progress).await.map_err(|e| {
-                (
-                    ApiError::new(ErrorKind::Retryable("response_idle_timeout"), e.to_string()),
-                    request_id.clone(),
-                )
-            })?;
-            let Some(event) = event else {
-                break;
-            };
-            let event = event.map_err(|e| {
-                (
-                    match e {
-                        eventsource_stream::EventStreamError::Transport(error) => {
-                            ApiError::with_source(
+        let mut cadence = crate::streaming::StreamCadence::default();
+        let stream_result = async {
+            loop {
+                let event = cadence
+                    .next(clock.next(events.next(), progress), || {
+                        if let Some(message) = accumulator.preview() {
+                            progress.reporter.stream_updated(message);
+                        }
+                    })
+                    .await
+                    .map_err(|e| {
+                        (
+                            ApiError::new(
+                                ErrorKind::Retryable("response_idle_timeout"),
+                                e.to_string(),
+                            ),
+                            request_id.clone(),
+                        )
+                    })?;
+                let Some(event) = event else {
+                    break;
+                };
+                let event = event.map_err(|e| {
+                    (
+                        match e {
+                            eventsource_stream::EventStreamError::Transport(error) => {
+                                ApiError::with_source(
+                                    ErrorKind::Retryable("stream"),
+                                    "Anthropic HTTP event stream failed",
+                                    error.without_url(),
+                                )
+                            }
+                            error => ApiError::with_source(
                                 ErrorKind::Retryable("stream"),
                                 "Anthropic HTTP event stream failed",
-                                error.without_url(),
-                            )
-                        }
-                        error => ApiError::with_source(
-                            ErrorKind::Retryable("stream"),
-                            "Anthropic HTTP event stream failed",
-                            error,
-                        ),
-                    },
-                    request_id.clone(),
-                )
-            })?;
-            if event.data.trim().is_empty() {
-                continue;
-            }
-            let advanced = accumulator
-                .push(&event.data)
-                .map_err(|e| (e, request_id.clone()))?;
-            if advanced {
-                clock.advanced(progress).await;
-                if let Some(message) = accumulator.preview() {
-                    progress.reporter.stream_updated(message);
+                                error,
+                            ),
+                        },
+                        request_id.clone(),
+                    )
+                })?;
+                if event.data.trim().is_empty() {
+                    continue;
+                }
+                let advanced = accumulator
+                    .push(&event.data)
+                    .map_err(|e| (e, request_id.clone()))?;
+                if advanced {
+                    clock.advanced(progress).await;
+                    cadence.mark_dirty();
+                    if cadence.take_due(accumulator.is_stopped())
+                        && let Some(message) = accumulator.preview()
+                    {
+                        progress.reporter.stream_updated(message);
+                    }
+                }
+                if accumulator.is_stopped() {
+                    break;
                 }
             }
-            if accumulator.is_stopped() {
-                break;
+            Ok::<(), (ApiError, Option<String>)>(())
+        }
+        .await;
+        if cadence.take_due(true) {
+            if let Some(message) = accumulator.preview() {
+                progress.reporter.stream_updated(message);
             }
         }
+        stream_result?;
         if accumulator.is_stopped() {
             let transformations = accumulator.input_transformations();
             if !transformations.is_null()

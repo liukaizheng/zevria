@@ -1,5 +1,9 @@
 # Transcript performance refactor
 
+The current append-batch, dispatch/projection, streaming, and single-load resume
+changes are documented in [session-lifecycle-performance.md](session-lifecycle-performance.md).
+The historical measurements below are unchanged.
+
 ## Current response-attempt ownership
 
 The response-attempt migration removes successful display checkpoints, links and

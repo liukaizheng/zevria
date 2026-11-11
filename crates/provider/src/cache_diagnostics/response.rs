@@ -298,11 +298,16 @@ pub(super) struct Observation {
     pub comparison: ProviderComparison,
 }
 impl Observation {
+    #[cfg(test)]
     pub fn parse(message: &str) -> Option<Self> {
         if message.len() > 16 * 1024 * 1024 {
             return None;
         }
         let event: Value = serde_json::from_str(message).ok()?;
+        Self::parse_value(&event)
+    }
+
+    pub fn parse_value(event: &Value) -> Option<Self> {
         let kind = match event.get("type")?.as_str()? {
             "response.completed" => TerminalEvent::Completed,
             "response.done" => TerminalEvent::Done,

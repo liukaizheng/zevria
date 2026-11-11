@@ -421,29 +421,40 @@ async fn start_worker_session(
         .clone()
         .unwrap_or_else(|| directory.join(format!("{id}.jsonl")));
     let lease = prepare_session_lease(&path).await?;
-    let loaded = resume_path
-        .as_deref()
-        .map(transcript::load_report)
-        .transpose()?;
+    let loaded = if let Some(path) = resume_path {
+        Some(
+            tokio::task::spawn_blocking(move || transcript::load_report(&path))
+                .await
+                .context("worker transcript loader failed")??,
+        )
+    } else {
+        None
+    };
+    let cleanup_abandoned_history = loaded.is_some();
     if let Some(loaded) = &loaded {
         loaded.ensure_resumable()?;
     }
     let models = crate::session_models::resolve(model_config, &id, loaded.as_ref(), None)?;
-    let items = loaded.as_ref().map_or_else(
-        || vec![TranscriptItem::SessionModels(models.selections.clone())],
-        |loaded| loaded.items.clone(),
-    );
-    zevria_transcript::SessionReplayError::validate(&items)?;
+    let initial_items = vec![TranscriptItem::SessionModels(models.selections.clone())];
     let skills = Arc::new(SkillCatalog::default());
     let skill_catalog = skills.clone();
     let (event_tx, event_rx) = session_event_channel(config.session.event_queue_capacity);
     let questions = question_channels(event_tx.clone());
     let tools = worker_tools(&workspace, questions.requester, config)?;
     let provider = ProviderRouter::root(&models.routing, &model_config.session.preamble, &id)?;
-    let writer = if loaded.is_some() {
-        transcript::TranscriptWriter::append_to(path.clone())?
-    } else {
-        transcript::TranscriptWriter::allocate_with_id(&directory, &id)?
+    let (writer, loaded) = match loaded {
+        Some(outcome) => tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            Ok((
+                transcript::TranscriptWriter::append_loaded(&outcome)?,
+                Some(outcome),
+            ))
+        })
+        .await
+        .context("worker writer preparation failed")??,
+        None => (
+            transcript::TranscriptWriter::allocate_with_id(&directory, &id)?,
+            None,
+        ),
     };
     #[cfg(feature = "cache-diagnostics")]
     let provider = provider.with_cache_diagnostics(zevria_provider::CacheDiagnosticContext::new(
@@ -455,9 +466,15 @@ async fn start_worker_session(
         &path,
         writer.recovered_malformed_lines(),
     ));
-    let mut engine = SessionEngine::new(provider, tools, worker_policies(), writer, skills)?
+    let engine = match loaded {
+        Some(outcome) => {
+            SessionEngine::from_loaded(provider, tools, worker_policies(), writer, skills, outcome)?
+        }
+        None => SessionEngine::new(provider, tools, worker_policies(), writer, skills)?
+            .with_transcript_items(initial_items)?,
+    };
+    let mut engine = engine
         .with_incremental_tools(config.session.incremental_tools)
-        .with_transcript_items(items.clone())?
         .with_guidance_roots(guidance_roots(&workspace))
         .with_compaction_policy(models.compaction)
         .with_question_responder(questions.responder);
@@ -480,7 +497,7 @@ async fn start_worker_session(
     );
     Ok(RunningSession {
         command_jobs: None,
-        cleanup_abandoned_history: loaded.is_some(),
+        cleanup_abandoned_history,
         restored_taken: false,
         restored_subtasks: Vec::new(),
         restored_agent_runs: Vec::new(),
@@ -833,7 +850,14 @@ pub async fn start_session(
     };
     let lease = prepare_session_lease(&root_path).await?;
     let loaded = match &start {
-        SessionStart::Resume(_) => Some(transcript::load_report(&root_path)?),
+        SessionStart::Resume(_) => {
+            let path = root_path.clone();
+            Some(
+                tokio::task::spawn_blocking(move || transcript::load_report(&path))
+                    .await
+                    .context("transcript loader failed")??,
+            )
+        }
         SessionStart::New { .. } | SessionStart::FromPlan { .. } => None,
     };
     let inherited_models = match &start {
@@ -853,7 +877,7 @@ pub async fn start_session(
     let subsessions_dir = transcript::subsessions_dir(workspace, &root_session_id);
     let agent_runs_root = agent_runs_dir(workspace, &root_session_id);
     let (restored_subtasks, restored_agent_runs) = if let Some(outcome) = &loaded {
-        preflight_restoration(&subsessions_dir, &agent_runs_root, &outcome.items)?
+        preflight_restoration(&subsessions_dir, &agent_runs_root, outcome.items())?
     } else {
         (Vec::new(), Vec::new())
     };
@@ -885,16 +909,17 @@ pub async fn start_session(
     })
     .await
     .context("skill catalog loader failed")??;
-    let original_items = loaded.map_or_else(
-        || {
-            vec![
-                TranscriptItem::SessionModels(session_models.selections.clone()),
-                TranscriptItem::SessionMode(SessionMode::Build),
-            ]
-        },
-        |outcome| outcome.items,
-    );
-    let pins = replay_active_skills(&original_items)?;
+    let initial_items = vec![
+        TranscriptItem::SessionModels(session_models.selections.clone()),
+        TranscriptItem::SessionMode(SessionMode::Build),
+    ];
+    let original_items = loaded
+        .as_ref()
+        .map_or(initial_items.as_slice(), |outcome| outcome.items());
+    let pins = match &loaded {
+        Some(outcome) => outcome.replay().instructions.skills().clone(),
+        None => replay_active_skills(original_items)?,
+    };
     for diagnostic in (zevria_instructions::SkillContext {
         catalog: skill_catalog.clone(),
         pins,
@@ -948,20 +973,6 @@ pub async fn start_session(
         &root_session_id,
     )?;
 
-    let transcript_items = original_items;
-    let transcript = match &start {
-        SessionStart::Resume(_) => transcript::TranscriptWriter::append_to(root_path)?,
-        SessionStart::New { .. } | SessionStart::FromPlan { .. } => {
-            transcript::TranscriptWriter::allocate_with_id(&sessions_dir, &root_session_id)?
-        }
-    };
-    let transcript_path = transcript.path().to_path_buf();
-    #[cfg(feature = "cache-diagnostics")]
-    let provider = provider.with_cache_diagnostics(zevria_provider::CacheDiagnosticContext::new(
-        &transcript_path,
-        &root_session_id,
-    ));
-    let recovered_malformed_lines = transcript.recovered_malformed_lines();
     let mut startup_notices = Vec::new();
     {
         for role in [ModelRole::Build, ModelRole::Plan, ModelRole::Review] {
@@ -982,13 +993,33 @@ pub async fn start_session(
                 ) => "inherited selection",
                 _ => "global default",
             };
-            match zevria_session_api::ModelProvider::preflight_input(&provider, profile, &transcript::model_input(&transcript_items)) {
+            match zevria_session_api::ModelProvider::preflight_input(&provider, profile, &transcript::model_input(original_items)) {
                 Ok(zevria_model::models::ReplayPreflight::Compatible(_)) => {},
                 Ok(zevria_model::models::ReplayPreflight::ConversionRequired { sources }) => startup_notices.push(format!("{} {origin} {} cannot read the checkpoint from {}. History remains inspectable. Use /model to select its source or confirm conversion, or start a fresh session. No conversion call was made.", role.name(), profile, sources.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))),
                 Err(error) => startup_notices.push(format!("{} replay preflight failed; generation is blocked until the history is repaired: {error:#}", role.name())),
             }
         }
     }
+
+    let (transcript, loaded) = match loaded {
+        Some(outcome) => tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let writer = transcript::TranscriptWriter::append_loaded(&outcome)?;
+            Ok((writer, Some(outcome)))
+        })
+        .await
+        .context("transcript writer preparation failed")??,
+        None => (
+            transcript::TranscriptWriter::allocate_with_id(&sessions_dir, &root_session_id)?,
+            None,
+        ),
+    };
+    let transcript_path = transcript.path().to_path_buf();
+    #[cfg(feature = "cache-diagnostics")]
+    let provider = provider.with_cache_diagnostics(zevria_provider::CacheDiagnosticContext::new(
+        &transcript_path,
+        &root_session_id,
+    ));
+    let recovered_malformed_lines = transcript.recovered_malformed_lines();
     if let Some(notice) = transcript_recovery_notice(&transcript_path, recovered_malformed_lines) {
         startup_notices.push(notice);
     }
@@ -1005,10 +1036,21 @@ pub async fn start_session(
         agent_runs_root.clone(),
         ensemble_questions,
     )?);
-    let mut engine = SessionEngine::new(provider, tools, policies, transcript, skills.clone())?
+    let engine = match loaded {
+        Some(outcome) => SessionEngine::from_loaded(
+            provider,
+            tools,
+            policies,
+            transcript,
+            skills.clone(),
+            outcome,
+        )?,
+        None => SessionEngine::new(provider, tools, policies, transcript, skills.clone())?
+            .with_transcript_items(initial_items)?,
+    };
+    let mut engine = engine
         .with_incremental_tools(app_config.session.incremental_tools)
         .with_skill_catalog(skill_catalog.clone())?
-        .with_transcript_items(transcript_items.clone())?
         .with_mode_management()
         .with_idle_notifications()
         .with_subtask_concurrency(app_config.session.max_concurrent_subtasks)

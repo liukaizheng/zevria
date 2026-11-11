@@ -155,7 +155,7 @@ fn current_torn_tail_is_recoverable_but_duplicate_ids_and_retired_keys_are_not()
     ] {
         std::fs::write(&path, format!("{prefix}{tail}")).unwrap();
         let report = load_report(&path).unwrap();
-        assert_eq!(report.items.len(), 1);
+        assert_eq!(report.items().len(), 1);
         assert_eq!(report.recoverable_lines, 1);
         drop(TranscriptWriter::append_to(path.clone()).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), prefix);

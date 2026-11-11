@@ -82,6 +82,7 @@ async fn cache_preparation_probe() {
             })
             .collect();
         let initial = ModelRequest {
+            input_identity: None,
             tools: &[],
             forbid_tool_calls: false,
             instructions: test_instructions(),
@@ -107,10 +108,11 @@ async fn cache_preparation_probe() {
             crate::cache_diagnostics::finish(&seed, &mut provider, Some(&response));
         }
         provider.ws.continuation = Some(ContinuationState {
+            lineage: None,
             socket_generation: provider.ws.socket_generation,
             response_id: "resp_probe".into(),
             request_properties: seed.request_properties.clone(),
-            request_input: seed.full_input.clone(),
+            request_input: seed.full_input.as_ref().clone(),
             response_output: output,
         });
         let prompt = Message::user(text.clone());
@@ -118,6 +120,7 @@ async fn cache_preparation_probe() {
         input.push(replay.as_borrowed());
         input.push(ModelRequestItem::message(&prompt));
         let request = ModelRequest {
+            input_identity: None,
             tools: &[],
             forbid_tool_calls: false,
             instructions: test_instructions(),
@@ -231,6 +234,7 @@ async fn cache_wire_equivalence_capture() {
     provider
         .complete(
             ModelRequest {
+                input_identity: None,
                 tools: &[],
                 forbid_tool_calls: false,
                 instructions: test_instructions(),

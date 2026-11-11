@@ -20,6 +20,7 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
     let build = set.render();
     let prompt = Message::user("first");
     let first_request = ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: &build,
@@ -39,10 +40,11 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
     ))
     .unwrap();
     provider.ws.continuation = Some(ContinuationState {
+        lineage: None,
         socket_generation: provider.ws.socket_generation,
         response_id: "first-response".into(),
         request_properties: first.request_properties.clone(),
-        request_input: first.full_input.clone(),
+        request_input: first.full_input.as_ref().clone(),
         response_output: output,
     });
     let body = DirectiveContent::skill(
@@ -56,6 +58,7 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
         ModelRequestItem::DeveloperInstruction(&body),
     ];
     let build_request = ModelRequest {
+        input_identity: None,
         tools: &[],
         forbid_tool_calls: false,
         instructions: &build,
@@ -85,6 +88,7 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
     let plan = set.render();
     let switched = prepare_turn_request(
         &ModelRequest {
+            input_identity: None,
             instructions: &plan,
             ..build_request
         },
@@ -102,7 +106,7 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
     let transmission = select_transmission(&switched, &mut provider);
     assert!(matches!(transmission.mode, RequestMode::Full));
     assert!(transmission.previous_response_id.is_none());
-    assert_eq!(transmission.input, switched.full_input);
+    assert_eq!(&transmission.input, switched.full_input.as_ref());
     assert!(
         provider.ws.continuation.is_none(),
         "request_properties_changed clears the previous chain"

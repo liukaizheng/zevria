@@ -187,6 +187,12 @@ pub(super) fn deserialize_checkpoint_message<'de, D: serde::Deserializer<'de>>(
 }
 
 impl serde::Serialize for OwnedModelRequestItem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_borrowed().serialize(serializer)
+    }
+}
+
+impl serde::Serialize for ModelRequestItem<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -214,7 +220,7 @@ impl serde::Serialize for OwnedModelRequestItem {
                 replay: &'a ProviderReplay,
             },
         }
-        let record = match self {
+        let record = match *self {
             Self::AdditionalTools(tools) => {
                 tools.validate().map_err(S::Error::custom)?;
                 if tools.is_empty() {
@@ -345,6 +351,62 @@ impl TryFrom<Message> for ModelResponse {
     }
 }
 
+/// Append lineage over canonical borrowed item bytes. One digest per input
+/// boundary permits constant-time prefix checks without comparing old payloads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelInputIdentity {
+    prefixes: Vec<[u8; 32]>,
+}
+
+impl ModelInputIdentity {
+    pub fn from_items(items: &[ModelRequestItem<'_>]) -> anyhow::Result<Self> {
+        let mut identity = Self::default();
+        identity.extend(items.iter().copied())?;
+        Ok(identity)
+    }
+
+    pub fn extend<'a>(
+        &mut self,
+        items: impl IntoIterator<Item = ModelRequestItem<'a>>,
+    ) -> anyhow::Result<()> {
+        for item in items {
+            self.prefixes
+                .push(Self::appended_digest(self.digest(), item)?);
+        }
+        Ok(())
+    }
+
+    pub fn appended_digest(
+        prefix: [u8; 32],
+        item: ModelRequestItem<'_>,
+    ) -> anyhow::Result<[u8; 32]> {
+        use sha2::{Digest as _, Sha256};
+        let bytes = serde_json::to_vec(&item)?;
+        let mut hash = Sha256::new();
+        hash.update(prefix);
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+        Ok(hash.finalize().into())
+    }
+
+    pub fn len(&self) -> usize {
+        self.prefixes.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.prefixes.is_empty()
+    }
+    pub fn prefix(&self, count: usize) -> Option<[u8; 32]> {
+        if count == 0 {
+            Some([0; 32])
+        } else {
+            self.prefixes.get(count - 1).copied()
+        }
+    }
+    pub fn digest(&self) -> [u8; 32] {
+        self.prefix(self.len()).expect("current boundary")
+    }
+}
+
 /// A borrowed request for a single provider completion.
 ///
 /// `input` is the complete model-visible conversation in exact order,
@@ -372,6 +434,11 @@ pub struct ModelRequest<'session> {
     /// Suppress calls without removing declarations (synthetic request fallback).
     pub forbid_tool_calls: bool,
     pub input: Vec<ModelRequestItem<'session>>,
+    /// Local-only append lineage for this exact input sequence. Callers must
+    /// keep it synchronized with input; pass None when no trusted lineage is
+    /// available. Never serialized or sent to a provider. Adapters compute a
+    /// fallback from borrowed input for synthetic callers using None.
+    pub input_identity: Option<&'session ModelInputIdentity>,
     pub model_role: ModelRole,
     pub allowed_tool_names: Option<&'session [String]>,
 }

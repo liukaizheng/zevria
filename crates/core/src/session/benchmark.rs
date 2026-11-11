@@ -178,6 +178,9 @@ impl AdmissionFixture {
             .record_completed(TranscriptItem::Message(Message::assistant(text)))
             .unwrap();
     }
+    pub fn completed_batch(&mut self, items: Vec<TranscriptItem>) {
+        self.engine.record_completed_items(items).unwrap();
+    }
     pub fn prepare(&self, text: &str) {
         let checked = self
             .engine

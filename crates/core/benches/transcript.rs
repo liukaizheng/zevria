@@ -165,6 +165,43 @@ fn transactions(c: &mut Criterion) {
                 )
             });
         }
+        // Historical single-completed-record admission baseline. Keep its name
+        // and workload stable for before/after comparisons; tool_batch below
+        // measures an actual assistant call + correlated tool result.
+        if count >= 100 {
+            group.bench_function("tool_round", |b| {
+                b.iter_batched_ref(
+                    || AdmissionFixture::new(f.items.clone()),
+                    |session| session.completed("tool round result"),
+                    BatchSize::PerIteration,
+                )
+            });
+            let call = zevria_content::message::tool_call_from_wire(
+                "benchmark_round_item",
+                "benchmark_round_call",
+                rig_core::message::ToolFunction::new(
+                    rig_core::message::ToolName::new("command").unwrap(),
+                    serde_json::json!({"command":"pwd"}),
+                ),
+            );
+            let result =
+                Message::from(call.result(vec![rig_core::message::ToolResultContent::text(
+                    "tool result",
+                )]));
+            let batch = vec![
+                TranscriptItem::Message(Message::from(vec![
+                    rig_core::message::AssistantContent::ToolCall(call),
+                ])),
+                TranscriptItem::Message(result),
+            ];
+            group.bench_function("tool_batch", |b| {
+                b.iter_batched_ref(
+                    || (AdmissionFixture::new(f.items.clone()), batch.clone()),
+                    |(session, records)| session.completed_batch(std::mem::take(records)),
+                    BatchSize::PerIteration,
+                )
+            });
+        }
         for operation in ["admit_required", "admit_completed"] {
             group.bench_function(operation, |b| {
                 b.iter_batched_ref(

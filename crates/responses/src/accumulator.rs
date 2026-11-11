@@ -37,6 +37,10 @@ impl NativeOutputLedger {
             self.malformed = true;
             return;
         };
+        self.record_output_item_done_value(&event);
+    }
+
+    pub fn record_output_item_done_value(&mut self, event: &serde_json::Value) {
         if event.get("type").and_then(serde_json::Value::as_str)
             != Some("response.output_item.done")
         {
@@ -74,6 +78,10 @@ impl NativeOutputLedger {
             self.malformed = true;
             return;
         };
+        self.record_terminal_output_value(&event);
+    }
+
+    pub fn record_terminal_output_value(&mut self, event: &serde_json::Value) {
         let output = event
             .get("response")
             .and_then(|response| response.get("output"))
@@ -952,6 +960,10 @@ pub fn message_reasoning(id: Option<String>, content: Vec<ReasoningContent>) -> 
 /// distinct from an absent or malformed field.
 pub fn response_cache_write_tokens(payload: &str) -> Option<u64> {
     let event = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    response_cache_write_tokens_value(&event)
+}
+
+pub fn response_cache_write_tokens_value(event: &serde_json::Value) -> Option<u64> {
     if !matches!(
         event.get("type").and_then(serde_json::Value::as_str),
         Some("response.completed" | "response.done")

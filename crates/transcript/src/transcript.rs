@@ -59,6 +59,31 @@ const SESSION_MODE_KEY: &str = "zevria_session_mode";
 const INSTRUCTION_PREFIX_KEY: &str = "zevria_instruction_prefix";
 const DIRECTIVE_KEY: &str = "zevria_directive";
 const INCOMPLETE_RESPONSE_KEY: &str = "zevria_incomplete_response";
+const BATCH_KEY: &str = "zevria_batch";
+
+/// A single physical commit boundary. Nested envelopes are deliberately not
+/// TranscriptItems, so batches cannot recursively contain batches.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchEnvelope {
+    zevria_batch: BatchRecord,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchRecord {
+    version: u32,
+    records: Vec<TranscriptItem>,
+}
+
+// The hot single-record decode stays inline instead of allocating one box per line.
+#[allow(clippy::large_enum_variant)]
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TranscriptLine {
+    Batch(BatchEnvelope),
+    Item(TranscriptItem),
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1005,6 +1030,25 @@ impl TranscriptFile {
     }
 }
 
+/// A failed append is rolled back before returning. If the storage device
+/// also rejects rollback, no code can promise which bytes survived: expose
+/// that ambiguity rather than claiming the required operation was uncommitted.
+fn append_or_rollback(
+    append: impl FnOnce() -> std::io::Result<()>,
+    rollback: impl FnOnce() -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    if let Err(error) = append() {
+        if let Err(rollback) = rollback() {
+            tracing::warn!(%error, %rollback, "transcript append durability is indeterminate");
+            return Err(anyhow::Error::new(error).context(format!(
+                "transcript append durability is indeterminate: rollback failed ({rollback}); inspect the session before resuming"
+            )));
+        }
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 impl TranscriptWriter {
     /// Allocate a fresh ID and intended path without creating a transcript.
     /// Directory and lease activity is independent of transcript persistence.
@@ -1118,10 +1162,28 @@ impl TranscriptWriter {
         // Validate the complete record boundary and lifecycle before acquiring
         // any writable handle. In particular, never erase unsupported records.
         let outcome = load_report(&path)?;
+        Self::append_loaded(&outcome)
+    }
+
+    /// Reopen the exact report already preflighted by startup; no second load.
+    pub fn append_loaded(outcome: &TranscriptLoadOutcome) -> anyhow::Result<Self> {
         outcome.ensure_resumable()?;
-        let mut writer = Self::open_existing(path, false, outcome.needs_newline)?;
+        let mut writer = Self::open_existing(outcome.path.clone(), false, outcome.needs_newline)?;
         if outcome.recoverable_lines > 0 {
-            writer.rewrite(&outcome.items)?;
+            let offset = outcome
+                .recoverable_tail_offset
+                .context("recoverable tail has no verified byte boundary")?;
+            let file = writer
+                .file
+                .handle()
+                .context("tail repair requires a materialized transcript")?;
+            // Preserve complete physical records verbatim, including committed
+            // batch envelopes. Re-encoding flattened items would rewrite the
+            // whole prefix and lose its original commit boundaries.
+            file.set_len(offset)
+                .and_then(|()| file.sync_data())
+                .context("failed to durably truncate the incomplete transcript tail")?;
+            writer.needs_newline = false;
             writer.recovered_malformed_lines = outcome.recoverable_lines;
         }
         Ok(writer)
@@ -1197,22 +1259,68 @@ impl TranscriptWriter {
 
     // Only public checked append and the private validated transaction call this.
     fn append_record(&mut self, item: &TranscriptItem) -> anyhow::Result<()> {
-        let mut line = serialize_record(item)?;
+        self.append_records(std::slice::from_ref(item), false)
+    }
+
+    fn append_records(&mut self, items: &[TranscriptItem], batch: bool) -> anyhow::Result<()> {
+        self.ensure_writable()?;
+        if items.is_empty() {
+            return Ok(());
+        }
+        if batch {
+            anyhow::ensure!(
+                std::fs::metadata(&self.path).is_ok_and(|metadata| metadata.is_file()),
+                "the canonical session transcript is missing or is not a regular file"
+            );
+        }
+        let mut line = if items.len() == 1 {
+            serialize_record(&items[0])?
+        } else {
+            // Serialize only the suffix, with the same bound as any physical
+            // record. A torn final line exposes none of this batch on reload.
+            #[derive(Serialize)]
+            struct BatchRef<'a> {
+                version: u32,
+                records: &'a [TranscriptItem],
+            }
+            #[derive(Serialize)]
+            struct EnvelopeRef<'a> {
+                zevria_batch: BatchRef<'a>,
+            }
+            let mut bytes = serde_json::to_vec(&EnvelopeRef {
+                zevria_batch: BatchRef {
+                    version: 1,
+                    records: items,
+                },
+            })?;
+            anyhow::ensure!(
+                bytes.len() < MAX_ROOT_RECORD_BYTES,
+                "root transcript record exceeds the 64 MiB limit"
+            );
+            bytes.push(b'\n');
+            bytes
+        };
         if self.needs_newline {
             line.insert(0, b'\n');
         }
         let TranscriptFile::Writable(file) = &mut self.file else {
             anyhow::bail!("appending requires a materialized writable transcript");
         };
-        file.write_all(&line)
-            .and_then(|()| file.flush())
-            .and_then(|()| file.sync_data())
-            .with_context(|| {
-                format!(
-                    "failed to append to the session file at {}",
-                    self.path.display()
-                )
-            })?;
+        let original_len = file.metadata()?.len();
+        // Staged replacement handles are not opened with O_APPEND; seek also
+        // restores the cursor after a failed append was truncated.
+        use std::io::{Seek as _, SeekFrom};
+        file.seek(SeekFrom::End(0))?;
+        append_or_rollback(
+            || (&*file).write_all(&line).and_then(|()| file.sync_data()),
+            || file.set_len(original_len).and_then(|()| file.sync_data()),
+        )
+        .with_context(|| {
+            format!(
+                "failed to append to the session file at {}",
+                self.path.display()
+            )
+        })?;
         self.needs_newline = false;
         Ok(())
     }
@@ -1579,6 +1687,42 @@ pub struct Conversation {
     items: Vec<TranscriptItem>,
     writer: TranscriptWriter,
     persistence_error: Option<String>,
+    replay: Option<Result<crate::ValidatedSessionReplay, crate::SessionReplayError>>,
+    input_identity: Option<zevria_model::ModelInputIdentity>,
+    has_images: bool,
+    has_compaction_prompt: bool,
+}
+
+/// Disjoint writer borrow used while a provider holds immutable model input.
+/// Display checkpoints are persisted immediately, but only installed into the
+/// conversation after that request borrow ends. They are never model input.
+pub struct AttemptCheckpointWriter<'a> {
+    writer: &'a mut TranscriptWriter,
+    persistence_error: &'a mut Option<String>,
+    records: Vec<crate::IncompleteResponse>,
+}
+
+impl AttemptCheckpointWriter<'_> {
+    pub fn append(&mut self, record: crate::IncompleteResponse) -> anyhow::Result<()> {
+        self.writer.ensure_writable()?;
+        let result = if let Some(error) = &self.persistence_error {
+            Err(anyhow::anyhow!(
+                "session transcript persistence is degraded: {error}"
+            ))
+        } else {
+            self.writer
+                .append_record(&TranscriptItem::IncompleteResponse(record.clone()))
+        };
+        self.records.push(record);
+        if let Err(error) = &result {
+            *self.persistence_error = Some(format!("{error:#}"));
+        }
+        result
+    }
+
+    pub fn into_records(self) -> Vec<crate::IncompleteResponse> {
+        self.records
+    }
 }
 
 /// Created and consumed synchronously inside Conversation. Neither arbitrary
@@ -1596,14 +1740,114 @@ impl Conversation {
             items: Vec::new(),
             writer,
             persistence_error: None,
+            replay: Some(Ok(crate::ValidatedSessionReplay::default())),
+            input_identity: Some(zevria_model::ModelInputIdentity::default()),
+            has_images: false,
+            has_compaction_prompt: false,
         }
     }
 
     /// Install validated startup items without writing: either metadata for a
     /// pending new session, or items loaded from this writer's existing log.
     /// The caller owns replay validation; this is not a mutation/acceptance API.
+    pub fn from_loaded(
+        writer: TranscriptWriter,
+        outcome: TranscriptLoadOutcome,
+    ) -> anyhow::Result<Self> {
+        outcome.ensure_resumable()?;
+        anyhow::ensure!(
+            writer.path() == outcome.path,
+            "loaded transcript does not belong to this writer"
+        );
+        let mut conversation = Self::new(writer);
+        conversation.items = outcome.items;
+        conversation.replay = Some(Ok(outcome
+            .replay
+            .context("loaded transcript has no validated replay")?));
+        conversation.rebuild_input_identity();
+        Ok(conversation)
+    }
+
+    pub fn adopt_validated(
+        &mut self,
+        items: Vec<TranscriptItem>,
+        replay: crate::ValidatedSessionReplay,
+    ) {
+        self.adopt_persisted(items);
+        self.replay = Some(Ok(replay));
+    }
+
     pub fn adopt_persisted(&mut self, items: Vec<TranscriptItem>) {
         self.items = items;
+        self.replay = None;
+        self.rebuild_input_identity();
+    }
+
+    /// Reuse all replay domains after append. Invalid committed evidence still
+    /// performs the independent full checks to preserve error precedence.
+    pub fn validated_replay(
+        &mut self,
+    ) -> Result<crate::ValidatedSessionReplay, crate::SessionReplayError> {
+        self.replay
+            .get_or_insert_with(|| crate::validate_session_replay(&self.items))
+            .clone()
+    }
+
+    pub fn input_identity(&self) -> Option<&zevria_model::ModelInputIdentity> {
+        self.input_identity.as_ref()
+    }
+
+    fn rebuild_input_identity(&mut self) {
+        let input = self.model_input();
+        let has_images = input
+            .iter()
+            .filter_map(|item| item.message_ref())
+            .any(zevria_content::prompt::message_has_images);
+        let identity = zevria_model::ModelInputIdentity::from_items(&input).ok();
+        self.input_identity = identity;
+        self.has_images = has_images;
+        self.has_compaction_prompt = self.items.iter().any(is_compaction_prompt_item);
+    }
+
+    pub fn has_images(&self) -> bool {
+        self.has_images
+    }
+
+    fn input_appended(&mut self, start: usize) {
+        self.has_images |= self.items[start..]
+            .iter()
+            .filter_map(TranscriptItem::model_request_item)
+            .filter_map(ModelRequestItem::message_ref)
+            .any(zevria_content::prompt::message_has_images);
+        self.has_compaction_prompt |= self.items[start..].iter().any(is_compaction_prompt_item);
+        if self.items[start..]
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Compaction(_)))
+        {
+            self.rebuild_input_identity();
+        } else if let Some(identity) = &mut self.input_identity
+            && identity
+                .extend(
+                    self.items[start..]
+                        .iter()
+                        .filter_map(TranscriptItem::model_request_item),
+                )
+                .is_err()
+        {
+            self.input_identity = None;
+        }
+    }
+
+    fn replay_appended(&mut self, start: usize) {
+        self.input_appended(start);
+        if let Some(Ok(prefix)) = &self.replay {
+            self.replay = Some(
+                prefix
+                    .clone()
+                    .apply_suffix(&self.items[start..])
+                    .or_else(|_| crate::validate_session_replay(&self.items)),
+            );
+        }
     }
 
     pub fn items(&self) -> &[TranscriptItem] {
@@ -1638,6 +1882,8 @@ impl Conversation {
         }
         self.writer.persist_unprepared(&replacement, false)?;
         self.items = replacement;
+        self.replay = None;
+        self.rebuild_input_identity();
         Ok(())
     }
 
@@ -1675,7 +1921,40 @@ impl Conversation {
             end <= self.items.len(),
             "replacement index is outside the transcript"
         );
-        let single_append = index.is_none() && mode.is_none() && records.len() == 1;
+        let append_only = index.is_none()
+            && mode.is_none_or(|mode| {
+                self.replay
+                    .as_ref()
+                    .and_then(|replay| replay.as_ref().ok())
+                    .and_then(|replay| replay.instructions.persisted_mode())
+                    == Some(mode)
+            });
+        if append_only {
+            let prefix = self.validated_replay()?;
+            let replay = match prefix.apply_suffix(&records) {
+                Ok(replay) => replay,
+                Err(_) => {
+                    // Rejected proposals are uncommon; preserve independent
+                    // full-replay error classification without cloning history.
+                    let start = self.items.len();
+                    self.items.extend(records.iter().cloned());
+                    let result = crate::validate_session_replay(&self.items);
+                    self.items.truncate(start);
+                    result?
+                }
+            };
+            if mode.is_some() {
+                anyhow::ensure!(
+                    self.persistence_error.is_none(),
+                    "session transcript persistence is degraded"
+                );
+            }
+            let batch = records.len() > 1 || mode.is_some();
+            self.push_required_batch_impl(records, false, batch)?;
+            self.replay = Some(Ok(replay.clone()));
+            return Ok(replay);
+        }
+        let single_append = false;
         let mut items = self.items[..end].to_vec();
         if let Some(mode) = mode {
             // Only canonical header positions can be replaced. Final replay
@@ -1733,8 +2012,36 @@ impl Conversation {
                 return Err(error);
             }
             self.items = change.items;
+            self.rebuild_input_identity();
         }
+        self.replay = Some(Ok(change.replay.clone()));
         Ok(change.replay)
+    }
+
+    /// Split the immutable request history from checkpoint-only persistence.
+    pub fn borrow_for_dispatch(
+        &mut self,
+    ) -> (
+        Vec<ModelRequestItem<'_>>,
+        Option<&zevria_model::ModelInputIdentity>,
+        AttemptCheckpointWriter<'_>,
+    ) {
+        (
+            model_input(&self.items),
+            self.input_identity.as_ref(),
+            AttemptCheckpointWriter {
+                writer: &mut self.writer,
+                persistence_error: &mut self.persistence_error,
+                records: Vec::new(),
+            },
+        )
+    }
+
+    pub fn install_attempt_checkpoints(&mut self, records: Vec<crate::IncompleteResponse>) {
+        let start = self.items.len();
+        self.items
+            .extend(records.into_iter().map(TranscriptItem::IncompleteResponse));
+        self.replay_appended(start);
     }
 
     /// The exact ordered active model projection.
@@ -1772,46 +2079,71 @@ impl Conversation {
     }
 
     pub fn has_compaction_prompt(&self) -> bool {
-        self.items.iter().any(is_compaction_prompt_item)
+        self.has_compaction_prompt
     }
 
     /// Append a pre-effect item. A failure keeps memory unchanged and marks
     /// the writer degraded because the failed write may have left a partial
     /// trailing line that must be repaired before another append.
     pub fn push_required(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
-        self.writer.ensure_writable()?;
-        if self.writer.is_pending() && self.persistence_error.is_some() {
-            self.ensure_durable()?;
-        }
-        if self.writer.is_pending() {
-            let mut replacement = self.items.clone();
-            replacement.push(item);
-            self.writer.persist_unprepared(&replacement, true)?;
-            self.items = replacement;
-            return Ok(());
-        }
-        if let Err(error) = self.writer.append(&item) {
-            let error = error.context("the session transcript is degraded");
-            self.persistence_error = Some(format!("{error:#}"));
-            return Err(error);
-        }
-        self.items.push(item);
-        Ok(())
+        self.push_required_batch_impl(vec![item], true, false)
     }
 
     /// Atomically append several pre-effect records. Workflow transitions
     /// pair a prompt with its Plan record through this path so a crash or
     /// write failure can expose neither half on its own.
     pub fn push_required_batch(&mut self, new_items: Vec<TranscriptItem>) -> anyhow::Result<()> {
+        self.push_required_batch_impl(new_items, true, true)
+    }
+
+    fn push_required_batch_impl(
+        &mut self,
+        new_items: Vec<TranscriptItem>,
+        replay: bool,
+        batch: bool,
+    ) -> anyhow::Result<()> {
         self.writer.ensure_writable()?;
         if new_items.is_empty() {
             return Ok(());
         }
         self.ensure_durable()?;
-        let mut replacement = self.items.clone();
-        replacement.extend(new_items);
-        self.writer.persist_unprepared(&replacement, false)?;
-        self.items = replacement;
+        let start = self.items.len();
+        let pending = self.writer.is_pending();
+        self.items.extend(new_items);
+        let result = if pending {
+            if replay {
+                self.writer.persist_unprepared(&self.items, false)
+            } else {
+                self.writer.persist_records(&self.items, false)
+            }
+        } else {
+            self.validate_appended_header(start)
+                .and_then(|_| self.writer.append_records(&self.items[start..], batch))
+        };
+        if let Err(error) = result {
+            self.items.truncate(start);
+            if !pending {
+                self.persistence_error = Some(format!("{error:#}"));
+            }
+            return Err(error);
+        }
+        if replay {
+            self.replay_appended(start);
+        } else {
+            self.input_appended(start);
+        }
+        Ok(())
+    }
+
+    fn validate_appended_header(&self, start: usize) -> anyhow::Result<()> {
+        if self.items[start..].iter().any(|item| {
+            matches!(
+                item,
+                TranscriptItem::SessionModels(_) | TranscriptItem::SessionMode(_)
+            )
+        }) {
+            validate_header(self.items.iter())?;
+        }
         Ok(())
     }
 
@@ -1820,38 +2152,7 @@ impl Conversation {
     /// truthful, mark the writer degraded, and require a full repair before
     /// any further pre-effect work starts.
     pub fn push_completed(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
-        self.writer.ensure_writable()?;
-        let pending = if self.writer.is_pending() {
-            let mut replacement = self.items.clone();
-            replacement.push(item.clone());
-            crate::validate_session_replay(&replacement)?;
-            if !replacement.iter().any(is_conversation_item) {
-                // No external conversational evidence to retain on failure:
-                // reject invalid/oversized metadata just like required changes.
-                self.writer.persist_records(&replacement, true)?;
-                self.items = replacement;
-                return Ok(());
-            }
-            Some(replacement)
-        } else {
-            None
-        };
-        let result = self.ensure_durable().and_then(|_| {
-            if let Some(replacement) = &pending {
-                self.writer.persist_records(replacement, true)
-            } else {
-                self.writer.append(&item)
-            }
-        });
-        self.items.push(item);
-        match result {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let error = error.context("the session transcript is degraded");
-                self.persistence_error = Some(format!("{error:#}"));
-                Err(error)
-            }
-        }
+        self.push_completed_batch_impl(vec![item], false)
     }
 
     /// Atomically persist several records for work that has already completed.
@@ -1860,29 +2161,45 @@ impl Conversation {
     /// ensuring a successful crash boundary can expose either every record or
     /// none of them.
     pub fn push_completed_batch(&mut self, new_items: Vec<TranscriptItem>) -> anyhow::Result<()> {
+        self.push_completed_batch_impl(new_items, true)
+    }
+
+    fn push_completed_batch_impl(
+        &mut self,
+        new_items: Vec<TranscriptItem>,
+        batch: bool,
+    ) -> anyhow::Result<()> {
         self.writer.ensure_writable()?;
         if new_items.is_empty() {
             return Ok(());
         }
-        let mut replacement = self.items.clone();
-        replacement.extend(new_items);
+        let durable = self.ensure_durable();
+        let start = self.items.len();
         let pending = self.writer.is_pending();
+        self.items.extend(new_items);
         if pending {
-            crate::validate_session_replay(&replacement)?;
-            if !replacement.iter().any(is_conversation_item) {
-                self.writer.persist_records(&replacement, false)?;
-                self.items = replacement;
+            if let Err(error) = crate::validate_session_replay(&self.items) {
+                self.items.truncate(start);
+                return Err(error.into());
+            }
+            if !self.items.iter().any(is_conversation_item) {
+                if let Err(error) = self.writer.persist_records(&self.items, false) {
+                    self.items.truncate(start);
+                    return Err(error);
+                }
+                self.replay_appended(start);
                 return Ok(());
             }
         }
-        let result = self.ensure_durable().and_then(|_| {
+        let result = durable.and_then(|_| {
             if pending {
-                self.writer.persist_records(&replacement, false)
+                self.writer.persist_records(&self.items, false)
             } else {
-                self.writer.persist_unprepared(&replacement, false)
+                self.validate_appended_header(start)
+                    .and_then(|_| self.writer.append_records(&self.items[start..], batch))
             }
         });
-        self.items = replacement;
+        self.replay_appended(start);
         match result {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -1962,6 +2279,8 @@ impl Conversation {
         self.writer
             .persist_unprepared(&self.items[..index], false)?;
         self.items.truncate(index);
+        self.replay = None;
+        self.rebuild_input_identity();
         Ok(())
     }
 
@@ -1986,6 +2305,8 @@ impl Conversation {
         replacement.extend(new_items);
         self.writer.persist_unprepared(&replacement, false)?;
         self.items = replacement;
+        self.replay = None;
+        self.rebuild_input_identity();
         Ok(())
     }
 
@@ -2020,8 +2341,8 @@ pub struct TranscriptDiagnostic {
 /// diagnostics. Unsupported histories return an error instead of a projection.
 #[derive(Debug)]
 pub struct TranscriptLoadOutcome {
-    pub path: PathBuf,
-    pub items: Vec<TranscriptItem>,
+    path: PathBuf,
+    items: Vec<TranscriptItem>,
     /// Original physical line for each projected item.
     pub source_lines: Vec<usize>,
     pub diagnostics: Vec<TranscriptDiagnostic>,
@@ -2031,9 +2352,27 @@ pub struct TranscriptLoadOutcome {
     // Invalid metadata must never be mistaken for absence.
     session_models_error: Option<String>,
     needs_newline: bool,
+    recoverable_tail_offset: Option<u64>,
+    replay: Option<crate::ValidatedSessionReplay>,
 }
 
 impl TranscriptLoadOutcome {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn items(&self) -> &[TranscriptItem] {
+        &self.items
+    }
+    pub fn into_items(self) -> Vec<TranscriptItem> {
+        self.items
+    }
+
+    pub fn replay(&self) -> &crate::ValidatedSessionReplay {
+        self.replay
+            .as_ref()
+            .expect("successful transcript loads have validated replay")
+    }
+
     fn diagnose(&mut self, line: Option<usize>, kind: TranscriptDamage, message: impl AsRef<str>) {
         self.blocked |= kind != TranscriptDamage::IncompleteTail;
         if kind == TranscriptDamage::InvalidSessionModels && self.session_models_error.is_none() {
@@ -2094,6 +2433,8 @@ pub fn load(path: &Path) -> anyhow::Result<Vec<TranscriptItem>> {
 }
 
 pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {
+    #[cfg(feature = "test-support")]
+    crate::replay_probe::record(|counts| counts.loads += 1);
     let file = std::fs::File::open(path)
         .with_context(|| format!("failed to read the session file at {}", path.display()))?;
     let mut outcome = TranscriptLoadOutcome {
@@ -2106,16 +2447,71 @@ pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {
         blocked: false,
         session_models_error: None,
         needs_newline: false,
+        recoverable_tail_offset: None,
+        replay: None,
     };
     let mut lines = bounded_record_lines(std::io::BufReader::new(file))
         .enumerate()
         .peekable();
     let mut incomplete_attempts = std::collections::HashSet::new();
+    let mut byte_offset = 0_u64;
     while let Some((index, line)) = lines.next() {
         let line = line?;
+        let line_offset = byte_offset;
+        byte_offset = byte_offset.saturating_add(line.len() as u64);
         let line = line.as_slice();
         outcome.needs_newline = !line.ends_with(b"\n");
         if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        // Successful current records take one typed decode; expensive key
+        // probes and error classification are reserved for damaged records.
+        if let Ok(decoded) = serde_json::from_slice::<TranscriptLine>(line) {
+            let records = match decoded {
+                TranscriptLine::Item(item) => vec![item],
+                TranscriptLine::Batch(envelope) => {
+                    let batch = envelope.zevria_batch;
+                    if batch.version != 1
+                        || batch.records.is_empty()
+                        || batch.records.iter().any(|item| {
+                            matches!(
+                                item,
+                                TranscriptItem::SessionModels(_) | TranscriptItem::SessionMode(_)
+                            )
+                        })
+                    {
+                        outcome.diagnose(
+                            Some(index + 1),
+                            TranscriptDamage::IncompatibleLifecycle,
+                            "invalid batch version, empty batch, or batched session header",
+                        );
+                        continue;
+                    }
+                    batch.records
+                }
+            };
+            for item in records {
+                if matches!(item, TranscriptItem::SessionModels(_)) && index != 0 {
+                    outcome.diagnose(
+                        Some(index + 1),
+                        TranscriptDamage::InvalidSessionModels,
+                        "session model metadata must be unique and on the first physical line",
+                    );
+                    continue;
+                }
+                if let TranscriptItem::IncompleteResponse(record) = &item
+                    && !incomplete_attempts.insert(record.attempt_id.clone())
+                {
+                    outcome.diagnose(
+                        Some(index + 1),
+                        TranscriptDamage::IncompatibleLifecycle,
+                        "duplicate incomplete response attempt_id",
+                    );
+                    continue;
+                }
+                outcome.items.push(item);
+                outcome.source_lines.push(index + 1);
+            }
             continue;
         }
         // Detect a reserved top-level key even if its value is truncated. Do
@@ -2169,6 +2565,7 @@ pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {
                     && !has_unsupported_reserved_tail(line);
                 let kind = if recoverable {
                     outcome.recoverable_lines += 1;
+                    outcome.recoverable_tail_offset = Some(line_offset);
                     TranscriptDamage::IncompleteTail
                 } else {
                     TranscriptDamage::InvalidRecord
@@ -2230,34 +2627,31 @@ pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {
             ),
         }
     }
-    // Authority-bearing records must be validated before writable repair.
-    if !outcome.blocked
-        && let Err(error) = crate::replay_directives(&outcome.items)
-    {
-        outcome.diagnose(
-            None,
-            TranscriptDamage::IncompatibleLifecycle,
-            error.to_string(),
-        );
-    }
-    // Validate current lifecycle linkage before projection or writable open.
-    if !outcome.blocked
-        && let Err(error) = replay_active_skills(&outcome.items)
-    {
-        let line = error
-            .downcast_ref::<SkillLifecycleLocation>()
-            .and_then(|location| outcome.source_lines.get(location.0))
-            .copied();
-        outcome.diagnose(
-            line,
-            TranscriptDamage::IncompatibleLifecycle,
-            "expected valid current skill lifecycle linkage and checkpoint assertions",
-        );
-    }
-    if !outcome.blocked
-        && let Err(error) = crate::validate_ensemble_review_history(&outcome.items)
-    {
-        outcome.diagnose(None, TranscriptDamage::IncompatibleLifecycle, error);
+    // One authoritative reduction on successful load. Invalid histories alone
+    // pay for a diagnostic location probe; no writable repair precedes this.
+    if !outcome.blocked {
+        match crate::validate_session_replay(&outcome.items) {
+            Ok(replay) => outcome.replay = Some(replay),
+            Err(error) => {
+                let line = matches!(
+                    error,
+                    crate::SessionReplayError::Skills(_) | crate::SessionReplayError::Both { .. }
+                )
+                .then(|| replay_active_skills(&outcome.items).err())
+                .flatten()
+                .and_then(|error| {
+                    error
+                        .downcast_ref::<SkillLifecycleLocation>()
+                        .and_then(|location| outcome.source_lines.get(location.0))
+                        .copied()
+                });
+                return Err(anyhow::Error::new(error).context(UnsupportedHistory::new(
+                    path,
+                    line,
+                    "valid current session lifecycle",
+                )));
+            }
+        }
     }
     if outcome.blocked {
         let diagnostic = outcome
@@ -2746,6 +3140,18 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
     }
 
     let keys = top_level_keys(line);
+    if keys.iter().any(|key| key == BATCH_KEY) {
+        // Typed streaming decode notices invalid completed children before an
+        // interrupted later child; never erase unsupported lifecycle evidence.
+        if serde_json::from_slice::<BatchEnvelope>(line).is_err_and(|error| error.is_data()) {
+            return true;
+        }
+        if partial_json_field(line, &[BATCH_KEY, "version"])
+            .is_some_and(|value| value.as_u64() != Some(1))
+        {
+            return true;
+        }
+    }
     // Probe owned envelope bytes directly: Value would discard duplicate fields
     // in a complete invalid payload whose outer delimiter was interrupted.
     if keys.iter().any(|key| {
@@ -2848,7 +3254,8 @@ fn has_unsupported_reserved_tail(line: &[u8]) -> bool {
 fn current_reserved_key(key: &str) -> bool {
     matches!(
         key,
-        SKILL_APPLICATIONS_KEY
+        BATCH_KEY
+            | SKILL_APPLICATIONS_KEY
             | TOOL_DECLARATIONS_KEY
             | COMMAND_JOB_NOTICE_KEY
             | SKILL_INVOCATION_KEY
@@ -2965,6 +3372,10 @@ mod pending_persistence_tests;
 #[cfg(test)]
 #[path = "prepared_change_tests.rs"]
 mod prepared_change_tests;
+
+#[cfg(test)]
+#[path = "batch_tests.rs"]
+mod batch_tests;
 
 #[cfg(test)]
 #[path = "transcript_instruction_tests.rs"]
@@ -3172,7 +3583,9 @@ mod tests {
                 revision: 1,
             },
             title: title.to_string(),
-            markdown: format!("# {title}\n\ncomplete canonical markdown"),
+            markdown: format!(
+                "# {title}\n\n## Goal\nShip durable approval.\n\n## Decisions\nKeep canonical records.\n\n## Implementation\nPersist the handoff.\n\n## Validation\nRound trip the lifecycle.\n\n## Risks\nInterrupted writes."
+            ),
             source_turn_id: TurnId::new(7),
         };
         PlanHandoff::new(artifact, "source-session")
@@ -3976,8 +4389,8 @@ mod tests {
             .expect("persist original item");
 
         let original_bytes = std::fs::read(&original_path).unwrap();
-        let mut blocker =
-            TranscriptRewriteBlocker::new(&original_path).expect("block transcript replacement");
+        conversation.writer.file =
+            TranscriptFile::Writable(std::fs::File::open(&original_path).unwrap());
         let batch = vec![
             TranscriptItem::Message(Message::assistant("completed response")),
             TranscriptItem::Error {
@@ -3987,7 +4400,7 @@ mod tests {
 
         let error = conversation
             .push_completed_batch(batch.clone())
-            .expect_err("atomic replacement should fail");
+            .expect_err("atomic append should fail");
 
         assert!(error.to_string().contains("session transcript is degraded"));
         assert!(conversation.persistence_error().is_some());
@@ -3996,17 +4409,13 @@ mod tests {
             &[mode_item(), original, batch[0].clone(), batch[1].clone()]
         );
         assert_eq!(
-            load(blocker.backup_path()).expect("original durable file remains readable"),
+            load(&original_path).expect("original durable file remains readable"),
             vec![
                 mode_item(),
                 TranscriptItem::Message(Message::user("durable request"))
             ]
         );
-        assert_eq!(
-            std::fs::read(blocker.backup_path()).unwrap(),
-            original_bytes
-        );
-        blocker.restore().expect("restore transcript filename");
+        assert_eq!(std::fs::read(&original_path).unwrap(), original_bytes);
         assert!(conversation.ensure_durable().unwrap());
         assert!(conversation.persistence_error().is_none());
         assert_eq!(load(&original_path).unwrap(), conversation.items());

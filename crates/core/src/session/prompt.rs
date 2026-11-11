@@ -550,6 +550,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         let mut exact = None;
         if has_images || assessment.needs_exact() || force_exact {
             let request = ModelRequest {
+                input_identity: None,
                 instructions: &context.instructions.rendered,
                 tools: &tools,
                 forbid_tool_calls: false,

@@ -88,6 +88,7 @@ async fn inactivity_replay_preserves_wire_prefix_controls_headers_and_cache_iden
     let prompt = Message::user("authoritative input");
     let declared = declarations(&policy_tools(), None);
     let request = || ModelRequest {
+        input_identity: None,
         tools: &declared,
         forbid_tool_calls: false,
         instructions: test_instructions(),
@@ -183,6 +184,7 @@ async fn comparison_id_changes_preserve_socket_continuation_but_cache_mode_does_
         let response = provider
             .complete(
                 ModelRequest {
+                    input_identity: None,
                     tools: &[],
                     forbid_tool_calls: false,
                     instructions: test_instructions(),

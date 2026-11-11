@@ -490,6 +490,7 @@ async fn exact_count_wait_observes_turn_cancellation() {
             &mut provider,
             &mut input_count,
             ModelRequest {
+                input_identity: None,
                 tools: &[],
                 forbid_tool_calls: false,
                 instructions: "test instructions",
@@ -527,6 +528,7 @@ async fn transient_exact_count_failure_is_attempted_once_per_turn() {
         &mut provider,
         &mut input_count,
         ModelRequest {
+            input_identity: None,
             tools: &[],
             forbid_tool_calls: false,
             instructions: "test instructions",
@@ -543,6 +545,7 @@ async fn transient_exact_count_failure_is_attempted_once_per_turn() {
             &mut provider,
             &mut input_count,
             ModelRequest {
+                input_identity: None,
                 tools: &[],
                 forbid_tool_calls: false,
                 instructions: "test instructions",
@@ -568,6 +571,7 @@ async fn transient_exact_count_failure_is_attempted_once_per_turn() {
             &mut provider,
             &mut input_count,
             ModelRequest {
+                input_identity: None,
                 tools: &[],
                 forbid_tool_calls: false,
                 instructions: "test instructions",

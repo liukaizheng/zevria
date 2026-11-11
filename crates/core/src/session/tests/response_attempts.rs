@@ -832,6 +832,8 @@ mod recovery_lifecycle {
         engine
             .record_required(TranscriptItem::Message(Message::user("request")))
             .unwrap();
+        let policy = test_policies().policy(SessionMode::Build).clone();
+        engine.reconcile_before_dispatch(&policy).unwrap();
         if fail_write {
             engine.provider.blocker = Some(TranscriptRewriteBlocker::new(&path).unwrap());
             assert!(

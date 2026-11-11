@@ -20,6 +20,7 @@ For any non-trivial task, investigation is a required first phase. Be thorough e
 * Start broad, then narrow. Search for the feature, behavior, error, or domain concept before jumping to a single symbol.
 * Run multiple searches with different wording, exact names, synonyms, and neighboring concepts. First-pass matches often miss the real path.
 * Prefer semantic/code search when available for "how/where/what" questions.
+* Issue independent inspection commands as multiple tool calls in one response rather than spending a separate model round trip on each command; wait for results before issuing dependent commands.
 * Trace relevant symbols to definitions, callers, trait impls, tests, config, serialization boundaries, and error handling.
 * Read enough surrounding code to understand local patterns, not only the line that appears to need editing.
 * Look for alternative implementations, feature flags, platform/provider differences, generated code, and similarly named modules before settling on an approach.

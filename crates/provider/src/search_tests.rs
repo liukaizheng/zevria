@@ -813,6 +813,7 @@ async fn recovery_records_leave_prepared_full_input_and_wire_body_identical() {
     for history in [&ordinary, &with_recovery] {
         let instructions = rendered_test_instructions("byte-identical instructions");
         let request = || ModelRequest {
+            input_identity: None,
             tools: &[],
             forbid_tool_calls: false,
             instructions,

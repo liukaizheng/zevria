@@ -905,7 +905,7 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
             running.shutdown().await.unwrap();
             let durable = transcript::load_report(&path).unwrap();
             let inherited_models = durable.session_models().unwrap().unwrap().clone();
-            assert_eq!(&durable.items[1..], &original_history[1..]);
+            assert_eq!(&durable.items()[1..], &original_history[1..]);
             assert_eq!(
                 durable
                     .session_models()

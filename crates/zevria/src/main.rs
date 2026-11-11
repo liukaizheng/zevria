@@ -382,26 +382,28 @@ async fn run_session(
             restoration.model_contexts[role.index()].profile.clone(),
         )
     });
-    let mut root_app = App::new().with_skill_context(&zevria_instructions::skill::SkillContext {
+    let root_app = App::new().with_skill_context(&zevria_instructions::skill::SkillContext {
         catalog: restoration.skill_catalog.clone(),
         pins: transcript::replay_active_skills(&restoration.transcript_items)?,
         mode_enabled: true,
     });
-    root_app.restore_session(zevria_tui::RestorationInput {
-        items: restoration.transcript_items.clone(),
-        workflow: restoration.plan_state.clone(),
-        selected_mode: restoration.selected_mode,
-        model_profiles: model_profiles.collect(),
-        contexts: restoration.model_snapshots.clone(),
-        reasoning: restoration.reasoning_levels,
-        persistence_error: None,
-    });
+    let mut views = SessionViews::new_restored(
+        root_app,
+        workspace.to_path_buf(),
+        zevria_tui::RestorationInput {
+            items: restoration.transcript_items,
+            workflow: restoration.plan_state,
+            selected_mode: restoration.selected_mode,
+            model_profiles: model_profiles.collect(),
+            contexts: restoration.model_snapshots,
+            reasoning: restoration.reasoning_levels,
+            persistence_error: None,
+        },
+    );
     for notice in &restoration.startup_notices {
-        root_app.push_error(notice.clone());
+        views.show_root_error(notice.clone());
     }
 
-    let mut views = SessionViews::new(root_app, workspace.to_path_buf());
-    views.seed_child_creation_order(&restoration.transcript_items);
     for child in restoration.subtasks {
         views.restore_child(child.id, child.launch, child.items);
     }

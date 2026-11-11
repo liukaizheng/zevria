@@ -483,18 +483,31 @@ pub(crate) fn connection(openai: &OpenAiProvider, event: &'static str) {
 
 // Invoked before *existing* suppression. It neither consumes events nor changes
 // operational markers/usage. A bounded response-ID ledger owns late terminals.
+#[cfg(test)]
 pub(crate) fn observe_raw(
     openai: &mut OpenAiProvider,
     message: &str,
     prior_id: Option<&str>,
     upstream: Option<&str>,
 ) {
-    if message.len() > 16 * 1024 * 1024 {
+    if let Ok(event) = serde_json::from_str(message) {
+        observe_value(openai, &event, message.len(), prior_id, upstream);
+    }
+}
+
+pub(crate) fn observe_value(
+    openai: &mut OpenAiProvider,
+    event: &serde_json::Value,
+    bytes: usize,
+    prior_id: Option<&str>,
+    upstream: Option<&str>,
+) {
+    if bytes > 16 * 1024 * 1024 {
         tracing::info!(diagnostic_event = "response_observation_unavailable", runtime_id = %openai.cache_diagnostics.runtime,
             local_request_id = ?openai.cache_diagnostics.current_request, reason = "response_inspection_limit", "cache diagnostics");
         return;
     }
-    let Some(raw) = Observation::parse(message) else {
+    let Some(raw) = Observation::parse_value(event) else {
         return;
     };
     let prior_terminal = prior_id.is_some()

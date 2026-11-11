@@ -341,6 +341,7 @@ fn declared_tools_cache_movement_and_golden_body() {
         additional_params: &params,
     };
     let mut request = ModelRequest {
+        input_identity: None,
         tools: &tools,
         forbid_tool_calls: false,
         instructions: "stable",

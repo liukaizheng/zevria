@@ -1,6 +1,7 @@
 //! Lazy role-to-profile routing over independent protocol-specific runtimes.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 use zevria_foundation::{ModelRole, ReasoningLevel};
@@ -27,6 +28,7 @@ struct Route {
 struct ProfileSlot {
     profile: ResolvedModelProfile,
     runtime: Option<ProfileRuntime>,
+    responses_preflight: Mutex<zevria_responses::replay::PreflightCache>,
 }
 
 enum ProfileRuntime {
@@ -125,6 +127,7 @@ impl ProviderRouter {
                 router.slots.push(ProfileSlot {
                     profile: profile.clone(),
                     runtime: None,
+                    responses_preflight: Mutex::default(),
                 });
             }
         }
@@ -160,6 +163,7 @@ impl ProviderRouter {
                 slots.push(ProfileSlot {
                     profile,
                     runtime: None,
+                    responses_preflight: Mutex::default(),
                 });
                 index
             };
@@ -238,6 +242,22 @@ impl ProviderRouter {
         let profile = &self.slots[index].profile;
         match &profile.protocol {
             ProfileProtocol::Responses { endpoint, .. } => {
+                if request.input_identity.is_some() {
+                    let assessment = self.preflight_input_with_identity(
+                        &profile.profile,
+                        &request.input,
+                        request.input_identity,
+                    )?;
+                    anyhow::ensure!(
+                        matches!(
+                            assessment,
+                            zevria_model::models::ReplayPreflight::Compatible(_)
+                        ),
+                        "cannot send replay-only history to target profile {}: conversion required; select its source with /model, confirm a portable summary, or start a fresh session",
+                        profile.profile
+                    );
+                    return Ok(());
+                }
                 zevria_responses::replay::project_with_compatibility(
                     &request.input,
                     &profile.profile,
@@ -406,6 +426,34 @@ impl ModelProvider for ProviderRouter {
                 )
             }
         }
+    }
+
+    fn preflight_input_with_identity(
+        &self,
+        target: &zevria_foundation::ModelProfileRef,
+        input: &[zevria_model::ModelRequestItem<'_>],
+        identity: Option<&zevria_model::ModelInputIdentity>,
+    ) -> anyhow::Result<zevria_model::models::ReplayPreflight> {
+        let Some(identity) = identity else {
+            return self.preflight_input(target, input);
+        };
+        let slot = &self.slots[self.profile_slot(target)?];
+        let ProfileProtocol::Responses { endpoint, .. } = &slot.profile.protocol else {
+            return self.preflight_input(target, input);
+        };
+        slot.responses_preflight
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Responses preflight cache lock poisoned"))?
+            .assess(
+                input,
+                identity,
+                target,
+                endpoint.compatibility.developer_messages,
+                zevria_responses::tools::ToolRendererOptions {
+                    strict_tools: endpoint.compatibility.strict_tools,
+                },
+                endpoint.compatibility.additional_tools,
+            )
     }
 
     fn complete_profile<'a>(

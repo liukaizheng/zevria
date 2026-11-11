@@ -107,6 +107,10 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn invalidate_model_preview(&mut self) {
+        self.prepared_policies
+            .get_mut()
+            .expect("policy cache poisoned")
+            .clear();
         self.clear_model_preview();
         if let Some(models) = self.model_management_mut() {
             models.generation = models.generation.saturating_add(1);
@@ -246,6 +250,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         projected.extend(updates.iter().map(ModelRequestItem::DeveloperInstruction));
         let instructions = self.rendered_instructions(policy);
         let request = ModelRequest {
+            input_identity: None,
             instructions: &instructions,
             tools: &tools,
             forbid_tool_calls: false,
@@ -642,6 +647,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             .collect::<Vec<_>>();
         input.push(ModelRequestItem::message(&prompt));
         let request = ModelRequest {
+            input_identity: None,
             instructions: &captured.request.instructions,
             tools: &captured.request.tools,
             forbid_tool_calls: false,
