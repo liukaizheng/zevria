@@ -255,9 +255,36 @@ async fn lists_share_job_lines_and_do_not_consume_unread_streams() {
     assert!(preview.ends_with('…'));
     assert!(!list.contains("Background"));
     assert!(!list.contains("job updates:"));
+    assert_eq!(jobs.pending_completions().len(), 1);
+    assert_eq!(jobs.pending_completions()[0].snapshot.id, job.snapshot().id);
     let report = status(&jobs, &job.snapshot().id, None).await;
     assert!(report.ends_with("\n<stdout>\nstill unread\n</stdout>"));
     assert!(!report.contains("job updates:"));
+    assert!(jobs.pending_completions().is_empty());
+
+    let empty = jobs
+        .register("true".into(), None, CommandJobMode::Background, None)
+        .await
+        .unwrap();
+    empty
+        .finish(CommandJobStatus::Exited {
+            code: Some(0),
+            success: true,
+            signal: None,
+        })
+        .await;
+    assert_eq!(jobs.pending_completions().len(), 1);
+    CommandStatusTool::new(jobs.clone())
+        .call(
+            &mut ToolContext::new(),
+            CommandStatusArgs {
+                id: None,
+                wait_seconds: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(jobs.pending_completions().is_empty());
 }
 
 #[tokio::test]

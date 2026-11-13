@@ -77,7 +77,7 @@ fn foreground_shapes_are_exact_and_omit_empty_streams() {
         ),
     ] {
         assert_format(
-            &foreground_result(&exited(0, 0.4), &streams(stdout, stderr)),
+            &foreground_result(&exited(0, 0.4), &streams(stdout, stderr), None),
             expected,
         );
     }
@@ -88,6 +88,7 @@ fn foreground_shapes_are_exact_and_omit_empty_streams() {
                 "test edge ... FAILED\n",
                 "error: test failed, to rerun pass `--lib`\n",
             ),
+            None,
         ),
         "exit_code: 101\nduration: 38.2s\n<stdout>\ntest edge ... FAILED\n</stdout>\n<stderr>\nerror: test failed, to rerun pass `--lib`\n</stderr>",
     );
@@ -265,7 +266,7 @@ fn signal_and_unavailable_exit_headers() {
         0.1,
     );
     assert_format(
-        &foreground_result(&unavailable, &streams("", "")),
+        &foreground_result(&unavailable, &streams("", ""), None),
         "exit_code: unavailable\nduration: 0.1s",
     );
     let unknown = snapshot(
@@ -277,7 +278,7 @@ fn signal_and_unavailable_exit_headers() {
         0.1,
     );
     assert_format(
-        &foreground_result(&unknown, &streams("", "")),
+        &foreground_result(&unknown, &streams("", ""), None),
         "signal: 12345\nduration: 0.1s",
     );
     #[cfg(unix)]
@@ -291,7 +292,7 @@ fn signal_and_unavailable_exit_headers() {
             0.1,
         );
         assert_format(
-            &foreground_result(&killed, &streams("", "")),
+            &foreground_result(&killed, &streams("", ""), None),
             "signal: 9 (SIGKILL)\nduration: 0.1s",
         );
         assert_format(
@@ -305,7 +306,7 @@ fn signal_and_unavailable_exit_headers() {
 fn interrupted_errors_have_only_the_core_status_and_no_exit_header() {
     let timeout = snapshot(CommandJobStatus::TimedOut { seconds: 300 }, 300.0);
     assert_format(
-        &interrupted_body(&timeout, &streams("partial", "")),
+        &interrupted_body(&timeout, &streams("partial", ""), None),
         "duration: 300.0s\n<stdout>\npartial\n</stdout>",
     );
     let body = interrupted_body(
@@ -316,8 +317,44 @@ fn interrupted_errors_have_only_the_core_status_and_no_exit_header() {
             12.0,
         ),
         &streams("", ""),
+        None,
     );
     assert_format(&body, "duration: 12.0s");
+}
+
+#[test]
+fn detached_output_note_follows_duration_and_precedes_streams() {
+    let job = exited(0, 2.0);
+    let output = streams("leader-done", "");
+    let note = Some(DETACHED_OUTPUT_NOTE);
+    assert_format(
+        &foreground_result(&job, &output, note),
+        &format!(
+            "exit_code: 0\nduration: 2.0s\nnote: {DETACHED_OUTPUT_NOTE}\n<stdout>\nleader-done\n</stdout>"
+        ),
+    );
+    assert_format(
+        &interrupted_body(&job, &output, note),
+        &format!("duration: 2.0s\nnote: {DETACHED_OUTPUT_NOTE}\n<stdout>\nleader-done\n</stdout>"),
+    );
+    assert_format(
+        &job_report(&job, &output, note),
+        &format!(
+            "id: job-a1b2c3\nstatus: exited 0\nduration: 2.0s\nnote: {DETACHED_OUTPUT_NOTE}\n<stdout>\nleader-done\n</stdout>"
+        ),
+    );
+    assert_format(
+        &foreground_result(&job, &streams("", ""), note),
+        &format!("exit_code: 0\nduration: 2.0s\nnote: {DETACHED_OUTPUT_NOTE}"),
+    );
+    assert_format(
+        &interrupted_body(&job, &streams("", ""), note),
+        &format!("duration: 2.0s\nnote: {DETACHED_OUTPUT_NOTE}"),
+    );
+    assert_format(
+        &job_report(&job, &streams("", ""), note),
+        &format!("id: job-a1b2c3\nstatus: exited 0\nduration: 2.0s\nnote: {DETACHED_OUTPUT_NOTE}"),
+    );
 }
 
 #[test]

@@ -33,14 +33,21 @@ follow-ups. It is frontend-only: it never allocates a turn, enters the follow-up
 queue, or sends text to the model. The list shows running foreground/background
 commands and eight recent finished background jobs (plus jobs pinned for pending
 delivery or promised unread output), including their IDs,
-status, elapsed time, and command previews. Enter inspects bounded stdout/stderr
-tails; Backspace/Left/`b` returns to the list. `x` terminates a running job and `m`
+status, elapsed time (seconds to one decimal), and command previews. Enter
+inspects bounded stdout/stderr tails, opening at the newest output and following
+it while scrolled to the end. Panning up stops following; End or panning back to
+the end resumes it. The inspection header shows command, `fg`/`bg` mode, status,
+and duration. Non-empty stream labels show the shown and total byte counts (for
+example, `stdout (last 8 KiB of 1.2 MiB):` or `stdout (1.2 KiB):` when the whole
+stream fits). Escape sequences are stripped for display, and carriage-return
+progress shows its final state; model output and copied transcripts stay raw.
+Backspace/Left/`b` returns to the list. `x` terminates a running job and `m`
 moves a running foreground command into the background. Ineligible actions are
 both disabled and omitted from hints. Escape or Ctrl+C dismisses only the overlay;
 `?` opens its help. Inspection refreshes on open, lifecycle updates, and once a
 second while open, without consuming the model's incremental output cursor.
-The root status bar shows a lowest-priority `N jobs` count, and background command
-rows retain a `background · job-xxxxxx` badge plus live status when available.
+The root status bar shows a lowest-priority `1 job` / `N jobs` count of all running
+root commands (foreground and background), and background command rows retain a `background · job-xxxxxx` badge plus live status when available.
 Jobs survive turn cancellation but end when the session is closed or replaced;
 resumed transcripts display old badges without restoring the processes.
 

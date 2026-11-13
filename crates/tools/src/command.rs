@@ -147,10 +147,13 @@ impl CommandTool {
                 guard.armed = false;
                 self.jobs.mark_reported(&snapshot.id);
                 let streams = job.retained();
+                let note = job
+                    .output_detached()
+                    .then_some(render::DETACHED_OUTPUT_NOTE);
                 if matches!(snapshot.status, CommandJobStatus::Exited { .. }) {
-                    return Ok(render::foreground_result(&snapshot, &streams));
+                    return Ok(render::foreground_result(&snapshot, &streams, note));
                 }
-                let output = render::interrupted_body(&snapshot, &streams);
+                let output = render::interrupted_body(&snapshot, &streams, note);
                 return match snapshot.status {
                     CommandJobStatus::TimedOut { seconds } => {
                         Err(CommandError::Timeout { seconds, output })

@@ -3,6 +3,9 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 use zevria_foundation::{CommandJobStatus, shell::ShellSpec};
 use zevria_session_api::{CommandStream, JobHandle};
 pub(super) const TERMINATION_GRACE: Duration = Duration::from_secs(2);
+// Descendants that left the owned process group/Job cannot be killed reliably.
+// Stop reading their inherited pipes rather than letting them pin the job forever.
+const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// Spawn synchronously so launch errors remain ordinary tool errors. The task
 /// owns the child and process-tree guard independently of the tool future.
@@ -26,51 +29,71 @@ pub(super) fn spawn_job(
     let stderr = child.stderr.take().expect("piped stderr");
     let worker = job.clone();
     let task = tokio::spawn(async move {
-        // These futures are polled concurrently with the supervisor; aborting
-        // it drops the readers too, rather than detaching drainer tasks.
-        let stdout = drain(stdout, worker.clone(), CommandStream::Stdout);
-        let stderr = drain(stderr, worker.clone(), CommandStream::Stderr);
-        let supervise = async {
-            let mut termination = worker.termination_requested();
-            let mut deadline = worker.deadline();
-            loop {
-                let requested = *termination.borrow_and_update();
-                if let Some(origin) = requested {
-                    terminate_process_tree(&mut child, &tree).await;
-                    break CommandJobStatus::Terminated { origin };
-                }
-                let due = *deadline.borrow_and_update();
-                tokio::select! {
-                    biased;
-                    status = child.wait() => {
-                        tree.kill_remaining();
-                        break match status {
-                            Ok(status) => {
-                                #[cfg(unix)]
-                                let signal = std::os::unix::process::ExitStatusExt::signal(&status);
-                                #[cfg(not(unix))]
-                                let signal = None;
-                                CommandJobStatus::Exited { code: status.code(), success: status.success(), signal }
-                            }
-                            Err(error) => CommandJobStatus::Failed { error: format!("failed while waiting for command: {error}") },
-                        };
-                    }
-                    _ = termination.changed() => {},
-                    _ = deadline.changed() => {},
-                    () = async { if let Some(due) = due { tokio::time::sleep_until(due).await; } else { std::future::pending::<()>().await; } } => {
-                        let seconds = due.map(|d| worker.deadline_seconds(d)).unwrap_or_default();
+        let (status, drained) = {
+            // Poll drains with the supervisor so pipes cannot back up. This scope
+            // drops the readers and child borrow before disarming the tree guard.
+            let stdout = drain(stdout, worker.clone(), CommandStream::Stdout);
+            let stderr = drain(stderr, worker.clone(), CommandStream::Stderr);
+            let supervise = async {
+                let mut termination = worker.termination_requested();
+                let mut deadline = worker.deadline();
+                loop {
+                    let requested = *termination.borrow_and_update();
+                    if let Some(origin) = requested {
                         terminate_process_tree(&mut child, &tree).await;
-                        break CommandJobStatus::TimedOut { seconds };
+                        break CommandJobStatus::Terminated { origin };
                     }
+                    let due = *deadline.borrow_and_update();
+                    tokio::select! {
+                        biased;
+                        status = child.wait() => {
+                            tree.kill_remaining();
+                            break match status {
+                                Ok(status) => {
+                                    #[cfg(unix)]
+                                    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+                                    #[cfg(not(unix))]
+                                    let signal = None;
+                                    CommandJobStatus::Exited { code: status.code(), success: status.success(), signal }
+                                }
+                                Err(error) => CommandJobStatus::Failed { error: format!("failed while waiting for command: {error}") },
+                            };
+                        }
+                        _ = termination.changed() => {},
+                        _ = deadline.changed() => {},
+                        () = async { if let Some(due) = due { tokio::time::sleep_until(due).await; } else { std::future::pending::<()>().await; } } => {
+                            let seconds = due.map(|d| worker.deadline_seconds(d)).unwrap_or_default();
+                            terminate_process_tree(&mut child, &tree).await;
+                            break CommandJobStatus::TimedOut { seconds };
+                        }
+                    }
+                }
+            };
+            let drains = async {
+                let (stdout, stderr) = tokio::join!(stdout, stderr);
+                stdout.and(stderr)
+            };
+            tokio::pin!(supervise, drains);
+            let mut drained = None;
+            let status = loop {
+                tokio::select! {
+                    status = &mut supervise => break status,
+                    result = &mut drains, if drained.is_none() => drained = Some(result),
+                }
+            };
+            if drained.is_none() {
+                match tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut drains).await {
+                    Ok(result) => drained = Some(result),
+                    Err(_) => worker.mark_output_detached(),
                 }
             }
+            (status, drained)
         };
-        let (status, stdout, stderr) = tokio::join!(supervise, stdout, stderr);
-        let status = match stdout.and(stderr) {
-            Ok(()) => status,
-            Err(error) => CommandJobStatus::Failed {
+        let status = match drained {
+            Some(Err(error)) => CommandJobStatus::Failed {
                 error: error.to_string(),
             },
+            _ => status,
         };
         tree.disarm();
         worker.finish(status).await;

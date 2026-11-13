@@ -271,6 +271,23 @@ impl NativeToolState {
             subtasks: std::collections::BTreeMap::new(),
         }
     }
+
+    pub fn is_background_command(&self) -> bool {
+        self.command_job
+            .as_ref()
+            .is_some_and(|job| job.mode == zevria_foundation::CommandJobMode::Background)
+            || self
+                .metadata
+                .as_ref()
+                .and_then(ToolResultMetadata::command_job)
+                .is_some()
+            || self
+                .arguments
+                .as_ref()
+                .and_then(|args| args.get("background"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    }
 }
 
 /// What a `launch_subtasks` block shows beyond its separately rendered

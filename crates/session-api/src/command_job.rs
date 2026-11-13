@@ -12,8 +12,8 @@ use std::{
 use tokio::{sync::watch, task::AbortHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 use zevria_foundation::{
-    CommandJobId, CommandJobMode, CommandJobSnapshot, CommandJobStatus, CommandJobView,
-    TerminationOrigin,
+    COMMAND_JOB_FRONTEND_TAIL_BYTES, CommandJobId, CommandJobMode, CommandJobSnapshot,
+    CommandJobStatus, CommandJobView, TerminationOrigin,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -64,13 +64,16 @@ impl StreamBuffer {
         self.head.extend_from_slice(&bytes[..take]);
         bytes = &bytes[take..];
         let tail_limit = self.limit - self.limit / 2;
-        for &byte in bytes {
-            if self.tail.len() == tail_limit && tail_limit > 0 {
-                self.tail.pop_front();
-            }
-            if tail_limit > 0 {
-                self.tail.push_back(byte);
-            }
+        if tail_limit == 0 {
+            return;
+        }
+        if bytes.len() >= tail_limit {
+            self.tail.clear();
+            self.tail.extend(&bytes[bytes.len() - tail_limit..]);
+        } else {
+            let overflow = (self.tail.len() + bytes.len()).saturating_sub(tail_limit);
+            self.tail.drain(..overflow);
+            self.tail.extend(bytes);
         }
     }
     pub fn total_bytes(&self) -> usize {
@@ -97,12 +100,17 @@ impl StreamBuffer {
         }
     }
     pub fn peek_unread(&self, running: bool) -> StreamText {
-        self.clone().take_unread(running)
+        self.unread_from(running).0
     }
     pub fn consume_all(&mut self) {
         self.cursor = self.total;
     }
     pub fn take_unread(&mut self, running: bool) -> StreamText {
+        let (text, cursor) = self.unread_from(running);
+        self.cursor = cursor;
+        text
+    }
+    fn unread_from(&self, running: bool) -> (StreamText, usize) {
         let tail_start = self.total - self.tail.len();
         let mut bytes = Vec::new();
         if self.cursor < self.head.len() {
@@ -114,12 +122,14 @@ impl StreamBuffer {
             let head = String::from_utf8_lossy(&bytes).into_owned();
             bytes = self.tail.iter().copied().collect();
             let end = utf8_end(&bytes, running);
-            self.cursor = tail_start + end;
-            return StreamText {
-                head,
-                discarded: tail_start - gap_start,
-                tail: String::from_utf8_lossy(&bytes[..end]).into_owned(),
-            };
+            return (
+                StreamText {
+                    head,
+                    discarded: tail_start - gap_start,
+                    tail: String::from_utf8_lossy(&bytes[..end]).into_owned(),
+                },
+                tail_start + end,
+            );
         }
         bytes.extend(
             self.tail
@@ -129,21 +139,30 @@ impl StreamBuffer {
         );
         let start = self.cursor;
         let end = utf8_end(&bytes, running);
-        self.cursor = start + end;
-        StreamText {
-            head: String::from_utf8_lossy(&bytes[..end]).into_owned(),
-            ..StreamText::default()
-        }
+        (
+            StreamText {
+                head: String::from_utf8_lossy(&bytes[..end]).into_owned(),
+                ..StreamText::default()
+            },
+            start + end,
+        )
     }
     pub fn tail_preview(&self, max: usize) -> String {
-        let mut bytes: Vec<u8> = if self.total > self.head.len() + self.tail.len() {
-            self.tail.iter().copied().collect()
+        let retained = self.head.len() + self.tail.len();
+        let bytes: Vec<u8> = if self.total > retained {
+            self.tail
+                .iter()
+                .skip(self.tail.len().saturating_sub(max))
+                .copied()
+                .collect()
         } else {
-            self.head.iter().chain(self.tail.iter()).copied().collect()
+            self.head
+                .iter()
+                .chain(self.tail.iter())
+                .skip(retained.saturating_sub(max))
+                .copied()
+                .collect()
         };
-        if bytes.len() > max {
-            bytes.drain(..bytes.len() - max);
-        }
         let mut start = 0;
         while start < bytes.len() && bytes[start] & 0xc0 == 0x80 {
             start += 1;
@@ -209,6 +228,7 @@ struct State {
     completions: VecDeque<Arc<Job>>,
 }
 struct Job {
+    id: CommandJobId,
     record: Mutex<Record>,
     changed: watch::Sender<u64>,
     termination: watch::Sender<Option<TerminationOrigin>>,
@@ -224,6 +244,7 @@ struct Record {
     origin: Option<TurnId>,
     // A status-only notice promises that command_status can still read output.
     preserve_unread: bool,
+    output_detached: bool,
     pending_mode: Option<CommandJobSnapshot>,
     supervisor: Option<AbortHandle>,
 }
@@ -322,6 +343,7 @@ impl CommandJobs {
                 self.0.limits.background_timeout
             };
             let job = Arc::new(Job {
+                id: id.clone(),
                 record: Mutex::new(Record {
                     snapshot: CommandJobSnapshot {
                         id: id.clone(),
@@ -340,6 +362,7 @@ impl CommandJobs {
                     model_owned: mode == CommandJobMode::Background,
                     origin,
                     preserve_unread: false,
+                    output_detached: false,
                     pending_mode: None,
                     supervisor: None,
                 }),
@@ -357,7 +380,7 @@ impl CommandJobs {
         };
         let mut registration = RegistrationGuard {
             registry: Arc::downgrade(&self.0),
-            id: handle.snapshot().id,
+            id: handle.job.id.clone(),
             committed: false,
         };
         handle.publish(handle.snapshot()).await;
@@ -478,12 +501,12 @@ impl CommandJobs {
                             CommandJobView {
                                 snapshot: r.snapshot.clone(),
                                 stdout_tail: if id.is_some() {
-                                    r.stdout.tail_preview(8192)
+                                    r.stdout.tail_preview(COMMAND_JOB_FRONTEND_TAIL_BYTES)
                                 } else {
                                     String::new()
                                 },
                                 stderr_tail: if id.is_some() {
-                                    r.stderr.tail_preview(8192)
+                                    r.stderr.tail_preview(COMMAND_JOB_FRONTEND_TAIL_BYTES)
                                 } else {
                                     String::new()
                                 },
@@ -534,11 +557,7 @@ impl CommandJobs {
     pub fn acknowledge_completions(&self, acknowledgements: &[(CommandJobId, bool)]) {
         let mut state = self.0.state.lock().unwrap();
         for (id, consumed) in acknowledgements {
-            if let Some(job) = state
-                .completions
-                .iter()
-                .find(|job| job.snapshot().id == *id)
-            {
+            if let Some(job) = state.completions.iter().find(|job| job.id == *id) {
                 let mut r = job.record.lock().unwrap();
                 if *consumed {
                     r.stdout.consume_all();
@@ -547,7 +566,7 @@ impl CommandJobs {
                 r.preserve_unread =
                     !consumed && (r.stdout.unread_len() > 0 || r.stderr.unread_len() > 0);
             }
-            state.completions.retain(|job| job.snapshot().id != *id);
+            state.completions.retain(|job| job.id != *id);
         }
         evict_finished(&mut state, self.0.limits.retained_finished);
     }
@@ -562,10 +581,28 @@ impl CommandJobs {
     }
     pub fn mark_reported(&self, id: &CommandJobId) {
         let mut state = self.0.state.lock().unwrap();
-        state.completions.retain(|job| &job.snapshot().id != id);
+        state.completions.retain(|job| &job.id != id);
         if let Some(job) = state.jobs.get(id) {
             job.record.lock().unwrap().preserve_unread = false;
         }
+        evict_finished(&mut state, self.0.limits.retained_finished);
+    }
+    /// A list reports status only, so unread output must keep its delivery pin.
+    pub fn mark_listed(&self, id: &CommandJobId) {
+        let mut state = self.0.state.lock().unwrap();
+        let Some(job) = state.jobs.get(id) else {
+            return;
+        };
+        let mut r = job.record.lock().unwrap();
+        if !r.snapshot.status.is_terminal()
+            || r.stdout.unread_len() > 0
+            || r.stderr.unread_len() > 0
+        {
+            return;
+        }
+        r.preserve_unread = false;
+        drop(r);
+        state.completions.retain(|job| &job.id != id);
         evict_finished(&mut state, self.0.limits.retained_finished);
     }
     pub fn is_closed(&self) -> bool {
@@ -644,6 +681,9 @@ pub struct PendingCompletion {
     job: Arc<Job>,
 }
 impl PendingCompletion {
+    pub fn output_detached(&self) -> bool {
+        self.job.record.lock().unwrap().output_detached
+    }
     pub fn peek_unread(&self) -> (StreamText, StreamText) {
         let r = self.job.record.lock().unwrap();
         (r.stdout.peek_unread(false), r.stderr.peek_unread(false))
@@ -657,7 +697,7 @@ impl PendingCompletion {
 fn evict_finished(state: &mut State, limit: usize) {
     while state.finished.len() > limit {
         let Some(index) = state.finished.iter().position(|id| {
-            !state.completions.iter().any(|job| job.snapshot().id == *id)
+            !state.completions.iter().any(|job| job.id == *id)
                 && state
                     .jobs
                     .get(id)
@@ -711,6 +751,12 @@ impl JobHandle {
     }
     pub fn take_unread(&self) -> (StreamText, StreamText) {
         self.job.unread()
+    }
+    pub fn mark_output_detached(&self) {
+        self.job.record.lock().unwrap().output_detached = true;
+    }
+    pub fn output_detached(&self) -> bool {
+        self.job.record.lock().unwrap().output_detached
     }
     pub fn retained(&self) -> (StreamText, StreamText) {
         let r = self.job.record.lock().unwrap();
@@ -771,12 +817,7 @@ impl JobHandle {
         self.job.record.lock().unwrap().model_owned = false;
         self.finish(CommandJobStatus::Failed { error }).await;
         if let Some(registry) = self.registry.upgrade() {
-            registry
-                .state
-                .lock()
-                .unwrap()
-                .jobs
-                .remove(&self.snapshot().id);
+            registry.state.lock().unwrap().jobs.remove(&self.job.id);
         }
     }
     pub async fn finish(&self, status: CommandJobStatus) {

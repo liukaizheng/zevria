@@ -1458,10 +1458,12 @@ impl ConversationState {
                             .and_then(|m| m.detail.as_ref())
                             .and_then(|d| d.command_job())
                             .is_some_and(|d| d.id == job.id))
-                    && state.command_job.as_ref() != Some(job)
                 {
-                    state.command_job = Some(job.clone());
-                    block.touch();
+                    if state.command_job.as_ref() != Some(job) {
+                        state.command_job = Some(job.clone());
+                        block.touch();
+                    }
+                    return;
                 }
             }
         }

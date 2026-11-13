@@ -2309,7 +2309,7 @@ combined stdout/stderr capture. The foreground limits apply identically to root
 sessions and both child kinds. Both streams are drained concurrently into
 bounded head/tail buffers, preventing pipe deadlocks without retaining
 unbounded output. On Unix each command owns a process group; timeout,
-cancellation, or worker abort terminates descendants as well as the shell.
+cancellation, or worker abort terminates descendants in that group as well as the shell.
 Native Windows freezes a Git Bash shell/child environment for root and both child
 kinds and checks RTK before model-driven tools. It starts workloads suspended,
 assigns an owned kill-on-close Job Object, then resumes. Leader exit status is
@@ -2328,18 +2328,36 @@ that process tree. A user can inspect running foreground commands through
 `/jobs`, terminate one without cancelling the turn, or move it to the background
 and release the blocked tool call immediately. Turn cancellation terminates
 only the foreground command it is waiting on; background jobs survive turn
-completion and Ctrl+C.
+completion and Ctrl+C. Listing acknowledges only finished jobs with no unread
+output. A finished job with unread stdout/stderr remains pending (or keeps its
+promised-unread pin after a status-only notice), so listing cannot suppress its
+later automatic output delivery.
+
+When the leader exits, the supervisor kills the remaining owned process group or
+Job. Processes that left it, for example via `setsid`, cannot be killed reliably.
+Their inherited stdout/stderr readers get a two-second drain grace, then capture
+stops and the job finishes with the leader's real status. Results and completion
+notices include a `note:` explaining that a detached process held the pipes and
+may receive EPIPE/SIGPIPE on later writes; daemon output should be redirected to
+a file. This is a runtime-only flag, not a serialized snapshot field. Detached
+pipe holders therefore cannot pin termination, timeout, or turn cancellation:
+the cleanup budget is the two-second SIGTERM grace plus the two-second output
+drain grace (about four seconds, within the termination tool's five-second wait).
+Normal commands finish draining at EOF without waiting for that grace.
 
 Background jobs have no default deadline. `command.background_timeout_seconds`,
 when set, must be at least `command.timeout_seconds`; the total wall-clock
 budget is re-armed when a foreground job is moved to the background.
 `command.max_background_jobs` caps running background jobs (default 8); zero
 restores the foreground-only root registry and policies. Eight finished background
-jobs are normally retained; pending delivery and promised unread output pin jobs
+jobs are normally retained, using the shared foundation
+`RETAINED_FINISHED_COMMAND_JOBS` constant in the host and both frontend job states;
+pending delivery and promised unread output pin jobs
 past that retention bound until acknowledged/read. Completed foreground jobs are
 removed immediately.
 Each job keeps bounded head/tail capture, with 16 KiB per-stream model elision
-and independent, non-consuming 8 KiB frontend tails. UTF-8 fragments at the
+and independent, non-consuming 8 KiB frontend tails, bounded by foundation's
+`COMMAND_JOB_FRONTEND_TAIL_BYTES`. UTF-8 fragments at the
 running model cursor are held until complete. Capture returns structured head,
 discarded-byte count, and tail segments; only the shared shell-result renderer
 turns those segments into model text. Each elided stream has exactly one marker:
@@ -2366,8 +2384,8 @@ closing tag if the content does not already end with one. With no output the
 header stands alone: no empty blocks or placeholders. Content is not escaped;
 a literal closing tag in command output can therefore resemble a block boundary.
 Timeout, user termination, and turn cancellation retain the core
-`status: error\nerror:` envelope; their command body adds only duration and
-streams, never a second status or an unavailable exit code. Tool success/error
+`status: error\nerror:` envelope; their command body adds only duration, an optional
+detached-output note, and streams, never a second status or an unavailable exit code. Tool success/error
 classification and the command-job sidecar are independent of this text.
 
 Job lists and completion notices use the same line shape:
@@ -2446,6 +2464,29 @@ rewrite and displays a recovery notice. Content-only `write`/`edit` operations
 also use atomic sibling replacement. A combined edit-and-move attempts rollback
 if final installation fails and reports any surviving mutation as a typed
 `Partial` tool outcome.
+
+### Command-job backlog (priority order)
+
+The following larger features remain deliberately unimplemented:
+
+1. **Desktop job controls:** add the running-job count, ID/live status badges,
+   list/tail inspection, termination, and foreground-to-background controls.
+   Move correlated-request, generation, and overlay retention bookkeeping into
+   `zevria-presentation` first, rather than duplicating the TUI implementation.
+2. **ACP lifecycle/control parity:** surface `CommandJobUpdated` and
+   `CommandControlResult` and let editor clients stop runaway jobs.
+3. **Child command visibility and background work:** expose child foreground
+   commands to `/jobs` and support long-lived jobs in Build children instead of
+   private foreground-only registries capped by the foreground timeout.
+4. **Recoverable large logs:** consider opt-in per-job log spills for the
+   irrecoverable middle of head/tail capture, with explicit disk/privacy limits.
+5. **Status ergonomics:** wait for any job, re-read retained output, and offer
+   line-tail limits in addition to the current per-job unread cursor.
+6. **Restart awareness:** provide a one-time notice about unreported jobs from
+   the previous process, without restoring or implying that they still run.
+7. **TUI discoverability and confirmation:** consider a muted `/jobs to
+   background or stop` hint after about ten seconds and press-twice termination
+   confirmation. These are separate UX choices, not part of the current controls.
 
 ## Subtasks: independent Explore and Build subsessions
 

@@ -3,6 +3,9 @@ use rig_core::message::Message;
 use serde::{Deserialize, Serialize, de::Error as _};
 use std::{fmt, time::SystemTime};
 
+pub const RETAINED_FINISHED_COMMAND_JOBS: usize = 8;
+pub const COMMAND_JOB_FRONTEND_TAIL_BYTES: usize = 8 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CommandJobId(String);

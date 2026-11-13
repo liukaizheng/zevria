@@ -6,6 +6,7 @@ pub use zevria_foundation::{command_job_duration as duration, command_job_line a
 
 pub const MAX_OUTPUT_STREAM_BYTES: usize = 16 * 1024;
 pub const MOVED_TO_BACKGROUND_NOTE: &str = "the user moved this command to the background; use command_status for later output and command_terminate to stop it";
+pub const DETACHED_OUTPUT_NOTE: &str = "a detached process still held stdout/stderr after the command exited; capture stopped, and that process may get SIGPIPE on later writes (redirect its output to a file)";
 const STARTED_IN_BACKGROUND_NOTE: &str = "started in the background; use command_status to read output or wait, and command_terminate to stop it";
 
 /// Account for capture gaps and model elision in exactly one marker per stream.
@@ -87,7 +88,14 @@ pub fn exit_lines(status: &CommandJobStatus) -> String {
     }
 }
 
-fn with_streams(mut header: String, streams: &(StreamText, StreamText)) -> String {
+fn with_streams(
+    mut header: String,
+    streams: &(StreamText, StreamText),
+    note: Option<&str>,
+) -> String {
+    if let Some(note) = note {
+        write!(header, "\nnote: {note}").expect("writing to a string cannot fail");
+    }
     let blocks = stream_blocks(&streams.0, &streams.1);
     if !blocks.is_empty() {
         header.push('\n');
@@ -99,6 +107,7 @@ fn with_streams(mut header: String, streams: &(StreamText, StreamText)) -> Strin
 pub fn foreground_result(
     snapshot: &CommandJobSnapshot,
     streams: &(StreamText, StreamText),
+    note: Option<&str>,
 ) -> String {
     with_streams(
         format!(
@@ -107,6 +116,7 @@ pub fn foreground_result(
             duration(snapshot)
         ),
         streams,
+        note,
     )
 }
 
@@ -115,8 +125,9 @@ pub fn foreground_result(
 pub fn interrupted_body(
     snapshot: &CommandJobSnapshot,
     streams: &(StreamText, StreamText),
+    note: Option<&str>,
 ) -> String {
-    with_streams(format!("duration: {}", duration(snapshot)), streams)
+    with_streams(format!("duration: {}", duration(snapshot)), streams, note)
 }
 
 /// An immediate background acknowledgement has no output read or duration yet.
@@ -132,16 +143,16 @@ pub fn job_report(
     streams: &(StreamText, StreamText),
     note: Option<&str>,
 ) -> String {
-    let mut header = format!(
-        "id: {}\nstatus: {}\nduration: {}",
-        snapshot.id,
-        snapshot.status,
-        duration(snapshot)
-    );
-    if let Some(note) = note {
-        write!(header, "\nnote: {note}").expect("writing to a string cannot fail");
-    }
-    with_streams(header, streams)
+    with_streams(
+        format!(
+            "id: {}\nstatus: {}\nduration: {}",
+            snapshot.id,
+            snapshot.status,
+            duration(snapshot)
+        ),
+        streams,
+        note,
+    )
 }
 
 #[cfg(test)]

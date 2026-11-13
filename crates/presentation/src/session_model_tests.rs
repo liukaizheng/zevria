@@ -731,6 +731,119 @@ fn tool_completion_bumps_the_same_block_revision() {
     assert!(entry.blocks[0].revision > before.1);
 }
 #[test]
+fn tool_results_attach_only_the_batchs_live_command_snapshots() {
+    use zevria_foundation::{
+        CommandJobDetail, CommandJobDisposition, CommandJobId, CommandJobMode, CommandJobSnapshot,
+        CommandJobStatus, ToolCallOutcome, ToolResultDetail, ToolResultMetadata,
+    };
+    fn block<'a>(model: &'a SessionModel, id: &str) -> &'a crate::blocks::PresentationBlock {
+        model
+            .conversation
+            .history()
+            .iter()
+            .filter_map(|entry| match entry {
+                HistoryEntry::Conversation(entry) => Some(entry),
+                _ => None,
+            })
+            .flat_map(|entry| &entry.blocks)
+            .find(|block| {
+                block
+                    .native_tool()
+                    .is_some_and(|(call, _)| call.id.wire().as_ref() == id)
+            })
+            .unwrap()
+    }
+    for match_by_job_id in [false, true] {
+        let mut model = pending();
+        start(&mut model);
+        let older = CommandJobSnapshot {
+            id: CommandJobId::new("job-older"),
+            call_id: Some("older".into()),
+            command: "older command".into(),
+            mode: CommandJobMode::Background,
+            status: CommandJobStatus::Running,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            finished_at: None,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        };
+        let current = CommandJobSnapshot {
+            id: CommandJobId::new("job-batch"),
+            call_id: (!match_by_job_id).then(|| "batch".into()),
+            command: "batch command".into(),
+            ..older.clone()
+        };
+        for job in [&older, &current] {
+            model.reduce(E::CommandJobUpdated { job: job.clone() });
+        }
+        model.reduce(E::Intermediate {
+            turn_id: TURN,
+            attempt_id: None,
+            message: Message::Assistant(AssistantMessage::new(
+                ["older", "batch"]
+                    .into_iter()
+                    .map(|id| {
+                        AssistantContent::ToolCall(ToolCall::new(
+                            CallId::from_wire(id),
+                            ToolFunction::new(
+                                ToolName::new("command").unwrap(),
+                                serde_json::json!({"command":id}),
+                            ),
+                        ))
+                    })
+                    .collect(),
+            )),
+        });
+        // A deliberately distinct cached snapshot proves an unrelated block is
+        // not revisited by this batch's attachment pass.
+        let mut cached = older;
+        cached.stdout_bytes = 42;
+        model.conversation.update_command_job(&cached);
+        let old_revision = block(&model, "older").revision;
+        model.reduce(E::ToolResults {
+            turn_id: TURN,
+            message: Message::tool_result(
+                CallId::from_wire("batch"),
+                ToolName::new("command").unwrap(),
+                "done",
+            ),
+            metadata: vec![ToolResultMetadata {
+                id: "batch".into(),
+                call_id: None,
+                tool_name: "command".into(),
+                outcome: ToolCallOutcome::Success,
+                diagnostic: None,
+                detail: match_by_job_id.then(|| {
+                    ToolResultDetail::CommandJob(CommandJobDetail {
+                        id: current.id.clone(),
+                        disposition: CommandJobDisposition::StartedInBackground,
+                    })
+                }),
+            }],
+        });
+        assert_eq!(
+            block(&model, "batch")
+                .native_tool()
+                .unwrap()
+                .1
+                .command_job
+                .as_ref(),
+            Some(&current)
+        );
+        assert_eq!(
+            block(&model, "older")
+                .native_tool()
+                .unwrap()
+                .1
+                .command_job
+                .as_ref(),
+            Some(&cached)
+        );
+        assert_eq!(block(&model, "older").revision, old_revision);
+    }
+}
+
+#[test]
 fn disconnect_rejects_a_pending_mode_without_a_synthetic_turn() {
     let mut model = SessionModel::default();
     model.select_mode(SessionMode::Plan).unwrap();

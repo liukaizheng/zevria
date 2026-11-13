@@ -14,12 +14,16 @@ use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
-use zevria_foundation::{CommandJobId, CommandJobMode, CommandJobSnapshot, CommandJobView};
+use zevria_foundation::{
+    COMMAND_JOB_FRONTEND_TAIL_BYTES, CommandJobId, CommandJobMode, CommandJobSnapshot,
+    CommandJobView, RETAINED_FINISHED_COMMAND_JOBS, command_job_duration,
+};
+use zevria_presentation::jobs::{byte_label, terminal_tail_text};
 use zevria_session_api::{
     CommandControl, CommandControlAction as Request, CommandControlResult as Reply, ControlCommand,
     SessionCommand, SessionEvent,
 };
-use zevria_tui_widgets::overlay::{ListNav, modal};
+use zevria_tui_widgets::overlay::{ListAction, ListNav, modal};
 #[derive(Clone)]
 enum Purpose {
     Inspect(Option<CommandJobId>, u64),
@@ -31,6 +35,7 @@ pub(crate) struct JobsOverlay {
     jobs: Vec<CommandJobSnapshot>,
     inspect: Option<CommandJobId>,
     detail: Option<CommandJobView>,
+    follow: bool,
     nav: ListNav,
     keys: ChordState,
     pending: HashMap<String, Purpose>,
@@ -47,6 +52,7 @@ impl JobsOverlay {
     }
     pub fn show(&mut self) {
         self.open = true;
+        self.follow = false;
         self.inspect = None;
         self.detail = None;
         self.message.clear();
@@ -150,7 +156,7 @@ impl JobsOverlay {
             if j.mode == CommandJobMode::Foreground && j.status.is_terminal() {
                 return self.inspect.as_ref() == Some(&j.id);
             }
-            if j.status.is_terminal() && finished > 8 {
+            if j.status.is_terminal() && finished > RETAINED_FINISHED_COMMAND_JOBS {
                 finished -= 1;
                 return false;
             }
@@ -229,6 +235,7 @@ impl JobsOverlay {
         match action {
             Action::Cancel | Action::Close => self.open = false,
             Action::Back => {
+                self.follow = false;
                 self.inspect = None;
                 self.detail = None;
                 self.jobs
@@ -241,7 +248,7 @@ impl JobsOverlay {
             Action::Confirm if self.inspect.is_none() => {
                 self.inspect = self.selected().map(|j| j.id.clone());
                 self.detail = None;
-                self.nav.viewport.jump_start();
+                self.follow = true;
                 self.refresh();
             }
             Action::Terminate | Action::MoveToBackground => {
@@ -261,6 +268,8 @@ impl JobsOverlay {
                 if let Some(action) = action.list_action() {
                     if self.inspect.is_some() {
                         self.nav.pan(action);
+                        self.follow = action == ListAction::End
+                            || self.nav.viewport.top() >= self.nav.viewport.max_top();
                     } else {
                         self.nav.handle(action, self.jobs.len());
                     }
@@ -274,45 +283,55 @@ impl JobsOverlay {
         if let Some(id) = &self.inspect {
             lines.push(Line::from(format!("Inspect {id}")));
             if let Some(detail) = &self.detail {
+                let job = &detail.snapshot;
                 lines.push(Line::from(format!(
-                    "{} · {}",
-                    display_command(&detail.snapshot.command),
-                    detail.snapshot.status
+                    "{} · {} · {} · {}",
+                    display_command(&job.command),
+                    mode_label(job.mode),
+                    job.status,
+                    command_job_duration(job),
                 )));
-                lines.push(Line::from("stdout (tail):"));
-                lines.extend(
-                    clean(&detail.stdout_tail)
-                        .lines()
-                        .map(|s| Line::from(s.to_owned())),
-                );
-                lines.push(Line::from("stderr (tail):"));
-                lines.extend(
-                    clean(&detail.stderr_tail)
-                        .lines()
-                        .map(|s| Line::from(s.to_owned())),
-                );
+                for (name, tail, bytes) in [
+                    ("stdout", &detail.stdout_tail, job.stdout_bytes),
+                    ("stderr", &detail.stderr_tail, job.stderr_bytes),
+                ] {
+                    if tail.is_empty() {
+                        continue;
+                    }
+                    lines.push(Line::from(if bytes > COMMAND_JOB_FRONTEND_TAIL_BYTES {
+                        format!(
+                            "{name} (last {} KiB of {}):",
+                            COMMAND_JOB_FRONTEND_TAIL_BYTES / 1024,
+                            byte_label(bytes)
+                        )
+                    } else {
+                        format!("{name} ({}):", byte_label(bytes))
+                    }));
+                    lines.extend(
+                        terminal_tail_text(tail)
+                            .lines()
+                            .map(|s| Line::from(s.to_owned())),
+                    );
+                }
+                if detail.stdout_tail.is_empty() && detail.stderr_tail.is_empty() {
+                    lines.push(Line::from(if job.status.is_terminal() {
+                        "No output."
+                    } else {
+                        "No output yet."
+                    }));
+                }
             } else {
                 lines.push(Line::from("Loading output tails…"));
             }
         } else {
             for job in &self.jobs {
                 entries.push(lines.len());
-                let elapsed = job
-                    .finished_at
-                    .unwrap_or_else(std::time::SystemTime::now)
-                    .duration_since(job.started_at)
-                    .unwrap_or_default()
-                    .as_secs();
                 lines.push(Line::from(format!(
-                    "{} · {} · {} · {}s · {}",
+                    "{} · {} · {} · {} · {}",
                     job.id,
-                    if job.mode == CommandJobMode::Foreground {
-                        "fg"
-                    } else {
-                        "bg"
-                    },
+                    mode_label(job.mode),
                     job.status,
-                    elapsed,
+                    command_job_duration(job),
                     display_command(&job.command)
                 )));
             }
@@ -345,6 +364,9 @@ impl JobsOverlay {
             physical,
             usize::from(inner.height),
         );
+        if self.follow {
+            self.nav.viewport.jump_end();
+        }
         frame.render_widget(
             Paragraph::new(lines)
                 .style(crate::chrome::overlay_style())
@@ -356,6 +378,12 @@ impl JobsOverlay {
             self.nav.paint_selected(frame, inner);
         }
         crate::viewport::render_scrollbar(frame, area, &self.nav.viewport);
+    }
+}
+fn mode_label(mode: CommandJobMode) -> &'static str {
+    match mode {
+        CommandJobMode::Foreground => "fg",
+        CommandJobMode::Background => "bg",
     }
 }
 fn display_command(command: &str) -> String {
@@ -378,6 +406,202 @@ mod tests {
     fn key(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
     }
+    fn snapshot(mode: CommandJobMode) -> CommandJobSnapshot {
+        CommandJobSnapshot {
+            id: CommandJobId::new("job-inspect"),
+            call_id: None,
+            command: "echo output".into(),
+            mode,
+            status: zevria_foundation::CommandJobStatus::Exited {
+                code: Some(0),
+                success: true,
+                signal: None,
+            },
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            finished_at: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(1234)),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        }
+    }
+    fn render_text(overlay: &mut JobsOverlay, width: u16, height: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn reply_inspect(overlay: &mut JobsOverlay, view: CommandJobView) {
+        let SessionCommand::Control(ControlCommand::Command(request)) =
+            overlay.commands.pop_front().unwrap()
+        else {
+            panic!("inspect request")
+        };
+        assert!(matches!(request.action, Request::Inspect { .. }));
+        overlay.event(&SessionEvent::CommandControlResult {
+            request_id: request.request_id,
+            result: Reply::Inspected(vec![view]),
+        });
+    }
+    fn view(job: &CommandJobSnapshot, lines: usize) -> CommandJobView {
+        let stdout_tail: String = (0..lines).map(|n| format!("line {n:03}\n")).collect();
+        let mut snapshot = job.clone();
+        snapshot.stdout_bytes = stdout_tail.len();
+        CommandJobView {
+            snapshot,
+            stdout_tail,
+            stderr_tail: String::new(),
+        }
+    }
+
+    #[test]
+    fn inspection_opens_at_the_tail_and_follows_until_panned_up() {
+        let job = snapshot(CommandJobMode::Background);
+        let mut overlay = JobsOverlay::default();
+        overlay.show();
+        reply_inspect(&mut overlay, view(&job, 0));
+        overlay.handle_input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(overlay.follow);
+        reply_inspect(&mut overlay, view(&job, 50));
+        let text = render_text(&mut overlay, 100, 12);
+        assert!(text.contains("line 049"), "{text}");
+        assert!(!text.contains("line 000"), "{text}");
+        assert_eq!(overlay.nav.viewport.top(), overlay.nav.viewport.max_top());
+
+        overlay.tick(Instant::now() + Duration::from_secs(2));
+        reply_inspect(&mut overlay, view(&job, 60));
+        let text = render_text(&mut overlay, 100, 12);
+        assert!(text.contains("line 059"), "{text}");
+        assert_eq!(overlay.nav.viewport.top(), overlay.nav.viewport.max_top());
+
+        overlay.handle_input(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(!overlay.follow);
+        let top = overlay.nav.viewport.top();
+        overlay.tick(Instant::now() + Duration::from_secs(2));
+        reply_inspect(&mut overlay, view(&job, 70));
+        let text = render_text(&mut overlay, 100, 12);
+        assert_eq!(overlay.nav.viewport.top(), top);
+        assert!(!text.contains("line 069"), "{text}");
+
+        overlay.handle_input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(overlay.follow);
+        let text = render_text(&mut overlay, 100, 12);
+        assert!(text.contains("line 069"), "{text}");
+        overlay.tick(Instant::now() + Duration::from_secs(2));
+        reply_inspect(&mut overlay, view(&job, 80));
+        assert!(render_text(&mut overlay, 100, 12).contains("line 079"));
+        overlay.handle_input(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(!overlay.follow);
+        overlay.handle_input(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(overlay.follow, "reaching the end resumes following");
+        overlay.handle_input(key('b'));
+        assert!(!overlay.follow);
+        assert!(overlay.inspect.is_none());
+    }
+
+    #[test]
+    fn list_and_inspection_show_shared_durations_modes_and_stream_sizes() {
+        for mode in [CommandJobMode::Foreground, CommandJobMode::Background] {
+            let mut job = snapshot(mode);
+            let mut overlay = JobsOverlay::default();
+            // Finished foreground commands are retained only while inspected.
+            overlay.inspect = Some(job.id.clone());
+            overlay.update(job.clone());
+            overlay.inspect = None;
+            let text = render_text(&mut overlay, 100, 28);
+            assert!(
+                text.contains(&format!(
+                    "{} · {} · exited 0 · 1.2s",
+                    job.id,
+                    mode_label(mode)
+                )),
+                "{text}"
+            );
+            job.stdout_bytes = 1536 * 1024;
+            job.stderr_bytes = 1536;
+            overlay.inspect = Some(job.id.clone());
+            overlay.detail = Some(CommandJobView {
+                snapshot: job,
+                stdout_tail: "output".into(),
+                stderr_tail: "warning".into(),
+            });
+            let text = render_text(&mut overlay, 100, 28);
+            assert!(
+                text.contains(&format!(
+                    "echo output · {} · exited 0 · 1.2s",
+                    mode_label(mode)
+                )),
+                "{text}"
+            );
+            assert!(text.contains("stdout (last 8 KiB of 1.5 MiB):"), "{text}");
+            assert!(text.contains("stderr (1.5 KiB):"), "{text}");
+        }
+    }
+
+    #[test]
+    fn inspection_sanitizes_tails_and_omits_empty_stream_sections() {
+        let job = snapshot(CommandJobMode::Background);
+        let mut overlay = JobsOverlay::default();
+        overlay.inspect = Some(job.id.clone());
+        overlay.detail = Some(CommandJobView {
+            snapshot: job,
+            stdout_tail: "\u{1b}[31mred\u{1b}[0m\na\rb".into(),
+            stderr_tail: String::new(),
+        });
+        let text = render_text(&mut overlay, 100, 28);
+        assert!(text.contains("red"), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.trim_matches(|ch| ch == ' ' || ch == '│') == "b"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("[31m") && !text.contains("[0m") && !text.contains("ab"),
+            "{text}"
+        );
+        assert!(!text.contains("stderr ("), "{text}");
+        for running in [false, true] {
+            let detail = overlay.detail.as_mut().unwrap();
+            detail.stdout_tail.clear();
+            if running {
+                detail.snapshot.status = zevria_foundation::CommandJobStatus::Running;
+            }
+            let text = render_text(&mut overlay, 100, 28);
+            assert!(
+                text.contains(if running {
+                    "No output yet."
+                } else {
+                    "No output."
+                }),
+                "{text}"
+            );
+            assert!(
+                !text.contains("stdout (") && !text.contains("stderr ("),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn finished_background_retention_remains_eight() {
+        let mut overlay = JobsOverlay::default();
+        for n in 0..10 {
+            let mut job = snapshot(CommandJobMode::Background);
+            job.id = CommandJobId::new(format!("job-{n}"));
+            job.started_at += Duration::from_secs(n);
+            overlay.update(job);
+        }
+        assert_eq!(overlay.jobs.len(), 8);
+        assert_eq!(overlay.jobs[0].id, CommandJobId::new("job-2"));
+    }
+
     #[test]
     fn stale_inspection_cannot_resurrect_a_finished_foreground_job_or_reopen_overlay() {
         let mut overlay = JobsOverlay::default();

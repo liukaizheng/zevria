@@ -360,7 +360,8 @@ fn jobs_overlay_is_global_captures_input_and_dismisses_without_cancelling_busy_r
     let text = rendered_views_text(&mut views, 120, 28);
     assert!(text.contains("Jobs"));
     assert!(text.contains("job-test01"));
-    assert!(text.contains("1 jobs"));
+    assert!(text.contains("1 job"));
+    assert!(!text.contains("1 jobs"));
     views.handle_event(Event::Paste("ignored overlay paste".into()));
     assert_eq!(views.root.input(), "saved draft");
     assert_eq!(views.handle_event(key(KeyCode::Char('x'))), None);

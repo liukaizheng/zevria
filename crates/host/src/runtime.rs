@@ -173,7 +173,7 @@ pub(crate) fn build_isolated_build_tools(
 pub(crate) fn command_job_limits(config: CommandConfig) -> CommandJobLimits {
     CommandJobLimits {
         max_running_background: config.max_background_jobs,
-        retained_finished: 8,
+        retained_finished: zevria_foundation::RETAINED_FINISHED_COMMAND_JOBS,
         capture_bytes: config.capture_bytes,
         foreground_timeout: std::time::Duration::from_secs(config.timeout_seconds),
         background_timeout: config

@@ -270,13 +270,7 @@ impl BlockData {
                             meta: ToolMeta {
                                 added,
                                 removed,
-                                background: state.command_job.is_some()
-                                    || state
-                                        .arguments
-                                        .as_ref()
-                                        .and_then(|a| a.get("background"))
-                                        .and_then(|a| a.as_bool())
-                                        == Some(true),
+                                background: state.is_background_command(),
                             },
                         };
                         data.gutter = Gutter::Glyph(status);
@@ -1544,6 +1538,67 @@ mod tests {
         };
         assert_eq!(summary, "gh api x");
         assert_eq!(highlights, [(0..2, ShellToken::Program)]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn command_background_tags_follow_mode_metadata_or_explicit_arguments() {
+        use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
+        use zevria_foundation::*;
+        for (mode, metadata, argument, expected) in [
+            (Some(CommandJobMode::Foreground), false, false, false),
+            (Some(CommandJobMode::Background), false, false, true),
+            (None, true, false, true),
+            (None, false, true, true),
+        ] {
+            let args = serde_json::json!({"command":"echo done", "background":argument});
+            let mut state = NativeToolState::new(NativeToolCallStatus::Finished, &args);
+            let id = CommandJobId::new("job-tag");
+            state.command_job = mode.map(|mode| CommandJobSnapshot {
+                id: id.clone(),
+                call_id: Some("command-tag".into()),
+                command: "echo done".into(),
+                mode,
+                status: CommandJobStatus::Exited {
+                    code: Some(0),
+                    success: true,
+                    signal: None,
+                },
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                finished_at: Some(std::time::SystemTime::UNIX_EPOCH),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+            });
+            state.metadata = metadata.then(|| ToolResultMetadata {
+                id: "command-tag".into(),
+                call_id: None,
+                tool_name: "command".into(),
+                outcome: ToolCallOutcome::Success,
+                diagnostic: None,
+                detail: Some(ToolResultDetail::CommandJob(CommandJobDetail {
+                    id,
+                    disposition: CommandJobDisposition::MovedToBackground,
+                })),
+            });
+            let block = PresentationBlock {
+                id: PresentationBlockId(1),
+                revision: 0,
+                role: Some(PresentationRole::Assistant),
+                prompt_group: None,
+                prompt: None,
+                visibility: BlockVisibility::Always,
+                kind: PresentationBlockKind::Tool(PresentedTool::Native {
+                    call: Box::new(ToolCall::new(
+                        CallId::from_wire("command-tag"),
+                        ToolFunction::new(ToolName::new("command").unwrap(), args),
+                    )),
+                    state: Box::new(state),
+                }),
+            };
+            let BlockKind::Tool { meta, .. } = BlockData::block("epoch", &block).kind else {
+                panic!("command block did not map to a tool")
+            };
+            assert_eq!(meta.background, expected);
+        }
     }
 
     #[::core::prelude::v1::test]

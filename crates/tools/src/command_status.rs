@@ -45,7 +45,7 @@ impl CommandStatusTool {
             for job in jobs {
                 lines.push(render::job_line(&job));
                 if job.status.is_terminal() {
-                    self.jobs.mark_reported(&job.id);
+                    self.jobs.mark_listed(&job.id);
                 }
             }
             return Ok(lines.join("\n"));
@@ -71,7 +71,12 @@ impl CommandStatusTool {
         if snapshot.status.is_terminal() {
             self.jobs.mark_reported(&snapshot.id);
         }
-        Ok(render::job_report(&snapshot, &streams, None))
+        Ok(render::job_report(
+            &snapshot,
+            &streams,
+            job.output_detached()
+                .then_some(render::DETACHED_OUTPUT_NOTE),
+        ))
     }
 }
 impl Tool for CommandStatusTool {

@@ -62,6 +62,10 @@ impl JobFollowState {
         for completion in completions {
             text.push_str("\n\n");
             text.push_str(&command_render::job_line(&completion.snapshot));
+            if completion.output_detached() {
+                text.push_str("\nnote: ");
+                text.push_str(command_render::DETACHED_OUTPUT_NOTE);
+            }
             let mut consumed = false;
             if self.is_followed(completion) {
                 let (stdout, stderr) = completion.unread_bytes();

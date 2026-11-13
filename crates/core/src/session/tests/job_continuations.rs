@@ -88,6 +88,52 @@ fn notice_in(request: &CapturedRequest) -> String {
 }
 
 #[tokio::test]
+async fn listed_job_with_detached_output_still_delivers_its_note_and_unread_output() {
+    let (_directory, transcript) = test_transcript();
+    let path = transcript.path().to_path_buf();
+    let jobs = jobs();
+    let completed = job(&jobs, 1, b"probe-output-line").await;
+    completed.mark_output_detached();
+    finish(&completed).await;
+    jobs.mark_listed(&completed.snapshot().id);
+    let (provider, mut calls) = GatedProvider::new();
+    let engine = job_engine(provider, transcript, &jobs, 3);
+    let (events, receiver) = session_event_channel(64);
+    let mut run = RunningSession::start(engine, [submit("receive result")], events, receiver);
+    let next = run.call(&mut calls).await;
+    let notice = run
+        .lifecycle
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::CommandJobsReported { notice, .. } => Some(notice),
+            _ => None,
+        })
+        .expect("listed completion was not delivered");
+    assert_eq!(
+        notice.text(),
+        format!(
+            "Command job update: these background jobs finished.\n\n{}\nnote: {}\n<stdout>\nprobe-output-line\n</stdout>",
+            zevria_session_api::command_render::job_line(&completed.snapshot()),
+            zevria_session_api::command_render::DETACHED_OUTPUT_NOTE,
+        )
+    );
+    let expected = notice.text().to_owned();
+    assert!(notice_in(&next.request).contains("probe-output-line"));
+    assert!(jobs.pending_completions().is_empty());
+    answer(next, "done");
+    run.completed(TurnId::new(1)).await;
+    run.shutdown().await;
+    assert!(
+        zevria_transcript::load(&path)
+            .unwrap()
+            .iter()
+            .any(|item| matches!(
+                item, TranscriptItem::CommandJobNotice(notice) if notice.text() == expected
+            ))
+    );
+}
+
+#[tokio::test]
 async fn dispatch_boundary_delivers_once_after_complete_tool_batch_with_static_prefix() {
     let (_directory, transcript) = test_transcript();
     let path = transcript.path().to_path_buf();

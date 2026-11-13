@@ -77,7 +77,9 @@ in provider order:
 Build mint and Plan blue mark live work, mode controls and Send. A green ✓ means
 success, ✗ means failure, ⊘ means denied and ◼ means stopped or interrupted.
 Shapes and words always accompany state colors. Tool labels remain secondary
-ink; shell syntax, not the label, carries color. Background tags use info ink.
+ink; shell syntax, not the label, carries color. Background tags use info ink
+and appear only for commands started in or moved to the background; a live
+foreground command snapshot alone never adds the tag.
 
 SF Pro, Charter and Menlo are public macOS-bundled font families, with native
 fallback. Transcript typography is centralized as `Type { size, leading }` in

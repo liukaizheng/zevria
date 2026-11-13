@@ -243,7 +243,11 @@ fn fitting_candidate(
 fn build_candidate(view: &StatusBarView, options: RenderOptions) -> StatusCandidate {
     let mut left = Vec::new();
     if options.jobs && view.jobs > 0 {
-        left.push(format!("{} jobs", view.jobs));
+        left.push(format!(
+            "{} {}",
+            view.jobs,
+            if view.jobs == 1 { "job" } else { "jobs" }
+        ));
     }
     if options.optional_left {
         left.extend(
@@ -417,6 +421,19 @@ mod tests {
                 !text.contains(" · high") || text.contains("model-wide"),
                 "{width}: {text}"
             );
+        }
+    }
+
+    #[test]
+    fn running_job_count_uses_singular_and_plural() {
+        for (jobs, expected) in [(1, "1 job"), (2, "2 jobs")] {
+            let mut view = complete_view();
+            view.jobs = jobs;
+            let text = compact_text(&view, 240);
+            assert!(text.contains(expected), "{text}");
+            if jobs == 1 {
+                assert!(!text.contains("1 jobs"), "{text}");
+            }
         }
     }
 

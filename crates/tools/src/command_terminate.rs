@@ -4,8 +4,8 @@ use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use zevria_foundation::{CommandJobId, TerminationOrigin};
-use zevria_session_api::{CommandJobs, command_render as render};
+use zevria_foundation::{CommandJobId, TerminationOrigin, ToolCancelled};
+use zevria_session_api::{CommandJobs, TurnContext, command_render as render};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -38,20 +38,35 @@ impl Tool for CommandTerminateTool {
     }
     async fn call(
         &self,
-        _context: &mut ToolContext,
+        context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<String, CommandError> {
         let id = CommandJobId::new(args.id);
         async {
             let job = self.jobs.job(&id).map_err(job_error)?;
             job.terminate(TerminationOrigin::Model);
-            if !job.wait_terminal(Duration::from_secs(5), &Default::default()).await {
+            let cancellation = context
+                .scope::<TurnContext>()
+                .map(|t| t.cancellation().clone())
+                .unwrap_or_default();
+            let terminal = job.wait_terminal(Duration::from_secs(5), &cancellation).await;
+            if cancellation.is_cancelled() {
+                context
+                    .insert_result(ToolCancelled)
+                    .expect("cancellation markers serialize");
+                return Err(CommandError::Cancelled { output: "Termination wait cancelled; the termination request still applies and completes independently.".into() });
+            }
+            if !terminal {
                 return Err(CommandError::Job(format!("termination requested for {id}; cleanup is still in progress; use command_status to inspect it")));
             }
             let snapshot = job.snapshot();
             let streams = job.take_unread();
             self.jobs.mark_reported(&snapshot.id);
-            Ok(render::job_report(&snapshot, &streams, None))
+            Ok(render::job_report(
+                &snapshot,
+                &streams,
+                job.output_detached().then_some(render::DETACHED_OUTPUT_NOTE),
+            ))
         }.await
     }
 }

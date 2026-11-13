@@ -310,7 +310,12 @@ impl SessionModel {
                 for header in self.conversation.finish_tool_results(&message, &metadata) {
                     self.conversation.finish_header(Some(header), self.session.observed_at());
                 }
-                for job in self.jobs.iter() { self.conversation.update_command_job(job); }
+                for job in self.jobs.iter().filter(|job| metadata.iter().any(|result| {
+                    job.call_id.as_deref() == Some(result.id.as_str())
+                        || result.command_job().is_some_and(|detail| detail.id == job.id)
+                })) {
+                    self.conversation.update_command_job(job);
+                }
             }
             SessionEvent::SubtaskLaunched {
                 call_id,
