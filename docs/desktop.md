@@ -158,6 +158,69 @@ model**, **Thinking**, **Writing**, **Running command** (or another tool name),
 **Reconnecting** with attempt/countdown, **Compacting context**, and **Stopping**.
 Opaque-only progress cannot be called thinking, so it remains waiting.
 
+### Final outputs and turn navigation
+
+**Show final outputs only** (⇧⌘R) is a window-level reading mode, available as a
+checked View-menu item and the title-strip **Final outputs** book toggle. The
+compact title strip keeps only its icon. The mode applies to the root and every
+inspected subtask, survives session replacement and pane switches, and is not
+saved across launches. Turning it off restores the ordinary transcript and its
+independent thinking/tool choices. Toggling either way retires every pane's
+per-run expand/collapse choices.
+
+Each turn begins at the shared `ConversationState::turn_starts(false)` boundary:
+ordinary/skill prompts, approved Plan handoffs, job continuations and ensembles.
+Headerless ACP user groups map to their entry row; entries before the first
+boundary form a group without a prompt. Prompts stay fully readable. The last
+conversation entry with visible assistant content, including its Thinking
+header, and everything after it stay visible. Thus a trailing error, **Stopped**
+node or job/startup notice never displaces the answer. Plan artifacts, errors and
+compaction dividers also stay visible and split steps into separate runs.
+Approved Plan handoffs remain navigation stops without adding a hairline to
+their existing card border.
+
+A maximal eligible run before the answer becomes a full-width disclosure on the
+solid thread: **14 steps**, then muted **8 tool calls, 4 thoughts, 2 messages**,
+then **+42 −7** when changes exist. Zero parts are omitted; singular forms are
+**1 step**, **1 tool call**, **1 thought**, **1 message**. Tool, subtask and web
+blocks count as calls, reasoning as thoughts, other blocks as messages. Empty
+interior entries are absorbed. The summary inherits the first step's speaker
+label; expanding does not duplicate that label. A muted **⋮** marks compression
+on the thread, not a new card. There is no summary Copy action.
+
+Like Thinking, a summary is a focusable native Button, at least 28 px high, with
+an expanded state, **N steps** as its accessible name and the breakdown as its
+description. Click, Enter/Space and focused ⌥⌘→/← operate only that run. Live
+runs start expanded with their header visible. At turn end, untouched runs fold
+only while following the tail; scrolling away defers the fold until following
+resumes. Explicit choices survive later commits, not the next turn. Restored
+and finished runs start folded. Collapsing a run that contains the non-following
+viewport's top anchors it at the summary; focused hidden steps transfer focus
+to the summary, even if that header has not rendered yet. Disabling the mode
+with a focused summary returns focus to the window's shortcut context.
+
+This adapts TUI **zm/zR** (turn-intermediate folding/unfolding) and **zo** (one
+span), not **zM** (older final-response outlines). Desktop does not fold prompts
+or modify engine, provider or persisted state.
+
+**Previous turn** (⌥⌘↑) goes to the nearest start strictly above the live viewport
+top, or the current start if the top is mid-turn/mid-prompt. **Next turn** (⌥⌘↓)
+goes to the nearest start strictly below. Exact-boundary presses skip that start;
+there is no wraparound. These actions align the row top, detach tail following,
+preserve all folds and leave composer draft, cursor and focus alone. Pending
+thinking/step folds keep waiting. **Jump to beginning** (⌥⇧⌘↑) targets row 0;
+**Jump to latest** (⌥⇧⌘↓, formerly ⌥⌘↓) resumes following. The Kit Jump to latest
+button is unchanged. The stops match TUI **[/]**, at Desktop entry-row granularity.
+
+The live list anchor, rather than a saved destination, handles remeasurement,
+streaming, width changes, folds and truncation splices; projection replacement
+resets it. A destination within the final screenful cannot align to the top
+without trailing blank extent: the list clamps at the end and may resume
+following. Multiple ACP user groups within one entry share a stop. Input-context
+bindings override Kit's ⌥⌘↑/↓ add-cursor shortcuts, so Desktop text fields give
+up those multi-cursor bindings. Navigation is discoverable in menus and keys
+only: no floating previous/next controls or sidebar turn list.
+
 ### Commands: display without routing, copy exactly
 
 Both frontends share the renderer-free `zevria_presentation::shell` display rule.
@@ -247,7 +310,11 @@ scenes, thinking-live, thinking-restored, thinking-interrupted, thinking-unsaved
 code-heavy answers, docked questions and Plan review also render under Graphite
 Light. The `math` scene restores
 the shared Hölder proof fixture at 1240×3200 and 720×3200, plus a light-palette
-1240×3200 capture. It contains all 15 inline and 11 display formulas, including
+1240×3200 capture. The `final-outputs` scene restores three multi-step turns
+with commentary, thinking, commands, an edit, a Plan artifact and a stopped
+turn, then dispatches the native mode action. Its 1240×1600 and 720×1600 Graphite
+captures and 1240×1600 Graphite Light capture show the summary disclosures.
+The math scene contains all 15 inline and 11 display formulas, including
 large delimiters, boxes and an aligned derivation with a 2 mm row gap.
 
 For an opt-in, **read-only** capture of an existing session:
@@ -411,13 +478,18 @@ parser boundary separately from the fully covered proof fixture.
   warnings; 250 ms clock updates run only while root work is pending/active.
 - Exact primary/output copy values remain available even when display is bounded.
 
-Additional keyboard controls have discoverable View/Session menu items:
+Additional keyboard controls have discoverable View/Session menu items. View
+separates sidebar visibility, block/thinking disclosures, the checked **Show final
+outputs only** mode, and turn navigation/beginning/latest actions:
 
 | Keys | Action |
 | --- | --- |
-| ⌥⌘→ / ⌥⌘← | Expand/collapse the focused thinking or tool block; from the composer, the latest thinking |
+| ⌥⌘→ / ⌥⌘← | Expand/collapse the focused steps, thinking or tool block; from the composer, the latest visible thinking |
 | ⌥⇧⌘→ / ⌥⇧⌘← | Expand/collapse all thinking in the visible pane |
-| ⌥⌘↓ | Jump to latest and resume tail following |
+| ⇧⌘R | Toggle Show final outputs only |
+| ⌥⌘↑ / ⌥⌘↓ | Previous/next turn, aligned to the transcript top |
+| ⌥⇧⌘↑ | Jump to beginning (row 0) |
+| ⌥⇧⌘↓ | Jump to latest and resume tail following |
 | ⌘↩ | Send the open question answer or implement the open Plan |
 | ⇧⌘M | Switch the next-turn Build/Plan mode |
 
@@ -517,6 +589,18 @@ cacheable prompt prefixes remain under the existing regression tests.
   replacement retires them. Ambiguous/mismatched boundaries fall back to policy,
   not another block's state.
   Switching width class remeasures rows so labels and virtualized heights agree.
+- Steps keys are `{epoch}-steps-{start_row}` and belong to a separate pane-local
+  `DisclosureStore`, never the thinking/tool store. Truncations retaining a run's
+  start retain its choice; projection replacement and either mode toggle retire
+  choices. Mode survives replacement without a new config/persistence schema.
+  Runs/counts are rebuilt for history, busy/call or mode changes, never tail-only
+  deltas. Every block consumer uses the same presented-block accessor.
+- Hidden entries remain logical list items with zero height. Inter-row spacing
+  is row-local: Kit's wrapper `pb_8` is disabled, and non-final, non-hidden rows
+  use `pb(rems(2.))`, preserving the ordinary gap without hidden-row spacing.
+  Role changes remeasure affected rows; summary choices remeasure their run.
+  Navigation reads `logical_scroll_top()` and calls `scroll_to_item`, never
+  reconciles stored turn targets or invents within-row ACP stops.
 - Desktop styling never enters request construction, tool registration, prompts
   or transcript envelopes. The provider's cacheable prompt prefix is unchanged.
 
@@ -623,10 +707,13 @@ release:
   a generated named theme. Change macOS appearance while streaming; the default
   pair must switch live and a named theme must stay pinned.
 - [ ] Keyboard-only pass: sidebar arrows/Enter; Tab and reverse Shift-Tab;
-  Enter/Space on thinking; ⌥⌘→/←; expand/collapse-all; ⌥⌘↓; ⇧⌘M; ⌘↩ decisions.
+  Enter/Space on thinking and steps; ⌥⌘→/←; expand/collapse-all; ⇧⌘R;
+  ⌥⌘↑/↓ from the focused composer; ⌥⇧⌘↑/↓; ⇧⌘M; ⌘↩ decisions.
   Check every visible focus ring, including virtualized and narrow-window rows.
 - [ ] VoiceOver spot check: Thinking has its Button role, name, supplied preview
-  description and expanded state; Copy and Jump to latest have meaningful names.
+  description and expanded state; step summaries announce N steps and their
+  breakdown with expanded state; the book toggle announces Show final outputs
+  only and its checked state. Copy and Jump to latest have meaningful names.
 - [ ] Test Reduce Motion on and off: the live tip stays at ◐ and Plan opening is
   instant when enabled.
 - [ ] Open workspace (including ⌘O on the no-workspace screen), new session,
@@ -641,6 +728,15 @@ release:
 - [ ] Complete a turn: untouched thinking folds; explicit choices persist.
   Scroll up before completion and verify no jump/fold until Jump to latest.
   Enter another turn and confirm it does not inherit the previous fold.
+- [ ] Real-provider final-outputs pass: enable during streaming; live steps stay
+  expanded, explicit choices survive commits, untouched folds wait while scrolled
+  away and apply on Jump to latest. Prompts, final responses, Plan artifacts,
+  errors and Stopped stay visible. Toggle off and verify ordinary disclosures.
+- [ ] With final outputs enabled, inspect a child and replace/resume a session:
+  the mode survives, replacement retires run choices, composer navigation leaves
+  draft/cursor/focus alone, and the View menu matches the title toggle.
+- [ ] Collapse while focused within a step or reading its middle: focus/top move
+  to that run's summary rather than unrelated content.
 - [ ] Plan → Ready → Implement; repeat with Implement in fresh session.
 - [ ] Text/select/Other/multi-select/optional questions in the dock: transcript
   scroll stays available, ⌘↩ sends, Esc only dismisses when allowed, and the
@@ -678,6 +774,16 @@ No external provider credentials were exercised for this acceptance checklist.
 
 ## Explicit limitations
 
+- Final outputs mode is window-local, not persisted across launches. The
+  final-response heuristic is based on visible assistant roles; unusual mixed-role
+  ACP entries group coarsely. Multiple user groups in one entry share one stop.
+  Navigation aligns rows, not positions inside a row. The final screenful clamps
+  rather than adding trailing blank extent and may resume tail following.
+- Kit's ⌥⌘↑/↓ multi-cursor shortcuts are overridden in Desktop inputs. Jump to
+  latest moved to ⌥⇧⌘↓. Turn-end automatic fold flushing has no Window access,
+  so it cannot rescue focus from a live step folded at that point; explicit
+  collapses and mode changes do rescue it. Real-provider, VoiceOver and native
+  keyboard-only checks above remain manual acceptance, not gallery claims.
 - Math is KaTeX-compatible, not a TeX engine: unsupported commands show source,
   not an approximation. Native math/gallery require macOS and Metal. Raster
   overhang, device dimensions and caches have the budgets listed above; Unicode

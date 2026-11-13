@@ -7,6 +7,7 @@ use super::{
 use crate::{
     controller::SessionController,
     disclosure::{Phase, TailKind},
+    turns::StepCounts,
 };
 use gpui_kit::base::{AccordionTrigger, text::TextView};
 use gpui_kit::component::clipboard::Clipboard;
@@ -17,7 +18,12 @@ use gpui_kit::component::{
     text::TextViewState,
 };
 use gpui_kit::{prelude::*, *};
-use std::{ops::Range, sync::Arc};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    ops::Range,
+    sync::Arc,
+};
 use zevria_presentation::{
     blocks::*,
     conversation::HistoryEntry,
@@ -95,6 +101,7 @@ pub enum BlockKind {
         plain: bool,
     },
     Reasoning,
+    Steps(StepCounts),
     Tool {
         status: StatusIcon,
         name: String,
@@ -171,6 +178,16 @@ impl BlockData {
             source: None,
             header: None,
         }
+    }
+    pub fn steps(key: String, counts: StepCounts, gutter: Gutter, phase: Phase) -> Self {
+        let mut hash = DefaultHasher::new();
+        counts.hash(&mut hash);
+        let title = counts.title();
+        let mut data = Self::new(key, BlockKind::Steps(counts), gutter, title, true);
+        data.revision = hash.finish();
+        data.collapsible = true;
+        data.phase = phase;
+        data
     }
     fn block(epoch: &str, block: &PresentationBlock) -> Self {
         let role = block.role.unwrap_or(PresentationRole::System);
@@ -525,7 +542,10 @@ pub fn entry(
 impl BlockData {
     pub fn tail_kind(&self) -> Option<TailKind> {
         match self.kind {
-            BlockKind::Tool { .. } | BlockKind::Subtask { .. } | BlockKind::Live(_) => None,
+            BlockKind::Steps(_)
+            | BlockKind::Tool { .. }
+            | BlockKind::Subtask { .. }
+            | BlockKind::Live(_) => None,
             BlockKind::Reasoning => Some(TailKind::Thinking),
             BlockKind::Prose {
                 role: PresentationRole::Assistant,
@@ -569,6 +589,7 @@ pub struct BlockView {
     _text: Subscription,
     _output: Subscription,
     _clock: Subscription,
+    block_focus: FocusHandle,
     action_focus: [FocusHandle; 3],
     disclosure_focus: FocusHandle,
     focus_subscriptions: Vec<Subscription>,
@@ -583,12 +604,12 @@ impl BlockView {
     pub(super) fn text_id(&self) -> EntityId {
         self.text.entity_id()
     }
-    #[cfg(test)]
     pub(super) fn disclosure_focus(&self) -> FocusHandle {
         self.disclosure_focus.clone()
     }
     pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.disclosure_focus.contains_focused(window, cx)
+        self.block_focus.contains_focused(window, cx)
+            || self.disclosure_focus.contains_focused(window, cx)
             || self
                 .action_focus
                 .iter()
@@ -654,6 +675,7 @@ impl BlockView {
             _text: watch,
             _output: watch_output,
             _clock: clock,
+            block_focus: cx.focus_handle(),
             action_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
             disclosure_focus: cx.focus_handle(),
             focus_subscriptions: Vec::new(),
@@ -667,7 +689,8 @@ impl BlockView {
         }
         let metadata_changed = data.expanded != self.data.expanded
             || data.phase != self.data.phase
-            || data.key != self.data.key;
+            || data.key != self.data.key
+            || data.gutter != self.data.gutter;
         if data.revision == self.data.revision
             && data.body == self.data.body
             && data.secondary == self.data.secondary
@@ -944,6 +967,76 @@ impl Render for BlockView {
                                 .child(self.actions(window, cx)),
                         ),
                 );
+            }
+            BlockKind::Steps(counts) => {
+                let owner = cx.entity();
+                let mut header = AccordionTrigger::new("steps-disclosure")
+                    .open(self.data.expanded)
+                    .track_focus(&self.disclosure_focus)
+                    .aria_label(counts.title())
+                    .aria_description(counts.description())
+                    .relative()
+                    .w_full()
+                    .min_h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(|h| h.bg(tones(cx).hover))
+                    .active(|h| h.bg(tones(cx).pressed))
+                    .on_change(move |expanded, _, window, cx| {
+                        owner.update(cx, |this, cx| {
+                            window.focus(&this.disclosure_focus, cx);
+                            this.disclose(expanded, cx);
+                        })
+                    })
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.disclose(!this.data.expanded, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(
+                        Icon::new(if self.data.expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .small()
+                        .text_color(t.text.muted),
+                    )
+                    .child(style::label().child(counts.title()))
+                    .child(
+                        style::meta()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(t.text.muted)
+                            .child(counts.description()),
+                    );
+                if counts.added > 0 {
+                    header = header.child(
+                        style::meta()
+                            .flex_shrink_0()
+                            .text_color(t.feedback.success)
+                            .child(format!("+{}", counts.added)),
+                    );
+                }
+                if counts.removed > 0 {
+                    header = header.child(
+                        style::meta()
+                            .flex_shrink_0()
+                            .text_color(t.feedback.error)
+                            .child(format!("−{}", counts.removed)),
+                    );
+                }
+                if self.disclosure_focus.is_focused(window) {
+                    header = header.child(style::focus_ring(6., cx));
+                }
+                content = content.child(header);
+                if !self.data.expanded {
+                    content = content.child(style::thread_marker("⋮", t.text.muted, cx));
+                }
             }
             BlockKind::Reasoning => {
                 let preview = crate::disclosure::preview(&self.data.body);
@@ -1453,6 +1546,8 @@ impl Render for BlockView {
         measure
             .row()
             .id(self.data.key.clone())
+            .track_focus(&self.block_focus)
+            .tab_stop(false)
             .test_support()
             .when(self.data.turn_boundary, |r| r.pt(px(32.)))
             .when(show_gutter, |row| row.child(gutter))

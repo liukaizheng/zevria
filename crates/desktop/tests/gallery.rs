@@ -52,6 +52,7 @@ mod native {
         ThinkingInterrupted,
         ThinkingUnsaved,
         CodeHeavy,
+        FinalOutputs,
         Plan,
         Question,
         Confirm,
@@ -75,6 +76,7 @@ mod native {
                 Self::ThinkingInterrupted => "thinking-interrupted",
                 Self::ThinkingUnsaved => "thinking-unsaved",
                 Self::CodeHeavy => "code-heavy-answer",
+                Self::FinalOutputs => "final-outputs",
                 Self::Plan => "plan-review",
                 Self::Question => "question",
                 Self::Confirm => "replace-confirmation",
@@ -107,6 +109,7 @@ mod native {
                 Scene::ThinkingInterrupted,
                 Scene::ThinkingUnsaved,
                 Scene::CodeHeavy,
+                Scene::FinalOutputs,
                 Scene::Plan,
                 Scene::Question,
                 Scene::Confirm,
@@ -115,7 +118,11 @@ mod native {
                 capture(
                     scene,
                     width,
-                    840.,
+                    if scene == Scene::FinalOutputs {
+                        1600.
+                    } else {
+                        840.
+                    },
                     zevria_theme::ZEVRIA_GRAPHITE,
                     &directory.join(format!("{}-{}.png", scene.name(), width as u32)),
                 )?;
@@ -139,6 +146,13 @@ mod native {
                 )?;
             }
         }
+        capture(
+            Scene::FinalOutputs,
+            1240.,
+            1600.,
+            light,
+            &directory.join("final-outputs-light-1240.png"),
+        )?;
         for scene in [
             Scene::Empty,
             Scene::Working,
@@ -279,6 +293,12 @@ mod native {
                     cx.notify();
                 });
             }
+            if scene == Scene::FinalOutputs {
+                controller.update(cx, |c, cx| {
+                    c.model.root.conversation.restore(final_outputs_items());
+                    cx.notify();
+                });
+            }
             if scene == Scene::Math {
                 controller.update(cx, |c, cx| {
                     c.model.root.conversation.restore(vec![
@@ -351,6 +371,13 @@ mod native {
             })?;
             settle(&mut cx, window)?;
         }
+        if scene == Scene::FinalOutputs {
+            cx.update_window(window, |_, window, cx| {
+                window.dispatch_action(Box::new(actions::ToggleFinalOutputs), cx);
+                window.dispatch_action(Box::new(actions::JumpToBeginning), cx);
+            })?;
+            settle(&mut cx, window)?;
+        }
         if scene == Scene::Confirm {
             // A native action opens the authoritative inline confirmation layer.
             cx.update_window(window, |_, window, cx| {
@@ -367,6 +394,50 @@ mod native {
         screenshot.save(output)?;
         println!("{}", output.display());
         Ok(())
+    }
+    fn final_outputs_items() -> Vec<zevria_transcript::transcript::TranscriptItem> {
+        use zevria_transcript::transcript::TranscriptItem as T;
+        let thought = |text: &str| {
+            T::Message(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(rig_core::message::Reasoning::new(text)),
+            ])))
+        };
+        let tool = |id: &str, name: &str, args| {
+            T::Message(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::ToolCall(ToolCall::new(
+                    CallId::from_wire(id),
+                    ToolFunction::new(ToolName::new(name).unwrap(), args),
+                )),
+            ])))
+        };
+        vec![
+            T::Message(Message::user("Fix the restored transcript preview.")),
+            T::Message(Message::assistant("I'll reproduce the failure and trace the reader.")),
+            thought("Read past the metadata to find the first prompt."),
+            tool("preview-test", "command", serde_json::json!({"command":"rtk cargo test --release -p zevria-transcript"})),
+            tool("preview-edit", "edit", serde_json::json!({"file_path":"crates/transcript/src/transcript.rs"})),
+            T::ToolResults { message: Message::tool_result(CallId::from_wire("preview-edit"), ToolName::new("edit").unwrap(), "Updated preview scanning."), metadata: vec![ToolResultMetadata {
+                id: "preview-edit".into(), call_id: None, tool_name: "edit".into(), outcome: ToolCallOutcome::Success, diagnostic: None,
+                detail: Some(ToolResultDetail::FileChanges(vec![FileChangeOutput { path: "crates/transcript/src/transcript.rs".into(), change: FileChange::Update {
+                    unified_diff: "--- a/transcript.rs\n+++ b/transcript.rs\n@@ -1 +1,2 @@\n-lines.take(16)\n+lines\n+    .find_map(prompt_preview)\n".into(), move_path: None,
+                }}])),
+            }], skill_applications: vec![] },
+            T::Message(Message::assistant("The preview now finds the first readable prompt, including sessions with a long metadata prefix. The restore test passes.")),
+            T::Message(Message::user("Plan the regression coverage before adding it.")),
+            T::Message(Message::assistant("I'll cover the restore boundary without changing the transcript format.")),
+            thought("Include metadata, Unicode and an empty conversation."),
+            T::Plan(zevria_workflow::PlanRecord::Ready { artifact: PlanArtifact {
+                version: PlanVersion { id: PlanId::new(), revision: 1 }, title: "Cover restored prompt previews".into(), markdown: "## Regression coverage\n\nTest a long metadata prefix, a Unicode prompt and an empty conversation. Keep the persisted format unchanged.".into(), source_turn_id: TurnId::new(2),
+            }}),
+            tool("coverage-read", "command", serde_json::json!({"command":"rtk rg -n restore_roundtrip crates/transcript"})),
+            T::Message(Message::assistant("The plan keeps the tests at the restore boundary. The document stays visible in this reading mode.")),
+            T::Message(Message::user("Run the workspace checks.")),
+            T::Message(Message::assistant("I'll check the workspace and the prompt-prefix regression tests.")),
+            thought("Check the Desktop leaf boundary too."),
+            tool("workspace-check", "command", serde_json::json!({"command":"rtk cargo check --release --locked --workspace --all-targets"})),
+            T::Message(Message::assistant("The targeted restore checks passed. The workspace check was stopped before it finished.")),
+            T::Error { error: zevria_presentation::TURN_CANCELLED.into() },
+        ]
     }
     fn thinking_message() -> Message {
         Message::Assistant(AssistantMessage::new(vec![AssistantContent::Reasoning(

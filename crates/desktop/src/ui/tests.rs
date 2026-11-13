@@ -1,4 +1,6 @@
 //! Headless tests exercise real native controls and production window content.
+#[path = "turn_tests.rs"]
+mod turns;
 #[path = "thread_tests.rs"]
 mod working_thread;
 use super::{theme, window::DesktopWindow};

@@ -196,6 +196,29 @@ mod tests {
         assert!(!store.expanded("a", Phase::Live));
     }
     #[test]
+    fn step_runs_defer_finished_folds_and_retire_choices_independently() {
+        let key = "epoch-steps-2";
+        let mut steps = DisclosureStore::default();
+        steps.observe(key, Phase::Live);
+        assert!(steps.expanded(key, Phase::Live));
+        steps.observe(key, Phase::Live); // The run grows across commits.
+        steps.observe(key, Phase::Finished);
+        assert!(steps.follow_tail(false).is_empty());
+        assert!(steps.expanded(key, Phase::Finished));
+        assert_eq!(steps.follow_tail(true), [key]);
+        assert!(!steps.expanded(key, Phase::Finished));
+        steps.choose(key, true);
+        steps.observe(key, Phase::Live);
+        steps.observe(key, Phase::Finished);
+        steps.follow_tail(true);
+        assert!(steps.expanded(key, Phase::Finished));
+        steps.choose(key, false);
+        assert!(!steps.expanded(key, Phase::Live));
+        assert!(steps.expanded("epoch-steps-20", Phase::Live));
+        steps = DisclosureStore::default(); // Mode toggle or projection replacement.
+        assert!(!steps.expanded(key, Phase::Finished));
+    }
+    #[test]
     fn tail_commit_transfer_and_next_call_do_not_share_choices() {
         let a = TailIdentity {
             header: Some(NativeHeader::Assistant {

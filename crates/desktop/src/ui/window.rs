@@ -9,7 +9,7 @@ use crate::{
 };
 use gpui_kit::component::{
     IconName, Sizable, TitleBar,
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonVariants, Toggle},
     input::{InputEvent, TextareaState},
     text::TextViewState,
     tooltip::Tooltip,
@@ -341,6 +341,16 @@ impl DesktopWindow {
             view.disclose(expanded, all, from_composer, window, cx)
         });
     }
+    fn set_final_outputs(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let retired_focus = self
+            .transcript
+            .update(cx, |view, cx| view.set_final_outputs(on, window, cx));
+        if retired_focus {
+            window.focus(&self.window_focus, cx);
+        }
+        cx.set_menus(actions::menus(on));
+        cx.notify();
+    }
     fn confirm_decision(&mut self, cx: &mut Context<Self>) {
         if self.pending_replace.is_some() {
             return;
@@ -386,6 +396,7 @@ impl DesktopWindow {
             .bg(t.surfaces.canvas)
             .border_b_1()
             .border_color(tone.hairline);
+        let transcript_shown = self.screen(cx).is_none();
         let model = &self.controller.read(cx).model;
         if let Some(child) = model
             .selected_child
@@ -425,6 +436,20 @@ impl DesktopWindow {
             );
         }
         main = main.child(div().flex_1());
+        if transcript_shown {
+            main = main.child(
+                Toggle::new("final-outputs")
+                    .small()
+                    .gap(px(4.))
+                    .icon(IconName::BookOpen)
+                    .when(!self.compact, |toggle| toggle.label("Final outputs"))
+                    .tooltip("Show final outputs only ⇧⌘R")
+                    .checked(self.transcript.read(cx).final_outputs())
+                    .on_click(cx.listener(|this, on: &bool, window, cx| {
+                        this.set_final_outputs(*on, window, cx)
+                    })),
+            );
+        }
         if model.root.workflow.submitted_artifact().is_some()
             && model.root.workflow.dialog().is_none()
         {
@@ -562,6 +587,26 @@ impl Render for DesktopWindow {
                     this.disclose(false, true, window, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &actions::ToggleFinalOutputs, window, cx| {
+                    let on = !this.transcript.read(cx).final_outputs();
+                    this.set_final_outputs(on, window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &actions::PreviousTurn, _, cx| {
+                this.transcript.update(cx, |view, cx| {
+                    view.jump_turn(crate::turns::TurnDirection::Previous, cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &actions::NextTurn, _, cx| {
+                this.transcript.update(cx, |view, cx| {
+                    view.jump_turn(crate::turns::TurnDirection::Next, cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &actions::JumpToBeginning, _, cx| {
+                this.transcript
+                    .update(cx, |view, cx| view.jump_to_beginning(cx));
+            }))
             .on_action(cx.listener(|this, _: &actions::JumpToLatest, _, cx| {
                 this.transcript
                     .update(cx, |view, cx| view.jump_to_latest(cx))

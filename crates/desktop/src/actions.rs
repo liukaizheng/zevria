@@ -16,6 +16,10 @@ gpui_kit::actions!(
         CollapseBlock,
         ExpandAllThinking,
         CollapseAllThinking,
+        ToggleFinalOutputs,
+        PreviousTurn,
+        NextTurn,
+        JumpToBeginning,
         JumpToLatest,
         ConfirmDecision,
         ToggleMode
@@ -40,7 +44,25 @@ pub fn install(cx: &mut App) {
             CollapseAllThinking,
             Some("ZevriaDesktop"),
         ),
-        KeyBinding::new("alt-cmd-down", JumpToLatest, Some("ZevriaDesktop")),
+        KeyBinding::new("shift-cmd-r", ToggleFinalOutputs, Some("ZevriaDesktop")),
+        KeyBinding::new("alt-cmd-up", PreviousTurn, Some("ZevriaDesktop")),
+        KeyBinding::new("alt-cmd-down", NextTurn, Some("ZevriaDesktop")),
+        KeyBinding::new("alt-shift-cmd-up", JumpToBeginning, Some("ZevriaDesktop")),
+        KeyBinding::new("alt-shift-cmd-down", JumpToLatest, Some("ZevriaDesktop")),
+        // Kit's deeper Input context otherwise wins with add-cursor-above/below.
+        // Register after Kit, as for the completion bindings below, to win ties.
+        KeyBinding::new("alt-cmd-up", PreviousTurn, Some("ZevriaDesktop > Input")),
+        KeyBinding::new("alt-cmd-down", NextTurn, Some("ZevriaDesktop > Input")),
+        KeyBinding::new(
+            "alt-shift-cmd-up",
+            JumpToBeginning,
+            Some("ZevriaDesktop > Input"),
+        ),
+        KeyBinding::new(
+            "alt-shift-cmd-down",
+            JumpToLatest,
+            Some("ZevriaDesktop > Input"),
+        ),
         KeyBinding::new("cmd-enter", ConfirmDecision, Some("ZevriaDesktop")),
         KeyBinding::new("shift-cmd-m", ToggleMode, Some("ZevriaDesktop")),
         KeyBinding::new("escape", Cancel, Some("ZevriaDesktop")),
@@ -48,7 +70,11 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("up", CompletionUp, Some("ZevriaCompletion > Input")),
         KeyBinding::new("down", CompletionDown, Some("ZevriaCompletion > Input")),
     ]);
-    cx.set_menus([
+    cx.set_menus(menus(false));
+}
+
+pub fn menus(final_outputs: bool) -> Vec<Menu> {
+    vec![
         Menu::new("Zevria").items([MenuItem::action("Quit Zevria", Quit)]),
         Menu::new("File").items([
             MenuItem::action("Open workspace…", OpenWorkspace),
@@ -61,11 +87,18 @@ pub fn install(cx: &mut App) {
         ]),
         Menu::new("View").items([
             MenuItem::action("Toggle sidebar", ToggleSidebar),
+            MenuItem::separator(),
             MenuItem::action("Expand block", ExpandBlock),
             MenuItem::action("Collapse block", CollapseBlock),
             MenuItem::action("Expand all thinking", ExpandAllThinking),
             MenuItem::action("Collapse all thinking", CollapseAllThinking),
+            MenuItem::separator(),
+            MenuItem::action("Show final outputs only", ToggleFinalOutputs).checked(final_outputs),
+            MenuItem::separator(),
+            MenuItem::action("Previous turn", PreviousTurn),
+            MenuItem::action("Next turn", NextTurn),
+            MenuItem::action("Jump to beginning", JumpToBeginning),
             MenuItem::action("Jump to latest", JumpToLatest),
         ]),
-    ]);
+    ]
 }
