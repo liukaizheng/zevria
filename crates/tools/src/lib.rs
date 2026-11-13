@@ -10,6 +10,7 @@ mod error;
 mod launch_subtask;
 mod plan_authoring;
 mod question;
+mod read_image;
 mod read_plan;
 mod reconcile_reports;
 mod shared;
@@ -35,6 +36,7 @@ pub use launch_subtask::{
     LaunchSubtasksTool,
 };
 pub use question::{QuestionArgs, QuestionError, QuestionOptionArgs, QuestionSpec, QuestionTool};
+pub use read_image::{ReadImageArgs, ReadImageTool};
 pub use read_plan::{ReadPlanArgs, ReadPlanTool};
 pub use reconcile_reports::{ReconcileReportsError, ReconcileReportsTool};
 pub use skill::{SkillArgs, SkillError, SkillTool};

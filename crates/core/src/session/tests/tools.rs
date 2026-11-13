@@ -1,5 +1,326 @@
 use super::*;
 
+fn image_result_content() -> Vec<ToolResultContent> {
+    vec![
+        ToolResultContent::text("image summary"),
+        zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255])
+            .unwrap()
+            .to_tool_result_content(),
+    ]
+}
+
+async fn dispatch_rich_output(output: rig_core::tool::ToolOutput, id: &str) -> ToolCallSlot {
+    let tools = ToolServer::new().tool(RichOutputTestTool(output)).run();
+    let AssistantContent::ToolCall(call) = named_tool_call(id, "rich_output", json!({})) else {
+        unreachable!();
+    };
+    let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new());
+    dispatch_tool_call(&tools, &EngineCall::new(&call), &turn, None, None, None).await
+}
+
+#[tokio::test]
+async fn image_tool_results_persist_reload_and_reach_the_next_provider_request() {
+    let expected_content = image_result_content();
+    let tools = ToolServer::new()
+        .tool(RichOutputTestTool(
+            rig_core::tool::ToolOutput::content(expected_content.clone()).unwrap(),
+        ))
+        .run();
+    let provider = ScriptedProvider::new([
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
+                "image-call",
+                "rich_output",
+                json!({}),
+            )]),
+        )),
+        Ok(Message::assistant("image understood")),
+    ]);
+    let requests = provider.requests.clone();
+    let (_directory, transcript) = test_transcript();
+    let transcript_path = transcript.path().to_path_buf();
+    let mut engine = SessionEngine::new(
+        provider,
+        tools,
+        test_policies(),
+        transcript,
+        Arc::new(SkillCatalog::default()),
+    )
+    .unwrap();
+    let (events, mut receiver) = session_event_channel(256);
+    engine
+        .handle_command(
+            SessionCommand::Turn(TurnCommand::Submit {
+                behavior: zevria_foundation::RequestBehavior::Standard,
+                text: "look at the image".into(),
+                mode: SessionMode::Build,
+            }),
+            &events,
+        )
+        .await
+        .unwrap();
+    let updates = collect_events(&mut receiver).await;
+    assert!(
+        updates
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+    );
+    let (message, metadata) = updates
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ToolResults {
+                message, metadata, ..
+            } => Some((message, metadata)),
+            _ => None,
+        })
+        .expect("tool results event");
+    let Message::User { content } = message else {
+        panic!("user results")
+    };
+    let [UserContent::ToolResult(result)] = content.as_slice() else {
+        panic!("single result")
+    };
+    assert_eq!(result.content, expected_content);
+    assert!(!result.is_error);
+    assert_eq!(metadata[0].outcome, ToolCallOutcome::Success);
+    assert!(metadata[0].diagnostic.is_none());
+    assert!(engine.conversation.has_images());
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(&requests[1].prompt, message);
+    let items = zevria_transcript::transcript::load(&transcript_path).unwrap();
+    assert!(items.iter().any(|item| matches!(
+        item, TranscriptItem::ToolResults { message: persisted, .. } if persisted == message
+    )));
+    // Rebuilding conversation state must also recognize persisted tool images.
+    drop(engine);
+    let loaded = zevria_transcript::transcript::load_report(&transcript_path).unwrap();
+    let writer = TranscriptWriter::append_loaded(&loaded).unwrap();
+    let restored = Conversation::from_loaded(writer, loaded).unwrap();
+    assert!(restored.has_images());
+}
+
+#[tokio::test]
+async fn multimodal_dispatch_preserves_order_and_renders_only_json_blocks_as_text() {
+    let mut content = image_result_content();
+    content.insert(1, ToolResultContent::json(json!({"key": [1, 2]})));
+    content.push(ToolResultContent::text("after"));
+    let slot = dispatch_rich_output(
+        rig_core::tool::ToolOutput::content(content.clone()).unwrap(),
+        "mixed",
+    )
+    .await;
+    let UserContent::ToolResult(result) = slot.result else {
+        panic!("tool result")
+    };
+    content[1] = ToolResultContent::text("{\"key\":[1,2]}");
+    assert_eq!(result.content, content);
+    assert!(!result.is_error);
+    assert_eq!(slot.metadata.outcome, ToolCallOutcome::Success);
+    assert!(slot.metadata.diagnostic.is_none());
+}
+
+#[tokio::test]
+async fn non_image_outputs_keep_their_exact_historical_rendering() {
+    for output in [
+        rig_core::tool::ToolOutput::text("  literal\ntext\n"),
+        rig_core::tool::ToolOutput::json(json!({"value": [1, "two"]})),
+        rig_core::tool::ToolOutput::content(vec![
+            ToolResultContent::text("before"),
+            ToolResultContent::json(json!({"key": "value"})),
+            ToolResultContent::text("after"),
+        ])
+        .unwrap(),
+    ] {
+        let expected = output.render();
+        let slot = dispatch_rich_output(output, "text").await;
+        let UserContent::ToolResult(result) = slot.result else {
+            panic!("tool result")
+        };
+        assert_eq!(result.content, vec![ToolResultContent::text(expected)]);
+        assert!(!result.is_error);
+        assert!(slot.metadata.diagnostic.is_none());
+    }
+}
+
+#[tokio::test]
+async fn unsupported_image_blocks_become_error_results_without_payloads() {
+    use rig_core::message::ImageMediaType;
+    for image in [
+        ToolResultContent::image_url(
+            "https://example.com/image.png",
+            Some(ImageMediaType::PNG),
+            None,
+        ),
+        ToolResultContent::image_raw(vec![1, 2, 3], Some(ImageMediaType::PNG), None),
+        ToolResultContent::image_base64("AA==", None, None),
+        ToolResultContent::image_base64("AA==", Some(ImageMediaType::SVG), None),
+    ] {
+        let slot =
+            dispatch_rich_output(rig_core::tool::ToolOutput::one(image), "unsupported").await;
+        let UserContent::ToolResult(result) = slot.result else {
+            panic!("tool result")
+        };
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            vec![ToolResultContent::text(
+                "status: error\nerror: tool returned an unsupported image block"
+            )]
+        );
+        assert_eq!(slot.metadata.outcome, ToolCallOutcome::Error);
+        assert_eq!(
+            slot.metadata.diagnostic.as_deref(),
+            Some("tool returned an unsupported image block")
+        );
+    }
+}
+
+fn assert_image_budget_error(result: &ToolResult, metadata: &ToolResultMetadata) {
+    let diagnostic = "image result omitted: one response may return at most eight images or 20 MiB of image data; request fewer images per response";
+    assert!(result.is_error);
+    assert_eq!(
+        result.content,
+        vec![ToolResultContent::text(format!(
+            "status: error\nerror: {diagnostic}"
+        ))]
+    );
+    assert_eq!(metadata.outcome, ToolCallOutcome::Error);
+    assert_eq!(metadata.diagnostic.as_deref(), Some(diagnostic));
+}
+
+#[tokio::test]
+async fn image_batch_admits_eight_images_then_errors_the_ninth_slot_in_call_order() {
+    let mut slots = Vec::new();
+    for index in 0..9 {
+        slots.push(
+            dispatch_rich_output(
+                rig_core::tool::ToolOutput::content(image_result_content()).unwrap(),
+                &format!("image-{index}"),
+            )
+            .await,
+        );
+    }
+    slots.push(
+        dispatch_rich_output(rig_core::tool::ToolOutput::text("text still fits"), "text").await,
+    );
+    let batch = assemble_tool_result_batch(slots, None);
+    assert_eq!(batch.message.images().count(), 8);
+    let Message::User { content } = batch.message else {
+        panic!("user results")
+    };
+    for (index, block) in content.iter().enumerate() {
+        let UserContent::ToolResult(result) = block else {
+            panic!("tool result")
+        };
+        assert_eq!(
+            result.call.to_string(),
+            if index < 9 {
+                format!("image-{index}")
+            } else {
+                "text".into()
+            }
+        );
+        if index == 8 {
+            assert_image_budget_error(result, &batch.metadata[index]);
+        } else {
+            assert!(!result.is_error);
+            assert!(batch.metadata[index].diagnostic.is_none());
+        }
+    }
+}
+
+// Structural mock: the batch limiter measures base64 bytes without decoding
+// raster pixels. Real file validation is covered by content/tools tests.
+fn mock_image_of_size(bytes: usize) -> ToolResultContent {
+    let mut data = "AAAA".repeat(bytes / 3);
+    data.push_str(match bytes % 3 {
+        1 => "AA==",
+        2 => "AAA=",
+        _ => "",
+    });
+    ToolResultContent::image_base64(data, Some(rig_core::message::ImageMediaType::PNG), None)
+}
+
+#[tokio::test]
+async fn image_batch_limits_decoded_bytes_and_does_not_charge_rejected_slots() {
+    let max = zevria_content::prompt::MAX_IMAGE_BYTES;
+    let mut slots = Vec::new();
+    // Both one- and two-character base64 padding must be subtracted: the
+    // accepted images total exactly 20 MiB, not their expanded wire size.
+    for (index, bytes) in [max, max, max, max - 1, 2, 1].into_iter().enumerate() {
+        slots.push(
+            dispatch_rich_output(
+                rig_core::tool::ToolOutput::one(mock_image_of_size(bytes)),
+                &format!("bytes-{index}"),
+            )
+            .await,
+        );
+    }
+    let batch = assemble_tool_result_batch(slots, None);
+    assert_eq!(batch.message.images().count(), 5);
+    let Message::User { content } = batch.message else {
+        panic!("user results")
+    };
+    for (index, block) in content.iter().enumerate() {
+        let UserContent::ToolResult(result) = block else {
+            panic!("tool result")
+        };
+        if index == 4 {
+            assert_image_budget_error(result, &batch.metadata[index]);
+        } else {
+            assert!(!result.is_error);
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_batch_rejects_whole_multimodal_slots_instead_of_truncating_them() {
+    let mut slots = Vec::new();
+    for index in 0..7 {
+        slots.push(
+            dispatch_rich_output(
+                rig_core::tool::ToolOutput::content(image_result_content()).unwrap(),
+                &format!("single-{index}"),
+            )
+            .await,
+        );
+    }
+    slots.push(
+        dispatch_rich_output(
+            rig_core::tool::ToolOutput::content(
+                image_result_content()
+                    .into_iter()
+                    .chain(image_result_content())
+                    .collect(),
+            )
+            .unwrap(),
+            "two-images",
+        )
+        .await,
+    );
+    slots.push(
+        dispatch_rich_output(
+            rig_core::tool::ToolOutput::content(image_result_content()).unwrap(),
+            "last",
+        )
+        .await,
+    );
+    let batch = assemble_tool_result_batch(slots, None);
+    assert_eq!(batch.message.images().count(), 8);
+    let Message::User { content } = batch.message else {
+        panic!("user results")
+    };
+    let UserContent::ToolResult(result) = &content[7] else {
+        panic!("tool result")
+    };
+    assert_image_budget_error(result, &batch.metadata[7]);
+    let UserContent::ToolResult(result) = &content[8] else {
+        panic!("tool result")
+    };
+    assert!(!result.is_error);
+}
+
 #[tokio::test]
 async fn ensemble_plan_gate_denies_out_of_order_calls_and_keeps_progress_recoverable() {
     let command_calls = Arc::new(Mutex::new(Vec::new()));

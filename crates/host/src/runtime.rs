@@ -18,7 +18,8 @@ use zevria_foundation::SessionMode;
 use zevria_foundation::SessionPolicies;
 use zevria_foundation::TASK_TOOL_NAME;
 use zevria_foundation::{
-    CREATE_PLAN_TOOL_NAME, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+    CREATE_PLAN_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
+    UPDATE_PLAN_TOOL_NAME,
 };
 use zevria_foundation::{TurnPolicy, WorkspaceContract};
 use zevria_instructions::FixedSkillRoots;
@@ -41,8 +42,9 @@ use zevria_session_api::session_event_channel;
 use zevria_session_api::{CommandJobLimits, CommandJobs, QuestionRequester};
 use zevria_tools::{
     CommandLimits, CommandStatusTool, CommandTerminateTool, CommandTool, CreatePlanTool,
-    DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool, ReadPlanTool, ReconcileReportsTool,
-    SkillReadTool, SkillTool, SubmitPlanTool, TaskTool, UpdatePlanTool, WriteTool,
+    DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool, ReadImageTool, ReadPlanTool,
+    ReconcileReportsTool, SkillReadTool, SkillTool, SubmitPlanTool, TaskTool, UpdatePlanTool,
+    WriteTool,
 };
 use zevria_transcript::transcript;
 use zevria_transcript::transcript::TranscriptItem;
@@ -123,7 +125,7 @@ pub(crate) fn build_tools(
         .tool(LaunchSubtasksTool::new(launcher, workspace.clone()))
         .tool(EditTool::new(workspace.clone()))
         .tool(WriteTool::new(workspace.clone()))
-        .tool(DeleteTool::new(workspace))
+        .tool(DeleteTool::new(workspace.clone()))
         .tool(SkillTool)
         .tool(SkillReadTool);
     Ok(server
@@ -133,6 +135,8 @@ pub(crate) fn build_tools(
         .tool(UpdatePlanTool::new(max_plan_artifact_bytes))
         .tool(ReadPlanTool)
         .tool(SubmitPlanTool::new(max_plan_artifact_bytes))
+        // Append new root declarations so existing cacheable bytes keep their order.
+        .tool(ReadImageTool::new(workspace))
         .run())
 }
 
@@ -202,6 +206,7 @@ pub(crate) fn build_session_policies(
         "edit",
         "write",
         "delete",
+        READ_IMAGE_TOOL_NAME,
         LAUNCH_SUBTASKS_TOOL_NAME,
     ]
     .into_iter()
@@ -211,6 +216,7 @@ pub(crate) fn build_session_policies(
     let mut plan_tools = vec![
         "command".to_string(),
         zevria_foundation::WEB_SEARCH_TOOL_NAME.into(),
+        READ_IMAGE_TOOL_NAME.into(),
     ];
     if command_jobs {
         build_tools.splice(
@@ -746,7 +752,13 @@ mod tests {
                 for tool in zevria_foundation::SKILL_TOOL_NAMES {
                     assert_eq!(plan.allows_tool(tool), allow_skills);
                 }
-                for tool in ["command", "web_search", "question", "submit_plan"] {
+                for tool in [
+                    "command",
+                    "web_search",
+                    READ_IMAGE_TOOL_NAME,
+                    "question",
+                    "submit_plan",
+                ] {
                     assert!(plan.allows_tool(tool));
                 }
                 for tool in ["edit", "write", "delete", "task", "reconcile_reports"] {
@@ -757,6 +769,11 @@ mod tests {
                     BUILD_MODE_INSTRUCTIONS
                 );
                 assert!(policies.policy(SessionMode::Build).orchestration);
+                assert!(
+                    policies
+                        .policy(SessionMode::Build)
+                        .allows_tool(READ_IMAGE_TOOL_NAME)
+                );
             }
         }
     }
@@ -845,6 +862,7 @@ mod tests {
                 "edit",
                 "write",
                 "delete",
+                READ_IMAGE_TOOL_NAME,
                 "task",
                 "skill",
                 "skill_read",

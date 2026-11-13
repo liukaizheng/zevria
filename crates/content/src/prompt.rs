@@ -14,7 +14,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{
     AnimationDecoder as _, ImageDecoder as _, ImageEncoder as _, ImageFormat, ImageReader, Limits,
 };
-use rig_core::message::{DocumentSourceKind, ImageMediaType, Message, UserContent};
+use rig_core::message::{
+    DocumentSourceKind, ImageMediaType, Message, ToolResultContent, UserContent,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use sha2::{Digest as _, Sha256};
 
@@ -137,6 +139,25 @@ impl PromptImage {
         Self::from_encoded(mime, bytes)
     }
 
+    /// Detect the raster format from file contents, then validate without transcoding.
+    pub fn from_file_bytes(bytes: Vec<u8>) -> Result<Self, PromptError> {
+        if bytes.is_empty() {
+            return Err(PromptError("empty image data"));
+        }
+        let raster = match image::guess_format(&bytes) {
+            Ok(ImageFormat::Png) => Raster::Png,
+            Ok(ImageFormat::Jpeg) => Raster::Jpeg,
+            Ok(ImageFormat::WebP) => Raster::Webp,
+            Ok(ImageFormat::Gif) => Raster::Gif,
+            _ => {
+                return Err(PromptError(
+                    "unsupported image format; use PNG, JPEG, WebP, or GIF",
+                ));
+            }
+        };
+        Self::from_encoded(raster.mime(), bytes)
+    }
+
     pub fn from_encoded(mime: &str, bytes: Vec<u8>) -> Result<Self, PromptError> {
         let raster = Raster::from_mime(mime)?;
         if bytes.is_empty() {
@@ -218,6 +239,9 @@ impl PromptImage {
     }
     pub fn to_user_content(&self) -> UserContent {
         UserContent::image_base64(self.base64(), Some(self.0.raster.media_type()), None)
+    }
+    pub fn to_tool_result_content(&self) -> ToolResultContent {
+        ToolResultContent::image_base64(self.base64(), Some(self.0.raster.media_type()), None)
     }
     pub fn from_user_content(content: &UserContent) -> Result<Self, PromptError> {
         let UserContent::Image(image) = content else {
@@ -663,9 +687,16 @@ impl UserPrompt {
     }
 }
 
-/// Cheap capability/accounting query; no decoding or base64 allocation.
+/// Cheap query for user-prompt validation gates; ignores tool-result images.
 pub fn message_has_images(message: &Message) -> bool {
     matches!(message, Message::User { content } if content.iter().any(|block| matches!(block, UserContent::Image(_))))
+}
+
+/// Accounting only: includes tool-result images without decoding or allocation.
+/// User-prompt validation gates must keep using `message_has_images`, because
+/// `UserPrompt::from_message` deliberately rejects tool-result content.
+pub fn message_contains_images(message: &Message) -> bool {
+    message.images().next().is_some()
 }
 
 #[cfg(test)]
@@ -727,8 +758,65 @@ mod tests {
             assert_eq!(validated.encoded_bytes(), bytes);
             assert_eq!(validated.mime_type(), mime);
             assert_eq!(validated.dimensions(), (2, 2));
+            let sniffed = PromptImage::from_file_bytes(bytes.clone()).unwrap();
+            assert_eq!(sniffed, validated);
             assert!(PromptImage::from_encoded(mime, bytes[..bytes.len() / 2].to_vec()).is_err());
         }
+    }
+
+    #[test]
+    fn file_sniffing_rejects_unsupported_empty_and_truncated_data() {
+        for bytes in [b"BMunsupported BMP".to_vec(), b"not an image".to_vec()] {
+            assert_eq!(
+                PromptImage::from_file_bytes(bytes).unwrap_err().to_string(),
+                "unsupported image format; use PNG, JPEG, WebP, or GIF"
+            );
+        }
+        assert_eq!(
+            PromptImage::from_file_bytes(Vec::new())
+                .unwrap_err()
+                .to_string(),
+            "empty image data"
+        );
+        let mut truncated = image().encoded_bytes().to_vec();
+        truncated.truncate(truncated.len() - 1);
+        assert!(PromptImage::from_file_bytes(truncated).is_err());
+    }
+
+    #[test]
+    fn tool_result_content_preserves_image_bytes_and_counts_for_accounting_only() {
+        let image = image();
+        let block = image.to_tool_result_content();
+        let ToolResultContent::Image(content) = &block else {
+            panic!("expected image content");
+        };
+        assert_eq!(content.media_type, Some(ImageMediaType::PNG));
+        assert_eq!(content.data, DocumentSourceKind::Base64(image.base64()));
+        assert!(content.detail.is_none());
+        assert!(content.native.is_none());
+        let message = Message::tool_results(vec![rig_core::message::ToolResult {
+            call: rig_core::message::CallId::from_wire("image"),
+            name: rig_core::message::ToolName::new("read_image").unwrap(),
+            content: vec![ToolResultContent::text("summary"), block],
+            is_error: false,
+        }]);
+        assert!(message_contains_images(&message));
+        assert!(!message_has_images(&message));
+        assert!(UserPrompt::from_message(&message).is_err());
+        assert!(message_contains_images(
+            &UserPrompt::new(vec![PromptBlock::Image(image)])
+                .unwrap()
+                .to_message()
+        ));
+        assert!(!message_contains_images(&Message::user("text only")));
+        assert!(!message_contains_images(&Message::tool_results(vec![
+            rig_core::message::ToolResult {
+                call: rig_core::message::CallId::from_wire("text"),
+                name: rig_core::message::ToolName::new("echo").unwrap(),
+                content: vec![ToolResultContent::text("text only")],
+                is_error: false,
+            }
+        ])));
     }
 
     fn padded_png(size: usize) -> PromptImage {

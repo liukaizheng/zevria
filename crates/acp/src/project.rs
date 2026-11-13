@@ -885,6 +885,37 @@ mod tests {
     }
 
     #[test]
+    fn image_reads_project_as_read_with_payload_free_output() {
+        let arguments = serde_json::json!({"file_path": "capture.png"});
+        assert_eq!(tool_kind("read_image", &arguments), ToolKind::Read);
+        assert_eq!(
+            tool_title("read_image", &arguments),
+            "read_image: capture.png"
+        );
+        let output = tool_output(&ToolResult {
+            call: rig_core::message::CallId::from_wire("image"),
+            name: rig_core::message::ToolName::new("read_image").unwrap(),
+            content: vec![
+                ToolResultContent::text("image summary"),
+                ToolResultContent::image_base64(
+                    "c2Vuc2l0aXZlIGltYWdlIGJ5dGVz",
+                    Some(rig_core::message::ImageMediaType::PNG),
+                    None,
+                ),
+            ],
+            is_error: false,
+        });
+        assert_eq!(output.text, "image summary\n[image tool output omitted]");
+        assert_eq!(
+            output.raw,
+            Some(serde_json::json!([
+                "image summary",
+                "[image tool output omitted]"
+            ]))
+        );
+    }
+
+    #[test]
     fn reconciliation_projects_as_a_thinking_tool() {
         assert_eq!(
             tool_kind("reconcile_reports", &serde_json::json!({})),

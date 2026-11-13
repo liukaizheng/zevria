@@ -115,6 +115,83 @@ async fn three_image_tool_rounds_count_once_when_usage_covers_images_and_recount
 }
 
 #[tokio::test]
+async fn tool_result_images_trigger_exact_counts_and_usage_covers_only_existing_batches() {
+    for usage in [true, false] {
+        let (_directory, transcript) = test_transcript();
+        let responses = (0..3)
+            .map(|index| {
+                response(
+                    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                        named_tool_call(&format!("tool-image-{index}"), "rich_output", json!({})),
+                    ])),
+                    usage,
+                )
+            })
+            .chain((0..2).map(|_| response(Message::assistant("done"), usage)));
+        let provider = ScriptedProvider::with_model_responses(responses)
+            .with_input_counts((0..8).map(|_| Ok(InputTokenCount::Exact(15_000))));
+        let counts = provider.input_count_calls.clone();
+        let tools = ToolServer::new()
+            .tool(RichOutputTestTool(
+                rig_core::tool::ToolOutput::content(vec![
+                    ToolResultContent::text("image summary"),
+                    zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255])
+                        .unwrap()
+                        .to_tool_result_content(),
+                ])
+                .unwrap(),
+            ))
+            .run();
+        let mut engine = SessionEngine::new(
+            provider,
+            tools,
+            test_policies(),
+            transcript,
+            Arc::new(SkillCatalog::default()),
+        )
+        .unwrap()
+        .with_compaction_policy(test_compaction_policy(1_000_000, 90, 20_000));
+        let (events, mut receiver) = session_event_channel(256);
+        for (text, expected) in [
+            ("read three images", 3),
+            ("text follow-up", if usage { 3 } else { 4 }),
+        ] {
+            engine
+                .handle_command(
+                    SessionCommand::Turn(TurnCommand::Submit {
+                        behavior: zevria_foundation::RequestBehavior::Standard,
+                        text: text.into(),
+                        mode: SessionMode::Build,
+                    }),
+                    &events,
+                )
+                .await
+                .unwrap();
+            let updates = collect_events(&mut receiver).await;
+            assert!(
+                updates
+                    .iter()
+                    .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            );
+            assert!(!updates.iter().any(|event| matches!(
+                event,
+                SessionEvent::TurnFailed { .. } | SessionEvent::TurnRejected { .. }
+            )));
+            assert_eq!(
+                counts.load(Ordering::SeqCst),
+                expected,
+                "usage={usage}, prompt={text}"
+            );
+        }
+        let requests = engine.provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0].prompt.images().next().is_none());
+        assert_eq!(requests[1].prompt.images().count(), 1);
+        assert!(engine.conversation.has_images());
+    }
+}
+
+#[tokio::test]
 async fn measured_images_still_count_near_the_trigger() {
     let (_directory, transcript) = test_transcript();
     let provider =

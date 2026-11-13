@@ -50,6 +50,61 @@ protocol overhead—not the base64 string length. This is not an upper bound or 
 model-specific tokenizer. Large images can cost more. Count provenance, capacity
 failures, unsupported count endpoints, and model/provider errors remain visible.
 
+## Model image reads (`read_image`)
+
+During ordinary root **Build** and **Plan** turns, the model can call
+`read_image` with `{ "file_path": "capture.png" }` to inspect a local screenshot,
+diagram, or UI capture. The result contains a readable summary (canonical path,
+MIME format, dimensions, and byte count) followed by a real image content block,
+not base64 text. The TUI shows `read_image · capture.png`, the summary, and
+`[image]`; ACP clients receive an image-output omission placeholder rather than
+the payload. Explore children, Build children, and ensemble workers do not
+register this tool. Ensemble root synthesis keeps its narrower explicit tool
+allow-lists and does not enable it.
+
+Relative paths resolve against the tool's startup workspace. Absolute paths may
+point **anywhere readable**, including outside that workspace; symlinks are
+followed, and their targets must be regular files. No URL fetching is performed.
+The model can therefore send a sensitive image from outside the repository to a
+provider: check the requested path and protect local files and session history.
+Use `command` to read text files.
+
+The image format is detected from file contents, regardless of extension. PNG,
+JPEG, WebP, and GIF use the same validation as pasted images: **5 MiB** of encoded
+raster bytes per image (after base64 decoding), **16,384 pixels** per side, and a
+**40 million** decoded-pixel/work budget. Animated WebP and APNG are rejected.
+Images are never resized, cropped, transcoded, or replaced with a first frame.
+For SVG, BMP, TIFF, HEIC, PDF, unsupported images, or oversized captures, use
+`command` to convert/downscale into a temporary PNG/JPEG and read that file.
+Loading and raster validation run on a blocking thread, not the async event loop.
+
+Across all tool calls in **one model response**, at most **8 images / 20 MiB** of
+image data (before base64 expansion) are admitted in assistant-call order. A
+later result that would exceed either budget becomes an error result with a
+request-fewer-images diagnostic; an individual result is not partially kept.
+This is a per-response budget, not a cap on all images accumulated in a session.
+Image results participate in the same context accounting as pasted images:
+unmeasured images prefer exact endpoint counts when available, compatible
+provider usage covers existing images, and the local fallback estimates roughly
+1,600 tokens per image plus text/protocol overhead. Reading a file again adds a
+new image occurrence and consumes context again.
+
+**Read image bytes persist as plaintext base64 in session history**, like pasted
+images, and are included in later model requests and restored on resume. There
+is no automatic temporary-file cleanup or encrypted image store. Tool
+declarations are registered last in the stable root registry; older resumed
+sessions append the newly available declaration as `Additional` rather than
+rewriting their pinned declaration prefix. Availability does not vary by model
+or turn.
+
+There is no per-model vision-capability gate. A text-only model that calls
+`read_image` receives a provider error; because the image stays in history,
+subsequent requests can keep failing until compaction or a new session removes
+it from active context. Providers may enforce stricter image/request limits,
+and some Responses-compatible gateways may reject image-bearing
+`function_call_output` arrays. These failures remain visible; Zevria never
+silently drops or resizes an image to make a request succeed.
+
 ## ACP and ensembles
 
 Root and worker ACP profiles advertise `promptCapabilities.image: true`. `session/prompt` accepts an ordered array of text and embedded image blocks, including image-only input. Audio and resource blocks are rejected; URLs and resource paths are not resolved. Skill extension **version 1** accepts the same ordered blocks in `args`. Generic prompt text does not invoke skills implicitly. An image-bearing `/implement` cannot authorize implementation.

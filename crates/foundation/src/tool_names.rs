@@ -7,6 +7,7 @@ pub const COMMAND_JOB_TOOL_NAMES: [&str; 2] =
 pub const EDIT_TOOL_NAME: &str = "edit";
 pub const WRITE_TOOL_NAME: &str = "write";
 pub const DELETE_TOOL_NAME: &str = "delete";
+pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
 pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 pub const SKILL_TOOL_NAME: &str = "skill";
 pub const SKILL_READ_TOOL_NAME: &str = "skill_read";

@@ -850,5 +850,24 @@
       "required": [],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "read_image",
+    "description": "Read a local raster image and return it as viewable image content, not base64 text.\n\nUsage:\n- `file_path` may be an absolute path anywhere readable, or relative to the startup workspace. Symlinks are followed; the target must be a regular file.\n- Formats are detected from content, not the extension: PNG, JPEG, WebP, and GIF. Animated WebP and APNG are rejected.\n- Limits: 5 MiB of encoded raster bytes, at most 16,384 pixels per side, and a 40 million decoded-pixel/work budget per image. Images are never resized, cropped, transcoded, or replaced by an animation's first frame.\n- Convert SVG/BMP/TIFF/HEIC/PDF or unsupported or oversized images with `command` into a temporary PNG/JPEG first; downscale if needed, then read that file.\n- Each image costs substantial model context. One response may return at most 8 images or 20 MiB of image data across all tool calls; request fewer images per response if needed.\n- Use `command` for text files.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Absolute path to any readable image file, or a path relative to the startup workspace."
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "title": "ReadImageArgs",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
   }
 ]

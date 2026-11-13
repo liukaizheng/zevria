@@ -542,6 +542,32 @@ struct FailingTool;
 
 struct MetadataTool;
 
+/// Explicit rich output exercises core transport independently of file loading.
+struct RichOutputTestTool(rig_core::tool::ToolOutput);
+
+impl Tool for RichOutputTestTool {
+    const NAME: &'static str = "rich_output";
+    type Error = std::convert::Infallible;
+    type Args = NoArgs;
+    type Output = rig_core::tool::ToolOutput;
+
+    fn description(&self) -> String {
+        "return explicit content blocks".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        Ok(self.0.clone())
+    }
+}
+
 impl Tool for MetadataTool {
     const NAME: &'static str = "metadata";
     type Error = std::convert::Infallible;

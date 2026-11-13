@@ -152,7 +152,7 @@ impl Conversation {
         let has_images = input
             .iter()
             .filter_map(|item| item.message_ref())
-            .any(zevria_content::prompt::message_has_images);
+            .any(zevria_content::prompt::message_contains_images);
         let identity = zevria_model::ModelInputIdentity::from_items(&input).ok();
         self.input_identity = identity;
         self.has_images = has_images;
@@ -168,7 +168,7 @@ impl Conversation {
             .iter()
             .filter_map(TranscriptItem::model_request_item)
             .filter_map(ModelRequestItem::message_ref)
-            .any(zevria_content::prompt::message_has_images);
+            .any(zevria_content::prompt::message_contains_images);
         self.has_compaction_prompt |= self.items[start..].iter().any(is_compaction_prompt_item);
         if self.items[start..]
             .iter()

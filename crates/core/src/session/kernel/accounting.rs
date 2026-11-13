@@ -378,7 +378,7 @@ impl ContextAccounting {
             .iter()
             .filter_map(TranscriptItem::model_request_item)
             .filter_map(ModelRequestItem::message_ref)
-            .any(zevria_content::prompt::message_has_images);
+            .any(zevria_content::prompt::message_contains_images);
         for (profile, tracker) in &mut self.usage {
             let estimate = items
                 .iter()

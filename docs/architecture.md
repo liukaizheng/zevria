@@ -2043,14 +2043,18 @@ disabled independently under `providers.<key>.compatibility` in `models.jsonc`. 
 
 Production allow-lists for ordinary turns are explicit and govern permitted calls,
 not removal of already advertised declarations. Build permits `web_search`, `command`, `task`, `edit`,
-`write`, `delete`, `launch_subtasks`, and eligible `skill` and `skill_read`
+`write`, `delete`, `read_image`, `launch_subtasks`, and eligible `skill` and `skill_read`
 tools. The two skill registrations are statically registered
-in root runtimes even when not initially advertised. Plan permits `command`, `web_search`, optional
+in root runtimes even when not initially advertised. Plan permits `command`, `web_search`, `read_image`, optional
 `launch_subtasks`, mode-enabled skill tools, `question`, `create_plan`, `update_plan`, `read_plan`, and `submit_plan`. The authoring registrations have this fixed order after `question`; they are absent from Build's allow-list. Previously declared Plan tools may remain visible in Build, but the engine denies calls to them. Explore children
 receive only `command` plus an empty skill catalog. Build children receive exactly
 `command`, `task`, `edit`, `write`, and `delete`, rooted at their reserved directory.
-Both child registries omit interaction, skill, planning, reconciliation, and nested
+Both child registries omit interaction, skill, planning, reconciliation, image-read, and nested
 launch tools physically, with skills disabled in both nominal mode policies.
+`read_image` is registered last in the root registry, preserving existing
+cacheable declaration bytes/order; resumed sessions append its declaration as
+`Additional`. Ensemble workers do not register it, and synthesis overrides below
+remain unchanged.
 
 Ensemble root synthesis applies a narrower policy override without changing
 the underlying Plan and Review model roles: Ensemble Plan receives exactly

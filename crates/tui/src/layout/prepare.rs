@@ -24,8 +24,8 @@ use rig_core::message::ToolCall;
 use unicode_segmentation::UnicodeSegmentation as _;
 use zevria_foundation::{
     CREATE_PLAN_TOOL_NAME, FileChange, LAUNCH_SUBTASKS_TOOL_NAME, QUESTION_TOOL_NAME,
-    QuestionResponse, READ_PLAN_TOOL_NAME, RECONCILE_REPORTS_TOOL_NAME, SKILL_TOOL_NAME,
-    SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+    QuestionResponse, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, RECONCILE_REPORTS_TOOL_NAME,
+    SKILL_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
 };
 use zevria_workflow::{AgentRunStatus, EnsembleWorkflow, PlanArtifact, PlanHandoff};
 
@@ -1141,6 +1141,29 @@ fn render_tool_call(
         lines.push(header.expanded());
         if unsuccessful {
             render_tool_diagnostic(state, lines);
+        }
+        return Some(header);
+    }
+    if call.function.name == READ_IMAGE_TOOL_NAME {
+        let path = tool_argument(state, "file_path")
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| "<invalid arguments>".into());
+        let header = FoldHeader::single(
+            format!("read_image · {path}"),
+            native_header_status(call, state),
+        );
+        lines.push(header.expanded());
+        if tool_call_denied(state)
+            || tool_call_failed(state)
+            || state.status == ToolCallStatus::Interrupted
+        {
+            render_tool_diagnostic(state, lines);
+        } else if let Some(result) = &state.result {
+            push_plain_text(
+                &tool_result_plain_text(result),
+                Style::default().fg(theme().text.muted),
+                lines,
+            );
         }
         return Some(header);
     }

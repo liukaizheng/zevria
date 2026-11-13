@@ -7,8 +7,8 @@ use zevria_foundation::SKILL_TOOL_NAME;
 use zevria_foundation::SessionMode;
 use zevria_foundation::TASK_TOOL_NAME;
 use zevria_foundation::{
-    CREATE_PLAN_TOOL_NAME, PLAN_AUTHORING_TOOL_NAMES, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
-    UPDATE_PLAN_TOOL_NAME,
+    CREATE_PLAN_TOOL_NAME, PLAN_AUTHORING_TOOL_NAMES, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME,
+    SUBMIT_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
 };
 use zevria_instructions::prompts::BUILD_MODE_INSTRUCTIONS;
 use zevria_instructions::prompts::PLAN_MODE_INSTRUCTIONS;
@@ -20,8 +20,8 @@ use zevria_session_api::session_event_channel;
 use zevria_session_api::subtask_channels;
 use zevria_tools::{
     CommandTool, CreatePlanTool, DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool,
-    ReadPlanTool, ReconcileReportsTool, SkillTool, SubmitPlanTool, TaskTool, UpdatePlanTool,
-    WriteTool,
+    ReadImageTool, ReadPlanTool, ReconcileReportsTool, SkillTool, SubmitPlanTool, TaskTool,
+    UpdatePlanTool, WriteTool,
 };
 
 use crate::config::CommandConfig;
@@ -85,6 +85,7 @@ async fn production_registry_pins_names_order_and_schemas() {
             "update_plan",
             "read_plan",
             "submit_plan",
+            "read_image",
         ]
     );
     let snapshot = definitions
@@ -126,6 +127,7 @@ async fn production_registry_pins_names_order_and_schemas() {
         UpdatePlanTool::new(131_072).parameters(),
         ReadPlanTool.parameters(),
         SubmitPlanTool::new(131_072).parameters(),
+        ReadImageTool::new(workspace.path().to_path_buf()).parameters(),
     ];
     assert_eq!(
         definitions
@@ -223,6 +225,11 @@ async fn production_registry_pins_names_order_and_schemas() {
                 serde_json::json!([]),
                 serde_json::json!(false)
             ),
+            (
+                "read_image",
+                serde_json::json!(["file_path"]),
+                serde_json::json!(false)
+            ),
         ]
     );
     assert!(
@@ -298,6 +305,7 @@ async fn explore_registry_is_command_only_and_uses_configured_limits() {
         LAUNCH_SUBTASKS_TOOL_NAME,
         QUESTION_TOOL_NAME,
         TASK_TOOL_NAME,
+        READ_IMAGE_TOOL_NAME,
         "edit",
         "write",
         "delete",
@@ -329,6 +337,7 @@ fn production_policies_pin_mode_directives_and_plan_tool_access() {
                 "edit".to_string(),
                 "write".to_string(),
                 "delete".to_string(),
+                "read_image".to_string(),
                 "launch_subtasks".to_string(),
                 "skill".to_string(),
                 "skill_read".to_string(),
@@ -367,6 +376,7 @@ fn production_policies_pin_mode_directives_and_plan_tool_access() {
                 "command_status".to_string(),
                 "command_terminate".to_string(),
                 "web_search".to_string(),
+                "read_image".to_string(),
                 "launch_subtasks".to_string(),
                 "skill".to_string(),
                 "skill_read".to_string(),
@@ -409,6 +419,7 @@ fn plan_configuration_can_only_remove_optional_capabilities() {
                 "command_status".to_string(),
                 "command_terminate".to_string(),
                 "web_search".to_string(),
+                "read_image".to_string(),
                 "question".to_string(),
                 "create_plan".to_string(),
                 "update_plan".to_string(),

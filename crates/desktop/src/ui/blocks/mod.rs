@@ -31,7 +31,7 @@ pub fn tool_label(name: &str) -> &str {
         "edit" => "Edit",
         "write" => "Write",
         "delete" => "Delete",
-        "read" | "skill_read" => "Read",
+        "read" | "read_image" | "skill_read" => "Read",
         "web_search" => "Search",
         "question" => "Question",
         "create_plan" | "update_plan" | "read_plan" | "submit_plan" => "Plan draft",
@@ -1475,6 +1475,11 @@ impl Render for BlockView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[::core::prelude::v1::test]
+    fn image_reads_have_a_read_label() {
+        assert_eq!(tool_label("read_image"), "Read");
+    }
+
     #[::core::prelude::v1::test]
     fn tool_previews_are_bounded_without_changing_copy_or_summary() {
         use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};

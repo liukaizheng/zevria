@@ -7,7 +7,8 @@ use crate::session::workflow::plan::PlanSubmissionGate;
 use rig_agent::tool::ToolContext;
 use rig_agent::tool::server::ToolServerHandle;
 use rig_core::message::{
-    AssistantContent, Message, ToolCall, ToolResult, ToolResultContent, UserContent,
+    AssistantContent, DocumentSourceKind, ImageMediaType, Message, ToolCall, ToolResult,
+    ToolResultContent, UserContent,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -260,12 +261,61 @@ pub(in crate::session) async fn dispatch_tool_call(
         )),
     };
     let mut outcome = ToolCallOutcome::from(&execution);
-    let model_output = execution.output().render();
-    let diagnostic = (!execution.is_success()).then(|| model_output.clone());
-    let output = if execution.is_success() {
-        model_output
+    let blocks = execution.output().as_content();
+    let has_images = blocks
+        .iter()
+        .any(|block| matches!(block, ToolResultContent::Image(_)));
+    let supported_images = blocks.iter().all(|block| match block {
+        ToolResultContent::Image(image) => {
+            matches!(image.data, DocumentSourceKind::Base64(_))
+                && matches!(
+                    image.media_type,
+                    Some(
+                        ImageMediaType::PNG
+                            | ImageMediaType::JPEG
+                            | ImageMediaType::GIF
+                            | ImageMediaType::WEBP
+                    )
+                )
+        }
+        _ => true,
+    });
+    let successful = execution.is_success() && supported_images;
+    let (content, diagnostic) = if execution.is_success() && has_images {
+        if supported_images {
+            (
+                blocks
+                    .iter()
+                    .map(|block| match block {
+                        ToolResultContent::Json { value } => {
+                            ToolResultContent::text(value.to_string())
+                        }
+                        ToolResultContent::Text(_) | ToolResultContent::Image(_) => block.clone(),
+                    })
+                    .collect(),
+                None,
+            )
+        } else {
+            outcome = ToolCallOutcome::Error;
+            let diagnostic = "tool returned an unsupported image block".to_string();
+            (
+                vec![ToolResultContent::text(format!(
+                    "status: error\nerror: {diagnostic}"
+                ))],
+                Some(diagnostic),
+            )
+        }
     } else {
-        format!("status: error\nerror: {model_output}")
+        // Preserve the exact historical rendering for all non-image outputs
+        // and failed executions. Never serialize successful images into text.
+        let model_output = execution.output().render();
+        let diagnostic = (!execution.is_success()).then(|| model_output.clone());
+        let output = if execution.is_success() {
+            model_output
+        } else {
+            format!("status: error\nerror: {model_output}")
+        };
+        (vec![ToolResultContent::text(output)], diagnostic)
     };
     // Mutation metadata is truthful even when a later apply or rollback step
     // failed. Do not erase it merely because Rig classified the call as an
@@ -288,21 +338,21 @@ pub(in crate::session) async fn dispatch_tool_call(
     } else if turn.is_cancelled() && !outcome.is_success() {
         outcome = ToolCallOutcome::Cancelled;
     }
-    let candidate = (execution.is_success() && call.tool == EngineTool::SubmitPlan)
+    let candidate = (successful && call.tool == EngineTool::SubmitPlan)
         .then(|| {
             context
                 .result::<PlanCandidate>()
                 .expect("published Plan candidates must validate")
         })
         .flatten();
-    let draft = (execution.is_success() && call.tool.authors_draft())
+    let draft = (successful && call.tool.authors_draft())
         .then(|| {
             context
                 .result::<PlanDraft>()
                 .expect("published Plan drafts must decode")
         })
         .flatten();
-    let reconciliation = (execution.is_success() && call.tool == EngineTool::ReconcileReports)
+    let reconciliation = (successful && call.tool == EngineTool::ReconcileReports)
         .then(|| {
             let accepted = context
                 .result::<ValidatedReportReconciliation>()
@@ -318,7 +368,7 @@ pub(in crate::session) async fn dispatch_tool_call(
         result: UserContent::ToolResult(ToolResult {
             call: call.id.clone(),
             name: call.function.name.clone(),
-            content: vec![ToolResultContent::text(output)],
+            content,
             is_error: !outcome.is_success(),
         }),
         metadata: ToolResultMetadata {
@@ -728,9 +778,14 @@ pub(in crate::session) async fn execute_planned_tool_calls(
 }
 
 pub(in crate::session) fn assemble_tool_result_batch(
-    slots: Vec<ToolCallSlot>,
+    mut slots: Vec<ToolCallSlot>,
     mut candidate: Option<PlanCandidate>,
 ) -> ToolResultBatch {
+    let mut image_count = 0usize;
+    let mut image_bytes = 0usize;
+    for slot in &mut slots {
+        slot.enforce_image_budget(&mut image_count, &mut image_bytes);
+    }
     let mut results = Vec::with_capacity(slots.len());
     let mut metadata = Vec::with_capacity(slots.len());
     let mut reconciliation = None;
@@ -775,6 +830,48 @@ pub(in crate::session) fn assemble_tool_result_batch(
 }
 
 impl ToolCallSlot {
+    /// Admit whole image results in assistant-call order, never truncate a slot.
+    fn enforce_image_budget(&mut self, count: &mut usize, bytes: &mut usize) {
+        let UserContent::ToolResult(result) = &mut self.result else {
+            return;
+        };
+        let mut added_count = 0usize;
+        let mut added_bytes = 0usize;
+        for block in &result.content {
+            if let ToolResultContent::Image(image) = block {
+                added_count = added_count.saturating_add(1);
+                if let DocumentSourceKind::Base64(data) = &image.data {
+                    let padding = if data.ends_with("==") {
+                        2
+                    } else {
+                        usize::from(data.ends_with('='))
+                    };
+                    let decoded = (data.len() / 4 * 3).saturating_sub(padding);
+                    added_bytes = added_bytes.saturating_add(decoded);
+                }
+            }
+        }
+        if added_count == 0 {
+            return;
+        }
+        let next_count = count.saturating_add(added_count);
+        let next_bytes = bytes.saturating_add(added_bytes);
+        if next_count > zevria_content::prompt::MAX_PROMPT_IMAGES
+            || next_bytes > zevria_content::prompt::MAX_PROMPT_IMAGE_BYTES
+        {
+            let diagnostic = "image result omitted: one response may return at most eight images or 20 MiB of image data; request fewer images per response";
+            result.content = vec![ToolResultContent::text(format!(
+                "status: error\nerror: {diagnostic}"
+            ))];
+            result.is_error = true;
+            self.metadata.outcome = ToolCallOutcome::Error;
+            self.metadata.diagnostic = Some(diagnostic.into());
+        } else {
+            *count = next_count;
+            *bytes = next_bytes;
+        }
+    }
+
     /// Capture the readable diagnostic before constructing the unchanged model
     /// envelope. Renderers never need to reverse-parse provider result text.
     fn local_diagnostic(

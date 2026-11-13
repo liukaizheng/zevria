@@ -93,7 +93,7 @@ pub fn tool_summary(name: &str, arguments: Option<&serde_json::Value>) -> String
     };
     let value = match name {
         "command" => string("command").unwrap_or_default().into(),
-        "edit" | "write" | "delete" => string("file_path")
+        "edit" | "write" | "delete" | "read_image" => string("file_path")
             .or_else(|| string("path"))
             .unwrap_or_default()
             .into(),
@@ -231,6 +231,12 @@ mod tests {
             ("edit", json!({"file_path":"src/lib.rs"}), "src/lib.rs"),
             ("write", json!({"path":"new.rs"}), "new.rs"),
             ("delete", json!({"file_path":"old.rs"}), "old.rs"),
+            (
+                "read_image",
+                json!({"file_path":"capture.png"}),
+                "capture.png",
+            ),
+            ("read_image", json!({"file_path":123}), ""),
             ("skill", json!({"skill":"design"}), "design"),
             (
                 "skill_read",

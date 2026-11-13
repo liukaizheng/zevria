@@ -781,6 +781,91 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
 }
 
 #[test]
+fn read_image_renders_path_and_summary_without_image_payloads_or_error_envelopes() {
+    let image = zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+    let summary = format!(
+        "image: /workspace/capture.png\nformat: image/png\ndimensions: 1×1\nbytes: {}",
+        image.encoded_len()
+    );
+    for (arguments, outcome, status, diagnostic, expected_path) in [
+        (
+            json!({"file_path": "capture.png"}),
+            ToolCallOutcome::Success,
+            ToolCallStatus::Finished,
+            None,
+            "capture.png",
+        ),
+        (
+            json!({"file_path": "capture.png"}),
+            ToolCallOutcome::Error,
+            ToolCallStatus::Finished,
+            Some("image exceeds the 5 MiB limit; downscale it first"),
+            "capture.png",
+        ),
+        (
+            json!({"file_path": "capture.png"}),
+            ToolCallOutcome::Denied,
+            ToolCallStatus::Finished,
+            Some("image reads unavailable"),
+            "capture.png",
+        ),
+        (
+            json!({"file_path": "capture.png"}),
+            ToolCallOutcome::Cancelled,
+            ToolCallStatus::Interrupted,
+            Some("image read interrupted"),
+            "capture.png",
+        ),
+        (
+            json!({"file_path": 42}),
+            ToolCallOutcome::Error,
+            ToolCallStatus::Finished,
+            Some("invalid file_path"),
+            "<invalid arguments>",
+        ),
+    ] {
+        let message =
+            assistant_message(vec![tool_call("image-read", None, "read_image", arguments)]);
+        let mut result = test_tool_result("image-read", "read_image", &summary);
+        result.content.push(image.to_tool_result_content());
+        result.is_error = !outcome.is_success();
+        let mut metadata = file_metadata("image-read", None, "read_image", outcome, Vec::new());
+        if let Some(diagnostic) = diagnostic {
+            metadata = metadata.with_diagnostic(diagnostic);
+            result.content = vec![ToolResultContent::text(format!(
+                "status: error\nerror: {diagnostic}"
+            ))];
+        }
+        let states = vec![Some(crate::app::ToolCallState {
+            command_job: None,
+            arguments: None,
+            status,
+            result: Some(result),
+            metadata: Some(metadata),
+            subtasks: Default::default(),
+        })];
+        let mut lines = Vec::new();
+        layout_native_message(&message, Some(&states), &mut lines, 120, None);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(
+            rendered.contains(&format!("read_image · {expected_path}")),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(&image.base64()));
+        assert!(!rendered.contains("status: error"));
+        if let Some(diagnostic) = diagnostic {
+            assert!(rendered.contains(diagnostic), "{rendered}");
+            assert!(!rendered.contains("[image]"));
+        } else {
+            for line in summary.lines() {
+                assert!(rendered.contains(line), "missing {line:?}: {rendered}");
+            }
+            assert!(rendered.contains("[image]"));
+        }
+    }
+}
+
+#[test]
 fn successful_write_and_delete_render_only_one_compact_summary_row() {
     for (tool_name, change, expected_header) in [
         (
