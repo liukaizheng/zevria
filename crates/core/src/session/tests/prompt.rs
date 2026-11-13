@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "image_counting.rs"]
+mod image_counting;
+
 #[tokio::test]
 async fn image_only_messages_and_skill_arguments_are_durable_before_provider_failure() {
     for skill in [false, true] {
@@ -492,7 +495,7 @@ async fn finalized_provider_work_is_retained_when_failure_races_cancellation() {
     .unwrap();
     let start = ensemble_start_fixture("retained", EnsembleWorkflow::Plan, "plan");
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),

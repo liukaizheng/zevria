@@ -151,7 +151,7 @@ async fn ensemble_drafting_is_allowed_before_inspection_without_changing_gate_or
     )
     .unwrap();
     engine
-        .record_required(TranscriptItem::Plan(PlanRecord::Started {
+        .commit(TranscriptItem::Plan(PlanRecord::Started {
             id: PlanId::new(),
         }))
         .unwrap();

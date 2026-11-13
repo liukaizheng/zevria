@@ -7,9 +7,10 @@ use std::{
 
 use anyhow::Context as _;
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+#[cfg(test)]
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use zevria_acp::ExecutionProfile;
-use zevria_core::SessionEngine;
 use zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME;
 use zevria_foundation::ModelRole;
 use zevria_foundation::QUESTION_TOOL_NAME;
@@ -21,6 +22,7 @@ use zevria_foundation::{
 };
 use zevria_foundation::{TurnPolicy, WorkspaceContract};
 use zevria_instructions::FixedSkillRoots;
+#[cfg(test)]
 use zevria_instructions::SkillCatalog;
 use zevria_instructions::prompts::BUILD_MODE_INSTRUCTIONS;
 use zevria_instructions::prompts::PLAN_MODE_INSTRUCTIONS;
@@ -28,30 +30,26 @@ use zevria_instructions::prompts::{
     ENSEMBLE_WORKER_PLAN_INSTRUCTIONS, ENSEMBLE_WORKER_REVIEW_INSTRUCTIONS,
 };
 use zevria_instructions::skill::discover_skills;
-use zevria_provider::{ProviderRouter, ProviderRouterFactory};
 use zevria_session_api::SessionCommand;
 use zevria_session_api::SessionEventReceiver;
 use zevria_session_api::SessionEventSender;
 use zevria_session_api::SubtaskLauncher;
+#[cfg(test)]
 use zevria_session_api::question_channels;
+#[cfg(test)]
 use zevria_session_api::session_event_channel;
-use zevria_session_api::subtask_channels_with_capacity;
 use zevria_session_api::{CommandJobLimits, CommandJobs, QuestionRequester};
 use zevria_tools::{
     CommandLimits, CommandStatusTool, CommandTerminateTool, CommandTool, CreatePlanTool,
     DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool, ReadPlanTool, ReconcileReportsTool,
     SkillReadTool, SkillTool, SubmitPlanTool, TaskTool, UpdatePlanTool, WriteTool,
 };
-use zevria_transcript::agent_runs_dir;
 use zevria_transcript::transcript;
 use zevria_transcript::transcript::TranscriptItem;
-use zevria_transcript::transcript::replay_active_skills;
 use zevria_workflow::PlanHandoff;
 use zevria_workflow::PlanWorkflowState;
 
 use crate::config::{CommandConfig, Config};
-use crate::ensemble::EnsembleSupervisor;
-use crate::subtasks::{SubtaskSupervisorConfig, spawn_supervisor};
 
 fn guidance_roots(workspace: &Path) -> zevria_instructions::GuidanceRoots {
     #[cfg(not(test))]
@@ -78,6 +76,10 @@ fn append_guidance_notices(
         notices.push(diagnostic.to_string());
     }
 }
+
+mod restore;
+mod startup;
+use restore::preflight as preflight_restoration;
 
 #[cfg(test)]
 #[path = "restoration_tests.rs"]
@@ -362,173 +364,7 @@ pub async fn start_session_with_profile(
     start: SessionStart,
     profile: ExecutionProfile,
 ) -> anyhow::Result<RunningSession> {
-    if !profile.is_worker() {
-        return start_session(config, workspace, start).await;
-    }
-    let resume_path = match start {
-        SessionStart::New {
-            inherited_models: None,
-        } => None,
-        SessionStart::New {
-            inherited_models: Some(_),
-        } => {
-            anyhow::bail!("model inheritance is only supported for interactive root replacements")
-        }
-        SessionStart::Resume(path) => Some(path),
-        SessionStart::FromPlan { .. } => {
-            anyhow::bail!("ensemble workers cannot implement a Plan handoff")
-        }
-    };
-    start_worker_session(config, workspace, resume_path).await
-}
-
-/// Deliberately does not construct skill discovery/management, model mutation,
-/// a subtask supervisor, an ensemble launcher, or Markdown Plan projections.
-async fn start_worker_session(
-    config: &Config,
-    workspace: &Path,
-    resume_path: Option<PathBuf>,
-) -> anyhow::Result<RunningSession> {
-    zevria_foundation::shell::prepare_native().await?;
-    #[cfg(windows)]
-    let workspace = zevria_foundation::windows_io::checked_directory_path(workspace)
-        .context("unsupported protected Windows worker workspace")?;
-    #[cfg(not(windows))]
-    let workspace = std::fs::canonicalize(workspace)?;
-    let directory = sessions_dir(&workspace, ExecutionProfile::EnsembleWorker);
-    if let Some(path) = &resume_path {
-        anyhow::ensure!(
-            path.parent() == Some(directory.as_path()),
-            "worker transcript must be in the ensemble-sessions namespace"
-        );
-    }
-    ensure_worker_ignore_guard(&directory)?;
-    let fresh_models = config
-        .source_path
-        .as_deref()
-        .map(crate::models::load)
-        .transpose()?;
-    let model_config = fresh_models.as_ref().unwrap_or(config);
-    let id = match &resume_path {
-        Some(path) => path
-            .file_stem()
-            .and_then(|id| id.to_str())
-            .context("unreadable worker session ID")?
-            .to_string(),
-        None => transcript::pick_session_id(),
-    };
-    let path = resume_path
-        .clone()
-        .unwrap_or_else(|| directory.join(format!("{id}.jsonl")));
-    let lease = prepare_session_lease(&path).await?;
-    let loaded = if let Some(path) = resume_path {
-        Some(
-            tokio::task::spawn_blocking(move || transcript::load_report(&path))
-                .await
-                .context("worker transcript loader failed")??,
-        )
-    } else {
-        None
-    };
-    let cleanup_abandoned_history = loaded.is_some();
-    if let Some(loaded) = &loaded {
-        loaded.ensure_resumable()?;
-    }
-    let models = crate::session_models::resolve(model_config, &id, loaded.as_ref(), None)?;
-    let initial_items = vec![TranscriptItem::SessionModels(models.selections.clone())];
-    let skills = Arc::new(SkillCatalog::default());
-    let skill_catalog = skills.clone();
-    let (event_tx, event_rx) = session_event_channel(config.session.event_queue_capacity);
-    let questions = question_channels(event_tx.clone());
-    let tools = worker_tools(&workspace, questions.requester, config)?;
-    let provider = ProviderRouter::root(&models.routing, &model_config.session.preamble, &id)?;
-    let (writer, loaded) = match loaded {
-        Some(outcome) => tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            Ok((
-                transcript::TranscriptWriter::append_loaded(&outcome)?,
-                Some(outcome),
-            ))
-        })
-        .await
-        .context("worker writer preparation failed")??,
-        None => (
-            transcript::TranscriptWriter::allocate_with_id(&directory, &id)?,
-            None,
-        ),
-    };
-    #[cfg(feature = "cache-diagnostics")]
-    let provider = provider.with_cache_diagnostics(zevria_provider::CacheDiagnosticContext::new(
-        writer.path(),
-        &id,
-    ));
-    let mut startup_notices = Vec::new();
-    startup_notices.extend(transcript_recovery_notice(
-        &path,
-        writer.recovered_malformed_lines(),
-    ));
-    let engine = match loaded {
-        Some(outcome) => {
-            SessionEngine::from_loaded(provider, tools, worker_policies(), writer, skills, outcome)?
-        }
-        None => SessionEngine::new(provider, tools, worker_policies(), writer, skills)?
-            .with_transcript_items(initial_items)?,
-    };
-    let mut engine = engine
-        .with_incremental_tools(config.session.incremental_tools)
-        .with_guidance_roots(guidance_roots(&workspace))
-        .with_compaction_policy(models.compaction)
-        .with_question_responder(questions.responder);
-    append_guidance_notices(&mut startup_notices, engine.refresh_application_guidance()?);
-    let restored_items = engine.conversation().items().to_vec();
-    let plan_state = engine.plan_state()?.clone();
-    let selected_mode = engine.selected_mode();
-    let model_snapshots = engine.restored_model_contexts()?;
-    let (command_tx, command_rx) = unbounded_channel();
-    let (exit_tx, exit_rx) = unbounded_channel();
-    let engine_events = event_tx.clone();
-    let engine_lease = lease.clone();
-    let engine_task = observe_task(
-        "session engine",
-        tokio::spawn(async move {
-            let _lease = engine_lease;
-            engine.run(command_rx, engine_events).await
-        }),
-        exit_tx,
-    );
-    Ok(RunningSession {
-        command_jobs: None,
-        cleanup_abandoned_history,
-        restored_taken: false,
-        restored_subtasks: Vec::new(),
-        restored_agent_runs: Vec::new(),
-        restoration: SessionRestoration {
-            model_contexts: models.routing.context_policies(),
-            reasoning_levels: std::array::from_fn(|index| {
-                models
-                    .routing
-                    .selection_for_role(ModelRole::ALL[index])
-                    .reasoning_level
-            }),
-            model_snapshots,
-            sessions_dir: directory,
-            session_id: id.clone(),
-            subsessions_dir: transcript::subsessions_dir(&workspace, &id),
-            agent_runs_root: agent_runs_dir(&workspace, &id),
-            transcript_path: path,
-            transcript_items: restored_items,
-            skill_catalog,
-            startup_notices,
-            plan_state,
-            selected_mode,
-        },
-        _lease: Some(lease),
-        command_tx: Some(command_tx),
-        event_tx: Some(event_tx),
-        event_rx: Some(event_rx),
-        exit_rx: Some(exit_rx),
-        engine_task: Some(engine_task),
-        supervisor_task: None,
-    })
+    startup::start(config, workspace, start, profile).await
 }
 
 /// Capture startup discovery once: native global skills overridden by project
@@ -554,45 +390,6 @@ pub(crate) fn load_session_skills(workspace: &Path) -> zevria_instructions::Skil
         );
     }
     discovery
-}
-
-fn preflight_restoration(
-    children: &Path,
-    agents: &Path,
-    items: &[TranscriptItem],
-) -> anyhow::Result<(Vec<RestoredSubtask>, Vec<RestoredAgentRun>)> {
-    zevria_transcript::SessionReplayError::validate(items)?;
-    let mut subtasks = Vec::new();
-    let launches = zevria_transcript::subtask_launch_metadata(items);
-    for (id, path) in transcript::subsession_files(children)? {
-        let items = transcript::load(&path)?;
-        zevria_transcript::SessionReplayError::validate(&items)?;
-        subtasks.push(RestoredSubtask {
-            launch: launches.get(&id).cloned(),
-            id: zevria_foundation::SubtaskId::new(id),
-            items,
-        });
-    }
-    let mut agent_runs = Vec::new();
-    for item in items {
-        if let TranscriptItem::Ensemble(zevria_workflow::EnsembleRecord::Started { start }) = item {
-            crate::ensemble::preflight_existing_logs(agents, start)?;
-            for descriptor in &start.agents {
-                let path = zevria_transcript::agent_run_path(agents, &start.run_id, &descriptor.id);
-                if path.exists() {
-                    let records = zevria_transcript::AgentRunTranscriptReader::open(&path)?
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                    agent_runs.push(RestoredAgentRun {
-                        run_id: start.run_id.clone(),
-                        descriptor: descriptor.clone(),
-                        path,
-                        records,
-                    });
-                }
-            }
-        }
-    }
-    Ok((subtasks, agent_runs))
 }
 
 pub(crate) fn transcript_recovery_notice(path: &Path, malformed_lines: usize) -> Option<String> {
@@ -637,6 +434,8 @@ pub struct SessionRestoration {
     /// Authoritative startup items, including pending in-memory metadata.
     pub transcript_items: Vec<TranscriptItem>,
     pub skill_catalog: Arc<zevria_instructions::skill::SkillCatalog>,
+    /// Validated startup pins; frontends must not replay the transcript again.
+    pub active_skills: zevria_instructions::skill::ActiveSkills,
     pub startup_notices: Vec<String>,
     /// Snapshot from the fully configured engine, captured before spawning it.
     pub plan_state: PlanWorkflowState,
@@ -659,6 +458,8 @@ pub struct RestoredSession {
     /// Authoritative startup items, including pending in-memory metadata.
     pub transcript_items: Vec<TranscriptItem>,
     pub skill_catalog: Arc<zevria_instructions::skill::SkillCatalog>,
+    /// Validated startup pins; frontends must not replay the transcript again.
+    pub active_skills: zevria_instructions::skill::ActiveSkills,
     pub startup_notices: Vec<String>,
     /// Snapshot from the fully configured engine, captured before spawning it.
     pub plan_state: PlanWorkflowState,
@@ -737,6 +538,7 @@ impl RunningSession {
             transcript_path: meta.transcript_path.clone(),
             transcript_items: std::mem::take(&mut meta.transcript_items),
             skill_catalog: meta.skill_catalog.clone(),
+            active_skills: std::mem::take(&mut meta.active_skills),
             startup_notices: std::mem::take(&mut meta.startup_notices),
             plan_state: std::mem::take(&mut meta.plan_state),
             selected_mode: meta.selected_mode,
@@ -821,371 +623,7 @@ pub async fn start_session(
     workspace: &Path,
     start: SessionStart,
 ) -> anyhow::Result<RunningSession> {
-    zevria_foundation::shell::prepare_native().await?;
-    // Session construction reloads catalogs, limits and other-role defaults.
-    // Inherited/restored root selections and other running sessions stay pinned.
-    let fresh_models = app_config
-        .source_path
-        .as_deref()
-        .map(crate::models::load)
-        .transpose()?;
-    let model_config = fresh_models.as_ref().unwrap_or(app_config);
-    let sessions_dir = transcript::sessions_dir(workspace);
-    let (root_session_id, root_path) = match &start {
-        SessionStart::Resume(path) => {
-            let id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .with_context(|| {
-                    format!("the session file {} has no readable name", path.display())
-                })?
-                .to_string();
-            (id, path.clone())
-        }
-        SessionStart::New { .. } | SessionStart::FromPlan { .. } => {
-            let id = transcript::pick_session_id();
-            let path = sessions_dir.join(format!("{id}.jsonl"));
-            (id, path)
-        }
-    };
-    let lease = prepare_session_lease(&root_path).await?;
-    let loaded = match &start {
-        SessionStart::Resume(_) => {
-            let path = root_path.clone();
-            Some(
-                tokio::task::spawn_blocking(move || transcript::load_report(&path))
-                    .await
-                    .context("transcript loader failed")??,
-            )
-        }
-        SessionStart::New { .. } | SessionStart::FromPlan { .. } => None,
-    };
-    let inherited_models = match &start {
-        SessionStart::New { inherited_models }
-        | SessionStart::FromPlan {
-            inherited_models, ..
-        } => inherited_models.as_ref(),
-        SessionStart::Resume(_) => None,
-    };
-    // Selection errors precede writable handles, repair and provider calls.
-    let session_models = crate::session_models::resolve(
-        model_config,
-        &root_session_id,
-        loaded.as_ref(),
-        inherited_models,
-    )?;
-    let subsessions_dir = transcript::subsessions_dir(workspace, &root_session_id);
-    let agent_runs_root = agent_runs_dir(workspace, &root_session_id);
-    let (restored_subtasks, restored_agent_runs) = if let Some(outcome) = &loaded {
-        preflight_restoration(&subsessions_dir, &agent_runs_root, outcome.items())?
-    } else {
-        (Vec::new(), Vec::new())
-    };
-
-    let (event_tx, event_rx) = session_event_channel(app_config.session.event_queue_capacity);
-    let channels = subtask_channels_with_capacity(
-        root_session_id.clone(),
-        event_tx.clone(),
-        app_config.session.max_concurrent_subtasks,
-    );
-    let question_channels = question_channels(event_tx.clone());
-    let ensemble_questions = question_channels.requester.clone();
-    let skill_workspace = workspace.to_path_buf();
-    let skill_config_path = match &app_config.source_path {
-        Some(path) => path.clone(),
-        None => zevria_foundation::config::config_path()?,
-    };
-    let skill_loader_config_path = skill_config_path.clone();
-    let startup_skill_settings = app_config.skills.clone();
-    let skill_catalog = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let discovery = load_session_skills(&skill_workspace);
-        let settings = crate::skills::load_skill_config(&skill_loader_config_path)?.settings;
-        if settings != startup_skill_settings {
-            tracing::info!(target: "zevria::runtime",
-                "new session adopts updated skill behavior; mode permissions remain unchanged"
-            );
-        }
-        Ok(Arc::new(SkillCatalog::from_discovery(discovery, settings)?))
-    })
-    .await
-    .context("skill catalog loader failed")??;
-    let initial_items = vec![
-        TranscriptItem::SessionModels(session_models.selections.clone()),
-        TranscriptItem::SessionMode(SessionMode::Build),
-    ];
-    let original_items = loaded
-        .as_ref()
-        .map_or(initial_items.as_slice(), |outcome| outcome.items());
-    let pins = match &loaded {
-        Some(outcome) => outcome.replay().instructions.skills().clone(),
-        None => replay_active_skills(original_items)?,
-    };
-    for diagnostic in (zevria_instructions::SkillContext {
-        catalog: skill_catalog.clone(),
-        pins,
-        mode_enabled: true,
-    })
-    .pin_diagnostics()
-    {
-        tracing::warn!(target: "zevria::runtime", "{}", diagnostic.message);
-    }
-    let skills = skill_catalog.clone();
-    let command_jobs = (app_config.command.max_background_jobs > 0).then(|| {
-        CommandJobs::new(
-            command_job_limits(app_config.command),
-            Some(event_tx.clone()),
-        )
-    });
-    if let Some(jobs) = &command_jobs {
-        jobs.reserve_ids(
-            original_items
-                .iter()
-                .filter_map(|item| match item {
-                    TranscriptItem::ToolResults { metadata, .. } => Some(metadata),
-                    _ => None,
-                })
-                .flatten()
-                .filter_map(|meta| meta.command_job().map(|job| job.id.clone())),
-        );
-    }
-    let policies = build_session_policies(app_config.session.plan, command_jobs.is_some());
-    let skill_service = Arc::new(crate::skills::LocalSkillService {
-        roots: skill_catalog
-            .roots
-            .clone()
-            .expect("startup discovery captured fixed roots"),
-        config_path: skill_config_path,
-    });
-    // Keep the dependent supervisor alive until the engine observer publishes
-    // its result. Otherwise its channel-exhaustion exit can mask a fatal engine error.
-    let supervisor_keepalive = channels.launcher.clone();
-    let tools = build_tools(
-        workspace,
-        channels.launcher,
-        question_channels.requester,
-        app_config.command,
-        app_config.session.plan.max_artifact_bytes,
-        command_jobs.clone(),
-    )?;
-    let provider = ProviderRouter::root(
-        &session_models.routing,
-        &model_config.session.preamble,
-        &root_session_id,
-    )?;
-
-    let mut startup_notices = Vec::new();
-    {
-        for role in [ModelRole::Build, ModelRole::Plan, ModelRole::Review] {
-            let profile = &session_models.routing.for_role(role).profile;
-            let origin = match (&start, role) {
-                (SessionStart::Resume(_), ModelRole::Build | ModelRole::Plan) => {
-                    "restored selection"
-                }
-                (
-                    SessionStart::New {
-                        inherited_models: Some(_),
-                    }
-                    | SessionStart::FromPlan {
-                        inherited_models: Some(_),
-                        ..
-                    },
-                    ModelRole::Build | ModelRole::Plan,
-                ) => "inherited selection",
-                _ => "global default",
-            };
-            match zevria_session_api::ModelProvider::preflight_input(&provider, profile, &transcript::model_input(original_items)) {
-                Ok(zevria_model::models::ReplayPreflight::Compatible(_)) => {},
-                Ok(zevria_model::models::ReplayPreflight::ConversionRequired { sources }) => startup_notices.push(format!("{} {origin} {} cannot read the checkpoint from {}. History remains inspectable. Use /model to select its source or confirm conversion, or start a fresh session. No conversion call was made.", role.name(), profile, sources.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))),
-                Err(error) => startup_notices.push(format!("{} replay preflight failed; generation is blocked until the history is repaired: {error:#}", role.name())),
-            }
-        }
-    }
-
-    let (transcript, loaded) = match loaded {
-        Some(outcome) => tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let writer = transcript::TranscriptWriter::append_loaded(&outcome)?;
-            Ok((writer, Some(outcome)))
-        })
-        .await
-        .context("transcript writer preparation failed")??,
-        None => (
-            transcript::TranscriptWriter::allocate_with_id(&sessions_dir, &root_session_id)?,
-            None,
-        ),
-    };
-    let transcript_path = transcript.path().to_path_buf();
-    #[cfg(feature = "cache-diagnostics")]
-    let provider = provider.with_cache_diagnostics(zevria_provider::CacheDiagnosticContext::new(
-        &transcript_path,
-        &root_session_id,
-    ));
-    let recovered_malformed_lines = transcript.recovered_malformed_lines();
-    if let Some(notice) = transcript_recovery_notice(&transcript_path, recovered_malformed_lines) {
-        startup_notices.push(notice);
-    }
-    tracing::info!(target: "zevria::runtime",
-        session_id = transcript.session_id(),
-        path = %transcript_path.display(),
-        pending = transcript.is_pending(),
-        "opened session transcript storage"
-    );
-
-    let ensemble = Arc::new(EnsembleSupervisor::new(
-        app_config.ensemble.clone(),
-        workspace,
-        agent_runs_root.clone(),
-        ensemble_questions,
-    )?);
-    let engine = match loaded {
-        Some(outcome) => SessionEngine::from_loaded(
-            provider,
-            tools,
-            policies,
-            transcript,
-            skills.clone(),
-            outcome,
-        )?,
-        None => SessionEngine::new(provider, tools, policies, transcript, skills.clone())?
-            .with_transcript_items(initial_items)?,
-    };
-    let mut engine = engine
-        .with_incremental_tools(app_config.session.incremental_tools)
-        .with_skill_catalog(skill_catalog.clone())?
-        .with_mode_management()
-        .with_idle_notifications()
-        .with_subtask_concurrency(app_config.session.max_concurrent_subtasks)
-        .with_guidance_roots(guidance_roots(workspace))
-        .with_skill_management(skill_service, [true, app_config.session.plan.allow_skills])?
-        .with_compaction_policy(session_models.compaction.clone())
-        .with_question_responder(question_channels.responder)
-        .with_ensemble_launcher(ensemble)
-        .with_plans_dir(transcript::plans_dir(workspace));
-    if let Some(jobs) = &command_jobs {
-        engine = engine
-            .with_command_jobs(jobs.clone())
-            .with_job_continuations(app_config.command.max_automatic_continuations);
-    }
-    if let Some(path) = &app_config.source_path {
-        engine = engine.with_model_management(
-            Arc::new(crate::models::LocalModelSettings {
-                config_path: path.clone(),
-                models_path: model_config
-                    .models_path
-                    .clone()
-                    .unwrap_or_else(|| zevria_foundation::config::models_path_for(path)),
-            }),
-            crate::models::revision(model_config)?,
-        );
-    }
-
-    append_guidance_notices(&mut startup_notices, engine.refresh_application_guidance()?);
-    let transcript_items = engine.conversation().items().to_vec();
-    let plan_state = engine.plan_state()?.clone();
-    let selected_mode = engine.selected_mode();
-    let model_snapshots = engine.restored_model_contexts()?;
-    let (command_tx, command_rx) = unbounded_channel();
-    let supervisor = spawn_supervisor(
-        channels.requests,
-        SubtaskSupervisorConfig {
-            explore_factory: ProviderRouterFactory::new(
-                ModelRole::Explore,
-                model_config.routing().for_role(ModelRole::Explore).clone(),
-                model_config
-                    .routing()
-                    .selection_for_role(ModelRole::Explore)
-                    .reasoning_level,
-                &model_config.session.preamble,
-            ),
-            builder_factory: ProviderRouterFactory::new(
-                ModelRole::Builder,
-                model_config.routing().for_role(ModelRole::Builder).clone(),
-                model_config
-                    .routing()
-                    .selection_for_role(ModelRole::Builder)
-                    .reasoning_level,
-                &model_config.session.preamble,
-            ),
-            explore_tools: build_explore_tools(workspace, app_config.command)?,
-            startup_workspace: {
-                #[cfg(windows)]
-                {
-                    zevria_foundation::windows_io::checked_directory_path(workspace)?
-                }
-                #[cfg(not(windows))]
-                {
-                    std::fs::canonicalize(workspace)?
-                }
-            },
-            command_config: app_config.command,
-            events: event_tx.clone(),
-            subsessions_dir: subsessions_dir.clone(),
-            compaction: session_models.compaction.clone(),
-            max_concurrent_subtasks: app_config.session.max_concurrent_subtasks,
-            incremental_tools: app_config.session.incremental_tools,
-            guidance: engine
-                .guidance_snapshot()
-                .expect("root captured guidance")
-                .clone(),
-        },
-    );
-
-    let (exit_tx, exit_rx) = unbounded_channel();
-    let engine_lease = lease.clone();
-    let engine_events = event_tx.clone();
-    let engine_task = observe_task_retaining(
-        "session engine",
-        tokio::spawn(async move {
-            let _lease = engine_lease;
-            engine.run(command_rx, engine_events).await
-        }),
-        exit_tx.clone(),
-        supervisor_keepalive,
-    );
-    let supervisor_task = observe_task("subtask supervisor", supervisor, exit_tx);
-
-    let cleanup_abandoned_history = matches!(&start, SessionStart::Resume(_));
-    if let SessionStart::FromPlan { handoff, .. } = start {
-        command_tx
-            .send(SessionCommand::Turn(
-                zevria_session_api::TurnCommand::StartFromPlan { handoff },
-            ))
-            .map_err(|_| anyhow::anyhow!("the session engine stopped before its opening prompt"))?;
-    }
-
-    Ok(RunningSession {
-        command_jobs,
-        cleanup_abandoned_history,
-        restored_taken: false,
-        restored_subtasks,
-        restored_agent_runs,
-        _lease: Some(lease),
-        restoration: SessionRestoration {
-            model_contexts: session_models.routing.context_policies(),
-            reasoning_levels: std::array::from_fn(|index| {
-                session_models
-                    .routing
-                    .selection_for_role(ModelRole::ALL[index])
-                    .reasoning_level
-            }),
-            model_snapshots,
-            sessions_dir,
-            session_id: root_session_id,
-            subsessions_dir,
-            agent_runs_root,
-            transcript_path,
-            transcript_items,
-            skill_catalog,
-            startup_notices,
-            plan_state,
-            selected_mode,
-        },
-        command_tx: Some(command_tx),
-        event_tx: Some(event_tx),
-        event_rx: Some(event_rx),
-        exit_rx: Some(exit_rx),
-        engine_task: Some(engine_task),
-        supervisor_task: Some(supervisor_task),
-    })
+    startup::start(app_config, workspace, start, ExecutionProfile::Interactive).await
 }
 
 trait RuntimeTaskOutcome {
@@ -1553,10 +991,16 @@ mod tests {
     async fn pending_worker_shutdown_never_deletes_a_competing_abandoned_file() {
         for models_only in [false, true] {
             let workspace = tempfile::tempdir().unwrap();
-            let mut worker =
-                start_worker_session(&crate::config::test_config(), workspace.path(), None)
-                    .await
-                    .unwrap();
+            let mut worker = start_session_with_profile(
+                &crate::config::test_config(),
+                workspace.path(),
+                SessionStart::New {
+                    inherited_models: None,
+                },
+                ExecutionProfile::EnsembleWorker,
+            )
+            .await
+            .unwrap();
             let path = worker.restoration.transcript_path.clone();
             assert!(!path.exists());
             let bytes = if models_only {
@@ -1604,10 +1048,16 @@ mod tests {
     async fn dropping_frontend_or_aborting_observer_keeps_a_surviving_engine_leased() {
         for abort_observer in [false, true] {
             let workspace = tempfile::tempdir().unwrap();
-            let mut worker =
-                start_worker_session(&crate::config::test_config(), workspace.path(), None)
-                    .await
-                    .unwrap();
+            let mut worker = start_session_with_profile(
+                &crate::config::test_config(),
+                workspace.path(),
+                SessionStart::New {
+                    inherited_models: None,
+                },
+                ExecutionProfile::EnsembleWorker,
+            )
+            .await
+            .unwrap();
             let path = worker.restoration.transcript_path.clone();
             let sidecar = path.with_extension("jsonl.lock");
             let commands = worker.command_sender();
@@ -1744,6 +1194,7 @@ mod tests {
                 transcript_path: transcript_path.clone(),
                 transcript_items: Vec::new(),
                 skill_catalog: skills.clone(),
+                active_skills: Default::default(),
                 startup_notices: Vec::new(),
                 plan_state: PlanWorkflowState::Idle,
                 selected_mode: SessionMode::Build,
@@ -1812,6 +1263,7 @@ mod tests {
                 transcript_path,
                 transcript_items: Vec::new(),
                 skill_catalog: skills.clone(),
+                active_skills: Default::default(),
                 startup_notices: Vec::new(),
                 plan_state: PlanWorkflowState::Idle,
                 selected_mode: SessionMode::Build,

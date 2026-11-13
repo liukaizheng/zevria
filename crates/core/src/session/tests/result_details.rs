@@ -119,12 +119,13 @@ async fn dispatch_retains_details_with_partial_and_cancellation_precedence() {
         else {
             unreachable!()
         };
-        let slot = dispatch_tool_call(&tools, &call, &turn, None, None, None).await;
+        let slot =
+            dispatch_tool_call(&tools, &EngineCall::new(&call), &turn, None, None, None).await;
         assert_eq!(slot.metadata.outcome, expected);
         assert_eq!(slot.metadata.detail, detail);
         assert_eq!(slot.metadata.id, "detail-call");
         assert_eq!(
-            slot.question_disposition,
+            slot.effect.question_disposition(),
             slot.metadata.question_disposition()
         );
         let wire = serde_json::to_string(&slot.result).unwrap();
@@ -249,13 +250,14 @@ fn locally_denied_and_cancelled_calls_never_have_details() {
     let AssistantContent::ToolCall(call) = launch_call("not-started", "Never launched") else {
         unreachable!()
     };
+    let call = EngineCall::new(&call);
     for slot in [
         denied_slot(&call, SessionMode::Plan),
         cancelled_slot(&call),
         candidate_locked_slot(&call),
     ] {
         assert!(slot.metadata.detail.is_none());
-        assert!(slot.question_disposition.is_none());
+        assert!(slot.effect.question_disposition().is_none());
     }
 }
 

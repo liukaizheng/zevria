@@ -1,6 +1,6 @@
 use super::*;
-use crate::session::ensemble::recovered_ensemble_synthesis;
-use crate::session::worker_review::validate_frozen_workers;
+use crate::session::workflow::ensemble::recovered_ensemble_synthesis;
+use crate::session::workflow::worker_review::validate_frozen_workers;
 
 fn fixture(
     count: usize,
@@ -39,7 +39,7 @@ fn fixture(
             .collect(),
     };
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),

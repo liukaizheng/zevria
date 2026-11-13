@@ -17,10 +17,14 @@ use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+mod history;
+pub(crate) use history::HistoryCache;
 use zevria_anthropic::{
     body::{self, PreparedRequest, RequestOptions},
     error::{ApiError, ErrorKind},
+    project::ValidatedHistory,
     stream::{FinishedMessage, MessageAccumulator},
 };
 use zevria_foundation::{ModelProfileRef, ReasoningLevel};
@@ -125,8 +129,12 @@ impl AnthropicProvider {
     pub(crate) fn set_reasoning_level(&mut self, level: ReasoningLevel) {
         self.reasoning_level = level;
     }
-    fn prepare(&self, request: &ModelRequest<'_>) -> anyhow::Result<PreparedRequest> {
-        body::build(
+    fn prepare(
+        &self,
+        request: &ModelRequest<'_>,
+        history: Option<&ValidatedHistory>,
+    ) -> anyhow::Result<PreparedRequest> {
+        body::build_with_history(
             request,
             &RequestOptions {
                 target: &self.profile,
@@ -137,6 +145,7 @@ impl AnthropicProvider {
                 compatibility: &self.endpoint.compatibility,
                 additional_params: &self.endpoint.additional_params,
             },
+            history,
         )
     }
     fn authenticated_request(
@@ -159,6 +168,7 @@ impl AnthropicProvider {
         progress: AttemptProgress<'_>,
         request_start_deadline: Duration,
     ) -> Result<(FinishedMessage, Option<String>), (ApiError, Option<String>)> {
+        let mut telemetry = crate::telemetry::RequestTelemetry::new();
         progress.status(NetworkStatus::Connecting).await;
         let response = authenticated(
             &self.endpoint.api_key,
@@ -290,6 +300,7 @@ impl AnthropicProvider {
                 if event.data.trim().is_empty() {
                     continue;
                 }
+                telemetry.observe_event();
                 let advanced = accumulator
                     .push(&event.data)
                     .map_err(|e| (e, request_id.clone()))?;
@@ -325,6 +336,8 @@ impl AnthropicProvider {
             }
             tracing::info!(provider=%self.profile.provider, model=%self.profile.model,
                 transport="http", served_model=%accumulator.served_model, stop_reason=?accumulator.stop_reason(),
+                request_ms=telemetry.request_ms(), first_event_ms=?telemetry.first_event_ms(),
+                tool_uses=accumulator.tool_uses(),
                 upstream_request_id=?request_id, input_tokens=accumulator.usage.input_tokens,
                 cache_creation=accumulator.usage.cache_creation_input_tokens, cache_read=accumulator.usage.cache_read_input_tokens,
                 output_tokens=accumulator.usage.output_tokens, stripped_thinking_turns=prepared.stripped_thinking_turns,
@@ -336,12 +349,14 @@ impl AnthropicProvider {
             .map_err(|e| (e, request_id))
     }
     #[tracing::instrument(skip_all, fields(profile = %self.profile))]
-    async fn run(
+    pub(crate) async fn run(
         &mut self,
         request: ModelRequest<'_>,
         progress: ProgressReporter,
+        history: Option<Arc<ValidatedHistory>>,
     ) -> anyhow::Result<ModelResponse> {
-        let mut prepared = self.prepare(&request)?;
+        let mut prepared = self.prepare(&request, history.as_deref())?;
+        drop(history);
         let recovery = Recovery::new(&self.recovery);
         let mut stripped_retry = false;
         while let Some(plan) = recovery.start_attempt() {
@@ -364,7 +379,6 @@ impl AnthropicProvider {
                         Some(prepared.prefix_binding),
                     ))?
                     .with_usage(Some(usage));
-                    progress.usage_updated(usage).await;
                     return Ok(response);
                 }
                 Err((mut error, request_id)) => {
@@ -451,30 +465,16 @@ impl AnthropicProvider {
         }
         anyhow::bail!("completion recovery requires a positive attempt cap")
     }
-}
-impl ModelProvider for AnthropicProvider {
-    fn application_prompt(&self) -> &str {
-        &self.preamble
-    }
-    fn complete<'a>(
+    pub(crate) fn count_with_history<'a>(
         &'a mut self,
         request: ModelRequest<'a>,
-        progress: ProgressReporter,
-    ) -> ProviderFuture<'a> {
-        Box::pin(self.run(request, progress))
-    }
-    fn compact<'a>(&'a mut self, _request: ModelRequest<'a>) -> CompactFuture<'a> {
-        Box::pin(async { Ok(CompactResult::Unsupported) })
-    }
-    fn count_input_tokens<'a>(
-        &'a mut self,
-        request: ModelRequest<'a>,
+        history: Option<Arc<ValidatedHistory>>,
     ) -> InputTokenCountFuture<'a> {
         Box::pin(async move {
             let Some(url) = self.count_url.clone().filter(|_| !self.count_unsupported) else {
                 return Ok(InputTokenCount::Unsupported);
             };
-            let body = body::count_tokens_body(&self.prepare(&request)?.body);
+            let body = body::count_tokens_body(&self.prepare(&request, history.as_deref())?.body);
             let timeout =
                 Duration::from_secs(self.endpoint.input_token_count.request_timeout_seconds);
             let (response, deadline) = authenticated(
@@ -548,6 +548,27 @@ impl ModelProvider for AnthropicProvider {
             .await
             .map_err(|_| anyhow::anyhow!("Anthropic count_tokens request timed out"))?
         })
+    }
+}
+impl ModelProvider for AnthropicProvider {
+    fn application_prompt(&self) -> &str {
+        &self.preamble
+    }
+    fn complete<'a>(
+        &'a mut self,
+        request: ModelRequest<'a>,
+        progress: ProgressReporter,
+    ) -> ProviderFuture<'a> {
+        Box::pin(self.run(request, progress, None))
+    }
+    fn compact<'a>(&'a mut self, _request: ModelRequest<'a>) -> CompactFuture<'a> {
+        Box::pin(async { Ok(CompactResult::Unsupported) })
+    }
+    fn count_input_tokens<'a>(
+        &'a mut self,
+        request: ModelRequest<'a>,
+    ) -> InputTokenCountFuture<'a> {
+        self.count_with_history(request, None)
     }
     fn reset(&mut self) {}
 }

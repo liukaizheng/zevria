@@ -58,7 +58,9 @@ async fn simple_turn_has_authoritative_event_order() {
     assert_eq!(requests[0].model_role, ModelRole::Build);
     assert_eq!(
         requests[0].instructions,
-        engine.rendered_instructions(engine.policies.policy(SessionMode::Build))
+        engine
+            .rendered_instructions(engine.policies.policy(SessionMode::Build))
+            .as_ref()
     );
     assert_eq!(requests[0].allowed_tool_names, None);
     assert_eq!(engine.history().len(), 2);
@@ -139,8 +141,12 @@ async fn loop_calls_count_dispatches_not_tools_and_restart_for_each_turn() {
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].prompt, Message::user("use both tools"));
     assert_eq!(requests[2].prompt, Message::user("next question"));
-    assert!(requests.iter().all(|request| request.instructions
-        == engine.rendered_instructions(engine.policies.policy(SessionMode::Build))));
+    assert!(requests.iter().all(|request| {
+        request.instructions
+            == engine
+                .rendered_instructions(engine.policies.policy(SessionMode::Build))
+                .as_ref()
+    }));
     assert_eq!(requests[0].input.first(), requests[2].input.first());
 }
 
@@ -423,4 +429,28 @@ async fn usage_events_report_the_active_profile_role_and_window() {
         } if *actual == usage
             && profile == &ModelProfileRef::new("test-provider", "build-usage")
     )));
+    let call = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::ModelCallStarted { .. }))
+        .unwrap();
+    let usage = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+        .unwrap();
+    let completed = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+        .unwrap();
+    assert!(call < usage && usage < completed);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        zevria_transcript::load(engine.conversation.path()).unwrap(),
+        engine.conversation.items()
+    );
 }

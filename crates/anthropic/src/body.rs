@@ -35,6 +35,14 @@ pub fn build(
     request: &ModelRequest<'_>,
     options: &RequestOptions<'_>,
 ) -> anyhow::Result<PreparedRequest> {
+    build_with_history(request, options, None)
+}
+
+pub fn build_with_history(
+    request: &ModelRequest<'_>,
+    options: &RequestOptions<'_>,
+    history: Option<&project::ValidatedHistory>,
+) -> anyhow::Result<PreparedRequest> {
     anyhow::ensure!(
         !matches!(
             options.effort,
@@ -63,14 +71,27 @@ pub fn build(
         Value::Array(selected)
     };
     let system = json!([{"type":"text", "text":request.instructions}]);
-    let projected = project::project_with_compatibility(
-        &request.input,
-        options.target,
-        options.compatibility,
-        &system,
-        &tools,
-        false,
-    )?;
+    let projected = if let Some(history) = history {
+        anyhow::ensure!(
+            history.matches(
+                &request.input,
+                options.target,
+                options.compatibility,
+                request.input_identity,
+            )?,
+            "prepared Anthropic history does not match this request"
+        );
+        history.completion(&system, &tools, false)?
+    } else {
+        project::project_with_compatibility(
+            &request.input,
+            options.target,
+            options.compatibility,
+            &system,
+            &tools,
+            false,
+        )?
+    };
     let mut thinking = json!({"type":"adaptive", "display":options.display});
     if options.compatibility.strict_thinking_binding {
         thinking["block_binding"] = json!({"prefix_mismatch_behavior":"error"});

@@ -19,6 +19,7 @@ pub(crate) struct RecoveryPolicy {
     pub(crate) send_timeout: Duration,
     pub(crate) stall_warning: Duration,
     pub(crate) response_idle_timeout: Duration,
+    pub(crate) websocket_keepalive: Duration,
     pub(crate) backoff_base: Duration,
     pub(crate) backoff_cap: Duration,
 }
@@ -38,6 +39,7 @@ impl From<&NetworkConfig> for RecoveryPolicy {
             send_timeout: Duration::from_secs(config.request_start_timeout_seconds),
             stall_warning: Duration::from_secs(config.stall_warning_seconds),
             response_idle_timeout: Duration::from_secs(config.response_idle_timeout_seconds),
+            websocket_keepalive: Duration::from_secs(config.websocket_keepalive_seconds),
             backoff_base: Duration::from_millis(500),
             backoff_cap: Duration::from_secs(15),
         }

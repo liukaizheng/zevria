@@ -6,15 +6,55 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-#[derive(Debug, Clone)]
+mod environment;
+pub use environment::{prepare_environment, print_environment};
+
+/// Unix command startup policy. Windows retains its fixed Git Bash environment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellEnvironment {
+    #[default]
+    Captured,
+    Login,
+}
+
+static FROZEN_SHELL: OnceLock<Result<Arc<ShellSpec>, String>> = OnceLock::new();
+
+#[cfg(not(windows))]
+fn login_shell_path() -> PathBuf {
+    std::env::var_os("SHELL")
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into())
+        .into()
+}
+
+#[derive(Clone)]
 pub struct ShellSpec {
     executable: PathBuf,
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
     remove_env: Vec<&'static str>,
+    clear_env: bool,
 }
+
+impl std::fmt::Debug for ShellSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShellSpec")
+            .field("executable", &self.executable)
+            .field("args", &self.args)
+            .field("environment_variables", &self.env.len())
+            .field("remove_env", &self.remove_env)
+            .field("clear_env", &self.clear_env)
+            .finish()
+    }
+}
+
 impl ShellSpec {
     pub fn apply(&self, command: &mut tokio::process::Command) {
+        if self.clear_env {
+            command.env_clear();
+        }
         command.args(&self.args).envs(self.env.iter().cloned());
         for key in &self.remove_env {
             command.env_remove(key);
@@ -43,14 +83,16 @@ impl ShellSpec {
         }
         #[cfg(not(windows))]
         {
+            #[cfg(unix)]
+            if let Some(shell) = environment::captured() {
+                return Ok(shell);
+            }
             Ok(Self {
-                executable: std::env::var_os("SHELL")
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "/bin/sh".into())
-                    .into(),
+                executable: login_shell_path(),
                 args: vec!["-lc".into()],
                 env: vec![],
                 remove_env: vec![],
+                clear_env: false,
             })
         }
     }
@@ -79,8 +121,7 @@ impl ShellSpec {
 
 /// One selection for the entire process, shared by root, Explore and Build.
 pub fn frozen() -> anyhow::Result<Arc<ShellSpec>> {
-    static SHELL: OnceLock<Result<Arc<ShellSpec>, String>> = OnceLock::new();
-    SHELL
+    FROZEN_SHELL
         .get_or_init(|| {
             ShellSpec::resolve()
                 .map(Arc::new)
@@ -235,6 +276,7 @@ mod windows {
                 ("CHERE_INVOKING".into(), "1".into()),
             ],
             remove_env: vec!["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "CDPATH"],
+            clear_env: false,
         })
     }
 

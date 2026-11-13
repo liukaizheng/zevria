@@ -387,7 +387,9 @@ async fn successive_plan_and_build_submissions_resolve_fresh_policies() {
         assert_eq!(requests[0].model_role, ModelRole::Plan);
         assert_eq!(
             requests[0].instructions,
-            engine.rendered_instructions(engine.policies.policy(SessionMode::Plan))
+            engine
+                .rendered_instructions(engine.policies.policy(SessionMode::Plan))
+                .as_ref()
         );
         assert_eq!(
             requests[0].allowed_tool_names,
@@ -407,7 +409,9 @@ async fn successive_plan_and_build_submissions_resolve_fresh_policies() {
         assert_eq!(requests[1].model_role, ModelRole::Build);
         assert_eq!(
             requests[1].instructions,
-            engine.rendered_instructions(engine.policies.policy(SessionMode::Build))
+            engine
+                .rendered_instructions(engine.policies.policy(SessionMode::Build))
+                .as_ref()
         );
         assert_eq!(requests[1].allowed_tool_names, None);
     }
@@ -478,7 +482,9 @@ async fn plan_policy_allows_command_and_is_fixed_across_continuations() {
         assert!(requests.iter().all(|request| {
             request.model_role == ModelRole::Plan
                 && request.instructions
-                    == engine.rendered_instructions(engine.policies.policy(SessionMode::Plan))
+                    == engine
+                        .rendered_instructions(engine.policies.policy(SessionMode::Plan))
+                        .as_ref()
                 && request.allowed_tool_names == Some(vec!["command".to_string()])
         }));
     }

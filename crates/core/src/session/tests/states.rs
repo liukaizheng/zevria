@@ -103,17 +103,17 @@ fn early_instruction_failure_does_not_hide_later_skill_or_plan_errors() {
 fn prepared_policy_cache_tracks_context_limits_without_changing_the_wire_prefix() {
     let (_directory, mut engine) = engine();
     let policy = engine.policies.policy(SessionMode::Build).clone();
-    let first = engine.prepared_policy(&policy);
-    assert!(Arc::ptr_eq(&first, &engine.prepared_policy(&policy)));
+    let first = engine.request_plan(&policy);
+    assert!(Arc::ptr_eq(&first, &engine.request_plan(&policy)));
     engine.compaction = test_compaction_policy(12_000, 90, 128);
-    let updated = engine.prepared_policy(&policy);
+    let updated = engine.request_plan(&policy);
     assert!(!Arc::ptr_eq(&first, &updated));
     assert_ne!(first.shape.0, updated.shape.0);
     assert_eq!(first.instructions, updated.instructions);
     assert_eq!(first.tools, updated.tools);
     assert_eq!(updated.context, *engine.context_policy(policy.model_role));
     engine = engine.with_compaction_policy(test_compaction_policy(24_000, 90, 128));
-    let replaced = engine.prepared_policy(&policy);
+    let replaced = engine.request_plan(&policy);
     assert_ne!(updated.shape.0, replaced.shape.0);
     assert_eq!(updated.instructions, replaced.instructions);
     assert_eq!(updated.tools, replaced.tools);
@@ -182,10 +182,12 @@ async fn loaded_report_writer_and_engine_share_one_load_and_validation() {
 async fn failed_replay_has_no_payload_and_rejects_every_command_and_reseeding() {
     let (_directory, mut engine) = engine();
     let failure = engine
-        .record_completed_items(vec![invalid_skill(), invalid_plan()])
+        .record_completed(vec![invalid_skill(), invalid_plan()])
         .unwrap_err();
-    let error = failure.downcast::<SessionReplayError>().unwrap();
-    assert!(matches!(engine.replay, SessionReplayState::Failed(_)));
+    let RecordError::Replay(error) = failure else {
+        panic!("expected fatal replay")
+    };
+    assert!(engine.conversation.replay().is_err());
     assert_eq!(engine.active_skills().unwrap_err(), error);
     assert_eq!(engine.plan_state().unwrap_err(), error);
     assert_eq!(engine.context_tokens().unwrap_err(), error);
@@ -281,18 +283,19 @@ async fn fatal_shutdown_never_repairs_invalid_in_memory_evidence() {
     )
     .unwrap();
     engine
-        .record_required(TranscriptItem::Message(Message::user("durable")))
+        .commit(TranscriptItem::Message(Message::user("durable")))
         .unwrap();
     let original = std::fs::read(&path).unwrap();
     let mut blocker = TranscriptRewriteBlocker::new(&path).expect("block transcript replacement");
-    let error = engine
-        .record_completed_items(vec![
+    let RecordError::Replay(error) = engine
+        .record_completed(vec![
             invalid_plan(),
             TranscriptItem::Message(Message::assistant("completed")),
         ])
         .unwrap_err()
-        .downcast::<SessionReplayError>()
-        .unwrap();
+    else {
+        panic!("expected fatal replay")
+    };
     assert!(engine.conversation.persistence_error().is_some());
     blocker.restore().expect("restore transcript filename");
     let (_commands, receive) = mpsc::unbounded_channel();
@@ -305,20 +308,104 @@ async fn fatal_shutdown_never_repairs_invalid_in_memory_evidence() {
 fn invalid_uncommitted_edit_does_not_poison_or_mutate_current_history() {
     let (_directory, mut engine) = engine();
     engine
-        .record_required(TranscriptItem::Message(Message::user("valid")))
+        .commit(TranscriptItem::Message(Message::user("valid")))
         .unwrap();
     let bytes = std::fs::read(engine.conversation.path()).unwrap();
     assert!(
         engine
-            .commit_anchored_records(
+            .commit(RecordChange::anchored(
                 TurnAnchor::ReplaceFrom(0),
                 vec![invalid_plan()],
                 SessionMode::Build
-            )
+            ))
             .is_err()
     );
     assert_eq!(engine.plan_state().unwrap(), &PlanWorkflowState::Idle);
     assert_eq!(std::fs::read(engine.conversation.path()).unwrap(), bytes);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn request_preparation_shares_one_instruction_render_across_round_consumers() {
+    let (_directory, mut engine) = engine();
+    engine
+        .commit(TranscriptItem::Message(Message::user("request")))
+        .unwrap();
+    engine.invalidate_request_plans();
+    let policy = engine.policies.policy(SessionMode::Build).clone();
+    let (_, counts) = crate::session::pipeline_probe::measure(async {
+        let first = engine.instruction_preparation(&policy).unwrap();
+        engine.reconcile_before_dispatch(&policy).unwrap();
+        engine.local_context_candidates(&policy).unwrap();
+        let turn = engine.next_turn(SessionMode::Build);
+        let gate = PlanSubmissionGate::inert(None);
+        let scope = ToolExecutionScope::new(&engine, SessionMode::Build, &policy, &turn, &gate);
+        assert!(Arc::ptr_eq(
+            &first.instructions,
+            &scope.instructions.as_ref().unwrap().instructions
+        ));
+        let committed = engine.request_plan(&policy);
+        assert!(Arc::ptr_eq(
+            &committed.tools,
+            &engine.request_tools(HistoryView::Committed, &policy)
+        ));
+        let prospective = engine.request_plan_for(HistoryView::Prospective(&[]), &policy);
+        assert!(Arc::ptr_eq(
+            &committed.instructions,
+            &prospective.instructions
+        ));
+        assert_eq!(committed.instructions, prospective.instructions);
+        engine.invalidate_model_preview();
+        assert!(Arc::ptr_eq(&committed, &engine.request_plan(&policy)));
+    })
+    .await;
+    assert_eq!(counts.instruction_renders, 1);
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn committed_accounting_never_clones_transcript_items() {
+    let (_directory, mut engine) = engine();
+    let (result, required) = zevria_transcript::replay_probe::measure_instruction_replay(|| {
+        engine.commit(TranscriptItem::Message(Message::user("required")))
+    });
+    result.unwrap();
+    assert_eq!(required.item_clones, 0);
+    assert_eq!(required.prospective_copies, 1);
+    let (result, completed) = zevria_transcript::replay_probe::measure_instruction_replay(|| {
+        engine.record_completed(vec![TranscriptItem::Message(Message::assistant(
+            "completed",
+        ))])
+    });
+    result.unwrap();
+    assert_eq!(completed.item_clones, 0);
+    assert_eq!(completed.prospective_copies, 0);
+}
+
+#[test]
+fn commits_report_installed_ranges_and_reject_proposals_without_fatal_identity() {
+    let (_directory, mut engine) = engine();
+    let start = engine.conversation.items().len();
+    let committed = engine
+        .commit(vec![
+            TranscriptItem::Message(Message::user("first")),
+            TranscriptItem::Message(Message::assistant("second")),
+        ])
+        .unwrap();
+    assert_eq!(committed.range, start..start + 2);
+    assert!(!committed.history_replaced);
+    let error = engine.commit(vec![invalid_plan()]).unwrap_err();
+    assert!(matches!(error, RecordError::Rejected(_)));
+    assert_eq!(engine.conversation.items().len(), start + 2);
+    let replaced = engine
+        .commit(RecordChange::anchored(
+            TurnAnchor::ReplaceFrom(start),
+            vec![TranscriptItem::Message(Message::user("replacement"))],
+            SessionMode::Build,
+        ))
+        .unwrap();
+    assert!(replaced.history_replaced);
+    assert_eq!(replaced.range.end, engine.conversation.items().len());
 }
 
 /// Repeated provider skill-call IDs are invalid committed replay. Cancelling
@@ -511,13 +598,14 @@ async fn control_transitions_preserve_management_but_never_restore_confirmation(
             managed.then_some(1)
         );
         engine.context.count_failures.insert(test_profile());
+        engine.invalidate_request_plans();
         engine.invalidate_model_preview();
         assert!(engine.context.count_failures.is_empty());
         assert!(
             matches!(&engine.phase, EnginePhase::Turn { skill_queries, .. } if Arc::ptr_eq(skill_queries, &queries))
         );
         engine
-            .record_required_items(vec![TranscriptItem::SkillInvocation(SkillInvocation::new(
+            .commit(vec![TranscriptItem::SkillInvocation(SkillInvocation::new(
                 SkillName::parse("commit").unwrap(),
                 "test",
                 SkillApplication::Activate(test_skills().get("commit").unwrap().snapshot()),

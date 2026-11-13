@@ -1,5 +1,6 @@
 //! Responses transport lifecycle and provider construction.
 
+use crate::diagnostics::Diagnostics;
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
@@ -76,14 +77,7 @@ pub(crate) fn prompt_cache_key_fingerprint(cache_key: &str) -> String {
 // Diagnostic builds also bound existing identifier log fields. The actual
 // headers, IDs, errors, and continuation values remain untouched.
 pub(crate) fn log_identifier(value: &str) -> &str {
-    #[cfg(feature = "cache-diagnostics")]
-    {
-        crate::cache_diagnostics::identifier(value)
-    }
-    #[cfg(not(feature = "cache-diagnostics"))]
-    {
-        value
-    }
+    Diagnostics::identifier(value)
 }
 
 pub(crate) fn response_request_id(headers: &HeaderMap) -> Option<String> {
@@ -193,9 +187,7 @@ pub(crate) struct ContinuationState {
     pub(crate) socket_generation: u64,
     pub(crate) response_id: String,
     pub(crate) request_properties: serde_json::Value,
-    pub(crate) lineage: Option<crate::turn::ContinuationLineage>,
-    pub(crate) request_input: Vec<serde_json::Value>,
-    pub(crate) response_output: Vec<serde_json::Value>,
+    pub(crate) lineage: crate::turn::ContinuationLineage,
 }
 
 /// Everything needed to (re)establish the OpenAI Responses websocket. The base
@@ -208,6 +200,8 @@ pub(crate) struct OpenAiWebSocketConfig {
     pub(crate) api_key: ApiKeySource,
     pub(crate) provider: String,
     pub(crate) connect_timeout: std::time::Duration,
+    pub(crate) keepalive: std::time::Duration,
+    pub(crate) prewarm: bool,
 }
 
 pub(crate) struct OpenAiWebSocketConnection {
@@ -217,6 +211,7 @@ pub(crate) struct OpenAiWebSocketConnection {
 
 impl OpenAiWebSocketConfig {
     pub(crate) async fn connect(&self) -> anyhow::Result<OpenAiWebSocketConnection> {
+        let started = std::time::Instant::now();
         let log_url = redacted_url_for_logging(&self.url);
         tracing::debug!(url = %log_url, "connecting to the OpenAI websocket");
         let (socket, response) = authenticated(
@@ -256,6 +251,7 @@ impl OpenAiWebSocketConfig {
         let websocket_connection_request_id = response_request_id(response.headers());
         tracing::info!(
             url = %log_url,
+            connect_ms = started.elapsed().as_millis() as u64,
             websocket_connection_request_id = ?websocket_connection_request_id.as_deref().map(log_identifier),
             "OpenAI websocket connected"
         );
@@ -316,7 +312,7 @@ impl OpenAiParkedWebSocket {
             })?
         };
         let connection = self.config.connect().await?;
-        let session = OpenAiWebSocketSession::new(connection.socket);
+        let session = OpenAiWebSocketSession::new(connection.socket, self.config.keepalive);
         self.session = session;
         self.socket_generation = next_generation;
         self.websocket_connection_request_id = connection.websocket_connection_request_id;
@@ -357,8 +353,7 @@ pub(crate) enum HttpFallback {
 /// A live single-profile Responses runtime with an independent continuation
 /// chain and transport recovery state.
 pub struct OpenAiProvider {
-    #[cfg(feature = "cache-diagnostics")]
-    pub(crate) cache_diagnostics: crate::cache_diagnostics::DiagnosticState,
+    pub(crate) cache_diagnostics: crate::diagnostics::Diagnostics,
     pub(crate) profile: ModelProfileRef,
     pub(crate) input_projection: Option<crate::turn::ProjectionCache>,
     #[allow(dead_code)]
@@ -490,6 +485,8 @@ impl OpenAiProvider {
             api_key: endpoint.api_key().clone(),
             provider: profile.profile.provider.clone(),
             connect_timeout: recovery.connect_timeout,
+            keepalive: recovery.websocket_keepalive,
+            prewarm: endpoint.network.prewarm,
         };
         let websocket_log_url = redacted_url_for_logging(&websocket_config.url);
         let http_log_url = redacted_url_for_logging(endpoints.http.as_str());
@@ -506,7 +503,7 @@ impl OpenAiProvider {
         } else if endpoint.supports_websockets {
             match websocket_config.connect().await {
                 Ok(connection) => (
-                    OpenAiWebSocketSession::new(connection.socket),
+                    OpenAiWebSocketSession::new(connection.socket, recovery.websocket_keepalive),
                     OpenAiTransport::WebSocket,
                     connection.websocket_connection_request_id,
                 ),
@@ -562,12 +559,13 @@ impl OpenAiProvider {
         if endpoint.compatibility.send_prompt_cache_key {
             responses_parameters["prompt_cache_key"] = cache_key.into();
         }
+        responses_parameters["parallel_tool_calls"] =
+            endpoint.compatibility.parallel_tool_calls.into();
         let input_token_count_url =
             resolve_input_token_count_url(&endpoints.http, &endpoint.input_token_count)?;
 
         Ok(Self {
-            #[cfg(feature = "cache-diagnostics")]
-            cache_diagnostics: crate::cache_diagnostics::DiagnosticState::configured(
+            cache_diagnostics: crate::diagnostics::Diagnostics::configured(
                 endpoint.session_id_header.as_deref(),
                 transport == OpenAiTransport::Http && endpoint.supports_websockets,
             ),
@@ -622,6 +620,32 @@ impl OpenAiProvider {
         })
     }
 
+    /// One best-effort handshake, owned by the engine's idle select. Dropping
+    /// this future before completion cannot install a socket or spend the next
+    /// completion's recovery budget. HTTP-only/fallback profiles do nothing.
+    pub(crate) async fn prewarm_connection(&mut self) {
+        if !self.ws.config.prewarm
+            || self.transport != OpenAiTransport::WebSocket
+            || self.ws.session.terminal_status().is_none()
+        {
+            return;
+        }
+        match self.ws.reconnect().await {
+            Ok(()) => {}
+            Err(error) if is_http_upgrade_required(&error) => {
+                self.switch_to_http("websocket_upgrade_required");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    provider = %self.profile.provider,
+                    model = %self.profile.model,
+                    error = %error,
+                    "OpenAI WebSocket prewarm failed; the first request retains its recovery budget"
+                );
+            }
+        }
+    }
+
     pub(crate) fn set_reasoning_level(&mut self, level: ReasoningLevel) {
         self.reasoning_level = level;
     }
@@ -671,8 +695,7 @@ impl OpenAiProvider {
             .terminate(crate::websocket_session::OpenAiWebSocketTerminalCategory::HttpFallback);
         self.ws.invalidate_continuation(reason);
         self.ws.pending_done_response_id = None;
-        #[cfg(feature = "cache-diagnostics")]
-        crate::cache_diagnostics::transport_fallback(self);
+        Diagnostics::transport_fallback(self);
         let http_log_url = redacted_url_for_logging(self.responses_url.as_str());
         tracing::warn!(
             reason,

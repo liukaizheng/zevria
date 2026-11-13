@@ -4,7 +4,7 @@
 //! owned by their domain crates. Adapters import those owners directly.
 
 mod session;
-pub use session::SessionEngine;
+pub use session::{SessionEngine, SessionEngineBuilder};
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

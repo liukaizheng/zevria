@@ -290,7 +290,9 @@ async fn fallback_and_direct_build_submissions_respect_all_plan_states() {
             assert_eq!(requests[0].model_role, ModelRole::Build);
             assert_eq!(
                 requests[0].instructions,
-                engine.rendered_instructions(engine.policies.policy(SessionMode::Build))
+                engine
+                    .rendered_instructions(engine.policies.policy(SessionMode::Build))
+                    .as_ref()
             );
             if matches!(original, PlanWorkflowState::Planning { .. }) {
                 assert!(!matches!(
@@ -345,7 +347,9 @@ async fn plan_implementation_and_fresh_handoff_commit_ordinary_build_atomically(
         if decision == PlanDecision::ImplementCurrent {
             assert_eq!(
                 engine.provider.requests.lock().unwrap()[0].instructions,
-                engine.rendered_instructions(engine.policies.policy(SessionMode::Build))
+                engine
+                    .rendered_instructions(engine.policies.policy(SessionMode::Build))
+                    .as_ref()
             );
         }
         if decision == PlanDecision::ImplementFresh {
@@ -405,7 +409,9 @@ async fn plan_implementation_and_fresh_handoff_commit_ordinary_build_atomically(
             );
             assert_eq!(
                 engine.provider.requests.lock().unwrap()[0].instructions,
-                engine.rendered_instructions(engine.policies.policy(SessionMode::Build))
+                engine
+                    .rendered_instructions(engine.policies.policy(SessionMode::Build))
+                    .as_ref()
             );
         }
     }
@@ -481,7 +487,9 @@ async fn accepted_skills_and_transcript_edits_commit_their_explicit_mode() {
         );
         assert_eq!(
             engine.provider.requests.lock().unwrap()[0].instructions,
-            engine.rendered_instructions(engine.policies.policy(SessionMode::Build))
+            engine
+                .rendered_instructions(engine.policies.policy(SessionMode::Build))
+                .as_ref()
         );
     }
 }

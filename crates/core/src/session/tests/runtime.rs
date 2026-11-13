@@ -23,6 +23,8 @@ mod job_continuations;
 mod maintenance;
 #[path = "mode_runtime.rs"]
 mod mode_runtime;
+#[path = "prewarm.rs"]
+mod prewarm;
 #[path = "reasoning.rs"]
 mod reasoning;
 

@@ -1,6 +1,6 @@
 # Zevria Privacy Policy
 
-Last updated: October 24, 2026
+Last updated: November 11, 2026
 
 Zevria is an open-source coding assistant that runs on the machine where you
 launch it. **Running locally does not mean all processing stays local.** Zevria
@@ -45,6 +45,18 @@ metadata, such as the connecting IP address.
 
 In addition to ordinary model requests, Zevria can make these requests:
 
+- **Optional WebSocket prewarm:** disabled by default. Setting
+  `network.prewarm = true` permits a best-effort authenticated WebSocket
+  handshake for the selected mode while a session is idle, including before
+  your first prompt. This contacts the configured provider and resolves its API
+  key, including running a configured credential helper, at session start rather
+  than waiting for the first request. The handshake sends authentication and
+  configured routing headers and exposes ordinary connection metadata, but not
+  instructions, tools or conversation content. HTTP-only and Anthropic profiles
+  do not prewarm. Default keepalive pings can maintain an already-open WebSocket
+  during user/tool pauses; `network.websocket_keepalive_seconds = 0` disables
+  those pings. Keepalive alone never opens a connection early.
+
 - **Exact input-token counting:** enabled by default and used conditionally, such
   as for image-bearing or capacity-sensitive requests. Counting can send the
   prepared instructions and full input to an endpoint derived from the Responses
@@ -87,6 +99,16 @@ Zevria process. Commands can read files outside the workspace, access inherited
 environment variables, and contact external services. Tool output can enter the
 model context and saved history. **Zevria does not provide an operating-system
 sandbox.** Plan and Explore restrictions are not security isolation.
+
+On Unix, the default command environment captures exported variables from one
+login-shell startup per process and reuses them for non-login commands. This can
+run your trusted shell profiles at session start, before the first command. The
+capture runs the current Zevria binary's private environment exporter, with
+bounded output/time; captured variables remain in memory and are not written to
+transcripts or logs. Profile exports can include credentials and are available
+to subsequent commands, just as inherited variables were before. Set
+`command.shell_environment = "login"` to restore a login shell for every command;
+Windows command-environment selection is unchanged.
 
 An explicitly configured `api_key` command in your user-owned `models.jsonc`
 also runs a local program with Zevria's privileges and inherited environment. It

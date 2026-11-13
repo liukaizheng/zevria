@@ -106,6 +106,14 @@ pub enum Launch {
 
 pub async fn dispatch(args: Vec<String>) -> anyhow::Result<Launch> {
     // These private entry points bypass auto-selection and all app initialization.
+    if args.first().is_some_and(|s| s == "--__print-env") {
+        anyhow::ensure!(
+            args.len() == 2,
+            "private environment exporter expects one marker"
+        );
+        zevria_foundation::shell::print_environment(std::ffi::OsStr::new(&args[1]))?;
+        return Ok(Launch::Exit(0));
+    }
     if args.first().is_some_and(|s| s == "--__acp-job") {
         return acp_helper(&args[1..]).await;
     }

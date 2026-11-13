@@ -185,8 +185,8 @@ fn captured_source(input: &[OwnedModelRequestItem]) -> CompactionSource {
     let (history, positions) = snapshot_conversation_input(input);
     CompactionSource {
         request: CompactionRequest {
-            instructions: "normal request instructions".repeat(100),
-            tools: ToolDeclarations::default(),
+            instructions: "normal request instructions".repeat(100).into(),
+            tools: ToolDeclarations::default().into(),
             input: input.to_vec(),
         },
         history,

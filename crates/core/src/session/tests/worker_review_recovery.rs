@@ -265,7 +265,7 @@ fn recovery_fixture(
             detail: "accepted".into(),
         }),
     }));
-    engine.record_required_items(root).unwrap();
+    engine.commit(root).unwrap();
     if boundary >= 1 {
         writer
             .append(&AgentRunTranscriptRecord::Event {

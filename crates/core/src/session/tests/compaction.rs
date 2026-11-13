@@ -927,7 +927,7 @@ async fn compaction_reinjects_the_latest_successful_task_snapshot() {
     });
     let snapshot = TaskList::from_tool_arguments(&arguments).expect("valid task snapshot");
     engine
-        .record_required(TranscriptItem::Message(Message::user("first question")))
+        .commit(TranscriptItem::Message(Message::user("first question")))
         .expect("prompt persists");
     engine
         .record_completed(TranscriptItem::Message(Message::Assistant(

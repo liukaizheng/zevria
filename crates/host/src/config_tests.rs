@@ -57,6 +57,25 @@ fn environment_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn unix_shell_environment_defaults_to_captured_and_login_is_explicit() {
+    use zevria_foundation::shell::ShellEnvironment;
+    assert_eq!(
+        parse("").unwrap().command.shell_environment,
+        ShellEnvironment::Captured
+    );
+    assert_eq!(
+        parse("[command]\nshell_environment = 'login'")
+            .unwrap()
+            .command
+            .shell_environment,
+        ShellEnvironment::Login
+    );
+    for invalid in ["'unknown'", "'Captured'", "true", "1"] {
+        assert!(parse(&format!("[command]\nshell_environment = {invalid}")).is_err());
+    }
+}
+
+#[test]
 fn theme_selector_is_name_only_strict_and_never_resolved_by_config_parsing() {
     assert!(parse("").unwrap().theme.is_none());
     assert_eq!(

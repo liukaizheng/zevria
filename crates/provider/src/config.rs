@@ -310,6 +310,10 @@ pub struct NetworkConfig {
     pub request_start_timeout_seconds: u64,
     pub stall_warning_seconds: u64,
     pub response_idle_timeout_seconds: u64,
+    /// Ping an already-open idle WebSocket; zero disables the timer.
+    pub websocket_keepalive_seconds: u64,
+    /// Best-effort idle WebSocket establishment before a model request.
+    pub prewarm: bool,
     /// Outage window for scheduling recovery; never interrupts useful work.
     pub recovery_window_seconds: u64,
     /// Absolute attempt cap, including the initial attempt, handshakes and fallback.
@@ -323,6 +327,8 @@ impl Default for NetworkConfig {
             request_start_timeout_seconds: 30,
             stall_warning_seconds: 30,
             response_idle_timeout_seconds: 180,
+            websocket_keepalive_seconds: 30,
+            prewarm: false,
             recovery_window_seconds: 300,
             max_attempts: 30,
         }
@@ -353,6 +359,14 @@ impl NetworkConfig {
                 "{prefix}.{field} is too large for a monotonic deadline"
             );
         }
+        anyhow::ensure!(
+            std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(
+                    self.websocket_keepalive_seconds
+                ))
+                .is_some(),
+            "{prefix}.websocket_keepalive_seconds is too large for a monotonic deadline"
+        );
         anyhow::ensure!(
             self.stall_warning_seconds < self.response_idle_timeout_seconds,
             "{prefix}.stall_warning_seconds must be shorter than response_idle_timeout_seconds"
@@ -468,7 +482,7 @@ impl ModeAssignments {
 }
 
 /// Optional Responses request features that compatible gateways may not
-/// implement. Defaults preserve Zevria's established request shape.
+/// implement. Defaults enable supported features, including native call batching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResponsesCompatibilityConfig {
@@ -481,6 +495,8 @@ pub struct ResponsesCompatibilityConfig {
     pub strict_tools: bool,
     pub send_prompt_cache_key: bool,
     pub send_store: bool,
+    /// Request native multi-call responses; additional_params may override it.
+    pub parallel_tool_calls: bool,
 }
 
 impl Default for ResponsesCompatibilityConfig {
@@ -493,6 +509,7 @@ impl Default for ResponsesCompatibilityConfig {
             strict_tools: true,
             send_prompt_cache_key: true,
             send_store: true,
+            parallel_tool_calls: true,
         }
     }
 }
@@ -974,6 +991,18 @@ mod tests {
         assert_eq!(omitted.network, NetworkConfig::default());
         assert_eq!(omitted.network.max_attempts, 30);
         assert_eq!(omitted.network.recovery_window_seconds, 300);
+        assert_eq!(omitted.network.websocket_keepalive_seconds, 30);
+        assert!(!omitted.network.prewarm);
+        let disabled = NetworkConfig {
+            websocket_keepalive_seconds: 0,
+            ..NetworkConfig::default()
+        };
+        disabled.validate("test").unwrap();
+        assert!(
+            crate::recovery::RecoveryPolicy::from(&disabled)
+                .websocket_keepalive
+                .is_zero()
+        );
         value["network"] = json!({"response_idle_timeout_seconds":600});
         let partial: ResponsesProviderConfig = serde_json::from_value(value).unwrap();
         assert_eq!(partial.network.stall_warning_seconds, 30);
@@ -992,6 +1021,10 @@ mod tests {
             assert!(network.validate("test").is_err(), "{field}");
         }
         for network in [
+            NetworkConfig {
+                websocket_keepalive_seconds: u64::MAX,
+                ..NetworkConfig::default()
+            },
             NetworkConfig {
                 recovery_window_seconds: u64::MAX,
                 ..NetworkConfig::default()

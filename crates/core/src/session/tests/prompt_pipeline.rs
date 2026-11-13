@@ -37,7 +37,7 @@ fn committed_request(engine: &SessionEngine<ScriptedProvider>) -> CapturedReques
     let policy = engine.policies.policy(SessionMode::Build);
     CapturedRequest::of(&ModelRequest {
         input_identity: None,
-        tools: &engine.request_tools(engine.conversation.items(), policy),
+        tools: &engine.request_tools(HistoryView::Committed, policy),
         forbid_tool_calls: false,
         instructions: &engine.rendered_instructions(policy),
         input: engine.conversation.model_input(),
@@ -61,10 +61,10 @@ async fn acceptance_prepares_once_validates_once_and_reuses_the_exact_counted_re
                             SessionMode::Build,
                         )
                         .unwrap();
-                    engine.record_required_items(prepared.records).unwrap();
+                    engine.commit(prepared.records).unwrap();
                 }
                 engine
-                    .record_required_items(
+                    .commit(
                         (0..size)
                             .map(|i| {
                                 TranscriptItem::Message(if i % 2 == 0 {
@@ -73,7 +73,7 @@ async fn acceptance_prepares_once_validates_once_and_reuses_the_exact_counted_re
                                     Message::assistant("answer")
                                 })
                             })
-                            .collect(),
+                            .collect::<Vec<_>>(),
                     )
                     .unwrap();
                 let end = engine.conversation.items().len() - 2;
@@ -238,7 +238,7 @@ async fn checkpoint_versions_reuse_preparation_and_identity_with_one_remeasureme
         for rejected in [false, true] {
             let (_dir, mut engine) = fixture();
             engine
-                .record_required_items(vec![
+                .commit(vec![
                     TranscriptItem::Message(Message::user("earlier request")),
                     TranscriptItem::Message(Message::assistant("earlier answer")),
                     TranscriptItem::Message(Message::user("retained request")),
@@ -358,7 +358,7 @@ async fn editing_away_last_typed_boundary_still_prepares_a_standard_reset() {
             SessionMode::Build,
         )
         .unwrap();
-    engine.record_required_items(initial.records).unwrap();
+    engine.commit(initial.records).unwrap();
     engine.capabilities.subtask_concurrency = None;
     assert!(
         engine
@@ -395,7 +395,7 @@ async fn rebuild_discards_usage_and_prior_exact_but_keeps_the_failed_count_latch
     for outcome in ["exact", "unsupported", "failed"] {
         let (_dir, mut engine) = fixture();
         engine
-            .record_required_items(vec![
+            .commit(vec![
                 TranscriptItem::Message(Message::user("old request")),
                 TranscriptItem::Message(Message::assistant("old answer")),
             ])
@@ -459,7 +459,7 @@ async fn image_detection_uses_the_active_projection_not_compacted_history() {
     let prompt =
         zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(image)]).unwrap();
     engine
-        .record_required(TranscriptItem::Message(prompt.to_message()))
+        .commit(TranscriptItem::Message(prompt.to_message()))
         .unwrap();
     let checkpoint = CompactionCheckpoint::new(
         CompactionTrigger::AutomaticPreTurn,
@@ -471,7 +471,7 @@ async fn image_detection_uses_the_active_projection_not_compacted_history() {
     )
     .unwrap();
     engine
-        .record_required(TranscriptItem::Compaction(checkpoint))
+        .commit(TranscriptItem::Compaction(checkpoint))
         .unwrap();
     engine.reset_after_history_replacement().unwrap();
     let (events, _receiver) = session_event_channel(64);
@@ -517,7 +517,7 @@ async fn orchestration_is_checked_once_before_any_persistence_repair() {
     std::fs::create_dir(&path).unwrap();
     assert!(
         engine
-            .record_completed_items(vec![
+            .record_completed(vec![
                 TranscriptItem::Message(Message::user("completed request")),
                 TranscriptItem::Message(Message::assistant("completed answer")),
             ])

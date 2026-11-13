@@ -623,9 +623,10 @@ async fn late_done_has_prior_owner_and_missing_cached_counter_is_not_a_raw_zero(
             )
             .await
             .unwrap();
+        assert_eq!(response.usage.unwrap().cached_tokens, 14848);
         let replay = response.into_record().into_model_request_item();
         let next = Message::user("next");
-        provider
+        let response = provider
             .complete(
                 request(vec![
                     ModelRequestItem::message(&first),
@@ -645,7 +646,11 @@ async fn late_done_has_prior_owner_and_missing_cached_counter_is_not_a_raw_zero(
                 usage_count += 1;
             }
         }
-        assert_eq!(usage_count, 2, "late done cannot publish usage twice");
+        assert_eq!(response.usage.unwrap().cached_tokens, 0);
+        assert_eq!(
+            usage_count, 0,
+            "completed usage belongs to core, never late done or the provider"
+        );
         server.await.unwrap();
     }
     .with_subscriber(subscriber)

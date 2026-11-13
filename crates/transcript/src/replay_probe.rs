@@ -6,6 +6,8 @@ use std::cell::Cell;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InstructionReplayCounts {
     pub loads: usize,
+    pub worker_loads: usize,
+    pub worker_records: usize,
     pub full_replays: usize,
     pub full_records: usize,
     pub pin_replays: usize,
@@ -13,6 +15,8 @@ pub struct InstructionReplayCounts {
     pub suffix_applications: usize,
     pub suffix_records: usize,
     pub proposals: usize,
+    pub prospective_copies: usize,
+    pub item_clones: usize,
     pub validations: usize,
     pub header_scans: usize,
 }

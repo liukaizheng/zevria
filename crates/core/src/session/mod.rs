@@ -4,127 +4,38 @@
 //! adapters only complete one model request at a time; tools and frontends are
 //! connected here through Rig's shared tool server and session events.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    fmt,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+mod builder;
+pub use builder::SessionEngineBuilder;
 
+use crate::session::kernel::accounting::ContextAccounting;
+use crate::session::kernel::request_plan::RequestPlan;
+use crate::session::kernel::state::{EnginePhase, GuidanceState, RootCapabilities, SkillState};
+use crate::session::turn::execution::TurnWork;
+use crate::session::turn::runtime::CommandAction;
 use futures_util::FutureExt as _;
-use rig_agent::tool::{ToolContext, server::ToolServerHandle};
-use rig_core::message::{
-    AssistantContent, Message, ToolCall, ToolResult, ToolResultContent, UserContent,
-};
-use sha2::{Digest as _, Sha256};
-#[cfg(test)]
-use std::future::Future;
-use tokio::sync::mpsc;
+use rig_agent::tool::server::ToolServerHandle;
+use rig_core::message::Message;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-
-use zevria_foundation::RECONCILE_REPORTS_TOOL_NAME;
-use zevria_foundation::SKILL_TOOL_NAME;
-use zevria_foundation::config::ModelContextPolicy;
-use zevria_foundation::config::ModelProfileRef;
-use zevria_foundation::question::QUESTION_TOOL_NAME;
-#[cfg(test)]
-use zevria_foundation::question::QuestionRequest;
-#[cfg(test)]
-use zevria_foundation::question::QuestionRequestId;
-use zevria_foundation::question::QuestionTerminalDisposition;
-use zevria_foundation::subtask::LAUNCH_SUBTASKS_TOOL_NAME;
-#[cfg(test)]
-use zevria_foundation::subtask::SubtaskId;
-use zevria_foundation::task::TaskList;
-use zevria_foundation::tool_result::ToolCallId;
-use zevria_foundation::tool_result::ToolCallOutcome;
-use zevria_foundation::tool_result::ToolCancelled;
-use zevria_foundation::tool_result::ToolResultDetail;
-use zevria_foundation::tool_result::ToolResultMetadata;
-use zevria_foundation::{
-    CREATE_PLAN_TOOL_NAME, PLAN_AUTHORING_TOOL_NAMES, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
-    UPDATE_PLAN_TOOL_NAME,
-};
-use zevria_instructions::prompts::{
-    ENSEMBLE_PLAN_SYNTHESIS_INSTRUCTIONS, ENSEMBLE_REVIEW_SYNTHESIS_INSTRUCTIONS,
-};
-use zevria_instructions::skill::ActiveSkills;
-use zevria_instructions::skill::SkillApplication;
-use zevria_instructions::skill::SkillCatalog;
-use zevria_instructions::skill::SkillInvocation;
-use zevria_instructions::skill::SkillName;
-use zevria_instructions::skill::SkillRequest;
-#[cfg(test)]
-use zevria_model::ProviderReplay;
+use zevria_foundation::policy::{SessionMode, SessionPolicies, TurnId, TurnPolicy};
+use zevria_instructions::skill::{ActiveSkills, SkillCatalog};
 use zevria_model::ToolDeclarations;
-use zevria_model::compaction::CompactionBackend;
-use zevria_model::compaction::CompactionCheckpoint;
-use zevria_model::compaction::CompactionTrigger;
-use zevria_model::compaction::ContextTokenEstimate;
-use zevria_model::compaction::local_replacement_history;
-use zevria_model::compaction::select_recent_user_messages;
 use zevria_model::config::CompactionPolicy;
-use zevria_session_api::EnsembleLaunchRequest;
+use zevria_model::estimates::estimate_model_input;
+use zevria_model::request::ModelRequestItem;
 use zevria_session_api::EnsembleLauncher;
+use zevria_session_api::command::{ManagementCommand, SessionCommand, TurnCommand};
+use zevria_session_api::event::SessionEventSender;
+use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::question::QuestionResponder;
-use zevria_session_api::worker::*;
-use zevria_transcript::transcript::Conversation;
-use zevria_transcript::transcript::TranscriptItem;
-use zevria_transcript::transcript::TranscriptWriter;
-use zevria_transcript::transcript::latest_successful_task_snapshot;
-use zevria_transcript::transcript::replay_active_skills;
-use zevria_transcript::{ToolDeclarationPlacement, ToolDeclarationRecord, tool_window};
-#[cfg(test)]
-use zevria_workflow::ensemble::AgentRunId;
-use zevria_workflow::ensemble::AgentRunOutcome;
-use zevria_workflow::ensemble::AgentRunStatus;
-use zevria_workflow::ensemble::AgentRunSummary;
-use zevria_workflow::ensemble::EnsembleRecord;
-use zevria_workflow::ensemble::EnsembleRecovery;
-use zevria_workflow::ensemble::EnsembleRunId;
-use zevria_workflow::ensemble::EnsembleStart;
-use zevria_workflow::ensemble::EnsembleWorkflow;
-use zevria_workflow::ensemble::ReconciliationNextStep;
-use zevria_workflow::ensemble::ReportReconciliation;
-use zevria_workflow::ensemble::ReportReconciliationCatalog;
-use zevria_workflow::ensemble::ValidatedReportReconciliation;
-use zevria_workflow::ensemble::latest_ensemble_recovery;
-use zevria_workflow::ensemble_review::*;
-use zevria_workflow::plan::DirectWorkerPlan;
-use zevria_workflow::plan::MAX_PLAN_ARTIFACT_BYTES;
-use zevria_workflow::plan::PlanArtifact;
-use zevria_workflow::plan::PlanDecision;
-use zevria_workflow::plan::PlanHandoff;
-use zevria_workflow::plan::PlanId;
-use zevria_workflow::plan::PlanPublicationProvenance;
-use zevria_workflow::plan::PlanRecord;
-use zevria_workflow::plan::PlanResolution;
-use zevria_workflow::plan::PlanVersion;
-use zevria_workflow::plan::PlanWorkflowState;
-use zevria_workflow::plan::apply_plan_record;
-use zevria_workflow::plan::replay_plan_state;
-use zevria_workflow::plan::{PlanCandidate, PlanDraft, PlanDraftScope, derived_title};
-
-#[cfg(test)]
-use zevria_workflow::ensemble::AgentUserDecisionAnswer;
-#[cfg(test)]
-use zevria_workflow::ensemble::AgentUserDecisionBatch;
-#[cfg(test)]
-use zevria_workflow::ensemble::AgentUserDecisionId;
-#[cfg(test)]
-use zevria_workflow::ensemble::AgentUserDecisionValue;
-#[cfg(test)]
-use zevria_workflow::ensemble::RecordedDecisionAccounting;
-#[cfg(test)]
-use zevria_workflow::ensemble::RecordedDecisionDisposition;
-#[cfg(test)]
-use zevria_workflow::ensemble::ReportDisagreement;
-#[cfg(test)]
-use zevria_workflow::ensemble::ReportDisagreementClassification;
-#[cfg(test)]
-use zevria_workflow::ensemble::ReportDisagreementResolution;
-#[cfg(test)]
-use zevria_workflow::ensemble::ReportPosition;
+use zevria_session_api::turn::TurnContext;
+use zevria_transcript::transcript::{Conversation, TranscriptItem, TranscriptWriter};
+use zevria_transcript::{
+    SessionReplayError, ToolDeclarationPlacement, ToolDeclarationRecord, tool_window,
+};
+use zevria_workflow::plan::{PlanId, PlanWorkflowState};
 
 /// Owns one resumable conversation and drives provider/tool iterations.
 pub struct SessionEngine<P> {
@@ -137,10 +48,9 @@ pub struct SessionEngine<P> {
     conversation: Conversation,
     compaction: CompactionPolicy,
     incremental_tools: bool,
-    replay: SessionReplayState,
     phase: EnginePhase,
-    context: ContextState,
-    prepared_policies: Mutex<Vec<Arc<PreparedPolicy>>>,
+    context: ContextAccounting,
+    request_plans: Mutex<Vec<Arc<RequestPlan>>>,
     skills: SkillState,
     capabilities: RootCapabilities,
     next_turn_id: u64,
@@ -155,13 +65,56 @@ impl<P: ModelProvider> SessionEngine<P> {
         transcript: TranscriptWriter,
         skills: Arc<SkillCatalog>,
     ) -> anyhow::Result<Self> {
-        let conversation = if transcript.is_pending() {
-            Conversation::new(transcript)
+        let conversation = Self::opening_conversation(transcript)?;
+        Self::from_conversation(provider, tools, policies, conversation, skills)
+    }
+
+    fn opening_conversation(transcript: TranscriptWriter) -> anyhow::Result<Conversation> {
+        if transcript.is_pending() {
+            Ok(Conversation::new(transcript))
         } else {
             let outcome = zevria_transcript::transcript::load_report(transcript.path())?;
-            Conversation::from_loaded(transcript, outcome)?
-        };
-        Self::from_conversation(provider, tools, policies, conversation, skills)
+            Conversation::from_loaded(transcript, outcome)
+        }
+    }
+
+    /// Configure an opening engine before its one initial accounting pass.
+    pub fn builder(
+        provider: P,
+        tools: ToolServerHandle,
+        policies: SessionPolicies,
+        transcript: TranscriptWriter,
+        skills: Arc<SkillCatalog>,
+    ) -> anyhow::Result<SessionEngineBuilder<P>> {
+        Ok(SessionEngineBuilder::unaccounted(
+            Self::unaccounted_from_conversation(
+                provider,
+                tools,
+                policies,
+                Self::opening_conversation(transcript)?,
+                skills,
+            )?,
+        ))
+    }
+
+    /// Configure a resume using startup's authoritative load report.
+    pub fn builder_from_loaded(
+        provider: P,
+        tools: ToolServerHandle,
+        policies: SessionPolicies,
+        transcript: TranscriptWriter,
+        skills: Arc<SkillCatalog>,
+        loaded: zevria_transcript::TranscriptLoadOutcome,
+    ) -> anyhow::Result<SessionEngineBuilder<P>> {
+        Ok(SessionEngineBuilder::unaccounted(
+            Self::unaccounted_from_conversation(
+                provider,
+                tools,
+                policies,
+                Conversation::from_loaded(transcript, loaded)?,
+                skills,
+            )?,
+        ))
     }
 
     /// Resume from startup's one validated load, preserving its exact evidence.
@@ -186,12 +139,25 @@ impl<P: ModelProvider> SessionEngine<P> {
         provider: P,
         tools: ToolServerHandle,
         policies: SessionPolicies,
-        mut conversation: Conversation,
+        conversation: Conversation,
+        skills: Arc<SkillCatalog>,
+    ) -> anyhow::Result<Self> {
+        let mut engine =
+            Self::unaccounted_from_conversation(provider, tools, policies, conversation, skills)?;
+        engine.reestimate_context_usage();
+        Ok(engine)
+    }
+
+    fn unaccounted_from_conversation(
+        provider: P,
+        tools: ToolServerHandle,
+        policies: SessionPolicies,
+        conversation: Conversation,
         skills: Arc<SkillCatalog>,
     ) -> anyhow::Result<Self> {
         let application_prompt = provider.application_prompt().to_string();
-        let replay = conversation.validated_replay()?.into();
-        let mut engine = Self {
+        conversation.replay()?;
+        Ok(Self {
             application_prompt,
             guidance: GuidanceState::default(),
             provider,
@@ -207,16 +173,13 @@ impl<P: ModelProvider> SessionEngine<P> {
             conversation,
             compaction: CompactionPolicy::default(),
             incremental_tools: true,
-            replay,
             phase: EnginePhase::Idle,
-            context: ContextState::default(),
-            prepared_policies: Mutex::new(Vec::new()),
+            context: ContextAccounting::default(),
+            request_plans: Mutex::new(Vec::new()),
             capabilities: RootCapabilities::default(),
             next_turn_id: 1,
             plan_projection_warnings: HashSet::new(),
-        };
-        engine.reestimate_context_usage();
-        Ok(engine)
+        })
     }
 
     /// Seed the conversation from bare messages, which mirror as plain items.
@@ -235,8 +198,9 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> Result<Self, SessionReplayError> {
         self.ensure_replay_valid()?;
         let replay = zevria_transcript::validate_session_replay(&items)?;
-        self.conversation.adopt_validated(items, replay.clone());
-        self.install_replay(replay.into())?;
+        self.conversation.adopt_validated(items, replay);
+        self.replay_changed()?;
+        self.invalidate_request_plans();
         self.invalidate_model_preview();
         self.context.invalidate_prepared_count();
         self.context.last_snapshots.clear();
@@ -266,6 +230,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             snapshot: Some(snapshot),
             startup_diagnostics: Vec::new(),
         };
+        self.invalidate_request_plans();
         self.invalidate_model_preview();
         self.context.invalidate_prepared_count();
         self.context.last_snapshots.clear();
@@ -311,7 +276,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub fn with_incremental_tools(mut self, enabled: bool) -> Self {
-        self.prepared_policies
+        self.request_plans
             .get_mut()
             .expect("policy cache poisoned")
             .clear();
@@ -324,31 +289,6 @@ impl<P: ModelProvider> SessionEngine<P> {
             policy.allows_tool(tool.name.as_str())
         })
         .expect("registered tools have unique names and object schemas")
-    }
-
-    pub(super) fn request_tools(
-        &self,
-        items: &[TranscriptItem],
-        policy: &TurnPolicy,
-    ) -> ToolDeclarations {
-        if std::ptr::eq(items, self.conversation.items()) {
-            return self.prepared_policy(policy).tools.clone();
-        }
-        tool_window(items)
-            .initial
-            .cloned()
-            .unwrap_or_else(|| self.desired_tool_declarations(policy))
-    }
-
-    pub(super) fn tool_declaration_update(
-        &self,
-        items: &[TranscriptItem],
-        policy: &TurnPolicy,
-    ) -> Option<TranscriptItem> {
-        if std::ptr::eq(items, self.conversation.items()) {
-            return self.prepared_policy(policy).tool_update.clone();
-        }
-        self.uncached_tool_declaration_update(items, policy)
     }
 
     fn uncached_tool_declaration_update(
@@ -414,50 +354,6 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
     }
 
-    fn prepared_policy(&self, policy: &TurnPolicy) -> Arc<PreparedPolicy> {
-        let mut cache = self
-            .prepared_policies
-            .lock()
-            .expect("policy cache poisoned");
-        if let Some(prepared) = cache.iter().find(|prepared| {
-            prepared.policy == *policy
-                && prepared.application == self.application_prompt
-                && prepared.context == *self.context_policy(policy.model_role)
-        }) {
-            return prepared.clone();
-        }
-        let instructions = self.instruction_set(policy).render();
-        let tools = tool_window(self.conversation.items())
-            .initial
-            .cloned()
-            .unwrap_or_else(|| self.desired_tool_declarations(policy));
-        let tool_bytes = serde_json::to_vec(&tools).expect("tools serialize");
-        let prepared = Arc::new(PreparedPolicy {
-            policy: policy.clone(),
-            application: self.application_prompt.clone(),
-            context: self.context_policy(policy.model_role).clone(),
-            shape: prepared_request_shape(
-                policy,
-                self.context_policy(policy.model_role),
-                &instructions,
-                &tool_bytes,
-            ),
-            instructions,
-            tools,
-            tool_bytes,
-            tool_update: self.uncached_tool_declaration_update(self.conversation.items(), policy),
-        });
-        if cache.len() >= 8 {
-            cache.clear();
-        }
-        cache.push(prepared.clone());
-        prepared
-    }
-
-    pub(super) fn rendered_instructions(&self, policy: &TurnPolicy) -> String {
-        self.prepared_policy(policy).instructions.clone()
-    }
-
     pub fn context_tokens(&self) -> Result<u64, SessionReplayError> {
         let policy = self.policies.policy(self.selected_mode());
         let current = self.projected_context_tokens(policy)?;
@@ -476,10 +372,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub fn active_skills(&self) -> Result<&ActiveSkills, SessionReplayError> {
-        match &self.replay {
-            SessionReplayState::Valid { instructions, .. } => Ok(instructions.skills()),
-            SessionReplayState::Failed(error) => Err(error.clone()),
-        }
+        Ok(self.conversation.replay()?.instructions.skills())
     }
 
     /// The session's conversation and its log.
@@ -491,10 +384,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     /// or restoration. Hosts seed presentation from this snapshot before consuming
     /// live transition events; `run` does not publish a startup snapshot.
     pub fn plan_state(&self) -> Result<&PlanWorkflowState, SessionReplayError> {
-        match &self.replay {
-            SessionReplayState::Valid { plan, .. } => Ok(plan),
-            SessionReplayState::Failed(error) => Err(error.clone()),
-        }
+        Ok(&self.conversation.replay()?.plan)
     }
 
     fn ensure_replay_valid(&self) -> Result<(), SessionReplayError> {
@@ -516,40 +406,21 @@ impl<P: ModelProvider> SessionEngine<P> {
         command: SessionCommand,
         events: &SessionEventSender,
     ) -> Result<(), SessionReplayError> {
-        self.refresh_replay()?;
+        self.replay_changed()?;
+        let (action, reply) = self.route_idle_command(command, true);
+        if let Some(reply) = reply {
+            let _ = events.send(reply).await;
+        }
+        let command = match action {
+            CommandAction::Dispatch(command) => command,
+            CommandAction::Continue | CommandAction::Shutdown => return Ok(()),
+            CommandAction::Queue(_) => unreachable!("direct command API is idle"),
+        };
         match command {
             SessionCommand::Turn(command) => {
                 let turn = self.next_turn(command.mode());
                 self.handle_turn(command, &turn, events).await
             }
-            SessionCommand::Control(ControlCommand::Command(control)) => {
-                let reply = runtime::command_control_reply(
-                    self.capabilities.command_jobs.as_ref(),
-                    control,
-                );
-                let _ = events.send(reply).await;
-                Ok(())
-            }
-            SessionCommand::Control(ControlCommand::Worker(control)) => {
-                if let Err(result) = self.capabilities.worker_controls.route(control) {
-                    let _ = events
-                        .send(SessionEvent::WorkerControlResult { result })
-                        .await;
-                }
-                Ok(())
-            }
-            SessionCommand::Control(ControlCommand::AnswerQuestion {
-                request_id,
-                response,
-            }) => {
-                if let Some(responder) = &self.capabilities.question_responder {
-                    responder.respond(&request_id, response);
-                }
-                Ok(())
-            }
-            SessionCommand::Control(
-                ControlCommand::CancelTurn { .. } | ControlCommand::Shutdown,
-            ) => Ok(()),
             SessionCommand::Manage(ManagementCommand::SetMode { request_id, mode }) => {
                 self.manage_mode(request_id, mode, events).await?;
                 self.refresh_continuation_offer(events).await;
@@ -566,6 +437,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 request_id,
                 request,
             }) => self.manage_skills(request_id, request, events).await,
+            SessionCommand::Control(_) => unreachable!("control plane consumed the command"),
         }
     }
 
@@ -576,7 +448,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         turn: &TurnContext,
         events: &SessionEventSender,
     ) -> Result<(), SessionReplayError> {
-        self.refresh_replay()?;
+        self.replay_changed()?;
         self.enter_turn()?;
         let result = self
             .execute_turn(TurnWork::Command(command), events, turn)
@@ -619,59 +491,17 @@ impl<P: ModelProvider> SessionEngine<P> {
 #[doc(hidden)]
 pub mod benchmark;
 
-use zevria_content::assistant_plain_text;
-use zevria_foundation::policy::*;
-use zevria_model::request::*;
-use zevria_model::telemetry::*;
-use zevria_session_api::command::*;
-use zevria_session_api::event::*;
-use zevria_session_api::provider::*;
-use zevria_session_api::turn::*;
-
-mod orchestration;
-mod state;
-use state::*;
-mod timing;
-use timing::LifecycleTiming;
-
-mod capacity;
-mod directives;
-use capacity::*;
-use zevria_model::estimates::*;
-
-mod compaction;
-use compaction::*;
-
-mod records;
-use records::*;
-
 #[cfg(feature = "test-support")]
 mod pipeline_probe;
-mod prompt;
-use prompt::*;
 
-mod plan;
-use plan::*;
-
-mod ensemble;
-mod worker_review;
-
-mod model_loop;
-use model_loop::*;
-
-mod tools;
-use tools::*;
-
-mod skills;
-
-mod turn;
-use turn::*;
-
-use zevria_transcript::SessionReplayError;
-mod job_notices;
-mod mode;
-mod models;
-mod runtime;
-mod summary;
 #[cfg(test)]
 mod tests;
+
+mod kernel;
+mod manage;
+#[cfg(test)]
+mod test_prelude;
+mod turn;
+mod workflow;
+#[cfg(test)]
+use test_prelude::*;

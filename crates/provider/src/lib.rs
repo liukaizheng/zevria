@@ -16,10 +16,13 @@ mod prompt_cache;
 mod protocol;
 use zevria_responses::replay;
 mod attempt;
+mod diagnostics;
 mod recovery;
+mod responses;
 mod router;
 mod streaming;
-mod turn;
+mod telemetry;
+use responses as turn;
 
 mod websocket_session;
 

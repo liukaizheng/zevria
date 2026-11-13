@@ -4,7 +4,7 @@ use super::*;
 async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_on_http_and_websocket()
  {
     for websocket in [false, true] {
-        for parallel in [None, Some(false)] {
+        for parallel in [None, Some(false), Some(true)] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let batches: Vec<_> = [2, 1].into_iter().enumerate().map(|(batch, count)| {
@@ -138,8 +138,8 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
                 .unwrap();
             for request in &requests {
                 assert_eq!(
-                    request.get("parallel_tool_calls").cloned(),
-                    parallel.map(|value| json!(value))
+                    request["parallel_tool_calls"],
+                    json!(parallel.unwrap_or(true))
                 );
                 assert_eq!(request["instructions"], requests[0]["instructions"]);
                 assert_eq!(

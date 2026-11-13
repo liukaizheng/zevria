@@ -1,5 +1,25 @@
 //! Narrow private-admission wrappers for the synthetic Criterion harness.
-use super::*;
+use crate::session::SessionEngine;
+use crate::session::kernel::records::TurnAnchor;
+use crate::session::workflow::prompt::PromptTurnInput;
+use rig_agent::tool::ToolContext;
+use rig_core::message::Message;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+use zevria_foundation::SKILL_TOOL_NAME;
+use zevria_foundation::policy::{ModelRole, SessionMode, SessionPolicies, TurnId, TurnPolicy};
+use zevria_instructions::skill::{
+    SkillApplication, SkillCatalog, SkillInvocation, SkillName, SkillRequest,
+};
+use zevria_model::request::{InputTokenCount, ModelRequest};
+use zevria_session_api::event::ProgressReporter;
+use zevria_session_api::provider::{InputTokenCountFuture, ModelProvider, ProviderFuture};
+use zevria_session_api::turn::TurnContext;
+use zevria_transcript::transcript::{TranscriptItem, TranscriptWriter};
+
+#[path = "benchmark_round.rs"]
+mod round;
+pub use round::EngineRoundFixture;
 
 struct NoNetwork;
 impl ModelProvider for NoNetwork {
@@ -79,7 +99,7 @@ impl AdmissionFixture {
         if activated {
             fixture
                 .engine
-                .record_required(TranscriptItem::SkillInvocation(SkillInvocation::new(
+                .commit(TranscriptItem::SkillInvocation(SkillInvocation::new(
                     snapshot.name().clone(),
                     "first activation",
                     SkillApplication::Activate(snapshot),
@@ -94,7 +114,7 @@ impl AdmissionFixture {
         );
         fixture
             .engine
-            .record_required_items(history.items.into_iter().skip(2).collect())
+            .commit(history.items.into_iter().skip(2).collect::<Vec<_>>())
             .unwrap();
         fixture
     }
@@ -170,7 +190,7 @@ impl AdmissionFixture {
 
     pub fn required(&mut self, text: &str) {
         self.engine
-            .record_required(TranscriptItem::Message(Message::user(text)))
+            .commit(TranscriptItem::Message(Message::user(text)))
             .unwrap();
     }
     pub fn completed(&mut self, text: &str) {
@@ -179,7 +199,7 @@ impl AdmissionFixture {
             .unwrap();
     }
     pub fn completed_batch(&mut self, items: Vec<TranscriptItem>) {
-        self.engine.record_completed_items(items).unwrap();
+        self.engine.record_completed(items).unwrap();
     }
     pub fn prepare(&self, text: &str) {
         let checked = self

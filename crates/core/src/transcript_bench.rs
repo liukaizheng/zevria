@@ -144,7 +144,7 @@ fn tool_pair(index: usize, text: &str, success: bool) -> [TranscriptItem; 2] {
 }
 
 pub fn fixture(workload: Workload, minimum_records: usize, payload_bytes: usize) -> Fixture {
-    assert!((1..=1000).contains(&minimum_records));
+    assert!((1..=5000).contains(&minimum_records));
     assert!((1..=8192).contains(&payload_bytes));
     assert!(!matches!(workload, Workload::Images) || minimum_records <= 100);
     let text = "x".repeat(payload_bytes);

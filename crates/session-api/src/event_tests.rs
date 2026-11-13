@@ -696,3 +696,63 @@ async fn child_forwarding_through_the_parent_fences_an_unread_child_preview() {
         Err(mpsc::error::TryRecvError::Empty)
     );
 }
+
+#[test]
+fn continuing_agent_previews_move_the_growing_text_without_copying_earlier_segments() {
+    let (sender, _receiver) = session_event_channel(1);
+    let agent = AgentRunId::new();
+    let ensemble = EnsembleRunId::new();
+    for thought in [false, true] {
+        let mut text = String::with_capacity(8192);
+        text.push_str("start");
+        let allocation = text.as_ptr();
+        let event = |text| {
+            if thought {
+                AgentRunEvent::Thought {
+                    text,
+                    message_id: Some("message".into()),
+                }
+            } else {
+                AgentRunEvent::AgentMessage {
+                    text,
+                    message_id: Some("message".into()),
+                }
+            }
+        };
+        sender.agent_run_preview(TurnId::new(1), ensemble.clone(), agent.clone(), event(text));
+        for sequence in 0..256 {
+            sender.agent_run_preview(
+                TurnId::new(2),
+                ensemble.clone(),
+                agent.clone(),
+                event(" more".into()),
+            );
+            let snapshot = sender.streams.borrow();
+            let key = &snapshot.active_agent_runs[&agent];
+            let current = &snapshot.agent_runs[key];
+            let (AgentRunEvent::AgentMessage { text, .. } | AgentRunEvent::Thought { text, .. }) =
+                &current.event
+            else {
+                panic!("readable preview")
+            };
+            assert_eq!(
+                text.as_ptr(),
+                allocation,
+                "continuing text must not be cloned"
+            );
+            assert_eq!(text.len(), 5 + (sequence + 1) * 5);
+            assert_eq!(
+                current.turn_id,
+                TurnId::new(2),
+                "latest metadata replaces old metadata"
+            );
+        }
+    }
+    let snapshot = sender.streams.borrow();
+    assert_eq!(
+        snapshot.agent_runs.len(),
+        2,
+        "thought/message boundaries retain the unread prior row"
+    );
+    assert!(snapshot.agent_runs.values().any(|state| matches!(&state.event, AgentRunEvent::AgentMessage { text, .. } if text == &format!("start{}", " more".repeat(256)))));
+}

@@ -4,6 +4,9 @@ use zevria_content::HostedActivityStatus as Status;
 use zevria_content::ResponseAttempt;
 use zevria_content::ResponseAttemptOutcome as Outcome;
 
+#[path = "recoverable_batches.rs"]
+mod recoverable_batches;
+
 fn recovery(attempt: &ResponseAttempt) -> TranscriptItem {
     TranscriptItem::IncompleteResponse(
         zevria_transcript::IncompleteResponse::from_attempt(attempt)
@@ -643,7 +646,7 @@ mod recovery_lifecycle {
         let start = ensemble_start_fixture("linked-search", EnsembleWorkflow::Review, "review");
         let (attempt, record) = completed_attempt();
         engine
-            .record_required_items(vec![
+            .commit(vec![
                 TranscriptItem::Ensemble(EnsembleRecord::Started {
                     start: start.clone(),
                 }),
@@ -830,7 +833,7 @@ mod recovery_lifecycle {
         )
         .unwrap();
         engine
-            .record_required(TranscriptItem::Message(Message::user("request")))
+            .commit(TranscriptItem::Message(Message::user("request")))
             .unwrap();
         let policy = test_policies().policy(SessionMode::Build).clone();
         engine.reconcile_before_dispatch(&policy).unwrap();
@@ -838,7 +841,7 @@ mod recovery_lifecycle {
             engine.provider.blocker = Some(TranscriptRewriteBlocker::new(&path).unwrap());
             assert!(
                 engine
-                    .record_completed_items(vec![TranscriptItem::Error {
+                    .record_completed(vec![TranscriptItem::Error {
                         error: "already completed".into()
                     }])
                     .is_err()
@@ -1099,7 +1102,9 @@ impl ModelProvider for FinalProvider {
             let response = ModelResponse::from_replay(ProviderReplay::openai_responses(test_profile(), vec![
                 json!({"type":"reasoning","id":"reasoning","summary":[{"type":"summary_text","text":"committed reasoning"}]}),
                 json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":"committed answer","annotations":[]}]}),
-            ])).unwrap().with_attempt_id(Some(observed.id)).unwrap();
+            ])).unwrap().with_attempt_id(Some(observed.id)).unwrap().with_usage(Some(TokenUsage {
+                input_tokens: 10, cached_tokens: 0, output_tokens: 2, total_tokens: 12,
+            }));
             if self.cancel {
                 progress.turn().cancellation().cancel();
             }
@@ -1167,7 +1172,20 @@ async fn success_is_finalized_from_the_record_and_live_only_activity_is_not_pers
         "live-only search is dropped, not merged"
     );
     assert!(!serde_json::to_string(record).unwrap().contains(&live.id));
-    assert!(updates.iter().any(|event| matches!(event, SessionEvent::TurnCompleted { attempt_id: Some(id), .. } if id == &live.id)));
+    let attempt = updates.iter().position(|event| matches!(event, SessionEvent::ResponseAttemptUpdated { attempt, .. } if attempt.id == live.id)).unwrap();
+    let usage = updates
+        .iter()
+        .position(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+        .unwrap();
+    let terminal = updates.iter().position(|event| matches!(event, SessionEvent::TurnCompleted { attempt_id: Some(id), .. } if id == &live.id)).unwrap();
+    assert!(attempt < usage && usage < terminal);
+    assert_eq!(
+        updates
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1234,7 +1252,7 @@ async fn completed_response_that_loses_the_cancellation_race_is_interrupted_reco
 }
 
 #[tokio::test]
-async fn committed_response_is_durable_before_a_blocked_frontend_publication() {
+async fn committed_response_with_usage_is_durable_before_a_blocked_frontend_publication() {
     let (_directory, writer) = test_transcript();
     let path = writer.path().to_path_buf();
     let (ready, mut ready_rx) = tokio::sync::oneshot::channel();
@@ -1312,7 +1330,7 @@ async fn deferred_ensemble_final_publishes_attempt_before_turn_completed_without
     .unwrap();
     let start = ensemble_start_fixture("response-attempt", EnsembleWorkflow::Review, "review");
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),
@@ -1365,6 +1383,12 @@ async fn deferred_ensemble_final_publishes_attempt_before_turn_completed_without
             .iter()
             .all(|item| item.provider_replay().is_none())
     );
+    let mut updates = collect_events(&mut receiver).await;
+    assert!(
+        !updates
+            .iter()
+            .any(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+    );
     engine
         .finalize_turn(
             &accepted,
@@ -1375,7 +1399,7 @@ async fn deferred_ensemble_final_publishes_attempt_before_turn_completed_without
         )
         .await
         .unwrap();
-    let updates = collect_events(&mut receiver).await;
+    updates.extend(collect_events(&mut receiver).await);
     let display = updates.iter().position(|event| matches!(event, SessionEvent::ResponseAttemptUpdated { attempt, .. } if attempt.outcome == Outcome::Completed)).unwrap();
     let terminal = updates
         .iter()
@@ -1389,7 +1413,11 @@ async fn deferred_ensemble_final_publishes_attempt_before_turn_completed_without
             )
         })
         .unwrap();
-    assert!(display < terminal);
+    let usage = updates
+        .iter()
+        .position(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+        .unwrap();
+    assert!(display < usage && usage < terminal);
     let items = zevria_transcript::load(engine.conversation.path()).unwrap();
     assert_eq!(
         items

@@ -216,6 +216,15 @@ impl MessageAccumulator {
     pub fn stop_reason(&self) -> Option<&str> {
         self.stop_reason.as_deref()
     }
+    /// Count replayable client calls without constructing a display projection.
+    pub fn tool_uses(&self) -> usize {
+        self.blocks
+            .values()
+            .rev()
+            .take_while(|block| block.raw["type"] != "fallback")
+            .filter(|block| block.raw["type"] == "tool_use")
+            .count()
+    }
     pub fn input_transformations(&self) -> &Value {
         &self.input_transformations
     }
@@ -317,4 +326,31 @@ pub fn echo_blocks(blocks: Vec<Value>) -> Vec<Value> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_uses_count_matches_replay_after_fallback() {
+        let mut accumulator = MessageAccumulator::default();
+        for (index, kind) in ["tool_use", "text", "fallback", "tool_use", "tool_use"]
+            .into_iter()
+            .enumerate()
+        {
+            accumulator.blocks.insert(
+                index,
+                Block {
+                    raw: json!({"type":kind}),
+                    partial_json: String::new(),
+                    stopped: true,
+                },
+            );
+        }
+        assert_eq!(accumulator.tool_uses(), 2);
+        let replay = echo_blocks(accumulator.blocks.into_values().map(|b| b.raw).collect());
+        assert_eq!(replay.iter().filter(|b| b["type"] == "tool_use").count(), 2);
+    }
 }

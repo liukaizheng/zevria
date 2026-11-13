@@ -537,10 +537,12 @@ fn empty_initial_still_latches_the_window_when_the_flag_is_disabled() {
     );
     engine.incremental_tools = false;
     engine.tools = registry("command", Arc::new(Mutex::new(Vec::new())));
+    // Production registries are frozen; this test deliberately replaces one.
+    engine.invalidate_request_plans();
     engine.reconcile_before_dispatch(&policy).unwrap();
     assert!(
         engine
-            .request_tools(engine.conversation.items(), &policy)
+            .request_tools(HistoryView::Committed, &policy)
             .is_empty()
     );
     assert_eq!(records(&engine).len(), 2);

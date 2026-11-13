@@ -5,6 +5,19 @@ use super::*;
 async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("payload.jsonl");
+    let name = "review".parse().unwrap();
+    let snapshot =
+        zevria_instructions::SkillSnapshot::new(name, "Review", "Pinned body".repeat(1024))
+            .unwrap();
+    let items = vec![TranscriptItem::SkillInvocation(
+        zevria_instructions::SkillInvocation::new(
+            snapshot.name().clone(),
+            "root",
+            zevria_instructions::SkillApplication::Activate(snapshot),
+        ),
+    )];
+    let active_skills = zevria_transcript::replay_active_skills(&items).unwrap();
+    let pin_allocation = active_skills.snapshots().next().unwrap().body().as_ptr();
     let mut running = RunningSession {
         command_jobs: None,
         cleanup_abandoned_history: true,
@@ -27,10 +40,9 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
             subsessions_dir: directory.path().join("subsessions"),
             agent_runs_root: directory.path().join("agent-runs"),
             transcript_path: path.clone(),
-            transcript_items: vec![TranscriptItem::Message(rig_core::message::Message::user(
-                "root",
-            ))],
+            transcript_items: items,
             skill_catalog: Arc::new(SkillCatalog::default()),
+            active_skills,
             startup_notices: vec!["startup notice".into()],
             plan_state: PlanWorkflowState::Idle,
             selected_mode: SessionMode::Plan,
@@ -44,6 +56,17 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
     };
     let restored = running.take_restored();
     assert_eq!(restored.transcript_items.len(), 1);
+    assert_eq!(
+        restored
+            .active_skills
+            .snapshots()
+            .next()
+            .unwrap()
+            .body()
+            .as_ptr(),
+        pin_allocation
+    );
+    assert!(running.restoration().active_skills.is_empty());
     assert_eq!(restored.subtasks.len(), 1);
     assert_eq!(restored.subtasks[0].items.len(), 1);
     assert_eq!(restored.startup_notices, ["startup notice"]);

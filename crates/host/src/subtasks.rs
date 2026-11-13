@@ -285,7 +285,7 @@ async fn run_child_session(
         () = set_running(&id, request.turn.id, config) => {}
     }
 
-    let mut engine = SessionEngine::new(
+    let mut engine = SessionEngine::builder(
         provider,
         tools,
         policies,
@@ -294,7 +294,8 @@ async fn run_child_session(
     )?
     .with_incremental_tools(config.incremental_tools)
     .with_guidance_snapshot(config.guidance.clone())
-    .with_compaction_policy(config.compaction.clone());
+    .with_compaction_policy(config.compaction.clone())
+    .build()?;
 
     // Forward live child events while the submission runs; the forwarder also
     // extracts the terminal result so the report comes from the same stream

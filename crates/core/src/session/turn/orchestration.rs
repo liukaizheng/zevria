@@ -1,0 +1,115 @@
+//! Accepted-turn-only obligation. Neither history nor model prose supplies proof.
+use crate::session::SessionEngine;
+use crate::session::turn::execution::{AcceptedTurn, Rejection};
+use crate::session::turn::tools::{EngineCall, EngineTool, ToolResultBatch};
+use rig_core::message::{Message, UserContent};
+use zevria_foundation::policy::{SessionMode, TurnPolicy};
+use zevria_foundation::subtask::LAUNCH_SUBTASKS_TOOL_NAME;
+use zevria_session_api::provider::ModelProvider;
+use zevria_transcript::transcript::TranscriptItem;
+use zevria_workflow::plan::PlanWorkflowState;
+
+use zevria_foundation::{RequestBehavior, RequestMetadata};
+
+pub(in crate::session) struct OrchestrationGate {
+    request: Option<RequestMetadata>,
+    qualified: bool,
+    corrected: bool,
+}
+
+impl OrchestrationGate {
+    pub(in crate::session) fn new(accepted: &AcceptedTurn) -> Self {
+        Self {
+            request: accepted
+                .request
+                .clone()
+                .filter(|request| request.behavior == RequestBehavior::Orchestrate),
+            qualified: false,
+            corrected: false,
+        }
+    }
+
+    pub(in crate::session) fn satisfied(&self) -> bool {
+        self.request.is_none() || self.qualified
+    }
+
+    /// Called only after the complete correlated batch is durable and replay-valid.
+    pub(in crate::session) fn observe(
+        &mut self,
+        calls: &[EngineCall<'_>],
+        batch: &ToolResultBatch,
+    ) {
+        if self.request.is_none() {
+            return;
+        }
+        let Message::User { content } = &batch.message else {
+            return;
+        };
+        self.qualified |= batch.metadata.iter().any(|metadata| {
+            EngineTool::resolve(&metadata.tool_name) == EngineTool::LaunchSubtasks
+                && calls.iter().any(|call| call.tool == EngineTool::LaunchSubtasks
+                    && call.id.wire().as_ref() == metadata.id
+                    && call.id.provider().map(|provider| provider.as_str()) == metadata.call_id.as_deref())
+                && content.iter().any(|block| matches!(block, UserContent::ToolResult(result)
+                    if result.call.wire().as_ref() == metadata.id && EngineTool::resolve(result.name.as_str()) == EngineTool::LaunchSubtasks
+                        && result.call.provider().map(|provider| provider.as_str()) == metadata.call_id.as_deref()))
+                && metadata.subtasks().iter().filter_map(|entry| entry.launch.as_ref().map(|launch| &launch.id))
+                    .collect::<std::collections::HashSet<_>>().len() >= 2
+        });
+    }
+
+    pub(in crate::session) fn correction(&mut self) -> Option<TranscriptItem> {
+        if self.satisfied() || self.corrected {
+            return None;
+        }
+        self.corrected = true;
+        Some(TranscriptItem::RequestDirective(
+            zevria_instructions::RequestDirective::correction(
+                self.request.clone().expect("required request"),
+            ),
+        ))
+    }
+}
+
+impl<P: ModelProvider> SessionEngine<P> {
+    /// The composition root supplies exactly the supervisor's captured capacity.
+    /// Workers/children leave this unset, even when nominally in Build mode.
+    pub fn with_subtask_concurrency(mut self, limit: usize) -> Self {
+        self.capabilities.subtask_concurrency = Some(limit);
+        self
+    }
+
+    pub(in crate::session) fn admit_orchestration(
+        &self,
+        mode: SessionMode,
+        policy: &TurnPolicy,
+    ) -> Result<(), Rejection> {
+        #[cfg(feature = "test-support")]
+        crate::session::pipeline_probe::record(|counts| counts.orchestration_checks += 1);
+        if mode != SessionMode::Build
+            || !policy.orchestration
+            || self.capabilities.subtask_concurrency.is_none()
+        {
+            return Err("/orchestrate <prompt> is available only for a supported root Build request; it cannot switch modes or approve a Plan".to_string().into());
+        }
+        if matches!(
+            self.plan_state()?,
+            PlanWorkflowState::Planning { .. } | PlanWorkflowState::Ready { .. }
+        ) {
+            return Err("orchestration cannot revise or approve a pending Plan workflow; resolve the Plan explicitly first".to_string().into());
+        }
+        if !policy.allows_tool(LAUNCH_SUBTASKS_TOOL_NAME)
+            || !self.tools.snapshot().contains(LAUNCH_SUBTASKS_TOOL_NAME)
+        {
+            return Err(
+                "orchestration requires the registered and permitted launch_subtasks capability"
+                    .to_string()
+                    .into(),
+            );
+        }
+        if self.capabilities.subtask_concurrency.unwrap_or(0) < 2 {
+            return Err("orchestration requires session.max_concurrent_subtasks >= 2; increase the limit or resubmit without /orchestrate".to_string().into());
+        }
+        Ok(())
+    }
+}

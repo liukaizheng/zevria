@@ -6,6 +6,9 @@ use zevria_model::estimates::estimate_model_input_for_profile;
 pub type ProviderFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<ModelResponse>> + Send + 'a>>;
 
+/// Cancellable best-effort idle preparation, never an accepted model request.
+pub type PrewarmFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
 /// The boxed future returned by [`ModelProvider::compact`].
 pub type CompactFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<CompactResult>> + Send + 'a>>;
@@ -33,6 +36,13 @@ pub trait ModelProvider: Send + 'static {
     /// Application guidance captured by composition at startup/restoration.
     fn application_prompt(&self) -> &str {
         ""
+    }
+
+    /// Optional idle work for the selected role. The caller may drop this future
+    /// when a command arrives; implementations must install state only after
+    /// completion, perform no detached work and preserve completion recovery.
+    fn prewarm(&mut self, _role: ModelRole) -> PrewarmFuture<'_> {
+        Box::pin(async {})
     }
 
     /// Immutable selectable descriptors, without credentials or endpoint settings.
@@ -112,6 +122,9 @@ pub trait ModelProvider: Send + 'static {
         Box::pin(async { Ok(InputTokenCount::Unsupported) })
     }
 
+    /// Return completed usage in `ModelResponse`; do not await a completed-usage
+    /// lifecycle publication here. Core commits the response before publishing
+    /// attempt updates, usage and the intermediate/final outcome.
     fn complete<'a>(
         &'a mut self,
         request: ModelRequest<'a>,

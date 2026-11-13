@@ -170,12 +170,36 @@ is an exact extension after target-specific projection.
 
 ## WebSocket lifecycle and recovery
 
-Slot initialization performs local setup only. With `supports_websockets = true`,
-the first completion establishes its socket **inside that request's recovery
-controller**. Failed startup and replacement handshakes consume attempts too. A
+Router construction and slot initialization perform local setup only. By
+default, with `supports_websockets = true`, the first completion establishes its
+socket **inside that request's recovery controller**. Failed startup and replacement handshakes consume attempts too. A
 successful socket is parked in a continuously pumped session that handles
-Ping/Pong and terminal frames between model calls; parked healthy sockets have
-no inactivity timer.
+Ping/Pong and terminal frames between model calls. By default the pump sends a
+Ping after **30 seconds without a frame sent or received**, including while
+parked for user input or a long-running tool. Configure
+`providers.<name>.network.websocket_keepalive_seconds`; `0` disables this timer.
+Keepalive never opens a connection before the first request and never reconnects
+in the background. A failed ping send stops the pump, allowing the next request
+to reconnect immediately. Pongs are consumed inside the pump and never advance
+the response watchdog. A missing pong alone does not terminate the socket.
+Gateways may ignore pings as idle activity; continued replay after long pauses
+must be checked in real sessions rather than assumed fixed.
+
+`providers.<name>.network.prewarm = true` optionally establishes the selected
+mode's WebSocket while the engine is idle, before the first request. The default
+is **false**. One best-effort handshake is polled as part of the engine's idle
+select, once per idle period; an arriving command drops it before dispatch.
+Connection state is installed only after a successful handshake, without a
+detached reconnect task. An already healthy socket is not replaced. HTTP 426
+selects sticky HTTP as at ordinary construction; other failures only log a
+warning and leave the first completion's recovery budget untouched. HTTP-only
+and Anthropic profiles do nothing. Other roles are not warmed opportunistically.
+
+Enabling prewarm contacts the provider and resolves credentials, including an
+`api_key` command, at session start rather than first use. It transmits handshake
+headers and network metadata, not prompt content; see `PRIVACY.md`. The connected
+log's `connect_ms` should then occur before the first model round, rather than
+inside that round's `model_ms`. Measure the first-round effect in real sessions.
 
 Each prepared completion has a **300-second outage-recovery window**, a
 **30-attempt absolute cap**, and a **four-interrupted-response cap**. The outage

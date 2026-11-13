@@ -63,7 +63,7 @@ impl WorkspaceModel {
         };
         let skills = zevria_instructions::skill::SkillContext {
             catalog: restored.skill_catalog,
-            pins: zevria_transcript::transcript::replay_active_skills(&restored.transcript_items)?,
+            pins: restored.active_skills,
             mode_enabled: true,
         }
         .completions();

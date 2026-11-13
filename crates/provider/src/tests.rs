@@ -22,6 +22,8 @@ mod models;
 mod outages;
 #[path = "plan_draft_tests.rs"]
 mod plan_drafts;
+#[path = "prewarm_tests.rs"]
+mod prewarm;
 #[path = "prompt_cache_tests.rs"]
 mod prompt_cache_options;
 #[path = "resume_wire_tests.rs"]
@@ -34,6 +36,8 @@ mod session_headers;
 mod subtask_batches;
 #[path = "summary_tests.rs"]
 mod summaries;
+#[path = "websocket_keepalive_tests.rs"]
+mod websocket_keepalive;
 use crate::connection::ContinuationState;
 use std::{
     collections::BTreeMap,
@@ -610,7 +614,7 @@ fn test_session_with_url(
 ) -> OpenAiProvider {
     test_session_with_pump(
         url,
-        OpenAiWebSocketSession::new(socket),
+        OpenAiWebSocketSession::new(socket, std::time::Duration::ZERO),
         pending_done_response_id,
     )
 }
@@ -622,13 +626,12 @@ fn test_session_with_pump(
 ) -> OpenAiProvider {
     let endpoints = OpenAiResponseEndpoints::parse(url).expect("test endpoint");
     OpenAiProvider {
-        #[cfg(feature = "cache-diagnostics")]
         cache_diagnostics: Default::default(),
         input_projection: None,
         profile: zevria_foundation::ModelProfileRef::new("test-provider", "gpt-test"),
         context_window_tokens: 272_000,
         preamble: "Test instructions".to_string(),
-        responses_parameters: None,
+        responses_parameters: Some(json!({"parallel_tool_calls":true})),
         reasoning_level: ReasoningEffort::Medium,
         reasoning_summary_level: ReasoningSummaryLevel::Detailed,
         web_search: WebSearchConfig::default(),
@@ -643,6 +646,8 @@ fn test_session_with_pump(
             session,
             config: OpenAiWebSocketConfig {
                 connect_timeout: std::time::Duration::from_secs(1),
+                keepalive: std::time::Duration::ZERO,
+                prewarm: false,
                 url: url.to_string(),
                 headers: HeaderMap::new(),
                 api_key: ApiKeySource::literal("test-key"),
@@ -1135,6 +1140,8 @@ async fn initial_and_replacement_handshakes_use_only_configured_headers() {
 
     let config = OpenAiWebSocketConfig {
         connect_timeout: std::time::Duration::from_secs(1),
+        keepalive: std::time::Duration::ZERO,
+        prewarm: false,
         url: format!("ws://{address}"),
         headers: HeaderMap::new(),
         api_key: ApiKeySource::literal("test-key"),
@@ -1149,7 +1156,7 @@ async fn initial_and_replacement_handshakes_use_only_configured_headers() {
         Some("ws_connect_initial")
     );
     let mut parked = OpenAiParkedWebSocket {
-        session: OpenAiWebSocketSession::new(connection.socket),
+        session: OpenAiWebSocketSession::new(connection.socket, std::time::Duration::ZERO),
         config,
         socket_generation: 0,
         websocket_connection_request_id: connection.websocket_connection_request_id,
@@ -1238,7 +1245,8 @@ async fn exact_input_count_posts_the_complete_logical_request_without_touching_c
     openai.responses_parameters = Some(json!({
         "prompt_cache_key": "test-session",
         "include": ["reasoning.encrypted_content"],
-        "reasoning": {"effort": "medium", "summary": "detailed"}
+        "reasoning": {"effort": "medium", "summary": "detailed"},
+        "parallel_tool_calls": true
     }));
     openai.input_token_count_url = Some(
         reqwest::Url::parse(&format!("http://{address}/custom/input_tokens?version=1"))
@@ -1251,14 +1259,7 @@ async fn exact_input_count_posts_the_complete_logical_request_without_touching_c
         "prompt_cache_options".into(),
         json!({"comparison_response_id":"resp_synthetic_baseline", "mode":"implicit", "ttl":"30m"}),
     );
-    openai.ws.continuation = Some(ContinuationState {
-        lineage: None,
-        socket_generation: 0,
-        response_id: "resp_preserved".to_string(),
-        request_properties: json!({"preserve": true}),
-        request_input: vec![json!({"role": "user", "content": "old"})],
-        response_output: vec![json!({"type": "message", "id": "old"})],
-    });
+    seed_test_continuation(&mut openai, "resp_preserved").await;
     let image = zevria_content::PromptImage::from_rgba(1, 1, &[3, 2, 1, 255]).unwrap();
     let parts = RequestParts {
         tools: zevria_model::ToolDeclarations::default(),
@@ -1305,6 +1306,7 @@ async fn exact_input_count_posts_the_complete_logical_request_without_touching_c
         "include",
         "previous_response_id",
         "prompt_cache_key",
+        "parallel_tool_calls",
         "store",
         "stream",
     ] {
@@ -1612,7 +1614,7 @@ async fn parked_websocket_pump_answers_ping_with_matching_pong() {
     let (socket, _) = connect_async(format!("ws://{address}"))
         .await
         .expect("client should connect");
-    let session = OpenAiWebSocketSession::new(socket);
+    let session = OpenAiWebSocketSession::new(socket, std::time::Duration::ZERO);
 
     server.await.expect("server task should finish");
     drop(session);
@@ -1702,7 +1704,7 @@ async fn dropping_a_websocket_session_terminates_its_pump_and_connection() {
     let (socket, _) = connect_async(format!("ws://{address}"))
         .await
         .expect("client should connect");
-    let session = OpenAiWebSocketSession::new(socket);
+    let session = OpenAiWebSocketSession::new(socket, std::time::Duration::ZERO);
     drop(session);
 
     server.await.expect("server task should finish");
@@ -1734,14 +1736,7 @@ async fn provider_cancellation_terminates_the_socket_and_invalidates_continuatio
         .await
         .expect("client should connect");
     let mut openai = test_session(socket, Some("pending-done"));
-    openai.ws.continuation = Some(ContinuationState {
-        lineage: None,
-        socket_generation: 0,
-        response_id: "response-before-cancel".to_string(),
-        request_properties: json!({"model": "gpt-test"}),
-        request_input: vec![json!({"role": "user"})],
-        response_output: vec![json!({"type": "message"})],
-    });
+    seed_test_continuation(&mut openai, "response-before-cancel").await;
 
     <OpenAiProvider as zevria_session_api::ModelProvider>::cancel(&mut openai);
 
@@ -1779,7 +1774,7 @@ async fn overflowing_the_parked_inbound_queue_is_terminal() {
     let (socket, _) = connect_async(format!("ws://{address}"))
         .await
         .expect("client should connect");
-    let session = OpenAiWebSocketSession::new(socket);
+    let session = OpenAiWebSocketSession::new(socket, std::time::Duration::ZERO);
     let terminal = wait_for_terminal(&session).await;
     assert_eq!(terminal, OpenAiWebSocketTerminalCategory::InboundOverflow);
 
@@ -1911,9 +1906,37 @@ async fn default_request_keeps_current_responses_optional_fields() {
     );
     assert_eq!(request.body["store"], false);
     assert_eq!(request.body["stream"], true);
+    assert_eq!(request.body["parallel_tool_calls"], true);
     let tools = request.body["tools"].as_array().expect("tool definitions");
     assert_eq!(tools.len(), 2);
     assert!(tools.iter().all(|tool| tool["strict"] == true));
+}
+
+#[tokio::test]
+async fn native_call_batching_can_be_disabled_and_additional_params_win() {
+    let compatibility = ResponsesCompatibilityConfig {
+        parallel_tool_calls: false,
+        ..ResponsesCompatibilityConfig::default()
+    };
+    let disabled =
+        capture_http_request_with_options(compatibility.clone(), BTreeMap::new(), policy_tools())
+            .await
+            .body;
+    assert_eq!(disabled["parallel_tool_calls"], false);
+    let overridden = capture_http_request_with_options(
+        compatibility,
+        BTreeMap::from([("parallel_tool_calls".into(), json!(true))]),
+        policy_tools(),
+    )
+    .await
+    .body;
+    assert_eq!(overridden["parallel_tool_calls"], true);
+    for key in ["instructions", "tools", "input", "prompt_cache_key"] {
+        assert_eq!(
+            disabled[key], overridden[key],
+            "batching cannot rewrite {key}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2201,8 +2224,41 @@ fn done_event(response_id: &str, status: &str) -> Value {
     })
 }
 
+async fn seed_test_continuation(openai: &mut OpenAiProvider, response_id: &str) {
+    let parts = RequestParts {
+        tools: zevria_model::ToolDeclarations::default(),
+        forbid_tool_calls: false,
+        prompt: Message::user("old"),
+        history: Vec::new(),
+        instructions: test_instructions().to_owned(),
+        allowed_tool_names: None,
+    };
+    let request = parts.request();
+    let prepared = crate::turn::prepare_turn_request(&request, openai)
+        .await
+        .unwrap();
+    let output = completed_event("resp_seed", "msg_seed", "old")["response"]["output"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(
+        openai.profile.clone(),
+        output,
+    ))
+    .unwrap();
+    openai.ws.continuation = Some(
+        ContinuationState::after_response(
+            &prepared,
+            openai.ws.socket_generation,
+            response_id.into(),
+            &response,
+        )
+        .unwrap(),
+    );
+}
+
 /// The completed-event fixture with a real usage object — the other fixtures
-/// keep `"usage": null`, so only turns built on this one emit `UsageUpdated`.
+/// keep `"usage": null`. Core publishes this accounting after response commit.
 fn completed_event_with_usage(response_id: &str, message_id: &str, text: &str) -> Value {
     let mut event = completed_event(response_id, message_id, text);
     event["response"]["usage"] = json!({
@@ -3481,7 +3537,7 @@ async fn native_output_items_survive_capture_and_full_replay_after_reconnect() {
 }
 
 #[tokio::test]
-async fn a_completed_response_with_usage_reports_it_once() {
+async fn a_completed_response_returns_usage_without_publishing_before_core_commit() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test listener should bind");
@@ -3521,12 +3577,15 @@ async fn a_completed_response_with_usage_reports_it_once() {
         .expect("turn should complete");
 
     assert_eq!(response.usage, Some(expected_token_usage()));
-    assert_eq!(usage_events(&mut receiver), [expected_token_usage()]);
+    assert!(
+        usage_events(&mut receiver).is_empty(),
+        "provider returns usage without awaiting core publication"
+    );
     server.await.expect("server task should finish");
 }
 
 #[tokio::test]
-async fn a_done_completion_with_usage_reports_it_once() {
+async fn a_done_completion_leaves_completed_usage_publication_to_core() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test listener should bind");
@@ -3563,7 +3622,10 @@ async fn a_done_completion_with_usage_reports_it_once() {
     .await
     .expect("turn should complete");
 
-    assert_eq!(usage_events(&mut receiver), [expected_token_usage()]);
+    assert!(
+        usage_events(&mut receiver).is_empty(),
+        "provider returns usage without awaiting core publication"
+    );
     assert_eq!(
         attempt_message(&state),
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
@@ -4528,13 +4590,12 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         .expect("test endpoint")
         .http;
     let openai = OpenAiProvider {
-        #[cfg(feature = "cache-diagnostics")]
         cache_diagnostics: Default::default(),
         input_projection: None,
         profile: test_profile_ref(),
         context_window_tokens: 272_000,
         preamble: "Test instructions".to_string(),
-        responses_parameters: None,
+        responses_parameters: Some(json!({"parallel_tool_calls":true})),
         reasoning_level: ReasoningEffort::Medium,
         reasoning_summary_level: ReasoningSummaryLevel::Detailed,
         web_search: WebSearchConfig::default(),
@@ -4546,9 +4607,11 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         additional_params: Default::default(),
         prompt_cache_key: "test-session".to_string(),
         ws: OpenAiParkedWebSocket {
-            session: OpenAiWebSocketSession::new(socket),
+            session: OpenAiWebSocketSession::new(socket, std::time::Duration::ZERO),
             config: OpenAiWebSocketConfig {
                 connect_timeout: std::time::Duration::from_secs(1),
+                keepalive: std::time::Duration::ZERO,
+                prewarm: false,
                 url: url.clone(),
                 headers: HeaderMap::new(),
                 api_key: ApiKeySource::literal("test-key"),
@@ -4981,6 +5044,7 @@ fn fast_recovery_policy(max_attempts: usize) -> RecoveryPolicy {
         backoff_cap: std::time::Duration::from_millis(20),
         send_timeout: std::time::Duration::from_secs(1),
         response_idle_timeout: std::time::Duration::from_secs(1),
+        websocket_keepalive: std::time::Duration::ZERO,
     }
 }
 
@@ -5879,7 +5943,10 @@ async fn http_only_transport_posts_full_streaming_request_and_accumulates_fragme
 
     assert_eq!(openai.transport, OpenAiTransport::Http);
     assert!(openai.ws.continuation.is_none());
-    assert_eq!(usage_events(&mut events), vec![expected_token_usage()]);
+    assert!(
+        usage_events(&mut events).is_empty(),
+        "provider returns usage without awaiting core publication"
+    );
     let replay = state
         .history_replays
         .last()
@@ -5949,7 +6016,10 @@ async fn http_response_done_completes_with_native_output_and_usage() {
     .await
     .expect("HTTP response.done should complete");
 
-    assert_eq!(usage_events(&mut events), vec![expected_token_usage()]);
+    assert!(
+        usage_events(&mut events).is_empty(),
+        "provider returns usage without awaiting core publication"
+    );
     assert_eq!(
         attempt_message(&state),
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
@@ -6047,6 +6117,9 @@ async fn http_terminal_diagnostics_include_attempt_identity_usage_and_safe_cache
         "input_tokens=1200",
         "cached_tokens=1000",
         "cache_write_tokens=256",
+        "request_ms=",
+        "first_event_ms=Some(",
+        "function_calls=0",
         expected_fingerprint.as_str(),
     ] {
         assert!(
@@ -6135,6 +6208,10 @@ async fn websocket_terminal_diagnostics_keep_handshake_identity_connection_scope
         "upstream_request_id=None",
         "websocket_connection_request_id=Some(\"req_ws_handshake\")",
         "cache_write_tokens=512",
+        "connect_ms=",
+        "request_ms=",
+        "first_event_ms=Some(",
+        "function_calls=0",
         expected_fingerprint.as_str(),
     ] {
         assert!(
@@ -7063,6 +7140,7 @@ async fn http_only_responses_gateway_supports_arbitrary_models_tools_and_replay(
             send_store: false,
             developer_messages: true,
             additional_tools: true,
+            parallel_tool_calls: false,
         },
         additional_params: BTreeMap::from([
             ("gateway_routing".to_string(), json!("deepseek-and-glm")),
@@ -7396,6 +7474,7 @@ async fn router_lazily_dispatches_role_specific_profiles_and_reuses_exact_matche
             send_store: false,
             developer_messages: true,
             additional_tools: true,
+            parallel_tool_calls: false,
         },
         BTreeMap::from([("gateway_routing".to_string(), json!("route-b"))]),
         RemoteCompactionConfig::default(),

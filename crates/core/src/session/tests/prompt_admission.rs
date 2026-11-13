@@ -104,7 +104,7 @@ async fn admission_records_match_source_replay_for_message_activation_reapplicat
         },
         None,
     );
-    engine.record_required_items(initial.records).unwrap();
+    engine.commit(initial.records).unwrap();
     let first = assert_equivalent(
         &engine,
         TurnAnchor::Append,
@@ -119,7 +119,7 @@ async fn admission_records_match_source_replay_for_message_activation_reapplicat
     assert_eq!(first.records.len(), 2);
     assert!(matches!(&first.records[1], TranscriptItem::Directive(d)
         if matches!(d.payload, DirectivePayload::SkillBody { .. })));
-    engine.record_required_items(first.records).unwrap();
+    engine.commit(first.records).unwrap();
     let again = assert_equivalent(
         &engine,
         TurnAnchor::Append,
@@ -132,7 +132,7 @@ async fn admission_records_match_source_replay_for_message_activation_reapplicat
         1,
         "no duplicate directives on reapplication"
     );
-    engine.record_required_items(again.records).unwrap();
+    engine.commit(again.records).unwrap();
     let first_use = engine
         .conversation
         .items()
@@ -164,11 +164,11 @@ async fn edits_reuse_only_the_replaced_first_use_not_discarded_future_pins() {
     let first = engine
         .prepare_test_prompt(TurnAnchor::Append, skill("commit"), SessionMode::Build)
         .unwrap();
-    engine.record_required_items(first.records).unwrap();
+    engine.commit(first.records).unwrap();
     let later = engine
         .prepare_test_prompt(TurnAnchor::Append, skill("review"), SessionMode::Build)
         .unwrap();
-    engine.record_required_items(later.records).unwrap();
+    engine.commit(later.records).unwrap();
     let old_commit = engine
         .active_skills()
         .unwrap()
@@ -220,7 +220,7 @@ async fn edits_reuse_only_the_replaced_first_use_not_discarded_future_pins() {
 async fn ready_revision_preserves_exact_records_and_checks_before_staging() {
     let (_dir, mut engine) = engine();
     let (artifact, items) = ready_plan_fixture();
-    engine.record_required_items(items).unwrap();
+    engine.commit(items).unwrap();
     let policy = engine.policies.policy_mut(SessionMode::Plan);
     policy.skills_enabled = true;
     policy.allowed_tool_names = Some(vec!["command".into(), "skill".into()]);
@@ -292,12 +292,12 @@ async fn admission_replays_zero_append_history_once_for_edits_and_only_the_propo
                 let first = engine
                     .prepare_test_prompt(TurnAnchor::Append, skill("commit"), SessionMode::Build)
                     .unwrap();
-                engine.record_required_items(first.records).unwrap();
+                engine.commit(first.records).unwrap();
             }
             let policy = engine.policies.policy(SessionMode::Build).clone();
             engine.reconcile_before_dispatch(&policy).unwrap();
             engine
-                .record_required_items(
+                .commit(
                     (0..count)
                         .map(|i| {
                             TranscriptItem::Message(if i % 2 == 0 {
@@ -306,7 +306,7 @@ async fn admission_replays_zero_append_history_once_for_edits_and_only_the_propo
                                 Message::assistant("x".repeat(bytes))
                             })
                         })
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 )
                 .unwrap();
             let index = engine.conversation.items().len() - 2;
@@ -336,13 +336,8 @@ async fn admission_replays_zero_append_history_once_for_edits_and_only_the_propo
                 }
             }
             let captured = engine.prompt_anchor_state(TurnAnchor::Append).unwrap();
-            let SessionReplayState::Valid { instructions, .. } = &engine.replay else {
-                panic!()
-            };
-            assert!(std::ptr::eq(
-                captured.instructions.as_ref(),
-                instructions.as_ref()
-            ));
+            let instructions = &engine.conversation.replay().unwrap().instructions;
+            assert!(std::ptr::eq(captured.instructions.as_ref(), instructions));
         }
     }
 }
@@ -353,7 +348,7 @@ async fn admission_keeps_pending_tool_context_and_does_not_leak_rejected_pins() 
     let policy = engine.policies.policy(SessionMode::Build).clone();
     engine.reconcile_before_dispatch(&policy).unwrap();
     engine
-        .record_required(TranscriptItem::Message(Message::Assistant(
+        .commit(TranscriptItem::Message(Message::Assistant(
             rig_core::message::AssistantMessage::new(vec![named_tool_call(
                 "pending",
                 "command",
@@ -373,7 +368,7 @@ async fn admission_keeps_pending_tool_context_and_does_not_leak_rejected_pins() 
     assert_eq!(engine.conversation.items(), before);
     assert_eq!(std::fs::read(engine.conversation.path()).unwrap(), bytes);
     engine
-        .record_required(TranscriptItem::ToolResults {
+        .commit(TranscriptItem::ToolResults {
             message: Message::tool_result(
                 rig_core::message::CallId::from_wire("pending"),
                 rig_core::message::ToolName::new("command").expect("nonempty tool name"),
@@ -406,7 +401,7 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
                 SessionMode::Build,
             )
             .unwrap();
-        engine.record_required_items(first.records).unwrap();
+        engine.commit(first.records).unwrap();
         let assistant = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
             named_tool_call(
                 "correlated",
@@ -461,7 +456,7 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
             }
         };
         engine
-            .record_required_items(vec![TranscriptItem::Message(assistant), result])
+            .commit(vec![TranscriptItem::Message(assistant), result])
             .unwrap();
         let before_directives = owned_input(engine.conversation.items());
         let mut without_metadata = engine.conversation.items().to_vec();
@@ -486,7 +481,7 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
             );
         }
         engine
-            .record_required(TranscriptItem::Message(Message::assistant(
+            .commit(TranscriptItem::Message(Message::assistant(
                 "final assistant response",
             )))
             .unwrap();
@@ -501,7 +496,7 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
             },
             None,
         );
-        engine.record_required_items(second.records).unwrap();
+        engine.commit(second.records).unwrap();
         let next = owned_input(engine.conversation.items());
         assert!(next.starts_with(&completed));
         assert_eq!(next.len(), completed.len() + 1);

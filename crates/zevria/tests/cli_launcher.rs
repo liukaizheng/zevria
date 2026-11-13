@@ -55,6 +55,36 @@ fn help_version_and_machine_probe_have_no_configuration_or_terminal_side_effects
 }
 
 #[test]
+fn private_environment_export_bypasses_runtime_and_application_initialization() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let output = command(home.path(), workspace.path())
+        .env_clear()
+        .env("CAPTURE_TEST", "spaces = and\nnewlines")
+        .env("ZEVRIA_CONFIG", home.path().join("missing/config.toml"))
+        .env("ZEVRIA_GIT_BASH", home.path().join("missing-bash.exe"))
+        .args(["--__print-env", "test-marker"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(output.stdout.starts_with(b"test-marker\0"));
+    assert!(
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == b"CAPTURE_TEST=spaces = and\nnewlines")
+    );
+    assert!(std::fs::read_dir(home.path()).unwrap().next().is_none());
+    assert!(
+        std::fs::read_dir(workspace.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn explicit_native_offline_commands_do_not_require_a_command_backend() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

@@ -4,7 +4,7 @@ use std::{hint::black_box, io::Write, time::Duration};
 
 use criterion::{BatchSize, BenchmarkId, Criterion};
 use rig_core::message::Message;
-use zevria_core::benchmark::AdmissionFixture;
+use zevria_core::benchmark::{AdmissionFixture, EngineRoundFixture};
 use zevria_core::transcript_bench::Workload;
 use zevria_core::transcript_bench::fixture;
 use zevria_core::transcript_bench::layout;
@@ -299,6 +299,25 @@ fn prompt_pipeline(c: &mut Criterion) {
     }
 }
 
+fn engine_round(c: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let mut group = c.benchmark_group("engine_round");
+    for count in [100, 1000, 5000] {
+        group.bench_function(BenchmarkId::from_parameter(count), |b| {
+            b.iter_batched_ref(
+                || EngineRoundFixture::new(count),
+                |fixture| runtime.block_on(fixture.run()),
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
+}
+
 fn filesystem(c: &mut Criterion) {
     let f = fixture(Workload::Replay, 100, 128);
     let directory = tempfile::tempdir().unwrap();
@@ -385,6 +404,7 @@ fn main() {
         transactions(&mut c);
         prompt_admission(&mut c);
         prompt_pipeline(&mut c);
+        engine_round(&mut c);
         filesystem(&mut c);
         record_codecs(&mut c);
         c.final_summary();

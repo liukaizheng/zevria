@@ -341,3 +341,79 @@ fn item_id_matching_cannot_confirm_a_different_output_index() {
         "completion unconfirmed"
     );
 }
+
+#[test]
+fn reasoning_deltas_keep_the_growing_allocation_and_ignore_invisible_changes() {
+    let mut state = state();
+    state.ingest(&json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"provisional","delta":"Read"}));
+    let Content::Reasoning { text } = &mut state.attempt_mut().presentation[0].content else {
+        panic!("reasoning part")
+    };
+    text.reserve(8192);
+    let allocation = text.as_ptr();
+    for _ in 0..256 {
+        let revision = state.attempt().revision;
+        state.ingest(
+            &json!({"type":"response.reasoning_text.delta","output_index":0,"delta":" more"}),
+        );
+        assert_eq!(state.attempt().revision, revision + 1);
+        let Content::Reasoning { text } = &state.attempt().presentation[0].content else {
+            panic!("reasoning part")
+        };
+        assert_eq!(text.as_ptr(), allocation, "append must not copy its prefix");
+    }
+    let before = state.attempt().clone();
+    state.ingest(
+        &json!({"type":"response.reasoning_text.delta","output_index":0,"delta":"\u{1b}[31m"}),
+    );
+    assert_eq!(
+        state.attempt(),
+        &before,
+        "sanitized-empty deltas are invisible"
+    );
+    let Content::Reasoning { text } = &before.presentation[0].content else {
+        panic!("reasoning part")
+    };
+    state.ingest(&json!({"type":"response.reasoning_text.done","output_index":0,"item_id":"final","text":text}));
+    assert_eq!(
+        state.attempt().presentation[0].source.item_id.as_deref(),
+        Some("final")
+    );
+    assert_eq!(state.attempt().revision, before.revision + 1);
+    let before = state.attempt().clone();
+    state.ingest(&json!({"type":"response.reasoning_text.done","output_index":0,"item_id":"final","text":text}));
+    state.ingest(&json!({"type":"response.reasoning_text.delta","output_index":0,"delta":"stale"}));
+    assert_eq!(state.attempt(), &before);
+}
+
+#[test]
+fn visible_mutation_flags_match_revision_equality_at_authority_and_terminal_boundaries() {
+    let mut state = state();
+    let reasoning = json!({"type":"reasoning","id":"reason","summary":[{"type":"summary_text","text":"Think"}],"content":[{"type":"reasoning_text","text":"Carefully"}]});
+    let search = json!({"type":"web_search_call","id":"search","status":"searching","action":{"type":"search","queries":["evidence"]}});
+    for event in [
+        json!({"type":"response.created","response":{"id":"response"}}),
+        json!({"type":"response.created","response":{"id":"response"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":reasoning}),
+        json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+        json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+        json!({"type":"response.web_search_call.searching","output_index":1,"item_id":"search","action":search["action"]}),
+        json!({"type":"response.output_item.done","output_index":1,"item":search}),
+        json!({"type":"response.web_search_call.completed","output_index":1,"item_id":"search"}),
+        json!({"type":"response.completed","response":{"id":"response","output":[reasoning,search]}}),
+        json!({"type":"response.done","response":{"id":"response","output":[reasoning,search]}}),
+        json!({"type":"response.completed","response":{"id":"response","output":[{"type":"reasoning","id":"reason","summary":[{"type":"signature","text":"opaque"}],"content":[]},search]}}),
+        json!({"type":"response.done","response":{"id":"response","output":[{"type":"reasoning","id":"reason","summary":[],"content":[]},search]}}),
+    ] {
+        let before = state.attempt().clone();
+        state.ingest(&event);
+        let mut after = state.attempt().clone();
+        let revision = after.revision;
+        after.revision = before.revision;
+        assert_eq!(
+            revision,
+            before.revision + u64::from(before != after),
+            "{event}"
+        );
+    }
+}

@@ -548,8 +548,8 @@ async fn ten_real_response_launches_share_limits_and_return_original_slots() {
             "strict Responses makes optional fields required-nullable"
         );
         assert_eq!(
-            call.request.get("parallel_tool_calls"),
-            parallel.as_ref().map(|_| &Value::Bool(false))
+            call.request["parallel_tool_calls"],
+            Value::Bool(parallel.unwrap_or(true))
         );
         let tasks = (0..10).map(|i| {
             let mut args = json!({"title":format!("Book {i}"),"prompt":format!("BOOK_TASK_{i}"),"type":if !mixed || i % 2 == 0 { "build" } else { "explore" }});

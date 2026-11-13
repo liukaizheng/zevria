@@ -365,7 +365,10 @@ See [image input](image-input.md) for user behavior, limits, and privacy.
 - persistence-health events for frontend-visible transcript failures; and
 - `UsageUpdated` events carrying the latest completed response usage, exact
   active provider/model profile, `ModelRole`, input ceiling, and physical
-  context window; and
+  context window. Core publishes completed usage after response persistence and
+  attempt updates, before the intermediate/final outcome; adapters return usage
+  in `ModelResponse` without awaiting this lifecycle event. Ensemble finals keep
+  their deferred atomic workflow commit and publish usage at that boundary; and
 - `ContextUsageUpdated` events carrying the authoritative projected size,
   count source, trigger, input ceiling, and physical window for the next
   prepared request; and
@@ -2282,6 +2285,20 @@ window never interrupts an attempt already running. Cancellation interrupts conn
 warning, and backoff; a progressing stream still has no total duration limit.
 These timers never restart completed local tools or impose deadlines on approval
 waits or external ACP worker processes.
+
+Unix sessions prepare their command environment before tool construction.
+`command.shell_environment = "captured"` (default) runs the login shell once and
+uses the current binary's private `--__print-env` entry point to export native
+NUL-delimited variables after a random marker. An eight-second deadline and 1 MiB
+per-stream bounds cover capture. Profile stdout before the marker is discarded;
+`PWD`, `OLDPWD`, `SHLVL` and `_` are excluded. Later commands use `-c`, clear the
+inherited environment and apply the captured exports. Root, Explore and Build
+share that process-frozen selection. Capture failure logs one warning and retains
+the per-call login shell. `shell_environment = "login"` explicitly restores that
+old behavior. Login profile changes and non-exported profile functions are not
+carried into the captured environment; restart after changing profiles or choose
+`login`. Shell-specific non-login startup files may still execute. Native Windows
+keeps its existing Git Bash selection and environment behavior.
 
 Foreground shell commands default to a five-minute wall-clock timeout and 1 MiB
 combined stdout/stderr capture. The foreground limits apply identically to root

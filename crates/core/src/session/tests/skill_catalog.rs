@@ -30,7 +30,9 @@ fn catalog(engine: &SessionEngine<impl ModelProvider>) -> Option<SkillPromptCata
         .catalog
 }
 fn instructions(engine: &SessionEngine<impl ModelProvider>) -> String {
-    engine.rendered_instructions(engine.policies.policy(engine.selected_mode()))
+    engine
+        .rendered_instructions(engine.policies.policy(engine.selected_mode()))
+        .to_string()
 }
 async fn submit(engine: &mut SessionEngine<ScriptedProvider>, text: &str, mode: SessionMode) {
     let (events, _receiver) = session_event_channel(128);
@@ -580,16 +582,16 @@ async fn synthesis_preflight_includes_the_same_instructions_and_revocation_as_di
             .await
             .unwrap();
         let counted = engine.provider.input.clone();
-        engine
-            .record_required(TranscriptItem::Message(message))
-            .unwrap();
+        engine.commit(TranscriptItem::Message(message)).unwrap();
         engine
             .reconcile_before_dispatch(&engine.ensemble_policy(workflow))
             .unwrap();
         assert_eq!(counted, snapshot_model_input(engine.model_input()).unwrap());
         assert_eq!(
             engine.provider.instructions,
-            engine.rendered_instructions(&engine.ensemble_policy(workflow))
+            engine
+                .rendered_instructions(&engine.ensemble_policy(workflow))
+                .as_ref()
         );
         assert!(
             engine

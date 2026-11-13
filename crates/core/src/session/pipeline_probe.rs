@@ -4,6 +4,7 @@ use std::cell::Cell;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PipelineCounts {
     pub instruction_snapshots: usize,
+    pub instruction_renders: usize,
     pub instruction_updates: usize,
     pub prompt_preparations: usize,
     pub plan_prefix_replays: usize,
@@ -11,6 +12,7 @@ pub(super) struct PipelineCounts {
     pub projections: usize,
     pub measurements: usize,
     pub replay_installations: usize,
+    pub accounting_passes: usize,
 }
 
 tokio::task_local! {

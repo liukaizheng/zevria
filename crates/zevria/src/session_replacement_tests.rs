@@ -318,11 +318,7 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
             resumed.restoration().plan_state,
             PlanWorkflowState::Planning { .. }
         ));
-        assert!(
-            !transcript::replay_active_skills(&resumed.restoration().transcript_items)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!resumed.restoration().active_skills.is_empty());
         let mut inherited = tui_models(resumed.restoration());
         resumed.shutdown().await.unwrap();
         let mut previous_id = source_id;
@@ -347,11 +343,7 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
                 ]
             );
             assert!(transcript::model_input(&running.restoration().transcript_items).is_empty());
-            assert!(
-                transcript::replay_active_skills(&running.restoration().transcript_items)
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(running.restoration().active_skills.is_empty());
             let path = running.restoration().transcript_path.clone();
             assert!(!path.exists());
             let live_models = tui_models(running.restoration());

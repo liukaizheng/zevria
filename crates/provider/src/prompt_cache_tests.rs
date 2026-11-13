@@ -67,6 +67,8 @@ async fn inactivity_replay_preserves_wire_prefix_controls_headers_and_cache_iden
         request_start_timeout_seconds: 7,
         stall_warning_seconds: 3,
         response_idle_timeout_seconds: 42,
+        websocket_keepalive_seconds: 17,
+        prewarm: true,
         recovery_window_seconds: 123,
         max_attempts: 2,
     };
@@ -83,6 +85,9 @@ async fn inactivity_replay_preserves_wire_prefix_controls_headers_and_cache_iden
     assert_eq!(provider.recovery.send_timeout.as_secs(), 7);
     assert_eq!(provider.recovery.stall_warning.as_secs(), 3);
     assert_eq!(provider.recovery.response_idle_timeout.as_secs(), 42);
+    assert_eq!(provider.recovery.websocket_keepalive.as_secs(), 17);
+    assert_eq!(provider.ws.config.keepalive.as_secs(), 17);
+    assert!(provider.ws.config.prewarm);
     assert_eq!(provider.recovery.recovery_window.as_secs(), 123);
     assert_eq!(provider.recovery.max_attempts, 2);
     let prompt = Message::user("authoritative input");

@@ -574,47 +574,46 @@ Delete these temporary assets as a unit; keep the permanent regressions separate
   paragraph in `docs/responses-compatible.md`. The rehearsal script removes both.
 - `cache-diagnostics` definition/forwarding and their temporary comments in
   `crates/provider/Cargo.toml`, `crates/host/Cargo.toml`, `crates/zevria/Cargo.toml`.
-- Every `#[cfg(feature = "cache-diagnostics")]` hook in the following files:
-  - `lib.rs`: optional module declaration and `CacheDiagnosticContext` export.
-  - `router.rs`: optional context, reset marker, context builder, lazy-slot
-    configuration, initialized/uninitialized reset handling.
-  - `connection.rs`: `OpenAiProvider.cache_diagnostics`, initializer in `connect`,
-    fallback observation, and the diagnostic branch of `log_identifier`.
-    Unwrap its feature-off identity branch (or remove the no-op helper/maps).
-  - `turn.rs`: `PreparedRequest.cache_diagnostics`, the `None` initializer in
-    `prepare_turn_request`, `log_terminal_response` observation,
-    `send_prepared_request` transmission observation, `run_model_request` and
-    `run_http_model_request` finish hooks, `run_http_model_request_inner`
-    transmission observation, `run_model_request_with_recovery` dispatch and
-    recovery observations, and `ModelProvider::reset` hook. Also remove
-    `Transmission.full_reason` and its initializers, pre-projection raw-terminal
-    observations, reconnect observations, and the built-HTTP diagnostic branch.
-    **Unwrap** the `#[cfg(not(feature = "cache-diagnostics"))]` original HTTP
-    `.send()` branch; do not remove it.
-  - `websocket_session.rs`: `OpenAiWebSocketSession.cache_diagnostics`;
-    sidecar local, pump argument, and struct initializer in `new_with_send_delay`;
-    `disconnected` initializer; `terminate` observation; `pump_socket` optional
-    parameter, send/pong/read error observations, close observation, final
-    observation before watch publication.
-  - `tests.rs`: optional `cache_diagnostic_lifecycle` module plus field
-    initializers in **both** `test_session_with_pump` and
-    `reconnecting_a_continuation_does_not_execute_its_tool_twice`.
-  - `resume_wire_tests.rs`: only context attachment and snapshot assertions;
-    keep the ordinary engine/JSONL/native replay regression.
-  - `crates/host/src/runtime.rs`: normal and worker context attachment and gated
-    diagnostic startup-test module.
-- Remove provider optional `libc`/`uuid` dependency edges and their entries in
-  the `zevria-provider` dependency list in `Cargo.lock`, not the workspace packages.
+- `crates/provider/src/diagnostics.rs`: the facade and its real/no-op owners,
+  opaque request/transmission/observer data, socket sidecar and router context.
+  Disabled owners are zero-sized; the HTTP diagnostic clone/build exists only
+  in the enabled implementation. No transport `.send()` lives in this facade.
+- Facade imports, fields, initializers and standalone calls in these files:
+  - `lib.rs`: facade module, optional implementation module and context export.
+  - `router.rs`: router owner/context builder, lazy-runtime configuration and
+    initialized/uninitialized reset observations.
+  - `connection.rs`: provider owner/configuration, fallback observation and the
+    diagnostic `log_identifier` branch. Unwrap its identity implementation (or
+    remove the helper/maps); ordinary identifier values remain unchanged.
+  - `responses/prepare.rs`: request metadata and its empty initializer.
+  - `responses/continuation.rs`: `Transmission.full_reason` and initializers.
+  - `responses/driver.rs`: terminal/raw-event observations and observer metadata.
+  - `responses/{websocket,http}.rs`: transmission and finish observations. Keep
+    HTTP body construction, `.send()`, retry handling and all transport behavior.
+  - `responses/recovery_loop.rs`: dispatch, recovery and connection observations;
+    remove facade shadowing lets, leaving their original values in scope.
+  - `responses/mod.rs`: provider reset observation and test probe support module.
+  - `websocket_session.rs`: socket owner, construction, pump argument and
+    observations. Keep the operational close-frame branch and terminal watch.
+  - `tests.rs`: optional lifecycle module, probe module and both provider-owner
+    fixture initializers.
+- Remaining feature-gated public/context hooks in `router.rs`,
+  `resume_wire_tests.rs`, `crates/host/src/runtime.rs` (startup-test module), and
+  `crates/host/src/runtime/startup.rs` (shared root/worker context attachment).
+  Keep ordinary resume engine/JSONL/native replay and both startup profiles.
+- Remove the provider optional `libc` dependency and its edge in the
+  `zevria-provider` dependency list in `Cargo.lock`, not the workspace package.
+  Keep provider `uuid`: recovery jitter now uses it independently of diagnostics.
 - The unconditional-within-tests `cache_preparation_probe` path/module inclusion
   in `tests.rs` and the `#[cfg(test)] cache_preparation_probe_support` inclusion
-  (and temporary comment) at the end of `turn.rs`.
+  (and temporary comment) at the end of `responses/mod.rs`.
 
 **Keep** `wire_request_properties`, `incident_prefix_flow`, the strengthened native
 replay regression, second-prompt tests in provider/directive-wire/core admission,
 ordinary fixtures, `isolate_log_test` and its existing operational-log test callers,
 and the permanent release gates in `docs/transcript-performance.md`.
 Also **keep** `prompt_cache.rs`, its `lib.rs` module, the narrowly scoped
-`turn.rs` continuation/counting/compaction calls, `prompt_cache_tests.rs` and
+`responses/{continuation,maintenance}.rs` continuation/counting/compaction calls, `prompt_cache_tests.rs` and
 its `tests.rs` module, and the prefix-sharing compaction wire assertions. These are explicit
 `additional_params` interoperability, required in **both feature configurations**,
 not observer infrastructure. They do not depend on the temporary module, add
@@ -623,8 +622,8 @@ operator opt-in documentation apart from its marked observer paragraph. If the
 comparison request capability itself is later retired, this is its complete
 separate removal inventory; restore exact property equality in
 `select_transmission` and remove the two maintenance filtering calls with it.
-Keep other existing dependencies, including `sha2`, and the `libc`/`uuid` packages
-used by other crates. Remove only the two new provider lockfile edges.
+Keep other existing dependencies, including `sha2` and `uuid`, and the `libc`
+package used by other crates. Remove only the optional provider `libc` edge.
 No operational decision or public schema depends on any removable asset.
 
 ### Rehearse deletion, not just feature disablement
@@ -638,15 +637,18 @@ the original tree:
 rtk proxy python3 crates/provider/src/cache_diagnostics/rehearse_removal.py /absolute/disposable/source
 # Commands below execute with the disposable source as working directory:
 rtk cargo fmt --all -- --check
-rtk cargo test --workspace
+rtk cargo test --release --workspace
 rtk cargo build --release -p zevria
 # Also run the permanent named gates in docs/transcript-performance.md.
 ```
 
 The script refuses the original tree, unmarked directories, and Git worktrees. It
 removes only the inventory above and checks for remaining module/feature/probe
-references throughout source/manifests/docs. Review its output and diff; it is not
-a substitute for tests. Give the copy its own target directory.
+references throughout source and manifests. Historical performance/release
+reports retain their recorded feature-enabled commands and measurements; the
+live interoperability document loses its marked observer paragraph. Review the
+output and diff; it is not a substitute for tests. Give the copy its own target
+directory.
 
 ## Validation and pre-release checklist
 

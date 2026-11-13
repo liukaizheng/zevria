@@ -157,6 +157,8 @@ auxiliary endpoints; `additional_params` can hold gateway-specific fields.
         "request_start_timeout_seconds": 30,
         "stall_warning_seconds": 30,
         "response_idle_timeout_seconds": 180,
+        "websocket_keepalive_seconds": 30,
+        "prewarm": false,
         "recovery_window_seconds": 300,
         "max_attempts": 30
       },
@@ -165,7 +167,8 @@ auxiliary endpoints; `additional_params` can hold gateway-specific fields.
         "send_reasoning_encrypted_content": true,
         "strict_tools": true,
         "send_prompt_cache_key": true,
-        "send_store": true
+        "send_store": true,
+        "parallel_tool_calls": true
       },
       "compaction": {
         "request_timeout_seconds": 300
@@ -524,7 +527,17 @@ Provider-level compatibility flags default to `true`:
 | `additional_tools` | Fold additions into top-level tools (replace same-name entries in place, append new names); correct calls, but the tool prefix changes. |
 | `send_prompt_cache_key` | Omit the profile-specific prompt-cache key. |
 | `send_store` | Omit `store`; when enabled Zevria sends `store: false`, never `true`. |
+| `parallel_tool_calls` | Send `parallel_tool_calls: false` instead of the explicit default `true`. It does not make ordinary tool execution concurrent. |
 | `developer_messages` | Project ordered skill directives with `role: "user"` instead of `role: "developer"`. |
+
+Ordinary Responses completions explicitly send `parallel_tool_calls: true` by
+default. Set `compatibility.parallel_tool_calls` to `false` for a gateway that
+requires single-call responses. A provider's `additional_params` is merged later
+and can override either value. This is one completion request property only:
+instructions, tool declarations and their ordering are unchanged. Exact-count
+requests omit this completion-only option; remote compaction retains its existing
+defaulting behavior. Native batching still depends on the gateway/model and does
+not authorize concurrent ordinary tool execution.
 
 `instructions` is a deterministic join of engine-owned modules in this order:
 engine protocol, optional Application guidance, optional File guidance (sorted by
@@ -571,9 +584,35 @@ Zevria does not support alternate vendor socket dialects.
 ### Completion networking and automatic recovery
 
 `providers.<name>.network` is optional; omission (including individual omitted
-fields) enables the defaults shown above. Durations are positive integer seconds
-that must fit monotonic deadlines. The warning must be shorter than the idle
-limit, and `max_attempts` must be positive. Zero does not mean unlimited.
+fields) enables the defaults shown above. Durations are integer seconds that
+must fit monotonic deadlines. All are positive except
+`websocket_keepalive_seconds`, where zero disables keepalive. The warning must be
+shorter than the idle limit, and `max_attempts` must be positive. Zero does not
+mean unlimited.
+
+| Network setting | Default | Purpose |
+| --- | ---: | --- |
+| `connect_timeout_seconds` | 30 | Bound connection establishment. |
+| `request_start_timeout_seconds` | 30 | Initial write/header deadline. |
+| `stall_warning_seconds` | 30 | Warn without meaningful model progress. |
+| `response_idle_timeout_seconds` | 180 | Abandon an unprogressing attempt. |
+| `websocket_keepalive_seconds` | 30 | Ping an already-open socket after no sent/received frame; `0` disables it. |
+| `prewarm` | false | Opt in to one best-effort idle WebSocket handshake for the selected mode before first use. |
+| `recovery_window_seconds` | 300 | Bound scheduling of recovery, not useful work. |
+| `max_attempts` | 30 | Absolute attempts including handshakes and fallback. |
+
+Keepalive also operates while waiting for local tools or user input. It opens no
+socket early; a failed ping stops the pump so the next request reconnects. Pongs
+stay invisible to model progress, and missing pongs alone are not fatal. HTTP/SSE
+and Anthropic connections are unchanged. Some gateways may not count control
+frames as activity; verify incremental requests after long idle periods in logs.
+
+Prewarm is separately opt-in and contacts the provider early, including resolving
+an API-key command at session start. It sends handshake headers only, not prompt
+content. A command cancels the idle handshake; failures leave completion recovery
+untouched, except HTTP 426 selects sticky HTTP. Router construction itself has no
+network I/O, HTTP-only/Anthropic profiles do nothing, and no detached reconnect
+loop runs. See `websocket-connection.md` and `PRIVACY.md`.
 
 A completion warns after 30 seconds of no meaningful response progress and
 retries its immutable prepared request after 180 seconds of inactivity. The
@@ -753,14 +792,22 @@ example, `/v1/responses` becomes `/v1/responses/input_tokens`. Set an explicit
 HTTP(S) URL for a gateway-specific route, set `derive_url = false` to require an
 explicit route, or set `enabled = false` to disable the capability.
 
-For image-bearing input, or when a capacity decision is near or ambiguous,
-Zevria prefers posting the complete
+For images not yet covered by a compatible provider-usage baseline, or when a
+capacity decision is near or ambiguous, Zevria prefers posting the complete
 logical request to this endpoint: model, the exact rendered instruction set, selected
 tools and compatibility rewrites, additional prompt parameters, native or
 portable replay, and the full ordered input including directive history.
 Endpoint-excluded non-prompt fields, such as cache metadata, are omitted. Counting never uses an incremental
 `previous_response_id` body. It does not perform a completion, publish
 completed-response usage, or mutate continuation ownership.
+
+Once a completed response reports usage covering existing images, ordinary tool
+rounds and text-only appends reuse that baseline plus local deltas instead of
+counting the same images before every dispatch. New images, an incompatible
+profile/request shape, history replacement or compaction require fresh coverage.
+Near-trigger/limit, disagreement and forced-recheck rules still request an exact
+count even when all images have already been measured. Missing provider usage
+never invents a baseline.
 
 A nonnegative `input_tokens` response becomes the authoritative measurement.
 HTTP 404, 405, and 501 mark exact counting unsupported for that initialized

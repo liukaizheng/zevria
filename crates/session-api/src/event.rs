@@ -603,15 +603,14 @@ impl SessionEventSender {
         self.publish_next(|sequence| {
             self.streams.send_modify(|snapshot| {
                 let active = snapshot.active_agent_runs.get(&agent_run_id).cloned();
-                let previous = active
+                let continues_segment = active
                     .as_ref()
                     .and_then(|key| snapshot.agent_runs.get(key))
-                    .map(|state| state.event.clone());
-                let continues_segment = previous
-                    .as_ref()
-                    .is_some_and(|previous| agent_preview_segments_match(previous, &event));
-                let key = if continues_segment {
-                    active.expect("a continuing segment has an active key")
+                    .is_some_and(|previous| agent_preview_segments_match(&previous.event, &event));
+                let (key, previous) = if continues_segment {
+                    let key = active.expect("a continuing segment has an active key");
+                    let previous = snapshot.agent_runs.remove(&key).map(|state| state.event);
+                    (key, previous)
                 } else {
                     let key = AgentRunPreviewKey {
                         agent_run_id: agent_run_id.clone(),
@@ -620,9 +619,9 @@ impl SessionEventSender {
                     snapshot
                         .active_agent_runs
                         .insert(agent_run_id.clone(), key.clone());
-                    key
+                    (key, None)
                 };
-                let event = accumulate_agent_preview(previous.as_ref(), event);
+                let event = accumulate_agent_preview(previous, event);
                 snapshot.agent_runs.insert(
                     key,
                     AgentRunStreamState {
@@ -947,30 +946,36 @@ fn hosted_activity_update(
 }
 
 pub(super) fn accumulate_agent_preview(
-    previous: Option<&AgentRunEvent>,
+    previous: Option<AgentRunEvent>,
     next: AgentRunEvent,
 ) -> AgentRunEvent {
     match (previous, next) {
         (
             Some(AgentRunEvent::AgentMessage {
-                text: previous,
+                text: mut previous,
                 message_id: previous_id,
             }),
             AgentRunEvent::AgentMessage { text, message_id },
-        ) if previous_id == &message_id => AgentRunEvent::AgentMessage {
-            text: format!("{previous}{text}"),
-            message_id,
-        },
+        ) if previous_id == message_id => {
+            previous.push_str(&text);
+            AgentRunEvent::AgentMessage {
+                text: previous,
+                message_id,
+            }
+        }
         (
             Some(AgentRunEvent::Thought {
-                text: previous,
+                text: mut previous,
                 message_id: previous_id,
             }),
             AgentRunEvent::Thought { text, message_id },
-        ) if previous_id == &message_id => AgentRunEvent::Thought {
-            text: format!("{previous}{text}"),
-            message_id,
-        },
+        ) if previous_id == message_id => {
+            previous.push_str(&text);
+            AgentRunEvent::Thought {
+                text: previous,
+                message_id,
+            }
+        }
         (_, next) => next,
     }
 }

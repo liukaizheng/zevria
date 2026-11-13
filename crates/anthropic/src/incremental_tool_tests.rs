@@ -18,6 +18,46 @@ fn tools(values: Vec<ToolDeclaration>) -> ToolDeclarations {
     ToolDeclarations::new(values).unwrap()
 }
 
+fn shared_history(
+    request: &ModelRequest<'_>,
+    options: &body::RequestOptions<'_>,
+    expected: &body::PreparedRequest,
+) -> project::ValidatedHistory {
+    let (assessment, Some(history)) = project::prepare_history(
+        &request.input,
+        options.target,
+        options.compatibility,
+        request.input_identity,
+    )
+    .unwrap() else {
+        panic!("compatible history")
+    };
+    assert_eq!(
+        assessment,
+        project::preflight_with_compatibility(
+            &request.input,
+            options.target,
+            options.compatibility
+        )
+        .unwrap()
+    );
+    let shared = body::build_with_history(request, options, Some(&history)).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&shared.body).unwrap(),
+        serde_json::to_vec(&expected.body).unwrap()
+    );
+    assert_eq!(shared.prefix_binding, expected.prefix_binding);
+    assert_eq!(
+        shared.stripped_thinking_turns,
+        expected.stripped_thinking_turns
+    );
+    assert_eq!(
+        serde_json::to_vec(&body::count_tokens_body(&shared.body)).unwrap(),
+        serde_json::to_vec(&body::count_tokens_body(&expected.body)).unwrap()
+    );
+    history
+}
+
 #[test]
 fn inline_additions_merge_with_directives_in_order_and_fold_only_when_ineffective() {
     let target = ModelProfileRef::new("anthropic", "claude-opus-5-5");
@@ -58,6 +98,7 @@ fn inline_additions_merge_with_directives_in_order_and_fold_only_when_ineffectiv
             additional_params: &params,
         };
         let prepared = body::build(&request, &options).unwrap();
+        shared_history(&request, &options, &prepared);
         let body = &prepared.body;
         let betas = body::beta_headers(
             &[],
@@ -170,6 +211,31 @@ fn summary_extension_keeps_tools_properties_and_historical_thinking_binding() {
         ModelRequestItem::message(&last),
     ]);
     let normal = body::build(&request, &options).unwrap();
+    let history = shared_history(&request, &options, &normal);
+    for changed in [
+        ModelRequest {
+            instructions: "changed",
+            ..request.clone()
+        },
+        ModelRequest {
+            tools: &[],
+            ..request.clone()
+        },
+    ] {
+        let expected = body::build(&changed, &options).unwrap();
+        let cached = body::build_with_history(&changed, &options, Some(&history)).unwrap();
+        assert_eq!(
+            cached.stripped_thinking_turns, 1,
+            "bind to actual instructions/tools, never the management prefix"
+        );
+        assert_eq!(
+            serde_json::to_vec(&cached.body).unwrap(),
+            serde_json::to_vec(&expected.body).unwrap()
+        );
+    }
+    let mut mismatched = request.clone();
+    mismatched.input.pop();
+    assert!(body::build_with_history(&mismatched, &options, Some(&history)).is_err());
     let summary = zevria_model::compaction::summary_request_message("configured summary prompt");
     request.input.push(ModelRequestItem::message(&summary));
     let synthetic = body::build(&request, &options).unwrap();

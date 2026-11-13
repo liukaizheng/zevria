@@ -28,7 +28,7 @@ async fn ensemble_abandonment_seals_survivors_in_either_control_order() {
             agents: launcher.workers(EnsembleWorkflow::Plan).unwrap(),
         };
         engine
-            .record_required_items(vec![
+            .commit(vec![
                 TranscriptItem::Ensemble(EnsembleRecord::Started {
                     start: start.clone(),
                 }),
@@ -214,7 +214,7 @@ async fn all_abandoned(worker_count: usize) {
             .collect(),
     };
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),

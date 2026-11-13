@@ -208,7 +208,7 @@ async fn image_synthesis_capacity_rejects_confirmation_before_a_durable_seal() {
         agents: launcher.workers(EnsembleWorkflow::Plan).unwrap(),
     };
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),
@@ -293,7 +293,7 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
         agents: launcher.workers(EnsembleWorkflow::Plan).unwrap(),
     };
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),
@@ -405,7 +405,7 @@ async fn ensemble_seal_drains_bounded_worker_updates_before_terminal_acknowledge
         agents: launcher.workers(EnsembleWorkflow::Plan).unwrap(),
     };
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),
@@ -470,7 +470,7 @@ async fn ensemble_payload_ineligibility_is_durable_before_confirmation() {
         agents: launcher.workers(EnsembleWorkflow::Plan).unwrap(),
     };
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),
@@ -528,7 +528,7 @@ async fn ensemble_root_cancellation_returns_results_for_every_routed_control() {
         agents: launcher.workers(EnsembleWorkflow::Plan).unwrap(),
     };
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Ensemble(EnsembleRecord::Started {
                 start: start.clone(),
             }),

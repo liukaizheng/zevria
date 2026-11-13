@@ -112,24 +112,33 @@ const ACP_PROCESS_EXIT_DATA_PREFIX: &str = "Process exited with ";
 fn native_acp_helper() -> anyhow::Result<PathBuf> {
     let executable = std::env::current_exe().context("cannot resolve the native ACP job helper")?;
     // A Rust libtest executable does not dispatch Zevria's private helper flag.
-    // Workspace integration tests build the real binary alongside debug/deps.
+    // Cargo can place it under deps or a deeper per-package artifact directory.
     #[cfg(test)]
     let executable = std::env::var_os("ZEVRIA_TEST_ACP_HELPER")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            executable
-                .parent()
-                .expect("test executable parent")
-                .parent()
-                .expect("Cargo target profile directory")
-                .join("zevria.exe")
-        });
+        .or_else(|| test_zevria_executable(&executable))
+        .with_context(|| {
+            format!(
+                "cannot find the native ACP job helper near {}; build Zevria with the same Cargo profile before package-local ensemble tests, or set ZEVRIA_TEST_ACP_HELPER",
+                executable.display()
+            )
+        })?;
     anyhow::ensure!(
         executable.is_file(),
-        "native ACP job helper is missing at {}; on Windows build Zevria before package-local ensemble tests (cargo build --locked -p zevria), or set ZEVRIA_TEST_ACP_HELPER",
+        "native ACP job helper is missing at {}; build Zevria with the same Cargo profile before package-local ensemble tests, or set ZEVRIA_TEST_ACP_HELPER",
         executable.display()
     );
     Ok(executable)
+}
+
+#[cfg(test)]
+fn test_zevria_executable(test_executable: &Path) -> Option<PathBuf> {
+    test_executable
+        .ancestors()
+        .skip(1)
+        .take(8)
+        .map(|directory| directory.join(format!("zevria{}", std::env::consts::EXE_SUFFIX)))
+        .find(|path| path.is_file() && path != test_executable)
 }
 
 #[derive(Clone)]
@@ -3013,6 +3022,10 @@ fn clone_mutex<T: Clone>(target: &Arc<Mutex<T>>) -> T {
 fn take_mutex<T>(target: &Arc<Mutex<Option<T>>>) -> Option<T> {
     target.lock().expect("ACP state lock poisoned").take()
 }
+
+#[cfg(test)]
+#[path = "native_acp_helper_tests.rs"]
+mod native_acp_helper_tests;
 
 #[cfg(test)]
 #[path = "ensemble_worker_tests.rs"]

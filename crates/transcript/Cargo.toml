@@ -18,6 +18,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [features]
+# Replay probes and historical/invalid-evidence fixture mutation APIs only.
+# Required production changes must use Conversation::commit_anchored.
 test-support = ["zevria-model/test-support"]
 
 [dev-dependencies]

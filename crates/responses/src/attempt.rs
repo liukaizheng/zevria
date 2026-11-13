@@ -26,6 +26,9 @@ struct LiveText {
 
 pub struct AttemptReducer {
     attempt: ResponseAttempt,
+    // Only display-visible mutations advance the attempt revision. Authority
+    // fences and raw text/annotation bookkeeping are not themselves changes.
+    changed: bool,
     // Raw native completed parts are never sanitized or used as model input.
     completed_text: BTreeMap<(u64, u64), Text>,
     live_text: BTreeMap<(u64, u64), LiveText>,
@@ -53,6 +56,7 @@ impl AttemptReducer {
         let attempt = ResponseAttempt::new(profile);
         Self {
             attempt,
+            changed: false,
             completed_text: BTreeMap::new(),
             text_outputs: BTreeMap::new(),
             authority: HashMap::new(),
@@ -79,6 +83,7 @@ impl AttemptReducer {
         let activity = match position {
             Some(position) => &mut self.attempt.hosted_activity[position],
             None => {
+                self.changed = true;
                 self.attempt.hosted_activity.push(HostedActivity {
                     kind: zevria_content::HostedActivityKind::WebSearch,
                     item_id: id.map(str::to_string),
@@ -96,25 +101,36 @@ impl AttemptReducer {
         if authority < *prior {
             return;
         }
-        if activity.item_id.is_none() {
+        if activity.item_id.is_none() && id.is_some() {
             activity.item_id = id.map(str::to_string);
+            self.changed = true;
         }
         if status.is_terminal() || !activity.status.is_terminal() {
             // Out-of-order in_progress must not regress searching/completed.
-            if authority > *prior
+            if (authority > *prior
                 || status != HostedActivityStatus::InProgress
-                || activity.status == HostedActivityStatus::InProgress
+                || activity.status == HostedActivityStatus::InProgress)
+                && activity.status != status
             {
                 activity.status = status;
+                self.changed = true;
             }
         }
         if let Some(action) = action {
             if authority > *prior || activity.action.is_none() {
-                activity.action = Some(action.clone());
+                if activity.action.as_ref() != Some(action) {
+                    activity.action = Some(action.clone());
+                    self.changed = true;
+                }
             } else if let (Some(Value::Object(existing)), Value::Object(incoming)) =
                 (&mut activity.action, action)
             {
-                existing.extend(incoming.clone());
+                for (key, value) in incoming {
+                    if existing.get(key) != Some(value) {
+                        existing.insert(key.clone(), value.clone());
+                        self.changed = true;
+                    }
+                }
             }
         }
         *prior = authority;
@@ -299,9 +315,40 @@ impl AttemptReducer {
                     return;
                 }
                 if authority > 0 {
-                    self.attempt
-                        .presentation
-                        .retain(|part| part.source.output_index != index);
+                    // A final item replaces the complete set, but retaining
+                    // identical parts avoids treating a duplicate terminal as
+                    // a removal followed by an insertion.
+                    let keep = [("summary", true), ("content", false)]
+                        .into_iter()
+                        .flat_map(|(field, summary)| {
+                            item.get(field)
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .enumerate()
+                                .filter_map(move |(part_index, part)| {
+                                    let text =
+                                        zevria_content::readable::readable_reasoning_value(part)?;
+                                    (!zevria_content::readable::sanitize_readable(text)
+                                        .trim()
+                                        .is_empty())
+                                    .then_some(if summary {
+                                        zevria_content::AssistantPartIdentity::Summary(
+                                            part_index as u64,
+                                        )
+                                    } else {
+                                        zevria_content::AssistantPartIdentity::Content(
+                                            part_index as u64,
+                                        )
+                                    })
+                                })
+                        })
+                        .collect::<std::collections::HashSet<_>>();
+                    let before = self.attempt.presentation.len();
+                    self.attempt.presentation.retain(|part| {
+                        part.source.output_index != index || keep.contains(&part.source.part)
+                    });
+                    self.changed |= before != self.attempt.presentation.len();
                 }
                 for (field, summary) in [("summary", true), ("content", false)] {
                     if let Some(parts) = item.get(field).and_then(Value::as_array) {
@@ -386,9 +433,13 @@ impl AttemptReducer {
             .iter_mut()
             .find(|part| part.source.output_index == output && part.source.part == identity)
         {
-            *existing = part;
+            if *existing != part {
+                *existing = part;
+                self.changed = true;
+            }
         } else {
             self.attempt.presentation.push(part);
+            self.changed = true;
         }
     }
 
@@ -419,24 +470,30 @@ impl AttemptReducer {
             return;
         }
         let text = zevria_content::readable::sanitize_readable(text);
-        let text = if append {
-            self.attempt
+        if append
+            && let Some(part) = self
+                .attempt
                 .presentation
-                .iter()
-                .find_map(|part| {
-                    if part.source.output_index == output
-                        && part.source.part == identity
-                        && let Reasoning { text: existing } = &part.content
-                    {
-                        Some(format!("{existing}{text}"))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(text)
-        } else {
-            text
-        };
+                .iter_mut()
+                .find(|part| part.source.output_index == output && part.source.part == identity)
+            && let Reasoning { text: existing } = &mut part.content
+        {
+            // Existing reasoning is already readable, so whitespace deltas
+            // remain meaningful separators. Append without copying the prefix.
+            if !text.is_empty() {
+                existing.push_str(&text);
+                self.changed = true;
+            }
+            let item_id = self.item_ids.get(&output).map(|(id, _)| id);
+            if part.source.item_id.as_ref() != item_id {
+                part.source.item_id = item_id.cloned();
+                self.changed = true;
+            }
+            if authority > 0 {
+                self.finalized_parts.insert((output, identity), authority);
+            }
+            return;
+        }
         // Whitespace in a live delta can separate words. Keep it only inside
         // an already readable part, never as an empty selectable block.
         if !text.trim().is_empty() {
@@ -490,14 +547,25 @@ impl AttemptReducer {
                 (!unchanged).then(|| (output, content, text.text.clone()))
             })
             .collect::<Vec<_>>();
+        let before = self.attempt.presentation.len();
         self.attempt.presentation.retain(|part| !matches!(&part.content, Answer { .. })
             || matches!(part.source.part, Content(content) if keys.contains(&(part.source.output_index, content))));
+        self.changed |= before != self.attempt.presentation.len();
         for (output, content, text) in answers {
             self.set_part(output, Content(content), Answer { text });
         }
-        self.attempt
+        let key = |part: &zevria_content::AssistantPresentationPart| {
+            (part.source.output_index, part.source.part)
+        };
+        if self
+            .attempt
             .presentation
-            .sort_by_key(|part| (part.source.output_index, part.source.part));
+            .windows(2)
+            .any(|parts| key(&parts[0]) > key(&parts[1]))
+        {
+            self.attempt.presentation.sort_by_key(key);
+            self.changed = true;
+        }
     }
 
     /// Ingest all readable evidence synchronously, before any cancellable await.
@@ -507,7 +575,7 @@ impl AttemptReducer {
         {
             return;
         }
-        let before = self.attempt.clone();
+        self.changed = false;
         let kind = event
             .get("type")
             .and_then(Value::as_str)
@@ -636,8 +704,11 @@ impl AttemptReducer {
             _ => {}
         }
         if let Some(response) = event.get("response") {
-            if let Some(id) = response.get("id").and_then(Value::as_str) {
+            if let Some(id) = response.get("id").and_then(Value::as_str)
+                && self.attempt.response_id.as_deref() != Some(id)
+            {
                 self.attempt.response_id = Some(id.into());
+                self.changed = true;
             }
             if matches!(
                 kind,
@@ -652,7 +723,7 @@ impl AttemptReducer {
             }
         }
         self.refresh_answers();
-        if before != self.attempt {
+        if self.changed {
             self.attempt.touch();
         }
     }

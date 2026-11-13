@@ -21,15 +21,37 @@ pub struct ProjectedMessages {
     pub stripped_thinking_turns: usize,
 }
 
+/// Validated, destination-specific history before request-prefix binding.
+/// Management estimates bind it to an empty prefix; completion must bind it to
+/// its actual system/tools so signed thinking is never reused under the wrong
+/// prefix. Immutable history can be shared by admission, routing and body build.
+pub struct ValidatedHistory {
+    projection: HistoryProjection,
+    target: ModelProfileRef,
+    compatibility: crate::Compatibility,
+    input_count: usize,
+    input_digest: [u8; 32],
+}
+
+#[derive(Clone)]
 struct Segment {
     blocks: Vec<Value>,
     binding: Option<String>,
     native: bool,
 }
+#[derive(Clone)]
 struct Turn {
     role: &'static str,
     segments: Vec<Segment>,
 }
+#[derive(Clone)]
+struct HistoryProjection {
+    turns: Vec<Turn>,
+    native: bool,
+    portable: bool,
+    generic: bool,
+}
+
 #[derive(Default)]
 struct Projection {
     turns: Vec<Turn>,
@@ -295,6 +317,20 @@ fn project_impl(
     strip_all_thinking: bool,
     completion: bool,
 ) -> anyhow::Result<ProjectedMessages> {
+    bind_projection(
+        project_history(input, target, compatibility)?,
+        system,
+        tools,
+        strip_all_thinking,
+        completion,
+    )
+}
+
+fn project_history(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+) -> anyhow::Result<HistoryProjection> {
     let system_messages = compatibility.system_messages;
     let mut projection = Projection::default();
     for replay in input.iter().filter_map(|item| item.replay_ref()) {
@@ -352,6 +388,86 @@ fn project_impl(
         }
     }
     projection.flush_directives(system_messages)?;
+    Ok(HistoryProjection {
+        turns: projection.turns,
+        native: projection.native,
+        portable: projection.portable,
+        generic: projection.generic,
+    })
+}
+
+impl ValidatedHistory {
+    pub fn new(
+        input: &[ModelRequestItem<'_>],
+        target: &ModelProfileRef,
+        compatibility: &crate::Compatibility,
+        identity: Option<&zevria_model::ModelInputIdentity>,
+    ) -> anyhow::Result<Self> {
+        let projection = project_history(input, target, compatibility)?;
+        let fallback;
+        let identity = match identity {
+            Some(identity) if identity.len() == input.len() => identity,
+            _ => {
+                fallback = zevria_model::ModelInputIdentity::from_items(input)?;
+                &fallback
+            }
+        };
+        Ok(Self {
+            projection,
+            target: target.clone(),
+            compatibility: compatibility.clone(),
+            input_count: identity.len(),
+            input_digest: identity.digest(),
+        })
+    }
+
+    pub fn matches(
+        &self,
+        input: &[ModelRequestItem<'_>],
+        target: &ModelProfileRef,
+        compatibility: &crate::Compatibility,
+        identity: Option<&zevria_model::ModelInputIdentity>,
+    ) -> anyhow::Result<bool> {
+        if &self.target != target
+            || &self.compatibility != compatibility
+            || self.input_count != input.len()
+        {
+            return Ok(false);
+        }
+        let fallback;
+        let identity = match identity {
+            Some(identity) if identity.len() == input.len() => identity,
+            _ => {
+                fallback = zevria_model::ModelInputIdentity::from_items(input)?;
+                &fallback
+            }
+        };
+        Ok(self.input_digest == identity.digest())
+    }
+
+    pub fn completion(
+        &self,
+        system: &Value,
+        tools: &Value,
+        strip_all_thinking: bool,
+    ) -> anyhow::Result<ProjectedMessages> {
+        bind_projection(
+            self.projection.clone(),
+            system,
+            tools,
+            strip_all_thinking,
+            true,
+        )
+    }
+}
+
+fn bind_projection(
+    projection: HistoryProjection,
+    system: &Value,
+    tools: &Value,
+    strip_all_thinking: bool,
+    completion: bool,
+) -> anyhow::Result<ProjectedMessages> {
     let mut messages: Vec<Value> = Vec::new();
     let mut binding = PrefixBinding::new(system, tools);
     let mut stripped = 0;
@@ -526,6 +642,17 @@ pub fn preflight_with_compatibility(
     target: &ModelProfileRef,
     compatibility: &crate::Compatibility,
 ) -> anyhow::Result<ReplayPreflight> {
+    prepare_history(input, target, compatibility, None).map(|(assessment, _)| assessment)
+}
+
+/// Preserve management conversion/error precedence while retaining the same
+/// unbound validated history for subsequent completion/count binding.
+pub fn prepare_history(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+    identity: Option<&zevria_model::ModelInputIdentity>,
+) -> anyhow::Result<(ReplayPreflight, Option<ValidatedHistory>)> {
     let mut sources = BTreeSet::new();
     for item in input {
         if let Some(replay) = item.replay_ref() {
@@ -540,16 +667,18 @@ pub fn preflight_with_compatibility(
         }
     }
     if !sources.is_empty() {
-        return Ok(ReplayPreflight::ConversionRequired {
-            sources: sources.into_iter().collect(),
-        });
+        return Ok((
+            ReplayPreflight::ConversionRequired {
+                sources: sources.into_iter().collect(),
+            },
+            None,
+        ));
     }
     // Management preflight assesses stored history, not a completion body:
     // an idle transcript can be empty or end in a completed assistant turn.
-    let projected = project_impl(
-        input,
-        target,
-        compatibility,
+    let history = ValidatedHistory::new(input, target, compatibility, identity)?;
+    let projected = bind_projection(
+        history.projection.clone(),
         &json!([]),
         &json!([]),
         false,
@@ -574,8 +703,9 @@ pub fn preflight_with_compatibility(
             }
         }
     }
-    Ok(ReplayPreflight::Compatible(
-        zevria_model::ContextTokenEstimate::new(tokens, tokens),
+    Ok((
+        ReplayPreflight::Compatible(zevria_model::ContextTokenEstimate::new(tokens, tokens)),
+        Some(history),
     ))
 }
 

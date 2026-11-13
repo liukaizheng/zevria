@@ -77,35 +77,36 @@ enum OpenAiWebSocketSessionState {
 }
 
 pub(crate) struct OpenAiWebSocketSession {
-    #[cfg(feature = "cache-diagnostics")]
-    pub(crate) cache_diagnostics: crate::cache_diagnostics::socket::SocketDiagnostics,
+    pub(crate) cache_diagnostics: crate::diagnostics::SocketDiagnostics,
     state: OpenAiWebSocketSessionState,
     forced_terminal: Option<OpenAiWebSocketTerminalCategory>,
 }
 
 impl OpenAiWebSocketSession {
-    pub(crate) fn new(socket: OpenAiWebSocketStream) -> Self {
-        Self::new_with_send_delay(socket, std::time::Duration::ZERO)
+    pub(crate) fn new(socket: OpenAiWebSocketStream, keepalive: std::time::Duration) -> Self {
+        Self::new_with_send_delay(socket, std::time::Duration::ZERO, keepalive)
     }
 
-    fn new_with_send_delay(socket: OpenAiWebSocketStream, send_delay: std::time::Duration) -> Self {
+    fn new_with_send_delay(
+        socket: OpenAiWebSocketStream,
+        send_delay: std::time::Duration,
+        keepalive: std::time::Duration,
+    ) -> Self {
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (event_tx, events) = mpsc::channel(INBOUND_EVENT_CAPACITY);
         let (terminal_tx, terminal) = watch::channel(None);
-        #[cfg(feature = "cache-diagnostics")]
-        let cache_diagnostics = crate::cache_diagnostics::socket::SocketDiagnostics::default();
+        let cache_diagnostics = crate::diagnostics::SocketDiagnostics::default();
         let pump = tokio::spawn(pump_socket(
-            #[cfg(feature = "cache-diagnostics")]
             cache_diagnostics.clone(),
             socket,
             send_delay,
+            keepalive,
             command_rx,
             event_tx,
             terminal_tx,
         ));
 
         Self {
-            #[cfg(feature = "cache-diagnostics")]
             cache_diagnostics,
             state: OpenAiWebSocketSessionState::Connected {
                 commands,
@@ -122,10 +123,7 @@ impl OpenAiWebSocketSession {
     /// replace this state with a real session through `OpenAiParkedWebSocket`.
     pub(crate) fn disconnected(category: OpenAiWebSocketTerminalCategory) -> Self {
         Self {
-            #[cfg(feature = "cache-diagnostics")]
-            cache_diagnostics: crate::cache_diagnostics::socket::SocketDiagnostics::disconnected(
-                category,
-            ),
+            cache_diagnostics: crate::diagnostics::SocketDiagnostics::disconnected(category),
             state: OpenAiWebSocketSessionState::Disconnected,
             forced_terminal: Some(category),
         }
@@ -136,7 +134,7 @@ impl OpenAiWebSocketSession {
         socket: OpenAiWebSocketStream,
         send_delay: std::time::Duration,
     ) -> Self {
-        Self::new_with_send_delay(socket, send_delay)
+        Self::new_with_send_delay(socket, send_delay, std::time::Duration::ZERO)
     }
 
     /// Queue one write and wait until the pump acknowledges the actual socket
@@ -230,7 +228,6 @@ impl OpenAiWebSocketSession {
         };
         let terminal = self.forced_terminal.or(observed).unwrap_or(category);
         self.forced_terminal = Some(terminal);
-        #[cfg(feature = "cache-diagnostics")]
         self.cache_diagnostics.observed(terminal, "local");
         if let OpenAiWebSocketSessionState::Connected { pump, .. } = &self.state {
             pump.abort();
@@ -260,16 +257,25 @@ fn session_terminal_status(
 }
 
 async fn pump_socket(
-    #[cfg(feature = "cache-diagnostics")]
-    cache_diagnostics: crate::cache_diagnostics::socket::SocketDiagnostics,
+    cache_diagnostics: crate::diagnostics::SocketDiagnostics,
     mut socket: OpenAiWebSocketStream,
     send_delay: std::time::Duration,
+    keepalive: std::time::Duration,
     mut commands: mpsc::Receiver<OpenAiWebSocketCommand>,
     events: mpsc::Sender<OpenAiWebSocketInbound>,
     terminal: watch::Sender<Option<OpenAiWebSocketTerminalCategory>>,
 ) {
+    let mut last_frame = tokio::time::Instant::now();
     let category = loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(last_frame + keepalive), if !keepalive.is_zero() => {
+                if let Err(error) = socket.send(WebSocketMessage::Ping(Default::default())).await {
+                    cache_diagnostics.error(OpenAiWebSocketTerminalCategory::SendError, &error);
+                    let _ = forward_event(&events, OpenAiWebSocketInbound::Error(error));
+                    break OpenAiWebSocketTerminalCategory::SendError;
+                }
+                last_frame = tokio::time::Instant::now();
+            }
             command = commands.recv() => {
                 let Some(command) = command else {
                     break OpenAiWebSocketTerminalCategory::PumpStopped;
@@ -281,10 +287,10 @@ async fn pump_socket(
                         }
                         match socket.send(message).await {
                             Ok(()) => {
+                                last_frame = tokio::time::Instant::now();
                                 let _ = result.send(Ok(()));
                             }
                             Err(error) => {
-                                #[cfg(feature = "cache-diagnostics")]
                                 cache_diagnostics.error(OpenAiWebSocketTerminalCategory::SendError, &error);
                                 let _ = result.send(Err(error));
                                 break OpenAiWebSocketTerminalCategory::SendError;
@@ -294,10 +300,12 @@ async fn pump_socket(
                 }
             }
             incoming = socket.next() => {
+                if matches!(incoming, Some(Ok(_))) {
+                    last_frame = tokio::time::Instant::now();
+                }
                 match incoming {
                     Some(Ok(WebSocketMessage::Ping(payload))) => {
                         if let Err(error) = socket.send(WebSocketMessage::Pong(payload)).await {
-                            #[cfg(feature = "cache-diagnostics")]
                             cache_diagnostics.error(OpenAiWebSocketTerminalCategory::PongError, &error);
                             let category = forward_event(
                                 &events,
@@ -307,13 +315,13 @@ async fn pump_socket(
                             .unwrap_or(OpenAiWebSocketTerminalCategory::PongError);
                             break category;
                         }
+                        last_frame = tokio::time::Instant::now();
                     }
                     Some(Ok(WebSocketMessage::Pong(_))) => {}
                     Some(Ok(message @ (WebSocketMessage::Text(_)
                         | WebSocketMessage::Binary(_)
                         | WebSocketMessage::Close(_)))) => {
                         let is_close = matches!(message, WebSocketMessage::Close(_));
-                        #[cfg(feature = "cache-diagnostics")]
                         if is_close {
                             cache_diagnostics.observed(OpenAiWebSocketTerminalCategory::CloseFrame, "pump");
                         }
@@ -329,7 +337,6 @@ async fn pump_socket(
                     }
                     Some(Ok(WebSocketMessage::Frame(_))) => {}
                     Some(Err(error)) => {
-                        #[cfg(feature = "cache-diagnostics")]
                         cache_diagnostics.error(OpenAiWebSocketTerminalCategory::ReadError, &error);
                         let category = forward_event(
                             &events,
@@ -344,8 +351,6 @@ async fn pump_socket(
             }
         }
     };
-
-    #[cfg(feature = "cache-diagnostics")]
     cache_diagnostics.finished(category);
     terminal.send_replace(Some(category));
 }

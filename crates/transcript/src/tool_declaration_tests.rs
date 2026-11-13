@@ -40,11 +40,19 @@ fn ordered_declarations_roundtrip_and_window_projection() {
     );
     let directory = tempfile::tempdir().unwrap();
     let mut conversation = Conversation::new(TranscriptWriter::create(directory.path()).unwrap());
-    conversation.push_required(initial.clone()).unwrap();
     conversation
-        .push_required(TranscriptItem::Message(Message::user("prompt")))
+        .commit_anchored(None, vec![initial.clone()], None)
         .unwrap();
-    conversation.push_required(additional.clone()).unwrap();
+    conversation
+        .commit_anchored(
+            None,
+            vec![TranscriptItem::Message(Message::user("prompt"))],
+            None,
+        )
+        .unwrap();
+    conversation
+        .commit_anchored(None, vec![additional.clone()], None)
+        .unwrap();
     assert_eq!(load(conversation.path()).unwrap(), conversation.items());
     let bytes = std::fs::read(conversation.path()).unwrap();
     conversation
@@ -66,10 +74,14 @@ fn ordered_declarations_roundtrip_and_window_projection() {
     let window = tool_window(conversation.items());
     assert_eq!(window.initial.unwrap()[0].name, "a");
     assert_eq!(window.latest.len(), 2);
-    conversation.push_required(checkpoint()).unwrap();
+    conversation
+        .commit_anchored(None, vec![checkpoint()], None)
+        .unwrap();
     assert!(tool_window(conversation.items()).initial.is_none());
     assert_eq!(conversation.model_input().len(), 1);
-    conversation.push_required(initial).unwrap();
+    conversation
+        .commit_anchored(None, vec![initial], None)
+        .unwrap();
     assert!(InstructionReplayState::replay(conversation.items()).is_ok());
 }
 

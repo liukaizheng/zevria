@@ -54,6 +54,8 @@ auto_trigger_percent = 90
 # name = "ocean"
 
 [command]
+# Unix: capture login exports once; "login" restores a login shell for every call.
+shell_environment = "captured"
 timeout_seconds = 300
 capture_bytes = 1048576
 # Running background job cap. Set 0 for the foreground-only command surface.
@@ -130,11 +132,14 @@ pub(crate) const DEFAULT_MODELS: &str = r#"// Zevria model configuration. JSON w
   //     // "api_key": { "command": "auth", "args": ["--key"],
   //     //   "timeout_seconds": 30, "refresh_interval_seconds": 300 },
   //     "supports_websockets": true,
+  //     // Optional early authenticated handshake while idle (off by default):
+  //     // "network": { "prewarm": false, "websocket_keepalive_seconds": 30 },
   //     // Optional provider-specific routing header (OpenCode Go example):
   //     // "session_id_header": "x-opencode-session",
   //     "compatibility": {
   //       "send_reasoning": true, "send_reasoning_encrypted_content": true,
-  //       "strict_tools": true, "send_prompt_cache_key": true, "send_store": true
+  //       "strict_tools": true, "send_prompt_cache_key": true, "send_store": true,
+  //       "parallel_tool_calls": true
   //     },
   //     "compaction": {
   //       // "url": "https://api.openai.com/v1/responses/compact",
@@ -458,6 +463,7 @@ builder = { provider = "test", model = "test-model", reasoning_level = "medium" 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CommandConfig {
+    pub shell_environment: zevria_foundation::shell::ShellEnvironment,
     pub timeout_seconds: u64,
     pub capture_bytes: usize,
     pub max_background_jobs: usize,
@@ -468,6 +474,7 @@ pub struct CommandConfig {
 impl Default for CommandConfig {
     fn default() -> Self {
         Self {
+            shell_environment: zevria_foundation::shell::ShellEnvironment::Captured,
             timeout_seconds: 300,
             capture_bytes: 1024 * 1024,
             max_background_jobs: 8,

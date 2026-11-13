@@ -82,13 +82,10 @@ async fn streaming_preview_is_published_before_message_stop() {
                         ack.send(()).unwrap();
                     }
                 }
-                SessionUpdate::Lifecycle(SessionEvent::UsageUpdated { .. }) => {
-                    return preview_seen.is_none();
-                }
                 _ => {}
             }
         }
-        false
+        preview_seen.is_none()
     };
     let (result, observed) = tokio::join!(
         provider.complete(request(&user), ProgressReporter::new(events)),

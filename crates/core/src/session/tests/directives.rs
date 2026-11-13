@@ -327,7 +327,7 @@ async fn instruction_set_is_stable_within_build_and_counted_as_fixed_context() {
     assert!(
         requests[..3]
             .iter()
-            .all(|request| request.instructions == rendered)
+            .all(|request| request.instructions == rendered.as_ref())
     );
     assert_eq!(requests[2].instructions, requests[3].instructions);
     assert_eq!(
@@ -653,7 +653,7 @@ async fn failed_completed_activation_persistence_keeps_truthful_result_pin_and_b
         named_tool_call("activate", "skill", json!({"skill":"review"})),
     ]));
     engine
-        .record_required_items(vec![
+        .commit(vec![
             TranscriptItem::Message(Message::user("activate")),
             TranscriptItem::Message(assistant.clone()),
         ])
@@ -688,7 +688,7 @@ async fn failed_completed_activation_persistence_keeps_truthful_result_pin_and_b
     let durable_bytes = std::fs::read(engine.conversation.path()).unwrap();
     let mut blocker = TranscriptRewriteBlocker::new(engine.conversation.path())
         .expect("block transcript replacement");
-    assert!(engine.record_completed_items(records).is_err());
+    assert!(engine.record_completed(records).is_err());
     let (events, _receiver) = session_event_channel(128);
     engine
         .handle_command(

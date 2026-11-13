@@ -40,7 +40,15 @@ Submitted images render as bounded labels, for example `[image 1 · png · 1440�
 
 Zevria never silently resizes, crops, reduces quality, or substitutes an animation's first frame. GIF frames are validated within a bounded work/allocation budget. The pinned decoder APIs do not offer the required pre-frame guarantees for animated WebP/APNG, so those are explicitly rejected. Native clipboard APIs may allocate a decoded bitmap before Zevria can inspect its dimensions; application-side checks cannot prevent that backend allocation.
 
-Image requests prefer exact endpoint input-token counting when configured and available. The local fallback adds **approximately 1,600 tokens per image**, plus text and protocol overhead—not the base64 string length. This is not an upper bound or a model-specific tokenizer. Large images can cost more. Count provenance, capacity failures, unsupported count endpoints, and model/provider errors remain visible.
+Images not yet covered by compatible provider-reported usage prefer exact
+endpoint input-token counting when configured and available. Once usage covers
+those images, ordinary tool rounds and text-only appends reuse it plus local
+deltas; adding images or losing the compatible baseline counts again. Near-limit,
+near-trigger, disagreement and forced-recheck rules still count measured images.
+The local fallback adds **approximately 1,600 tokens per image**, plus text and
+protocol overhead—not the base64 string length. This is not an upper bound or a
+model-specific tokenizer. Large images can cost more. Count provenance, capacity
+failures, unsupported count endpoints, and model/provider errors remain visible.
 
 ## ACP and ensembles
 

@@ -61,7 +61,7 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
                 mode: SessionMode::Plan,
             },
             "ready-plan" | "stale-plan" | "decision-commit" => {
-                engine.record_required_items(ready).unwrap();
+                engine.commit(ready).unwrap();
                 if case == "ready-plan" {
                     submit()
                 } else {
@@ -102,7 +102,7 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
             }
             "nonempty-handoff" => {
                 engine
-                    .record_required(TranscriptItem::Message(Message::user("existing")))
+                    .commit(TranscriptItem::Message(Message::user("existing")))
                     .unwrap();
                 TurnCommand::StartFromPlan {
                     handoff: PlanHandoff::new(artifact.clone(), "source"),
@@ -132,7 +132,7 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
             .then(|| TranscriptRewriteBlocker::new(&path).expect("block transcript replacement"));
         if case == "degraded" {
             engine
-                .record_completed_items(vec![TranscriptItem::Message(Message::assistant(
+                .record_completed(vec![TranscriptItem::Message(Message::assistant(
                     "already completed",
                 ))])
                 .unwrap_err();
@@ -1884,4 +1884,48 @@ async fn opaque_replay_regression_uses_usage_delta_instead_of_legacy_wire_maximu
         events.last(),
         Some(SessionEvent::TurnCompleted { .. })
     ));
+}
+
+#[test]
+fn shared_idle_router_applies_controls_but_returns_work_for_its_scheduler() {
+    let (_directory, writer) = test_transcript();
+    let engine = SessionEngine::new(
+        ScriptedProvider::new([]),
+        ToolServer::new().run(),
+        test_policies(),
+        writer,
+        test_skills(),
+    )
+    .unwrap();
+    for direct in [false, true] {
+        let (action, reply) = engine.route_idle_command(
+            SessionCommand::Control(ControlCommand::CancelTurn { turn_id: None }),
+            direct,
+        );
+        assert!(matches!(
+            action,
+            crate::session::turn::runtime::CommandAction::Continue
+        ));
+        assert!(reply.is_none());
+        let (action, reply) = engine.route_idle_command(
+            SessionCommand::Manage(ManagementCommand::SetMode {
+                request_id: "route-mode".into(),
+                mode: SessionMode::Plan,
+            }),
+            direct,
+        );
+        assert!(
+            matches!(action, crate::session::turn::runtime::CommandAction::Dispatch(SessionCommand::Manage(ManagementCommand::SetMode { request_id, mode: SessionMode::Plan })) if request_id == "route-mode")
+        );
+        assert!(reply.is_none());
+        let (action, reply) =
+            engine.route_idle_command(SessionCommand::Control(ControlCommand::Shutdown), direct);
+        assert!(matches!(
+            action,
+            crate::session::turn::runtime::CommandAction::Shutdown
+        ));
+        assert!(reply.is_none());
+    }
+    assert!(engine.conversation.items().is_empty());
+    assert!(engine.provider.requests.lock().unwrap().is_empty());
 }

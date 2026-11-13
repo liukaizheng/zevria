@@ -134,11 +134,8 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
     // Cargo builds this binary for cli_acp as part of `cargo test -p zevria`.
     // No production test-only protocol method or command is needed.
     let test_executable = std::env::current_exe().unwrap();
-    // Accommodate both Cargo's deps layout and its per-package artifact layout.
-    let binary = test_executable.ancestors().skip(1).take(8)
-        .map(|directory| directory.join(format!("zevria{}", std::env::consts::EXE_SUFFIX)))
-        .find(|path| path.is_file() && path != &test_executable)
-        .expect("build the real process fixture with cargo build -p zevria before running this unit test alone");
+    let binary = test_zevria_executable(&test_executable)
+        .expect("build the real process fixture with the same Cargo profile before running this unit test alone");
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("workspace");
     let home = directory.path().join("home");

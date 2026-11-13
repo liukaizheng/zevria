@@ -99,22 +99,22 @@ async fn cache_preparation_probe() {
             ProviderReplay::openai_responses(provider.profile.clone(), output.clone()),
         )
         .unwrap();
+        let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(
+            provider.profile.clone(),
+            output,
+        ))
+        .unwrap();
         #[cfg(feature = "cache-diagnostics")]
-        {
-            let response = zevria_model::ModelResponse::from_replay(
-                ProviderReplay::openai_responses(provider.profile.clone(), output.clone()),
+        crate::cache_diagnostics::finish(&seed, &mut provider, Some(&response));
+        provider.ws.continuation = Some(
+            ContinuationState::after_response(
+                &seed,
+                provider.ws.socket_generation,
+                "resp_probe".into(),
+                &response,
             )
-            .unwrap();
-            crate::cache_diagnostics::finish(&seed, &mut provider, Some(&response));
-        }
-        provider.ws.continuation = Some(ContinuationState {
-            lineage: None,
-            socket_generation: provider.ws.socket_generation,
-            response_id: "resp_probe".into(),
-            request_properties: seed.request_properties.clone(),
-            request_input: seed.full_input.as_ref().clone(),
-            response_output: output,
-        });
+            .unwrap(),
+        );
         let prompt = Message::user(text.clone());
         let mut input = initial.input;
         input.push(replay.as_borrowed());

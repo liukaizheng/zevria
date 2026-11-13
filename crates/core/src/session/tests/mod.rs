@@ -1,4 +1,6 @@
 mod adaptive_summary;
+#[cfg(feature = "test-support")]
+mod builder;
 mod directives;
 mod incremental_tools;
 #[cfg(unix)]
@@ -390,9 +392,6 @@ impl ModelProvider for ScriptedProvider {
                 .pop_front()
                 .expect("script should contain another response")?;
             progress.stream_updated(response.message().clone());
-            if let Some(usage) = response.usage {
-                progress.usage_updated(usage).await;
-            }
             Ok(response)
         })
     }

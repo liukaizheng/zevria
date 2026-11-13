@@ -244,7 +244,30 @@ impl AgentRunTranscriptWriter {
         for record in reader.by_ref() {
             record?;
         }
-        let validation = reader.validation;
+        Self::append_validated(path, reader.validation)
+    }
+
+    /// Validate and project one full scan, verify the root's expected identity
+    /// before any repair, and keep the exhausted reader's append validator.
+    /// The display projection is not a substitute for journal validation.
+    pub fn reopen(
+        path: PathBuf,
+        expected: &AgentRunTranscriptHeader,
+    ) -> anyhow::Result<(Self, AgentRunProjection)> {
+        let mut reader = AgentRunTranscriptReader::open(&path)?;
+        let mut projection = AgentRunProjection::default();
+        for record in reader.by_ref() {
+            projection.apply(&record?);
+        }
+        anyhow::ensure!(
+            projection.header.as_ref() == Some(expected),
+            "worker transcript identity does not match the ensemble recovery record"
+        );
+        let writer = Self::append_validated(path, reader.validation)?;
+        Ok((writer, projection))
+    }
+
+    fn append_validated(path: PathBuf, validation: AgentRunValidation) -> anyhow::Result<Self> {
         repair_agent_run_tail(&path)?;
         let file = std::fs::OpenOptions::new()
             .append(true)
@@ -403,6 +426,8 @@ pub struct AgentRunTranscriptReader {
 
 impl AgentRunTranscriptReader {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        #[cfg(feature = "test-support")]
+        crate::replay_probe::record(|counts| counts.worker_loads += 1);
         let file = File::open(path)
             .with_context(|| format!("failed to read agent-run log at {}", path.display()))?;
         Ok(Self {
@@ -531,6 +556,8 @@ impl Iterator for AgentRunTranscriptReader {
                 .with_failure(failure)
                 .into()));
             }
+            #[cfg(feature = "test-support")]
+            crate::replay_probe::record(|counts| counts.worker_records += 1);
             return Some(Ok(record));
         }
     }
@@ -956,6 +983,10 @@ fn report_segment_boundary(event: &AgentRunEvent) -> bool {
             | AgentRunEvent::Failure { .. }
     )
 }
+
+#[cfg(test)]
+#[path = "worker_reopen_tests.rs"]
+mod reopen_tests;
 
 #[cfg(test)]
 mod tests {

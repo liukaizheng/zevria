@@ -384,7 +384,7 @@ async fn run_session(
     });
     let root_app = App::new().with_skill_context(&zevria_instructions::skill::SkillContext {
         catalog: restoration.skill_catalog.clone(),
-        pins: transcript::replay_active_skills(&restoration.transcript_items)?,
+        pins: restoration.active_skills,
         mode_enabled: true,
     });
     let mut views = SessionViews::new_restored(

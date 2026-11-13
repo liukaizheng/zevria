@@ -312,7 +312,7 @@ async fn mode_selection_cannot_implicitly_change_plan_workflow() {
         let mut engine = job_engine(provider, transcript, &jobs, 3);
         if planning {
             engine
-                .record_required(TranscriptItem::Plan(PlanRecord::Started {
+                .commit(TranscriptItem::Plan(PlanRecord::Started {
                     id: PlanId::new(),
                 }))
                 .unwrap();
@@ -513,7 +513,7 @@ async fn failed_continuation_commit_preserves_pending_output_and_transcript() {
     finish(&completed).await;
     let mut engine = job_engine(ScriptedProvider::new([]), transcript, &jobs, 3);
     engine
-        .record_required(TranscriptItem::Message(Message::user("durable user")))
+        .commit(TranscriptItem::Message(Message::user("durable user")))
         .unwrap();
     let original = engine.conversation.items().to_vec();
     let mut blocker = TranscriptRewriteBlocker::new(&path).unwrap();

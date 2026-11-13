@@ -80,6 +80,37 @@ fn request(user: &Message) -> ModelRequest<'_> {
 }
 
 #[tokio::test]
+async fn anthropic_prewarm_never_contacts_the_endpoint() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut profile = profile(format!(
+        "http://{}/v1/messages",
+        listener.local_addr().unwrap()
+    ));
+    if let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol {
+        endpoint.network.prewarm = true;
+    }
+    let mut runtime = runtime(&profile);
+    runtime.prewarm(ModelRole::Build).await;
+    let mut router = crate::ProviderRouter::from_routes(
+        [(
+            ModelRole::Build,
+            profile,
+            zevria_foundation::ReasoningLevel::High,
+        )],
+        "stable",
+        "session-1",
+    )
+    .unwrap();
+    router.prewarm(ModelRole::Build).await;
+    assert_eq!(router.initialized_profile_count(), 0);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn headers_streaming_usage_counting_and_local_compaction() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
@@ -111,7 +142,10 @@ async fn headers_streaming_usage_counting_and_local_compaction() {
             SessionUpdate::Lifecycle(SessionEvent::UsageUpdated { .. })
         );
     }
-    assert!(saw_usage);
+    assert!(
+        !saw_usage,
+        "core owns completed-usage publication after durability"
+    );
     assert_eq!(
         provider.count_input_tokens(request(&user)).await.unwrap(),
         InputTokenCount::Exact(123)

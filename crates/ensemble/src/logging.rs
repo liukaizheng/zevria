@@ -21,13 +21,7 @@ impl RunLog {
         let io_path = path.clone();
         let (writer, projection) = tokio::task::spawn_blocking(move || {
             if resume && io_path.exists() {
-                let projection = load_agent_run_projection(&io_path)?;
-                if projection.header.as_ref() != Some(&header) {
-                    anyhow::bail!(
-                        "worker transcript identity does not match the ensemble recovery record"
-                    );
-                }
-                Ok((AgentRunTranscriptWriter::append_to(io_path)?, projection))
+                AgentRunTranscriptWriter::reopen(io_path, &header)
             } else {
                 Ok((
                     AgentRunTranscriptWriter::create(io_path, header)?,

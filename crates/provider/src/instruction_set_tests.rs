@@ -39,14 +39,20 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
         output.clone(),
     ))
     .unwrap();
-    provider.ws.continuation = Some(ContinuationState {
-        lineage: None,
-        socket_generation: provider.ws.socket_generation,
-        response_id: "first-response".into(),
-        request_properties: first.request_properties.clone(),
-        request_input: first.full_input.as_ref().clone(),
-        response_output: output,
-    });
+    let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(
+        provider.profile.clone(),
+        output,
+    ))
+    .unwrap();
+    provider.ws.continuation = Some(
+        ContinuationState::after_response(
+            &first,
+            provider.ws.socket_generation,
+            "first-response".into(),
+            &response,
+        )
+        .unwrap(),
+    );
     let body = DirectiveContent::skill(
         &SkillSnapshot::new("review".parse().unwrap(), "Review", "Pinned body").unwrap(),
     );
@@ -77,6 +83,11 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
         Some("first-response")
     );
     assert_eq!(transmission.input.len(), 2);
+    assert_eq!(
+        transmission.input.as_ptr(),
+        activated.full_input[activated.full_input.len() - 2..].as_ptr(),
+        "incremental transmission borrows the prepared suffix"
+    );
     assert!(
         transmission.input[1]
             .to_string()
@@ -106,7 +117,12 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
     let transmission = select_transmission(&switched, &mut provider);
     assert!(matches!(transmission.mode, RequestMode::Full));
     assert!(transmission.previous_response_id.is_none());
-    assert_eq!(&transmission.input, switched.full_input.as_ref());
+    assert_eq!(transmission.input, switched.full_input.as_slice());
+    assert_eq!(
+        transmission.input.as_ptr(),
+        switched.full_input.as_ptr(),
+        "full transmission borrows the prepared input"
+    );
     assert!(
         provider.ws.continuation.is_none(),
         "request_properties_changed clears the previous chain"

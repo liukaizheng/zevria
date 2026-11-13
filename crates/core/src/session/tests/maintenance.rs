@@ -118,7 +118,7 @@ async fn start_maintenance_with_idle_notifications(
             .unwrap(),
         )
         .unwrap();
-    engine.refresh_replay().unwrap();
+    engine.replay_changed().unwrap();
     let (events, receiver) = session_event_channel(32);
     let run = RunningSession::start(
         engine,
