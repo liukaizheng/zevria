@@ -462,7 +462,7 @@ impl<'a> ResponseDriver<'a> {
         }
         ctx.state.observe_attempt_value(&raw);
         let event = parse_server_event_value(raw)
-            .map_err(|error| self.terminal_error(&mut ctx, error.into()))?;
+            .map_err(|error| self.terminal_error(&mut ctx, CompletionError::from(error).into()))?;
         let Some(event) = event else {
             ctx.state.publish_stream(ctx.progress);
             return Ok(None);

@@ -215,7 +215,8 @@ pub struct SkillInvocation {
     name: SkillName,
     arguments: crate::UserPrompt,
     application: SkillApplication,
-    model_message: Message,
+    // Keep the derived cache off the stack without changing persisted invocation fields.
+    model_message: Box<Message>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -287,7 +288,7 @@ impl SkillInvocation {
             name,
             arguments,
             application,
-            model_message,
+            model_message: Box::new(model_message),
         }
     }
     pub fn name(&self) -> &SkillName {

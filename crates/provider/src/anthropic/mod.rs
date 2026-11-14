@@ -320,10 +320,10 @@ impl AnthropicProvider {
             Ok::<(), (ApiError, Option<String>)>(())
         }
         .await;
-        if cadence.take_due(true) {
-            if let Some(message) = accumulator.preview() {
-                progress.reporter.stream_updated(message);
-            }
+        if cadence.take_due(true)
+            && let Some(message) = accumulator.preview()
+        {
+            progress.reporter.stream_updated(message);
         }
         stream_result?;
         if accumulator.is_stopped() {

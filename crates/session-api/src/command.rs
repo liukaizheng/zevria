@@ -117,7 +117,7 @@ pub enum TurnCommand {
         decision: PlanDecision,
     },
     /// Begin a fresh session from an engine-generated typed handoff.
-    StartFromPlan { handoff: PlanHandoff },
+    StartFromPlan { handoff: Box<PlanHandoff> },
 }
 
 impl TurnCommand {

@@ -231,7 +231,7 @@ async fn failed_replay_has_no_payload_and_rejects_every_command_and_reseeding() 
             decision: PlanDecision::Revise,
         }),
         SessionCommand::Turn(crate::session::TurnCommand::StartFromPlan {
-            handoff: PlanHandoff::new(artifact, "source"),
+            handoff: Box::new(PlanHandoff::new(artifact, "source")),
         }),
         SessionCommand::Manage(crate::session::ManagementCommand::Models {
             request_id: "picker".into(),

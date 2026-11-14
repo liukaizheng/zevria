@@ -17,7 +17,7 @@ use zevria_workflow::ensemble::{
 
 pub(in crate::session) enum TurnWork {
     Command(TurnCommand),
-    ResumeEnsemble(EnsembleRecovery),
+    ResumeEnsemble(Box<EnsembleRecovery>),
 }
 impl TurnWork {
     pub(in crate::session) fn mode(&self) -> SessionMode {
@@ -210,7 +210,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         let command = match work {
             TurnWork::Command(command) => command,
             TurnWork::ResumeEnsemble(recovery) => {
-                return self.resume_ensemble(recovery, events, turn).await;
+                return self.resume_ensemble(*recovery, events, turn).await;
             }
         };
         match command {
@@ -279,7 +279,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 self.resolve_plan(expected, decision, events, turn).await
             }
             TurnCommand::StartFromPlan { handoff } => {
-                self.start_from_plan(handoff, events, turn).await
+                self.start_from_plan(*handoff, events, turn).await
             }
         }
     }

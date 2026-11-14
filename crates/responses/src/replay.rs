@@ -363,6 +363,16 @@ pub fn preflight_with_policy(
     Ok(ReplayPreflight::Compatible(estimate))
 }
 
+/// Prepared-request settings shared by one cached capacity assessment.
+#[derive(Debug, Clone, Copy)]
+pub struct PreflightOptions<'a> {
+    pub target: &'a ModelProfileRef,
+    pub developer_messages: bool,
+    pub tool_options: crate::tools::ToolRendererOptions,
+    pub additional_tools: bool,
+    pub policy: &'a zevria_foundation::image_accounting::ImageAccountingPolicy,
+}
+
 /// Capacity validation retains correlation context, not old projected payloads.
 #[derive(Default)]
 pub struct PreflightCache {
@@ -394,23 +404,28 @@ impl PreflightCache {
         self.assess_with_policy(
             input,
             identity,
-            target,
-            developer_messages,
-            tool_options,
-            additional_tools,
-            &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+            PreflightOptions {
+                target,
+                developer_messages,
+                tool_options,
+                additional_tools,
+                policy: &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+            },
         )
     }
     pub fn assess_with_policy(
         &mut self,
         input: &[ModelRequestItem<'_>],
         identity: &zevria_model::ModelInputIdentity,
-        target: &ModelProfileRef,
-        developer_messages: bool,
-        tool_options: crate::tools::ToolRendererOptions,
-        additional_tools: bool,
-        policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+        options: PreflightOptions<'_>,
     ) -> anyhow::Result<ReplayPreflight> {
+        let PreflightOptions {
+            target,
+            developer_messages,
+            tool_options,
+            additional_tools,
+            policy,
+        } = options;
         policy.validate(false)?;
         anyhow::ensure!(
             identity.len() == input.len(),

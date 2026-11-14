@@ -1,4 +1,6 @@
-use crate::replay::{InputProjection, PreflightCache, preflight_with_compatibility, project};
+use crate::replay::{
+    InputProjection, PreflightCache, PreflightOptions, preflight_with_compatibility, project,
+};
 use crate::tools::ToolRendererOptions;
 use rig_core::message::{AssistantContent, Message, ToolFunction, ToolName, ToolResultContent};
 use serde_json::json;
@@ -230,11 +232,13 @@ fn accounting_policy_changes_recompute_numbers_but_leave_transport_identity_unch
                     .assess_with_policy(
                         &input[..end],
                         &identity,
-                        &target,
-                        true,
-                        Default::default(),
-                        true,
-                        &policy
+                        PreflightOptions {
+                            target: &target,
+                            developer_messages: true,
+                            tool_options: Default::default(),
+                            additional_tools: true,
+                            policy: &policy,
+                        },
                     )
                     .unwrap(),
                 crate::replay::preflight_with_policy(

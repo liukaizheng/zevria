@@ -29,10 +29,11 @@ mod native {
         ui::{assets::AppAssets, theme, window::DesktopWindow},
     };
     use zevria_foundation::{
-        FileChange, FileChangeOutput, QuestionOption, QuestionPrompt, QuestionPromptKind,
-        QuestionRequest, QuestionRequestId, SessionMode, ToolCallOutcome, ToolResultDetail,
-        ToolResultMetadata, TurnId,
+        FileChange, FileChangeOutput, ModelProfileRef, ModelRole, QuestionOption, QuestionPrompt,
+        QuestionPromptKind, QuestionRequest, QuestionRequestId, SessionMode, ToolCallOutcome,
+        ToolResultDetail, ToolResultMetadata, TurnId,
     };
+    use zevria_model::{ContextTokenSnapshot, ContextTokenSource, TokenUsage};
     use zevria_session_api::SessionEvent as E;
     use zevria_workflow::{PlanArtifact, PlanId, PlanVersion, PlanWorkflowState};
 
@@ -476,6 +477,19 @@ mod native {
             c.fixture_event(E::TurnStarted { turn_id,mode: SessionMode::Build,message: Message::user("Fix the failing transcript preview test.") },cx);
             c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
             c.fixture_event(E::Intermediate { turn_id,message: Message::assistant("I'll reproduce the failure, then trace the restored prompt."),attempt_id: None },cx);
+            let profile = ModelProfileRef::new("fixture", "fixture");
+            c.fixture_event(E::UsageUpdated {
+                turn_id,
+                usage: TokenUsage { input_tokens: 12_300, cached_tokens: 10_200, output_tokens: 2_100, total_tokens: 14_400 },
+                profile: profile.clone(), model_role: ModelRole::Build,
+                input_token_limit: 100_000, context_window_tokens: 128_000,
+            }, cx);
+            c.fixture_event(E::ContextUsageUpdated { turn_id, snapshot: ContextTokenSnapshot {
+                profile, model_role: ModelRole::Build,
+                projected_input_tokens: Some(14_800), known_input_tokens: 14_800,
+                unresolved_media: Default::default(), source: ContextTokenSource::UsagePlusDelta,
+                automatic_trigger: 80_000, input_token_limit: 100_000, context_window_tokens: 128_000,
+            }}, cx);
             for (id,name,args) in [
                 ("command-ok","command",serde_json::json!({"command":"rtk cargo test -p zevria-transcript"})),
                 ("command-fail","command",serde_json::json!({"command":"rtk proxy cargo test restore_roundtrip -- --nocapture 2>&1 | tail -20"})),

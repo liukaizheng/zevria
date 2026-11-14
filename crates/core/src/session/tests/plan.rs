@@ -1448,7 +1448,7 @@ async fn fresh_session_starts_only_from_a_canonical_typed_handoff() {
     engine
         .handle_command(
             SessionCommand::Turn(crate::session::TurnCommand::StartFromPlan {
-                handoff: handoff.clone(),
+                handoff: Box::new(handoff.clone()),
             }),
             &events,
         )
@@ -1482,7 +1482,9 @@ async fn fresh_session_starts_only_from_a_canonical_typed_handoff() {
     .expect("engine");
     rejected
         .handle_command(
-            SessionCommand::Turn(crate::session::TurnCommand::StartFromPlan { handoff: tampered }),
+            SessionCommand::Turn(crate::session::TurnCommand::StartFromPlan {
+                handoff: Box::new(tampered),
+            }),
             &events,
         )
         .await

@@ -1,12 +1,9 @@
 //! OpenAI request and server-event protocol conversion.
 
 use crate::wire::{ResponseChunk, ResponsesWebSocketEvent};
-use rig_core::{
-    error::ProviderError as CompletionError,
-    message::{
-        AssistantContent, DocumentData, DocumentSourceKind, Image, Message, MimeType,
-        ToolResultContent, UserContent,
-    },
+use rig_core::message::{
+    AssistantContent, DocumentData, DocumentSourceKind, Image, Message, MimeType,
+    ToolResultContent, UserContent,
 };
 use serde_json::{Value, json};
 
@@ -270,15 +267,14 @@ impl ResponseProgress {
         let id = event["response"]["id"]
             .as_str()
             .or_else(|| event["response_id"].as_str());
-        if let Some(id) = id {
-            if self.excluded_responses.contains(id)
+        if let Some(id) = id
+            && (self.excluded_responses.contains(id)
                 || self
                     .response_id
                     .as_deref()
-                    .is_some_and(|current| current != id)
-            {
-                return OtherResponse;
-            }
+                    .is_some_and(|current| current != id))
+        {
+            return OtherResponse;
         }
         if !(is_known_streaming_event(kind)
             || is_hosted_progress_event(kind)
@@ -347,9 +343,7 @@ impl ResponseProgress {
     }
 }
 
-pub fn parse_server_event(
-    payload: &str,
-) -> Result<Option<ResponsesWebSocketEvent>, CompletionError> {
+pub fn parse_server_event(payload: &str) -> serde_json::Result<Option<ResponsesWebSocketEvent>> {
     parse_server_event_value(serde_json::from_str(payload)?)
 }
 
@@ -357,7 +351,7 @@ pub fn parse_server_event(
 /// progress observers inspect this same value before it is consumed here.
 pub fn parse_server_event_value(
     payload: Value,
-) -> Result<Option<ResponsesWebSocketEvent>, CompletionError> {
+) -> serde_json::Result<Option<ResponsesWebSocketEvent>> {
     let kind = payload
         .get("type")
         .and_then(Value::as_str)
@@ -366,31 +360,22 @@ pub fn parse_server_event_value(
         })?
         .to_owned();
     match kind.as_str() {
-        "error" => serde_json::from_value(payload)
-            .map(|e| Some(ResponsesWebSocketEvent::Error(e)))
-            .map_err(CompletionError::from),
+        "error" => serde_json::from_value(payload).map(|e| Some(ResponsesWebSocketEvent::Error(e))),
         // AttemptReducer owns these events and has already observed their raw
         // payloads. They must not enter Rig's function-tool stream conversion.
         kind if is_hosted_progress_event(kind) => Ok(None),
-        "response.done" => serde_json::from_value(payload)
-            .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
-            .map_err(CompletionError::from),
-        kind if matches!(
-            kind,
-            "response.created"
-                | "response.in_progress"
-                | "response.completed"
-                | "response.failed"
-                | "response.incomplete"
-        ) =>
-        {
-            serde_json::from_value::<ResponseChunk>(payload)
-                .map(|chunk| Some(ResponsesWebSocketEvent::Response(Box::new(chunk))))
-                .map_err(CompletionError::from)
+        "response.done" => {
+            serde_json::from_value(payload).map(|d| Some(ResponsesWebSocketEvent::Done(d)))
         }
-        kind if is_known_streaming_event(kind) => serde_json::from_value(payload)
-            .map(|item| Some(ResponsesWebSocketEvent::Item(item)))
-            .map_err(CompletionError::from),
+        "response.created"
+        | "response.in_progress"
+        | "response.completed"
+        | "response.failed"
+        | "response.incomplete" => serde_json::from_value::<ResponseChunk>(payload)
+            .map(|chunk| Some(ResponsesWebSocketEvent::Response(Box::new(chunk)))),
+        kind if is_known_streaming_event(kind) => {
+            serde_json::from_value(payload).map(|item| Some(ResponsesWebSocketEvent::Item(item)))
+        }
         kind => {
             tracing::trace!(target: "zevria_provider::protocol", kind, "ignoring an unknown OpenAI response event");
             Ok(None)

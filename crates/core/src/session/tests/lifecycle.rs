@@ -98,14 +98,16 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
             "noncanonical-handoff" => {
                 let mut handoff = PlanHandoff::new(artifact.clone(), "source");
                 handoff.prompt = Message::user("not the artifact");
-                TurnCommand::StartFromPlan { handoff }
+                TurnCommand::StartFromPlan {
+                    handoff: Box::new(handoff),
+                }
             }
             "nonempty-handoff" => {
                 engine
                     .commit(TranscriptItem::Message(Message::user("existing")))
                     .unwrap();
                 TurnCommand::StartFromPlan {
-                    handoff: PlanHandoff::new(artifact.clone(), "source"),
+                    handoff: Box::new(PlanHandoff::new(artifact.clone(), "source")),
                 }
             }
             "missing-edit" => into_turn(prompt_message_edit(99, "replacement", SessionMode::Build)),

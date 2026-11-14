@@ -130,7 +130,7 @@ pub(crate) struct PendingMessage {
 }
 
 pub(crate) enum PendingMessagePart {
-    Text(Text),
+    Text(Box<Text>),
     Refusal(String),
 }
 
@@ -200,7 +200,7 @@ impl AssistantMessageAccumulator {
                     };
                     message.initialize_part(
                         part.content_index,
-                        PendingMessagePart::Text(Text::new(text)),
+                        PendingMessagePart::Text(Box::new(Text::new(text))),
                     )?;
                 }
                 ContentPartChunkPart::SummaryText { text } => {
@@ -219,7 +219,7 @@ impl AssistantMessageAccumulator {
                     };
                     message.set_part(
                         part.content_index,
-                        PendingMessagePart::Text(Text::new(text)),
+                        PendingMessagePart::Text(Box::new(Text::new(text))),
                     )?;
                 }
                 ContentPartChunkPart::SummaryText { text } => {
@@ -243,7 +243,7 @@ impl AssistantMessageAccumulator {
                 };
                 message.set_part(
                     done.content_index,
-                    PendingMessagePart::Text(Text::new(done.text)),
+                    PendingMessagePart::Text(Box::new(Text::new(done.text))),
                 )?;
             }
             ItemChunkKind::RefusalDelta(delta) => {
@@ -466,7 +466,7 @@ impl PendingOutput {
                     .map(|content| {
                         Some(match content {
                             OpenAiAssistantContent::OutputText(text) => {
-                                PendingMessagePart::Text(normalize_openai_text(text))
+                                PendingMessagePart::Text(Box::new(normalize_openai_text(text)))
                             }
                             OpenAiAssistantContent::Refusal { refusal } => {
                                 PendingMessagePart::Refusal(refusal)
@@ -552,7 +552,7 @@ impl PendingMessage {
 
     pub(crate) fn append_text(&mut self, content_index: u64, delta: &str) -> anyhow::Result<()> {
         let part = indexed_slot_mut(&mut self.parts, content_index, "content")?
-            .get_or_insert_with(|| PendingMessagePart::Text(Text::new("")));
+            .get_or_insert_with(|| PendingMessagePart::Text(Box::new(Text::new(""))));
         match part {
             PendingMessagePart::Text(text) => {
                 text.text.push_str(delta);
@@ -583,7 +583,7 @@ impl PendingMessage {
             .iter()
             .flatten()
             .map(|part| match part {
-                PendingMessagePart::Text(text) => AssistantContent::Text(text.clone()),
+                PendingMessagePart::Text(text) => AssistantContent::Text(text.as_ref().clone()),
                 PendingMessagePart::Refusal(refusal) => AssistantContent::text(refusal.clone()),
             })
             .collect()
@@ -902,19 +902,16 @@ pub(crate) fn normalize_tool_arguments(arguments: serde_json::Value) -> serde_js
 
 pub(crate) fn assistant_content_from_openai_output(output: Output) -> Vec<AssistantContent> {
     match output {
-        Output::Message(message) => {
-            let content = message
-                .content
-                .into_iter()
-                .map(|content| match content {
-                    OpenAiAssistantContent::OutputText(text) => {
-                        AssistantContent::Text(normalize_openai_text(text))
-                    }
-                    OpenAiAssistantContent::Refusal { refusal } => AssistantContent::text(refusal),
-                })
-                .collect();
-            content
-        }
+        Output::Message(message) => message
+            .content
+            .into_iter()
+            .map(|content| match content {
+                OpenAiAssistantContent::OutputText(text) => {
+                    AssistantContent::Text(normalize_openai_text(text))
+                }
+                OpenAiAssistantContent::Refusal { refusal } => AssistantContent::text(refusal),
+            })
+            .collect(),
         Output::FunctionCall(function) => {
             let tool_call = tool_call_from_wire_text(
                 function.id,

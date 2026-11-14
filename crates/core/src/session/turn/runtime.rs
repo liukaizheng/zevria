@@ -122,7 +122,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     }
                 }))
         {
-            pending.push_back(TurnWork::ResumeEnsemble(recovery));
+            pending.push_back(TurnWork::ResumeEnsemble(Box::new(recovery)));
         }
         pending
     }

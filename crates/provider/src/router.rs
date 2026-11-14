@@ -501,13 +501,15 @@ impl ModelProvider for ProviderRouter {
                 .assess_with_policy(
                     input,
                     identity,
-                    target,
-                    endpoint.compatibility.developer_messages,
-                    zevria_responses::tools::ToolRendererOptions {
-                        strict_tools: endpoint.compatibility.strict_tools,
+                    zevria_responses::replay::PreflightOptions {
+                        target,
+                        developer_messages: endpoint.compatibility.developer_messages,
+                        tool_options: zevria_responses::tools::ToolRendererOptions {
+                            strict_tools: endpoint.compatibility.strict_tools,
+                        },
+                        additional_tools: endpoint.compatibility.additional_tools,
+                        policy: &slot.profile.image_accounting,
                     },
-                    endpoint.compatibility.additional_tools,
-                    &slot.profile.image_accounting,
                 ),
         }
     }

@@ -100,10 +100,10 @@ impl CommandJobsState {
                 if mode == CommandJobMode::Background {
                     background -= 1;
                 }
-                if let Some(job) = self.jobs.remove(&id) {
-                    if let Some(call) = job.call_id {
-                        self.calls.remove(&call);
-                    }
+                if let Some(job) = self.jobs.remove(&id)
+                    && let Some(call) = job.call_id
+                {
+                    self.calls.remove(&call);
                 }
             }
         }

@@ -690,7 +690,9 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
     if let SessionStart::FromPlan { handoff, .. } = resolved.start {
         command_tx
             .send(SessionCommand::Turn(
-                zevria_session_api::TurnCommand::StartFromPlan { handoff },
+                zevria_session_api::TurnCommand::StartFromPlan {
+                    handoff: Box::new(handoff),
+                },
             ))
             .map_err(|_| anyhow::anyhow!("the session engine stopped before its opening prompt"))?;
     }

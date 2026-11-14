@@ -386,7 +386,7 @@ async fn plan_implementation_and_fresh_handoff_commit_ordinary_build_atomically(
         engine
             .handle_command(
                 SessionCommand::Turn(TurnCommand::StartFromPlan {
-                    handoff: PlanHandoff::new(artifact, "source"),
+                    handoff: Box::new(PlanHandoff::new(artifact, "source")),
                 }),
                 &events,
             )

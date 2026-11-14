@@ -631,7 +631,9 @@ async fn irreducible_handoff_guidance_is_rejected_before_the_atomic_transition()
     let (events, mut receiver) = session_event_channel(128);
     engine
         .handle_command(
-            SessionCommand::Turn(TurnCommand::StartFromPlan { handoff }),
+            SessionCommand::Turn(TurnCommand::StartFromPlan {
+                handoff: Box::new(handoff),
+            }),
             &events,
         )
         .await

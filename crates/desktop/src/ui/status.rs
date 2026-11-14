@@ -56,6 +56,7 @@ pub struct StatusLine {
     pub profile: String,
     pub reasoning: Option<String>,
     pub context: Option<ContextGauge>,
+    pub cache: Option<String>,
     pub output: Option<String>,
     pub network: Option<String>,
 }
@@ -76,6 +77,7 @@ impl StatusLine {
         };
         let role = model.display_role();
         let telemetry = model.session.telemetry(role);
+        let response_usage = telemetry.response().map(|response| response.usage());
         Self {
             glyph: if persistence_failed {
                 StatusIcon::Failed
@@ -102,9 +104,15 @@ impl StatusLine {
                 .reasoning(role)
                 .map(|r| format!("{r:?}").to_lowercase()),
             context: telemetry.context().map(ContextGauge::from_snapshot),
-            output: telemetry
-                .response()
-                .map(|r| format!("{} output tokens", compact_number(r.usage().output_tokens))),
+            cache: response_usage.map(|usage| {
+                format!(
+                    "cached {} ({:.0}%)",
+                    compact_number(usage.cached_tokens),
+                    usage.cached_percent(),
+                )
+            }),
+            output: response_usage
+                .map(|usage| format!("{} output tokens", compact_number(usage.output_tokens))),
             network: model.session.network_message().map(|(m, _)| m),
         }
     }
@@ -256,6 +264,7 @@ impl DesktopWindow {
         let t = palette(cx);
         let mut row = div()
             .id("status-bar")
+            .test_support()
             .h(px(28.))
             .flex_shrink_0()
             .flex()
@@ -270,6 +279,11 @@ impl DesktopWindow {
             .font_features(style::tnum())
             .overflow_hidden();
         let mut activity = div()
+            .id("status-activity")
+            .test_support()
+            // Keep activity readable without letting long tool titles crowd out warnings.
+            .flex_shrink_0()
+            .max_w(relative(1. / 3.))
             .flex()
             .items_center()
             .gap(px(8.))
@@ -295,10 +309,11 @@ impl DesktopWindow {
                 .flex()
                 .items_center()
                 .gap(px(8.))
+                .min_w_0()
                 .text_color(t.text.secondary)
-                .child(status.profile);
+                .child(div().truncate().child(status.profile));
             if let Some(reasoning) = status.reasoning {
-                profile = profile.child(div().text_color(t.text.muted).child(reasoning));
+                profile = profile.child(div().truncate().text_color(t.text.muted).child(reasoning));
             }
             row = row.child(profile);
         }
@@ -306,14 +321,18 @@ impl DesktopWindow {
         if let Some(context) = status.context {
             row = row.child(
                 div()
+                    .id("status-context")
+                    .test_support()
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .min_w_0()
                     .text_color(t.text.muted)
                     .when(!self.compact && context.fraction.is_some(), |d| {
                         d.child(
                             div()
                                 .w(px(64.))
+                                .flex_shrink_0()
                                 .h(px(4.))
                                 .rounded_full()
                                 .bg(tones(cx).hairline)
@@ -330,17 +349,42 @@ impl DesktopWindow {
                                 ),
                         )
                     })
-                    .child(context.label),
+                    .child(
+                        div()
+                            .id("status-context-label")
+                            .test_support()
+                            .truncate()
+                            .child(context.label),
+                    ),
             );
         }
-        if !self.compact
-            && let Some(output) = status.output
-        {
-            row = row.child(div().text_color(t.text.muted).child(output));
+        if !self.compact {
+            if let Some(cache) = status.cache {
+                row = row.child(
+                    div()
+                        .id("status-cache")
+                        .test_support()
+                        .flex_shrink_0()
+                        .text_color(t.text.muted)
+                        .child(cache),
+                );
+            }
+            if let Some(output) = status.output {
+                row = row.child(
+                    div()
+                        .id("status-output")
+                        .test_support()
+                        .flex_shrink_0()
+                        .text_color(t.text.muted)
+                        .child(output),
+                );
+            }
         }
         if let Some(network) = status.network {
             row = row.child(
                 div()
+                    .id("status-network")
+                    .test_support()
                     .truncate()
                     .text_color(t.feedback.warning)
                     .child(network),
@@ -352,6 +396,181 @@ impl DesktopWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::message::Message;
+    use zevria_foundation::{ModelProfileRef, SessionMode, TurnId};
+    use zevria_model::{ContextTokenSnapshot, ContextTokenSource, TokenUsage};
+    use zevria_session_api::SessionEvent as E;
+
+    const TURN: TurnId = TurnId::new(1);
+
+    fn running_model() -> SessionModel {
+        let mut model = SessionModel::default();
+        model.reduce(E::TurnStarted {
+            turn_id: TURN,
+            mode: SessionMode::Build,
+            message: Message::user("Check cache usage"),
+        });
+        model
+    }
+
+    fn response_event(input_tokens: u64, cached_tokens: u64, output_tokens: u64) -> E {
+        E::UsageUpdated {
+            turn_id: TURN,
+            usage: TokenUsage {
+                input_tokens,
+                cached_tokens,
+                output_tokens,
+                total_tokens: input_tokens + output_tokens,
+            },
+            profile: ModelProfileRef::new("test", "model"),
+            model_role: ModelRole::Build,
+            input_token_limit: 100_000,
+            context_window_tokens: 128_000,
+        }
+    }
+
+    fn context_event(profile: ModelProfileRef, model_role: ModelRole, tokens: u64) -> E {
+        E::ContextUsageUpdated {
+            turn_id: TURN,
+            snapshot: ContextTokenSnapshot {
+                profile,
+                model_role,
+                projected_input_tokens: Some(tokens),
+                known_input_tokens: tokens,
+                unresolved_media: Default::default(),
+                source: ContextTokenSource::Exact,
+                automatic_trigger: 80_000,
+                input_token_limit: 100_000,
+                context_window_tokens: 128_000,
+            },
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn cache_count_and_rate_match_last_response_rounding() {
+        let mut model = running_model();
+        for (input, cached, expected) in [
+            (12_300, 10_200, "cached 10.2k (83%)"),
+            (1_000, 124, "cached 124 (12%)"),
+            (1_000, 126, "cached 126 (13%)"),
+            (12_300, 0, "cached 0 (0%)"),
+            (12_300, 12_300, "cached 12.3k (100%)"),
+            (0, 0, "cached 0 (0%)"),
+            (0, 100, "cached 100 (0%)"),
+            // Preserve the shared helper's semantics, including no clamping.
+            (1_000, 1_200, "cached 1.2k (120%)"),
+        ] {
+            model.reduce(response_event(input, cached, 2_100));
+            let status = StatusLine::new(&model, false);
+            assert_eq!(status.cache.as_deref(), Some(expected));
+            assert_eq!(status.output.as_deref(), Some("2.1k output tokens"));
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn absent_response_usage_has_no_cache_or_output_segment() {
+        let mut model = running_model();
+        assert_eq!(StatusLine::new(&model, false).cache, None);
+        model.reduce(context_event(
+            ModelProfileRef::new("test", "model"),
+            ModelRole::Build,
+            12_300,
+        ));
+        let status = StatusLine::new(&model, false);
+        assert!(status.context.is_some());
+        assert_eq!(status.cache, None);
+        assert_eq!(status.output, None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn tool_loop_usage_replaces_cache_rate_but_next_context_does_not() {
+        let mut model = running_model();
+        model.reduce(E::ModelCallStarted {
+            turn_id: TURN,
+            call: 1,
+        });
+        model.reduce(response_event(12_300, 10_200, 2_100));
+        model.reduce(E::Intermediate {
+            turn_id: TURN,
+            message: Message::assistant("Checking the next tool result"),
+            attempt_id: None,
+        });
+        model.reduce(E::ModelCallStarted {
+            turn_id: TURN,
+            call: 2,
+        });
+        model.reduce(context_event(
+            ModelProfileRef::new("test", "model"),
+            ModelRole::Build,
+            41_000,
+        ));
+        let status = StatusLine::new(&model, false);
+        assert_eq!(status.cache.as_deref(), Some("cached 10.2k (83%)"));
+        assert_eq!(status.output.as_deref(), Some("2.1k output tokens"));
+        assert_eq!(
+            status.context.unwrap().label,
+            "next 41k of 128k (provider count)"
+        );
+
+        model.reduce(response_event(20_000, 10_000, 3_000));
+        let status = StatusLine::new(&model, false);
+        assert_eq!(status.cache.as_deref(), Some("cached 10k (50%)"));
+        assert_eq!(status.output.as_deref(), Some("3k output tokens"));
+        model.reduce(E::TurnCompleted {
+            turn_id: TURN,
+            message: Message::assistant("Done"),
+            attempt_id: None,
+        });
+        // Late usage cannot replace the most recently accepted response.
+        model.reduce(response_event(1_000, 0, 1));
+        assert_eq!(
+            StatusLine::new(&model, false).cache.as_deref(),
+            Some("cached 10k (50%)")
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn visible_role_and_authoritative_profile_do_not_leak_cached_usage() {
+        let mut model = running_model();
+        model.reduce(response_event(12_300, 10_200, 2_100));
+        model.reduce(context_event(
+            ModelProfileRef::new("test", "plan"),
+            ModelRole::Plan,
+            5_000,
+        ));
+        assert_eq!(
+            StatusLine::new(&model, false).cache.as_deref(),
+            Some("cached 10.2k (83%)")
+        );
+
+        // A new authoritative profile clears the old response even if only
+        // next-request context is available for that profile so far.
+        model.reduce(context_event(
+            ModelProfileRef::new("test", "replacement"),
+            ModelRole::Build,
+            20_000,
+        ));
+        let status = StatusLine::new(&model, false);
+        assert_eq!(status.profile, "test/replacement");
+        assert_eq!(status.cache, None);
+        assert_eq!(status.output, None);
+        model.reduce(response_event(12_300, 10_200, 2_100));
+        model.reduce(E::TurnCompleted {
+            turn_id: TURN,
+            message: Message::assistant("Done"),
+            attempt_id: None,
+        });
+        model.reduce(E::ModeChanged {
+            mode: SessionMode::Plan,
+        });
+        let status = StatusLine::new(&model, false);
+        assert_eq!(status.mode, "Plan");
+        assert_eq!(status.profile, "test/plan");
+        assert!(status.context.is_some());
+        assert_eq!(status.cache, None);
+        assert_eq!(status.output, None);
+    }
+
     #[::core::prelude::v1::test]
     fn numbers_and_gauge_threshold() {
         for (n, expected) in [

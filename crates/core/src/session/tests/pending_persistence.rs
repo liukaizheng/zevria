@@ -262,7 +262,7 @@ async fn pending_plan_handoff_and_ensemble_start_publish_before_acceptance_effec
                 }
             } else {
                 TurnCommand::StartFromPlan {
-                    handoff: handoff.clone(),
+                    handoff: Box::new(handoff.clone()),
                 }
             };
             engine

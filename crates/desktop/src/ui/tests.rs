@@ -68,6 +68,261 @@ fn event(controller: &Entity<SessionController>, event: E, cx: &mut TestAppConte
     controller.update(cx, |this, cx| this.fixture_event(event, cx));
     cx.run_until_parked();
 }
+
+mod status {
+    use super::*;
+    use crate::ui::status::StatusLine;
+    use std::time::Duration;
+    use zevria_foundation::{ModelProfileRef, ModelRole};
+    use zevria_model::{ContextTokenSnapshot, ContextTokenSource, TokenUsage};
+    use zevria_session_api::event::{NetworkStatus, NetworkTransport};
+
+    const TURN: TurnId = TurnId::new(1);
+
+    fn start(controller: &Entity<SessionController>, cx: &mut TestAppContext) {
+        event(
+            controller,
+            E::TurnStarted {
+                turn_id: TURN,
+                mode: SessionMode::Build,
+                message: Message::user("Check cache usage"),
+            },
+            cx,
+        );
+        event(
+            controller,
+            E::ModelCallStarted {
+                turn_id: TURN,
+                call: 1,
+            },
+            cx,
+        );
+    }
+
+    fn usage_event(profile: &str, input_tokens: u64, cached_tokens: u64, output_tokens: u64) -> E {
+        E::UsageUpdated {
+            turn_id: TURN,
+            usage: TokenUsage {
+                input_tokens,
+                cached_tokens,
+                output_tokens,
+                total_tokens: input_tokens + output_tokens,
+            },
+            profile: ModelProfileRef::new("fixture", profile),
+            model_role: ModelRole::Build,
+            input_token_limit: 100_000,
+            context_window_tokens: 128_000,
+        }
+    }
+
+    fn context_event(profile: &str, tokens: u64) -> E {
+        E::ContextUsageUpdated {
+            turn_id: TURN,
+            snapshot: ContextTokenSnapshot {
+                profile: ModelProfileRef::new("fixture", profile),
+                model_role: ModelRole::Build,
+                projected_input_tokens: Some(tokens),
+                known_input_tokens: tokens,
+                unresolved_media: Default::default(),
+                source: ContextTokenSource::UsagePlusDelta,
+                automatic_trigger: 80_000,
+                input_token_limit: 100_000,
+                context_window_tokens: 128_000,
+            },
+        }
+    }
+
+    fn assert_response(
+        window: Window,
+        controller: &Entity<SessionController>,
+        cache: Option<&str>,
+        output: Option<&str>,
+        cx: &mut TestAppContext,
+    ) {
+        controller.read_with(cx, |c, _| {
+            let status = StatusLine::new(c.model.visible(), c.cancelling);
+            assert_eq!(status.cache.as_deref(), cache);
+            assert_eq!(status.output.as_deref(), output);
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.try_find("status-cache").is_some(), cache.is_some());
+            assert_eq!(window.try_find("status-output").is_some(), output.is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn cache_segment_obeys_compact_policy_and_keeps_status_inside_viewport(
+        cx: &mut TestAppContext,
+    ) {
+        // At 1016px the sidebar leaves exactly 760px: the first expanded width.
+        let mut activity_width = None;
+        let mut response_widths = None;
+        for width in [1920., 1240., 1016., 720.] {
+            let (window, view, controller, _) = setup_at_size(cx, width, 840.);
+            start(&controller, cx);
+            event(&controller, context_event("model", 12_300), cx);
+            event(&controller, usage_event("model", 12_300, 10_200, 2_100), cx);
+            event(
+                &controller,
+                E::NetworkStatus {
+                    turn_id: TURN,
+                    call: 1,
+                    attempt: 1,
+                    transport: NetworkTransport::Http,
+                    status: NetworkStatus::Quiet {
+                        idle_for: Duration::from_secs(45),
+                        retry_in: Duration::from_secs(15),
+                        will_retry: true,
+                    },
+                },
+                cx,
+            );
+            controller.read_with(cx, |c, _| {
+                let status = StatusLine::new(c.model.visible(), c.cancelling);
+                assert_eq!(status.cache.as_deref(), Some("cached 10.2k (83%)"));
+                assert_eq!(status.output.as_deref(), Some("2.1k output tokens"));
+                assert!(status.network.unwrap().starts_with("No response progress"));
+            });
+            cx.update_window(window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                let compact = view.read(cx).compact;
+                assert_eq!(compact, width == 720.);
+                let bar = window.find("status-bar").bounds();
+                assert!(bar.origin.x >= px(0.) && bar.right() <= window.viewport_size().width);
+                // In-bounds boxes alone can miss activity squeezed to just an ellipsis.
+                let activity = window.find("status-activity").bounds().size.width;
+                assert_eq!(
+                    *activity_width.get_or_insert(activity),
+                    activity,
+                    "{width}px activity"
+                );
+                let mut segments = vec![
+                    "status-activity",
+                    "status-context",
+                    "status-context-label",
+                    "status-network",
+                ];
+                if compact {
+                    assert!(window.try_find("status-cache").is_none());
+                    assert!(window.try_find("status-output").is_none());
+                } else {
+                    segments.extend(["status-cache", "status-output"]);
+                    let cache = window.find("status-cache").bounds();
+                    let output = window.find("status-output").bounds();
+                    let widths = (cache.size.width, output.size.width);
+                    assert_eq!(
+                        *response_widths.get_or_insert(widths),
+                        widths,
+                        "{width}px response"
+                    );
+                    assert!(cache.right() <= output.origin.x);
+                }
+                for id in segments {
+                    let segment = window.find(id);
+                    let bounds = segment.bounds();
+                    assert!(
+                        segment.visible() && bounds.size.width > px(0.),
+                        "{width}px: {id}"
+                    );
+                    assert!(
+                        bounds.origin.x >= bar.origin.x && bounds.right() <= bar.right(),
+                        "{width}px: {id} {bounds:?} outside {bar:?}"
+                    );
+                    assert!(
+                        bounds.origin.y >= bar.origin.y && bounds.bottom() <= bar.bottom(),
+                        "{width}px: {id} {bounds:?} outside {bar:?}"
+                    );
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn cache_segment_tracks_responses_without_context_profile_or_role_leaks(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, _, controller, _) = setup(cx);
+        start(&controller, cx);
+        event(&controller, context_event("model", 12_300), cx);
+        assert_response(window, &controller, None, None, cx);
+        event(&controller, usage_event("model", 12_300, 10_200, 2_100), cx);
+        assert_response(
+            window,
+            &controller,
+            Some("cached 10.2k (83%)"),
+            Some("2.1k output tokens"),
+            cx,
+        );
+
+        event(
+            &controller,
+            E::ModelCallStarted {
+                turn_id: TURN,
+                call: 2,
+            },
+            cx,
+        );
+        event(&controller, usage_event("model", 20_000, 10_000, 3_000), cx);
+        assert_response(
+            window,
+            &controller,
+            Some("cached 10k (50%)"),
+            Some("3k output tokens"),
+            cx,
+        );
+        event(&controller, context_event("model", 41_000), cx);
+        assert_response(
+            window,
+            &controller,
+            Some("cached 10k (50%)"),
+            Some("3k output tokens"),
+            cx,
+        );
+
+        event(&controller, context_event("replacement", 5_000), cx);
+        assert_response(window, &controller, None, None, cx);
+        event(
+            &controller,
+            usage_event("replacement", 5_000, 5_000, 400),
+            cx,
+        );
+        assert_response(
+            window,
+            &controller,
+            Some("cached 5k (100%)"),
+            Some("400 output tokens"),
+            cx,
+        );
+        event(
+            &controller,
+            E::TurnCompleted {
+                turn_id: TURN,
+                message: Message::assistant("Done"),
+                attempt_id: None,
+            },
+            cx,
+        );
+        assert_response(
+            window,
+            &controller,
+            Some("cached 5k (100%)"),
+            Some("400 output tokens"),
+            cx,
+        );
+        event(
+            &controller,
+            E::ModeChanged {
+                mode: SessionMode::Plan,
+            },
+            cx,
+        );
+        assert_response(window, &controller, None, None, cx);
+    }
+}
+
 #[gpui_kit::test]
 fn restored_transcript_renders_and_enter_emits_submit(cx: &mut TestAppContext) {
     let (window, view, controller, mut receiver) = setup(cx);

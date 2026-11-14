@@ -1636,7 +1636,7 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
         engine
             .handle_command(
                 SessionCommand::Turn(crate::session::TurnCommand::StartFromPlan {
-                    handoff: handoff.clone(),
+                    handoff: Box::new(handoff.clone()),
                 }),
                 &events,
             )
@@ -1969,7 +1969,7 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
         engine
             .handle_command(
                 SessionCommand::Turn(crate::session::TurnCommand::StartFromPlan {
-                    handoff: handoff.clone(),
+                    handoff: Box::new(handoff.clone()),
                 }),
                 &events,
             )

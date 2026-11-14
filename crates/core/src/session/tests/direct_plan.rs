@@ -300,7 +300,7 @@ async fn direct_plan_preserves_loose_markdown_projection_and_explicit_handoffs_w
                     fresh
                         .handle_command(
                             SessionCommand::Turn(TurnCommand::StartFromPlan {
-                                handoff: handoff.clone(),
+                                handoff: Box::new(handoff.clone()),
                             }),
                             &events,
                         )

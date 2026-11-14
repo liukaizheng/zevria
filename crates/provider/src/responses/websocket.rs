@@ -271,7 +271,7 @@ pub(super) async fn run_model_request_inner(
             Ok(None) => continue,
             Err(error) => {
                 abandon_attempt(openai, state);
-                return Err(error.into());
+                return Err(error);
             }
         };
 
