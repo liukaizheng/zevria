@@ -90,6 +90,7 @@ fn pending_selection(views: &mut SessionViews) -> (String, Result) {
         panic!("Plan catalog request");
     };
     let context = ModelContextPolicy {
+        image_accounting: Default::default(),
         profile: ModelProfileRef::new("replacement-provider", "replacement-plan"),
         context_window_tokens: 10000,
         input_token_limit: 9000,
@@ -368,8 +369,10 @@ fn incomplete_or_invalid_committed_state_errors_instead_of_using_telemetry_or_de
         .restore_model_contexts([zevria_model::ContextTokenSnapshot {
             profile: ModelProfileRef::new("telemetry-only", "not-a-selection"),
             model_role: ModelRole::Plan,
-            projected_input_tokens: 123,
-            source: zevria_model::ContextTokenSource::ConservativeEstimate,
+            projected_input_tokens: Some(123),
+            known_input_tokens: 123,
+            unresolved_media: Default::default(),
+            source: zevria_model::ContextTokenSource::LocalEstimate,
             automatic_trigger: 8100,
             input_token_limit: 9000,
             context_window_tokens: 10000,

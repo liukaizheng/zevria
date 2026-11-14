@@ -459,13 +459,46 @@ impl ModelRequest<'_> {
 #[derive(Debug)]
 pub struct ModelInputTooLarge {
     source: anyhow::Error,
+    pre_execution: bool,
 }
 
 impl ModelInputTooLarge {
     pub fn new(source: impl Into<anyhow::Error>) -> Self {
         Self {
             source: source.into(),
+            pre_execution: false,
         }
+    }
+    /// Only adapters with definite pre-execution rejection evidence may use this.
+    /// A final rejection after an ambiguous earlier transmission is NOT safe.
+    pub fn pre_execution(source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            source: source.into(),
+            pre_execution: true,
+        }
+    }
+    pub fn safe_to_replay(error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<Self>()
+            .is_some_and(|error| error.pre_execution)
+    }
+}
+
+/// Transport/upload size is not a token window. Compaction is not an automatic cure.
+#[derive(Debug)]
+pub struct ModelRequestBodyTooLarge(pub anyhow::Error);
+impl fmt::Display for ModelRequestBodyTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "provider request body exceeds upload capacity: {}",
+            self.0
+        )
+    }
+}
+impl std::error::Error for ModelRequestBodyTooLarge {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
     }
 }
 
@@ -492,5 +525,9 @@ pub enum CompactResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputTokenCount {
     Exact(u64),
+    /// Provider-qualified estimate (e.g. Claude's documented count semantics).
+    Approximate(u64),
     Unsupported,
+    /// A temporary failure already observed for this turn; not a capability claim.
+    Suppressed,
 }

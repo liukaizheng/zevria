@@ -515,6 +515,7 @@ mod tests {
             models: std::collections::BTreeMap::from([(
                 "gpt-test".to_string(),
                 ModelConfig {
+                    image_accounting: Default::default(),
                     context_window_tokens: 272_000,
                     input_token_limit: None,
                     retained_user_tokens: 20_000,
@@ -567,6 +568,7 @@ mod tests {
         let input_token_limit = profile.input_token_limit;
         let retained_user_tokens = profile.retained_user_tokens;
         let context = || ModelContextPolicy {
+            image_accounting: Default::default(),
             profile: context_profile.clone(),
             context_window_tokens,
             input_token_limit,

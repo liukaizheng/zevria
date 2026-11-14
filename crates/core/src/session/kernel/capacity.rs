@@ -7,7 +7,7 @@ use crate::session::kernel::state::{RequestShapeFingerprint, request_shape_finge
 use sha2::{Digest as _, Sha256};
 use zevria_foundation::config::ModelContextPolicy;
 use zevria_foundation::policy::{ModelRole, TurnPolicy};
-use zevria_model::estimates::{estimate_model_input, estimate_model_request_item};
+use zevria_model::estimates::estimate_model_request_item;
 use zevria_model::request::{InputTokenCount, ModelInputIdentity, ModelRequest, ModelRequestItem};
 use zevria_model::telemetry::{ContextTokenSnapshot, ContextTokenSource};
 use zevria_session_api::event::{ProgressReporter, SessionEvent};
@@ -41,6 +41,7 @@ pub(in crate::session) fn prepared_request_shape(
     }
     hash.update(identity);
     hash.update(serde_json::to_vec(context).expect("profile serializes"));
+    hash.update(zevria_foundation::image_accounting::IMAGE_ACCOUNTING_VERSION.to_be_bytes());
     hash.update(tools);
     RequestShapeFingerprint(hash.finalize().into())
 }
@@ -118,7 +119,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .as_ref()
                 .and_then(TranscriptItem::model_request_item)
                 .map(estimate_model_request_item)
-                .map_or(0, |estimate| estimate.conservative_tokens),
+                .map_or(0, |estimate| estimate.estimated_tokens),
         )
     }
 
@@ -135,24 +136,29 @@ impl<P: ModelProvider> SessionEngine<P> {
             .saturating_add(self.desired_tool_declarations(policy).approximate_tokens())
     }
 
+    #[cfg(test)]
     pub(in crate::session) fn compactable_context_tokens(
         &self,
         policy: &TurnPolicy,
-    ) -> Result<u64, SessionReplayError> {
-        let profile = &self.context_policy(policy.model_role).profile;
+    ) -> anyhow::Result<u64> {
+        let context = self.context_policy(policy.model_role);
         let shape = self.request_shape(policy)?;
-        Ok(self
+        let estimate = match self
             .context
-            .compactable_tokens(&self.conversation, profile, shape))
-    }
-
-    pub(in crate::session) fn projected_context_tokens(
-        &self,
-        policy: &TurnPolicy,
-    ) -> Result<u64, SessionReplayError> {
-        Ok(self
-            .compactable_context_tokens(policy)?
-            .saturating_add(self.fixed_input_tokens(policy)))
+            .usage
+            .get(&context.profile)
+            .and_then(|tracker| tracker.compactable_estimate_for(shape))
+        {
+            Some(estimate) => estimate,
+            None => zevria_model::estimates::estimate_model_input_with_policy(
+                self.conversation.model_input(),
+                &context.profile,
+                &context.image_accounting,
+            )?,
+        };
+        estimate
+            .complete_tokens()
+            .ok_or_else(|| anyhow::anyhow!("incomplete accounting"))
     }
 
     pub(in crate::session) fn report_provider_usage(
@@ -168,13 +174,65 @@ impl<P: ModelProvider> SessionEngine<P> {
         Ok(())
     }
 
+    /// Publish next-input coverage after a durably accepted completed response.
+    /// Its total usage is a projection basis, never an exact next-input count.
+    pub(in crate::session) async fn publish_usage_projection(
+        &mut self,
+        policy: &TurnPolicy,
+        progress: &ProgressReporter,
+    ) -> Result<(), SessionReplayError> {
+        let context = self.context_policy(policy.model_role).clone();
+        let shape = self.request_shape(policy)?;
+        let Some(estimate) = self.context.projected_estimate(
+            &context.profile,
+            shape,
+            self.fixed_input_tokens(policy),
+        ) else {
+            return Ok(());
+        };
+        let snapshot = ContextTokenSnapshot {
+            profile: context.profile,
+            model_role: policy.model_role,
+            projected_input_tokens: estimate.complete_tokens(),
+            known_input_tokens: estimate.known_tokens(),
+            unresolved_media: estimate.unresolved_media,
+            source: if estimate.complete_tokens().is_some() {
+                ContextTokenSource::UsagePlusDelta
+            } else {
+                ContextTokenSource::IncompleteEstimate
+            },
+            automatic_trigger: self.compaction.trigger_tokens(policy.model_role),
+            input_token_limit: context.input_token_limit,
+            context_window_tokens: context.context_window_tokens,
+        };
+        if self.context.last_snapshots.get(&policy.model_role) != Some(&snapshot) {
+            self.context
+                .last_snapshots
+                .insert(policy.model_role, snapshot.clone());
+            let _ = progress
+                .events()
+                .send(SessionEvent::ContextUsageUpdated {
+                    turn_id: progress.turn().id,
+                    snapshot,
+                })
+                .await;
+        }
+        Ok(())
+    }
+
     pub(in crate::session) fn reestimate_context_usage(&mut self) {
-        let profiles = ModelRole::ALL.map(|role| self.context_policy(role).profile.clone());
+        let profiles = ModelRole::ALL.map(|role| self.context_policy(role).clone());
         self.context.reestimate(&self.conversation, profiles);
     }
 
     pub(in crate::session) fn append_committed_estimates(&mut self, range: std::ops::Range<usize>) {
-        if self.context.on_committed(&self.conversation.items()[range]) {
+        let provider = &self.provider;
+        if self
+            .context
+            .on_committed(&self.conversation.items()[range], |profile| {
+                provider.tool_append_preserves_prefix(profile)
+            })
+        {
             self.refresh_request_tools();
             self.invalidate_model_preview();
         }
@@ -182,7 +240,10 @@ impl<P: ModelProvider> SessionEngine<P> {
 
     #[cfg(feature = "test-support")]
     pub(in crate::session) fn append_context_estimates(&mut self, items: &[TranscriptItem]) {
-        if self.context.on_committed(items) {
+        let provider = &self.provider;
+        if self.context.on_committed(items, |profile| {
+            provider.tool_append_preserves_prefix(profile)
+        }) {
             self.refresh_request_tools();
             self.invalidate_model_preview();
         }
@@ -191,33 +252,37 @@ impl<P: ModelProvider> SessionEngine<P> {
     pub(in crate::session) fn local_context_candidates(
         &self,
         policy: &TurnPolicy,
-    ) -> anyhow::Result<(u64, u64, Option<u64>)> {
+    ) -> anyhow::Result<(
+        zevria_model::ContextTokenEstimate,
+        Option<zevria_model::ContextTokenEstimate>,
+    )> {
         let context = self.context_policy(policy.model_role);
-        // Preview the next policy's body reconciliation without committing it
-        // or calling a model. Its instruction set is counted as fixed overhead.
         let updates = self.reconcile_instruction_state(
             self.directive_state()?,
             policy,
             self.active_skills()?,
         )?;
+        let plan = self.request_plan(policy);
         let mut input = self.conversation.model_input();
         input.extend(updates.iter().map(ModelRequestItem::DeveloperInstruction));
-        let update_tokens = estimate_model_input(
-            updates
-                .iter()
-                .map(ModelRequestItem::DeveloperInstruction)
-                .collect(),
-        )
-        .conservative_tokens;
-        let identity = updates
-            .is_empty()
+        input.extend(
+            plan.tool_update
+                .as_ref()
+                .and_then(TranscriptItem::model_request_item),
+        );
+        let identity = (updates.is_empty() && plan.tool_update.is_none())
             .then(|| self.conversation.input_identity())
             .flatten();
-        let estimate = match self.provider.preflight_input_with_identity(
-            &context.profile,
-            &input,
-            identity,
-        )? {
+        let request = ModelRequest {
+            instructions: &plan.instructions,
+            tools: &plan.tools,
+            forbid_tool_calls: false,
+            input,
+            input_identity: identity,
+            model_role: policy.model_role,
+            allowed_tool_names: policy.allowed_tool_names.as_deref(),
+        };
+        let estimate = match self.provider.assess_request(context, &request)? {
             zevria_model::models::ReplayPreflight::Compatible(estimate) => estimate,
             zevria_model::models::ReplayPreflight::ConversionRequired { sources } => anyhow::bail!(
                 "destination {} cannot read opaque history from {}; use /model to select its source or confirm conversion, or start a fresh session",
@@ -229,15 +294,28 @@ impl<P: ModelProvider> SessionEngine<P> {
                     .join(", ")
             ),
         };
-        let shape = self.request_shape(policy)?;
-        let instructions = self.fixed_input_tokens(policy);
-        let payload = estimate.payload_tokens.saturating_add(instructions);
-        let conservative = estimate.conservative_tokens.saturating_add(instructions);
-        let usage = self
-            .context
-            .projected_tokens(&context.profile, shape, instructions)
-            .map(|tokens| tokens.saturating_add(update_tokens));
-        Ok((payload, conservative, usage))
+        let update_estimate = zevria_model::estimates::estimate_model_input_with_policy(
+            updates
+                .iter()
+                .map(ModelRequestItem::DeveloperInstruction)
+                .collect(),
+            &context.profile,
+            &context.image_accounting,
+        )?;
+        let usage = if plan.tool_update.is_some()
+            && !self.provider.tool_append_preserves_prefix(&context.profile)
+        {
+            None
+        } else {
+            self.context
+                .projected_estimate(
+                    &context.profile,
+                    plan.shape,
+                    self.fixed_input_tokens(policy),
+                )
+                .map(|estimate| estimate.saturating_add(update_estimate))
+        };
+        Ok((estimate, usage))
     }
 
     pub(in crate::session) async fn assess_current_request(
@@ -248,7 +326,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         force_exact_count: bool,
     ) -> anyhow::Result<ContextTokenSnapshot> {
         let context = self.context_policy(policy.model_role).clone();
-        let (payload, conservative, usage) = self.local_context_candidates(policy)?;
+        let (local, usage) = self.local_context_candidates(policy)?;
         let identity = self.logical_request_identity(policy)?;
         let pending_exact =
             self.context
@@ -258,8 +336,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         let input_limit = context.input_token_limit;
         let assessment = self.context.assess(
             CapacityCandidates {
-                payload,
-                conservative,
+                local,
                 usage,
                 exact: pending_exact,
             },
@@ -267,9 +344,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             input_limit,
         );
         let (mut projected_input_tokens, mut source) = (assessment.tokens, assessment.source);
+        let mut known_input_tokens = assessment.known_tokens;
+        let mut unresolved_media = assessment.unresolved_media;
         let unmeasured_images = self.context.needs_image_count(
             &context.profile,
-            self.conversation.has_images(),
+            local.image_count > 0 || !local.unresolved_media.is_empty(),
             usage.is_some(),
             false,
         );
@@ -294,18 +373,32 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .count_input_tokens(&mut self.provider, request, progress.turn())
                 .await
             {
-                Ok(InputTokenCount::Exact(tokens)) => {
-                    projected_input_tokens = tokens;
-                    source = ContextTokenSource::Exact;
+                Ok(count @ (InputTokenCount::Exact(_) | InputTokenCount::Approximate(_))) => {
+                    let (tokens, measurement_source) = match count {
+                        InputTokenCount::Exact(tokens) => (tokens, ContextTokenSource::Exact),
+                        InputTokenCount::Approximate(tokens) => {
+                            (tokens, ContextTokenSource::ProviderEstimate)
+                        }
+                        _ => unreachable!(),
+                    };
+                    projected_input_tokens = Some(tokens);
+                    known_input_tokens = tokens;
+                    unresolved_media = Default::default();
+                    source = measurement_source;
                 }
-                Ok(InputTokenCount::Unsupported) => {}
+                Ok(InputTokenCount::Unsupported) => {
+                    tracing::debug!(profile=%context.profile, count_endpoint="unsupported", "input counting unavailable; retaining local accounting");
+                }
+                Ok(InputTokenCount::Suppressed) => {
+                    tracing::debug!(profile=%context.profile, count_endpoint="temporary_failure_suppressed", "input counting suppressed for this turn");
+                }
                 Err(error) if progress.turn().is_cancelled() => return Err(error),
                 Err(error) => {
                     tracing::warn!(
                         profile = %context.profile,
                         role = policy.model_role.name(),
                         error = %error,
-                        "exact input-token counting failed; using the local fallback"
+                        "provider input-token counting failed; retaining local accounting (best effort if incomplete)"
                     );
                 }
             }
@@ -315,6 +408,8 @@ impl<P: ModelProvider> SessionEngine<P> {
             profile: context.profile,
             model_role: policy.model_role,
             projected_input_tokens,
+            known_input_tokens,
+            unresolved_media,
             source,
             automatic_trigger: trigger,
             input_token_limit: input_limit,
@@ -322,6 +417,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         };
         let changed = self.context.last_snapshots.get(&policy.model_role) != Some(&snapshot);
         if changed {
+            tracing::debug!(profile=%snapshot.profile,role=policy.model_role.name(),
+                source=source.label(),projected_input_tokens=?snapshot.projected_input_tokens,
+                known_input_tokens=snapshot.known_input_tokens,unresolved_media=?snapshot.unresolved_media,
+                image_policy=context.image_accounting.label(),image_policy_version=context.image_accounting.version(),
+                "prepared next-input assessment (not last response usage)");
             self.context
                 .last_snapshots
                 .insert(policy.model_role, snapshot.clone());
@@ -340,14 +440,20 @@ impl<P: ModelProvider> SessionEngine<P> {
         snapshot: &ContextTokenSnapshot,
         compaction: CapacityCompactionState,
     ) -> String {
-        let measurement = if snapshot.source.is_estimated() {
+        let measurement = if snapshot.projected_input_tokens.is_none() {
+            format!(
+                "has estimated known portion: {}; {} (best effort)",
+                snapshot.known_input_tokens,
+                snapshot.unresolved_media.description()
+            )
+        } else if snapshot.source.is_estimated() {
             format!(
                 "is estimated at {} input tokens ({})",
-                snapshot.projected_input_tokens,
+                snapshot.known_input_tokens,
                 snapshot.source.label()
             )
         } else {
-            format!("requires {} input tokens", snapshot.projected_input_tokens)
+            format!("requires {} input tokens", snapshot.known_input_tokens)
         };
         let compaction = match compaction {
             CapacityCompactionState::Completed => {

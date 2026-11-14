@@ -61,11 +61,17 @@ fn late_build_descriptor_reconciles_activity_compaction_and_keeps_telemetry_sepa
                     snapshot: ContextTokenSnapshot {
                         profile: ModelProfileRef::new("runtime", role.name()),
                         model_role: role,
-                        projected_input_tokens: if role == ModelRole::Builder {
+                        projected_input_tokens: Some(if role == ModelRole::Builder {
+                            7500
+                        } else {
+                            123
+                        }),
+                        known_input_tokens: if role == ModelRole::Builder {
                             7500
                         } else {
                             123
                         },
+                        unresolved_media: Default::default(),
                         source: ContextTokenSource::Exact,
                         automatic_trigger: 40000,
                         input_token_limit: 50000,

@@ -5,6 +5,7 @@ use zevria_foundation::{ModelContextPolicy, ModelProfileRef, ReasoningLevel as L
 
 fn context(index: usize) -> ModelContextPolicy {
     ModelContextPolicy {
+        image_accounting: Default::default(),
         profile: ModelProfileRef::new("provider/with:separator", format!("model/{index}")),
         context_window_tokens: 10000,
         input_token_limit: 9000,

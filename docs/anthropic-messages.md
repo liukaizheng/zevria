@@ -235,6 +235,18 @@ Counting sends only `model`, `system`, `tools`, `tool_choice`, `messages`, and
 `request_timeout_seconds`. HTTP 404/405/501 cache an unsupported result for that
 runtime; subsequent counts do not keep hitting an absent endpoint.
 
+Counts retain Claude's published estimate qualification rather than claiming a
+mathematical exact count. Local preflight walks Messages-format direct images and
+nested tool-result images, not Responses shapes; base64 PDFs are explicitly
+unmeasured. Model-level `image_accounting` accepts the same local-only schema as
+Responses, validated for the Messages protocol. Unknown models/geometries use
+[explicit best effort](image-input.md#model-aware-context-accounting), not an
+image constant. No accounting setting changes transmitted detail or payloads.
+Bare HTTP 413 has a distinct upload-size diagnostic. Only a confirmed first
+pre-execution prompt-token rejection can authorize the shared one-shot ordinary
+round checkpoint/retry; counting-stage errors and terminal partial responses do
+not authorize replay.
+
 - `end_turn`, `stop_sequence`, `tool_use`: successful completion.
 - `max_tokens`, `model_context_window_exceeded`: terminal; inspect
   `max_output_tokens` and context limits. Partial output is discarded.

@@ -210,6 +210,9 @@ pub(super) fn classify_input_size(size_rejection: bool, error: anyhow::Error) ->
     }
 }
 
+/// A token-window diagnostic is not proof that a completion never started:
+/// terminal responses also carry `/error/code` or `/incomplete_details/reason`.
+/// Use `validation_input_size_rejection` separately before authorizing replay.
 pub(super) fn structured_input_size(value: &serde_json::Value) -> bool {
     input_size_code(
         value
@@ -220,6 +223,50 @@ pub(super) fn structured_input_size(value: &serde_json::Value) -> bool {
             .pointer("/incomplete_details/reason")
             .and_then(serde_json::Value::as_str),
     )
+}
+
+/// Validation-rejection evidence only. A non-success HTTP status does not
+/// establish this: gateways can return already-accepted terminal responses under
+/// 400/413/422. Response-envelope fields (including empty output/usage) veto the
+/// proof even when a recognized validation error is also present. This is scoped
+/// to protocol fields; never recursively guess evidence from diagnostic prose.
+pub(super) fn validation_input_size_rejection(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object
+        .get("type")
+        .is_some_and(|kind| kind.as_str() != Some("error"))
+    {
+        return false;
+    }
+    if [
+        "id",
+        "response_id",
+        "object",
+        "status",
+        "output",
+        "usage",
+        "incomplete_details",
+        "response",
+        "created_at",
+        "completed_at",
+    ]
+    .iter()
+    .any(|key| object.contains_key(*key))
+    {
+        return false;
+    }
+    let Some(error) = object.get("error").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    input_size_code(error.get("code").and_then(serde_json::Value::as_str))
+        && error.get("type").is_none_or(|kind| {
+            matches!(
+                kind.as_str(),
+                Some("invalid_request_error" | "context_length_exceeded" | "context_too_large")
+            )
+        })
 }
 
 pub(super) fn done_failure_error(

@@ -47,6 +47,7 @@ struct Turn {
 #[derive(Clone)]
 struct HistoryProjection {
     turns: Vec<Turn>,
+    accounting_media: zevria_model::ContextTokenEstimate,
     native: bool,
     portable: bool,
     generic: bool,
@@ -55,6 +56,9 @@ struct HistoryProjection {
 #[derive(Default)]
 struct Projection {
     turns: Vec<Turn>,
+    accounting: bool,
+    image_policy: Option<zevria_foundation::image_accounting::ImageAccountingPolicy>,
+    accounting_media: zevria_model::ContextTokenEstimate,
     directives: Vec<Value>,
     calls: ToolCorrelations<String>,
     reserved: HashSet<String>,
@@ -184,6 +188,15 @@ impl Projection {
         }
         Ok(())
     }
+    fn image(&mut self, image: &Image) -> anyhow::Result<Value> {
+        let value = image_input_with_accounting(image, self.accounting)?;
+        if let Some(policy) = &self.image_policy {
+            self.accounting_media = self.accounting_media.saturating_add(
+                zevria_model::media_accounting::canonical_image(image, policy),
+            );
+        }
+        Ok(value)
+    }
     fn message(&mut self, message: &Message, system_messages: bool) -> anyhow::Result<()> {
         match message {
             Message::System { .. } => anyhow::bail!("raw system messages must be typed directives"),
@@ -214,10 +227,10 @@ impl Projection {
                     match block {
                         UserContent::Text(text) if !text.text.is_empty() => blocks.push(json!({"type":"text", "text":text.text})),
                         UserContent::Text(_) => {},
-                        UserContent::Image(image) => blocks.push(image_input(image)?),
+                        UserContent::Image(image) => blocks.push(self.image(image)?),
                         UserContent::Document(document) => blocks.push(match &document.data {
                             DocumentData::Text(text) => json!({"type":"text", "text":text}),
-                            DocumentData::File(DocumentSourceKind::Base64(data)) if document.media_type.as_ref().is_none_or(|media| media.to_mime_type() == "application/pdf") => json!({"type":"document", "source":{"type":"base64", "media_type":"application/pdf", "data":data}}),
+                            DocumentData::File(DocumentSourceKind::Base64(data)) if document.media_type.as_ref().is_none_or(|media| media.to_mime_type() == "application/pdf") => json!({"type":"document", "source":{"type":"base64", "media_type":"application/pdf", "data":if self.accounting { "" } else { data.as_str() }}}),
                             _ => anyhow::bail!("unsupported Anthropic document source (expected base64 PDF)"),
                         }),
                         UserContent::ToolResult(result) => {
@@ -225,7 +238,7 @@ impl Projection {
                             let content = result.content.iter().map(|block| match block {
                                 ToolResultContent::Text(text) => Ok(json!({"type":"text", "text":text.text})),
                                 ToolResultContent::Json { value } => Ok(json!({"type":"text", "text":value.to_string()})),
-                                ToolResultContent::Image(image) => image_input(image),
+                                ToolResultContent::Image(image) => self.image(image),
                             }).collect::<anyhow::Result<Vec<_>>>()?;
                             blocks.push(json!({"type":"tool_result", "tool_use_id":id, "content":content, "is_error":result.is_error}));
                         }
@@ -243,7 +256,7 @@ fn tool_use(call: &rig_core::message::ToolCall, id: String) -> Value {
     let input = call.function.arguments_value();
     json!({"type":"tool_use", "id":id, "name":call.function.name, "input":if call.function.invalid_arguments.is_none() && input.is_object() { input } else { json!({}) }})
 }
-fn image_input(image: &Image) -> anyhow::Result<Value> {
+fn image_input_with_accounting(image: &Image, accounting: bool) -> anyhow::Result<Value> {
     let DocumentSourceKind::Base64(data) = &image.data else {
         anyhow::bail!("Anthropic images require base64 data");
     };
@@ -259,7 +272,9 @@ fn image_input(image: &Image) -> anyhow::Result<Value> {
         ),
         "unsupported Anthropic image media type {media}"
     );
-    Ok(json!({"type":"image", "source":{"type":"base64", "media_type":media, "data":data}}))
+    Ok(
+        json!({"type":"image", "source":{"type":"base64", "media_type":media, "data":if accounting { "" } else { data.as_str() }}}),
+    )
 }
 pub fn is_thinking(block: &Value) -> bool {
     matches!(
@@ -331,8 +346,22 @@ fn project_history(
     target: &ModelProfileRef,
     compatibility: &crate::Compatibility,
 ) -> anyhow::Result<HistoryProjection> {
+    project_history_accounting(input, target, compatibility, None, 0, Default::default())
+}
+fn project_history_accounting(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+    policy: Option<&zevria_foundation::image_accounting::ImageAccountingPolicy>,
+    measured_prefix: usize,
+    prefix_media: zevria_model::ContextTokenEstimate,
+) -> anyhow::Result<HistoryProjection> {
     let system_messages = compatibility.system_messages;
-    let mut projection = Projection::default();
+    let mut projection = Projection {
+        accounting: policy.is_some(),
+        accounting_media: prefix_media,
+        ..Default::default()
+    };
     for replay in input.iter().filter_map(|item| item.replay_ref()) {
         if replay
             .native_items_for(target, ReplayProtocol::Anthropic)?
@@ -346,7 +375,8 @@ fn project_history(
             );
         }
     }
-    for item in input {
+    for (index, item) in input.iter().enumerate() {
+        projection.image_policy = policy.filter(|_| index >= measured_prefix).cloned();
         match item {
             ModelRequestItem::AdditionalTools(tools) => {
                 tools.validate()?;
@@ -389,6 +419,7 @@ fn project_history(
     }
     projection.flush_directives(system_messages)?;
     Ok(HistoryProjection {
+        accounting_media: projection.accounting_media,
         turns: projection.turns,
         native: projection.native,
         portable: projection.portable,
@@ -642,7 +673,13 @@ pub fn preflight_with_compatibility(
     target: &ModelProfileRef,
     compatibility: &crate::Compatibility,
 ) -> anyhow::Result<ReplayPreflight> {
-    prepare_history(input, target, compatibility, None).map(|(assessment, _)| assessment)
+    assess_history_with_policy(
+        input,
+        target,
+        compatibility,
+        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+        None,
+    )
 }
 
 /// Preserve management conversion/error precedence while retaining the same
@@ -652,6 +689,21 @@ pub fn prepare_history(
     target: &ModelProfileRef,
     compatibility: &crate::Compatibility,
     identity: Option<&zevria_model::ModelInputIdentity>,
+) -> anyhow::Result<(ReplayPreflight, Option<ValidatedHistory>)> {
+    prepare_history_with_policy(
+        input,
+        target,
+        compatibility,
+        identity,
+        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+    )
+}
+pub fn prepare_history_with_policy(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+    identity: Option<&zevria_model::ModelInputIdentity>,
+    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
 ) -> anyhow::Result<(ReplayPreflight, Option<ValidatedHistory>)> {
     let mut sources = BTreeSet::new();
     for item in input {
@@ -674,20 +726,59 @@ pub fn prepare_history(
             None,
         ));
     }
-    // Management preflight assesses stored history, not a completion body:
-    // an idle transcript can be empty or end in a completed assistant turn.
+    let assessment = assess_history_with_policy(input, target, compatibility, policy, None)?;
     let history = ValidatedHistory::new(input, target, compatibility, identity)?;
-    let projected = bind_projection(
-        history.projection.clone(),
-        &json!([]),
-        &json!([]),
-        false,
-        false,
-    )?;
-    let mut tokens =
-        zevria_model::compaction::estimate_responses_input_tokens(&projected.messages, 0);
+    Ok((assessment, Some(history)))
+}
+
+/// Pure management/admission projection. Images/PDF bytes are substituted BEFORE
+/// projection allocation; actual transport history is prepared only at dispatch.
+/// Trusted prefix accounting avoids re-hashing/re-parsing historical attachments.
+pub fn assess_history_with_policy(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+    measured_prefix: Option<(usize, zevria_model::ContextTokenEstimate)>,
+) -> anyhow::Result<ReplayPreflight> {
+    policy.validate(true)?;
+    let mut sources = BTreeSet::new();
+    for item in input {
+        if let Some(replay) = item.replay_ref() {
+            replay.portable_projection()?;
+        }
+        if let ModelRequestItem::ReplayOnly(replay) = item
+            && replay
+                .native_items_for(target, ReplayProtocol::Anthropic)?
+                .is_none()
+        {
+            sources.insert(replay.source_profile.clone());
+        }
+    }
+    if !sources.is_empty() {
+        return Ok(ReplayPreflight::ConversionRequired {
+            sources: sources.into_iter().collect(),
+        });
+    }
+    let (prefix, media) = measured_prefix.unwrap_or_default();
+    let projection =
+        project_history_accounting(input, target, compatibility, Some(policy), prefix, media)?;
+    let media = projection.accounting_media;
+    let projected = bind_projection(projection, &json!([]), &json!([]), false, false)?;
+    let mut estimate = zevria_model::media_accounting::anthropic_input(
+        &projected.messages,
+        0,
+        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+    );
+    let files = estimate.unresolved_media.files;
+    let opaque_items = estimate.unresolved_media.opaque_items;
+    estimate.media_tokens = media.media_tokens;
+    estimate.image_count = media.image_count;
+    estimate.max_image_edge = media.max_image_edge;
+    estimate.unresolved_media = media.unresolved_media;
+    estimate.unresolved_media.files = files;
+    estimate.unresolved_media.opaque_items = opaque_items;
     if !(compatibility.inline_tools && compatibility.system_messages) {
-        // Folded declarations disappear from messages, not from capacity.
         for item in input {
             if let ModelRequestItem::AdditionalTools(tools) = item {
                 let rendered = tools
@@ -696,16 +787,16 @@ pub fn prepare_history(
                         crate::body::tool_definition(tool, compatibility.eager_tool_input_streaming)
                     })
                     .collect::<Vec<_>>();
-                tokens =
-                    tokens.saturating_add(zevria_model::compaction::approximate_tokens_from_bytes(
-                        serde_json::to_vec(&rendered)?.len(),
-                    ));
+                let tokens = zevria_model::compaction::approximate_tokens_from_bytes(
+                    serde_json::to_vec(&rendered)?.len(),
+                );
+                estimate = estimate
+                    .saturating_add(zevria_model::ContextTokenEstimate::new(tokens, tokens));
             }
         }
     }
-    Ok((
-        ReplayPreflight::Compatible(zevria_model::ContextTokenEstimate::new(tokens, tokens)),
-        Some(history),
+    Ok(ReplayPreflight::Compatible(
+        estimate.enforce_request_constraints(policy),
     ))
 }
 

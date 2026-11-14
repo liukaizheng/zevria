@@ -6,6 +6,7 @@ use std::{fmt, time::Duration};
 pub enum ErrorKind {
     Retryable(&'static str),
     InputTooLarge,
+    RequestBodyTooLarge,
     ThinkingBindingMismatch,
     Terminal,
 }
@@ -14,6 +15,8 @@ pub struct ApiError {
     pub kind: ErrorKind,
     pub retry_after: Option<Duration>,
     pub message: String,
+    /// A structured token-window rejection before a completion was accepted.
+    pub pre_execution: bool,
     source: Option<anyhow::Error>,
 }
 impl ApiError {
@@ -22,6 +25,7 @@ impl ApiError {
             kind,
             retry_after: None,
             message: message.into(),
+            pre_execution: false,
             source: None,
         }
     }
@@ -59,8 +63,22 @@ pub fn classify(
     let lower = message.to_ascii_lowercase();
     let category = value["error"]["type"].as_str().unwrap_or_default();
     let code = value["error"]["code"].as_str().unwrap_or(category);
-    let kind = if status == 413 || (status == 400 && lower.contains("prompt is too long")) {
+    let non_size = matches!(
+        category,
+        "authentication_error" | "permission_error" | "rate_limit_error"
+    ) || matches!(
+        code,
+        "invalid_api_key" | "insufficient_quota" | "max_output_tokens" | "max_tokens"
+    );
+    let token_rejection = !non_size
+        && (matches!(code, "context_length_exceeded" | "context_too_large")
+            || (status == 400
+                && matches!(category, "" | "invalid_request_error")
+                && lower.starts_with("prompt is too long")));
+    let kind = if token_rejection {
         ErrorKind::InputTooLarge
+    } else if status == 413 {
+        ErrorKind::RequestBodyTooLarge
     } else if should_retry == Some(false) {
         ErrorKind::Terminal
     } else if status == 400 && lower.contains("bound to a different conversation") {
@@ -89,6 +107,12 @@ pub fn classify(
                 .unwrap_or_default()
         ),
     );
+    error.pre_execution = kind == ErrorKind::InputTooLarge
+        && status == 400
+        && matches!(
+            category,
+            "" | "invalid_request_error" | "context_length_exceeded" | "context_too_large"
+        );
     error.retry_after = if matches!(kind, ErrorKind::Retryable(_)) {
         retry_after
     } else {
@@ -100,6 +124,31 @@ pub fn classify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_window_evidence_distinguishes_http_rejection_from_stream_and_non_size_errors() {
+        let body = r#"{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"prompt is too long"}}"#;
+        let http = classify(400, body, None, None, None);
+        assert_eq!(http.kind, ErrorKind::InputTooLarge);
+        assert!(http.pre_execution);
+        let stream = classify(0, body, None, None, None);
+        assert_eq!(stream.kind, ErrorKind::InputTooLarge);
+        assert!(!stream.pre_execution);
+        for category in [
+            "authentication_error",
+            "permission_error",
+            "rate_limit_error",
+        ] {
+            let body =
+                serde_json::json!({"error":{"type":category,"message":"prompt is too long"}})
+                    .to_string();
+            assert_ne!(
+                classify(400, &body, None, None, None).kind,
+                ErrorKind::InputTooLarge
+            );
+        }
+        assert!(!classify(413, "body", None, None, None).pre_execution);
+    }
 
     #[test]
     fn statuses_overrides_and_hints_preserve_size_precedence() {
@@ -129,7 +178,11 @@ mod tests {
             for retry in [Some(true), Some(false)] {
                 assert_eq!(
                     classify(status, body, None, delay, retry).kind,
-                    ErrorKind::InputTooLarge
+                    if status == 413 {
+                        ErrorKind::RequestBodyTooLarge
+                    } else {
+                        ErrorKind::InputTooLarge
+                    }
                 );
             }
         }

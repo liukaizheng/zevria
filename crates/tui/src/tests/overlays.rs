@@ -1297,7 +1297,9 @@ fn projected_and_last_response_usage_render_separately_and_survive_failure() {
             snapshot: zevria_model::ContextTokenSnapshot {
                 profile: zevria_foundation::ModelProfileRef::new("test", "model"),
                 model_role: zevria_foundation::ModelRole::Build,
-                projected_input_tokens: 17_800,
+                projected_input_tokens: Some(17_800),
+                known_input_tokens: 17_800,
+                unresolved_media: Default::default(),
                 source: zevria_model::ContextTokenSource::UsagePlusDelta,
                 automatic_trigger: 90_000,
                 input_token_limit: 100_000,
@@ -1305,7 +1307,7 @@ fn projected_and_last_response_usage_render_separately_and_survive_failure() {
             },
         },
     );
-    let summary = "next 17.8k/100.0k usage+delta · last total 13.7k";
+    let summary = "next ~17.8k/100.0k estimated usage+delta · last total 13.7k";
     // Leave room for the active engine-local turn suffix as well as telemetry.
     assert!(rendered_text(&mut app, 100, 8).contains(summary));
 
@@ -1316,7 +1318,8 @@ fn projected_and_last_response_usage_render_separately_and_survive_failure() {
             error: "later failure".to_string(),
         },
     );
-    assert!(rendered_text(&mut app, 80, 8).contains(summary));
+    assert!(rendered_text(&mut app, 100, 8).contains(summary));
+    assert!(rendered_text(&mut app, 80, 8).contains("next ~17.8k/100.0k"));
 }
 
 #[test]
@@ -1425,7 +1428,9 @@ fn authoritative_profile_changes_never_mix_old_context_or_stale_turns() {
         snapshot: ContextTokenSnapshot {
             profile: first_profile,
             model_role: ModelRole::Build,
-            projected_input_tokens: 20_000,
+            projected_input_tokens: Some(20_000),
+            known_input_tokens: 20_000,
+            unresolved_media: Default::default(),
             source: ContextTokenSource::Exact,
             automatic_trigger: 80_000,
             input_token_limit: 100_000,
@@ -1460,7 +1465,9 @@ fn authoritative_profile_changes_never_mix_old_context_or_stale_turns() {
         snapshot: ContextTokenSnapshot {
             profile: second_profile.clone(),
             model_role: ModelRole::Build,
-            projected_input_tokens: 24_000,
+            projected_input_tokens: Some(24_000),
+            known_input_tokens: 24_000,
+            unresolved_media: Default::default(),
             source: ContextTokenSource::UsagePlusDelta,
             automatic_trigger: 72_000,
             input_token_limit: 90_000,
@@ -1492,7 +1499,7 @@ fn authoritative_profile_changes_never_mix_old_context_or_stale_turns() {
             .context
             .expect("context survives stale event")
             .projected_input_tokens,
-        24_000
+        Some(24_000)
     );
 }
 

@@ -10,6 +10,9 @@ mod anthropic_tests;
 pub mod compaction;
 pub mod config;
 pub mod estimates;
+pub mod media_accounting;
+#[cfg(test)]
+mod media_accounting_tests;
 pub mod models;
 pub mod openai;
 pub mod provider_replay;

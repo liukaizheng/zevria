@@ -5,49 +5,48 @@ use std::collections::HashMap;
 use zevria_foundation::config::ModelProfileRef;
 use zevria_foundation::policy::{ModelRole, TurnId};
 use zevria_model::compaction::ContextTokenEstimate;
-use zevria_model::estimates::{
-    estimate_model_input, estimate_model_input_for_profile, estimate_model_request_item,
-    estimate_model_request_item_for_profile,
-};
 use zevria_model::request::{InputTokenCount, ModelRequest, ModelRequestItem};
 use zevria_model::telemetry::{ContextTokenSnapshot, ContextTokenSource};
 use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::turn::TurnContext;
 use zevria_transcript::transcript::{Conversation, TranscriptItem};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(in crate::session) struct ContextUsageTracker {
     pub(in crate::session) last_provider_total: Option<u64>,
     pub(in crate::session) last_provider_fixed_overhead: u64,
     pub(in crate::session) last_request_shape: Option<RequestShapeFingerprint>,
     pub(in crate::session) appended_estimate: ContextTokenEstimate,
+    pub(in crate::session) image_policy: zevria_foundation::image_accounting::ImageAccountingPolicy,
     /// Model-visible images not covered by this profile's latest usage baseline.
     pub(in crate::session) unmeasured_images: bool,
 }
 
 impl ContextUsageTracker {
-    pub(in crate::session) fn compactable_tokens_for(
-        self,
+    pub(in crate::session) fn compactable_estimate_for(
+        &self,
         shape: RequestShapeFingerprint,
-    ) -> Option<u64> {
+    ) -> Option<ContextTokenEstimate> {
         self.last_provider_total
             .filter(|_| self.last_request_shape == Some(shape))
             .map(|total| {
-                total
-                    .saturating_sub(self.last_provider_fixed_overhead)
-                    .saturating_add(self.appended_estimate.payload_tokens)
+                let base = total.saturating_sub(self.last_provider_fixed_overhead);
+                let mut estimate = self.appended_estimate;
+                estimate.payload_tokens = base.saturating_add(estimate.payload_tokens);
+                estimate.estimated_tokens =
+                    base.saturating_add(self.appended_estimate.payload_tokens);
+                estimate
             })
     }
-
-    pub(in crate::session) fn projected_tokens_for(
-        self,
+    pub(in crate::session) fn projected_estimate_for(
+        &self,
         shape: RequestShapeFingerprint,
         fixed_overhead: u64,
-    ) -> Option<u64> {
-        self.compactable_tokens_for(shape)
-            .map(|tokens| tokens.saturating_add(fixed_overhead))
+    ) -> Option<ContextTokenEstimate> {
+        self.compactable_estimate_for(shape).map(|estimate| {
+            estimate.saturating_add(ContextTokenEstimate::new(fixed_overhead, fixed_overhead))
+        })
     }
-
     pub(in crate::session) fn provider_reported(
         &mut self,
         total_tokens: u64,
@@ -75,6 +74,7 @@ pub(in crate::session) enum TurnInputCountState {
         role: ModelRole,
         identity: RequestShapeFingerprint,
         tokens: u64,
+        source: ContextTokenSource,
     },
     Failed {
         turn_id: TurnId,
@@ -93,18 +93,19 @@ impl TurnInputCountState {
         turn_id: TurnId,
         role: ModelRole,
         identity: RequestShapeFingerprint,
-    ) -> Option<u64> {
+    ) -> Option<(u64, ContextTokenSource)> {
         let prepared = match *self {
             Self::Prepared {
                 turn_id: counted_turn,
                 role: counted_role,
                 identity: counted_identity,
                 tokens,
+                source,
             } if counted_turn == turn_id
                 && counted_role == role
                 && counted_identity == identity =>
             {
-                Some(tokens)
+                Some((tokens, source))
             }
             _ => None,
         };
@@ -149,6 +150,11 @@ impl ContextAccounting {
         self.input_count.invalidate_prepared();
     }
     pub(in crate::session) fn reset_for_model_update(&mut self, role: ModelRole) {
+        tracing::debug!(
+            role = role.name(),
+            reason = "model_or_accounting_policy_change",
+            "invalidating context baselines and prepared counts"
+        );
         self.usage.clear();
         self.last_snapshots.clear();
         self.count_failures.clear();
@@ -176,14 +182,15 @@ impl CapacityBand {
     }
 }
 pub(in crate::session) struct CapacityCandidates {
-    pub(in crate::session) payload: u64,
-    pub(in crate::session) conservative: u64,
-    pub(in crate::session) usage: Option<u64>,
-    pub(in crate::session) exact: Option<u64>,
+    pub(in crate::session) local: ContextTokenEstimate,
+    pub(in crate::session) usage: Option<ContextTokenEstimate>,
+    pub(in crate::session) exact: Option<(u64, ContextTokenSource)>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(in crate::session) struct CapacityAssessment {
-    pub(in crate::session) tokens: u64,
+    pub(in crate::session) tokens: Option<u64>,
+    pub(in crate::session) known_tokens: u64,
+    pub(in crate::session) unresolved_media: zevria_model::media_accounting::UnresolvedMedia,
     pub(in crate::session) source: ContextTokenSource,
     pub(in crate::session) band: CapacityBand,
     pub(in crate::session) measurements_disagree: bool,
@@ -194,28 +201,49 @@ impl CapacityAssessment {
         trigger: u64,
         limit: u64,
     ) -> Self {
-        let (tokens, source) = if let Some(tokens) = c.exact {
-            (tokens, ContextTokenSource::Exact)
-        } else if let Some(tokens) = c.usage {
-            (tokens, ContextTokenSource::UsagePlusDelta)
+        let (estimate, mut source) = if let Some((tokens, source)) = c.exact {
+            (ContextTokenEstimate::new(tokens, tokens), source)
+        } else if let Some(estimate) = c.usage {
+            (estimate, ContextTokenSource::UsagePlusDelta)
         } else {
-            (c.conservative, ContextTokenSource::ConservativeEstimate)
+            (c.local, ContextTokenSource::LocalEstimate)
         };
-        let payload_band = CapacityBand::for_tokens(c.payload, trigger, limit);
-        let measurements_disagree = [Some(c.conservative), c.usage]
-            .into_iter()
-            .flatten()
-            .any(|tokens| CapacityBand::for_tokens(tokens, trigger, limit) != payload_band);
+        let tokens = estimate.complete_tokens();
+        if tokens.is_none() {
+            source = ContextTokenSource::IncompleteEstimate;
+        }
+        let known_tokens = estimate.known_tokens();
+        let payload_band = CapacityBand::for_tokens(c.local.known_payload_tokens(), trigger, limit);
+        let measurements_disagree = [
+            Some(c.local.known_tokens()),
+            c.usage.map(|estimate| estimate.known_tokens()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|tokens| CapacityBand::for_tokens(tokens, trigger, limit) != payload_band);
+        let band = match tokens {
+            Some(tokens) => CapacityBand::for_tokens(tokens, trigger, limit),
+            // A large known portion can spend one compaction attempt, but cannot
+            // reject best effort or be presented as the unknown total.
+            None if known_tokens >= trigger => CapacityBand::AtTrigger,
+            None => CapacityBand::Fits,
+        };
         Self {
             tokens,
+            known_tokens,
+            unresolved_media: estimate.unresolved_media,
             source,
-            band: CapacityBand::for_tokens(tokens, trigger, limit),
+            band,
             measurements_disagree,
         }
     }
     pub(in crate::session) fn needs_exact(&self) -> bool {
-        self.source != ContextTokenSource::Exact
-            && (self.band != CapacityBand::Fits || self.measurements_disagree)
+        !matches!(
+            self.source,
+            ContextTokenSource::Exact | ContextTokenSource::ProviderEstimate
+        ) && (self.tokens.is_none()
+            || self.band != CapacityBand::Fits
+            || self.measurements_disagree)
     }
 }
 
@@ -226,7 +254,7 @@ pub(in crate::session) async fn count_input_tokens_for_turn<P: ModelProvider>(
     turn: &TurnContext,
 ) -> anyhow::Result<InputTokenCount> {
     if *state == (TurnInputCountState::Failed { turn_id: turn.id }) {
-        return Ok(InputTokenCount::Unsupported);
+        return Ok(InputTokenCount::Suppressed);
     }
     // A new measurement supersedes any incompatible prepared request/outcome.
     *state = TurnInputCountState::Empty;
@@ -248,31 +276,15 @@ pub(in crate::session) async fn count_input_tokens_for_turn<P: ModelProvider>(
 }
 
 impl ContextAccounting {
-    pub(in crate::session) fn compactable_tokens(
-        &self,
-        conversation: &Conversation,
-        profile: &ModelProfileRef,
-        shape: RequestShapeFingerprint,
-    ) -> u64 {
-        self.usage
-            .get(profile)
-            .and_then(|tracker| tracker.compactable_tokens_for(shape))
-            .unwrap_or_else(|| {
-                estimate_model_input_for_profile(conversation.model_input(), profile)
-                    .unwrap_or_else(|_| estimate_model_input(conversation.model_input()))
-                    .conservative_tokens
-            })
-    }
-
-    pub(in crate::session) fn projected_tokens(
+    pub(in crate::session) fn projected_estimate(
         &self,
         profile: &ModelProfileRef,
         shape: RequestShapeFingerprint,
         fixed: u64,
-    ) -> Option<u64> {
+    ) -> Option<ContextTokenEstimate> {
         self.usage
             .get(profile)
-            .and_then(|tracker| tracker.projected_tokens_for(shape, fixed))
+            .and_then(|tracker| tracker.projected_estimate_for(shape, fixed))
     }
 
     pub(in crate::session) fn on_provider_usage(
@@ -291,22 +303,31 @@ impl ContextAccounting {
     pub(in crate::session) fn reestimate(
         &mut self,
         conversation: &Conversation,
-        profiles: impl IntoIterator<Item = ModelProfileRef>,
+        profiles: impl IntoIterator<Item = zevria_foundation::ModelContextPolicy>,
     ) {
         #[cfg(feature = "test-support")]
         crate::session::pipeline_probe::record(|counts| counts.accounting_passes += 1);
         let mut usage = HashMap::new();
-        for profile in profiles {
+        for context in profiles {
+            let profile = context.profile;
             if usage.contains_key(&profile) {
                 continue;
             }
-            let estimate = estimate_model_input_for_profile(conversation.model_input(), &profile)
-                .unwrap_or_else(|_| estimate_model_input(conversation.model_input()));
+            let estimate = zevria_model::estimates::estimate_model_input_with_policy(
+                conversation.model_input(),
+                &profile,
+                &context.image_accounting,
+            );
+            let Ok(estimate) = estimate else {
+                continue;
+            };
             usage.insert(
                 profile,
                 ContextUsageTracker {
                     appended_estimate: estimate,
-                    unmeasured_images: conversation.has_images(),
+                    image_policy: context.image_accounting,
+                    unmeasured_images: estimate.image_count > 0
+                        || !estimate.unresolved_media.is_empty(),
                     ..ContextUsageTracker::default()
                 },
             );
@@ -317,8 +338,12 @@ impl ContextAccounting {
     pub(in crate::session) fn on_history_replaced(
         &mut self,
         conversation: &Conversation,
-        profiles: impl IntoIterator<Item = ModelProfileRef>,
+        profiles: impl IntoIterator<Item = zevria_foundation::ModelContextPolicy>,
     ) {
+        tracing::debug!(
+            reason = "history_replacement_or_compaction",
+            "invalidating context baselines and prepared counts"
+        );
         self.invalidate_prepared_count();
         self.reestimate(conversation, profiles);
         self.recompute_arming(conversation.items());
@@ -359,7 +384,11 @@ impl ContextAccounting {
     }
 
     /// Account borrowed committed items, never detached transcript copies.
-    pub(in crate::session) fn on_committed(&mut self, items: &[TranscriptItem]) -> bool {
+    pub(in crate::session) fn on_committed(
+        &mut self,
+        items: &[TranscriptItem],
+        tool_append_preserves_prefix: impl Fn(&ModelProfileRef) -> bool,
+    ) -> bool {
         let changed = items.iter().any(|item| {
             matches!(
                 item,
@@ -379,19 +408,37 @@ impl ContextAccounting {
             .filter_map(TranscriptItem::model_request_item)
             .filter_map(ModelRequestItem::message_ref)
             .any(zevria_content::prompt::message_contains_images);
+        let tools_changed = items
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::ToolDeclarations(_)));
         for (profile, tracker) in &mut self.usage {
+            if tools_changed && !tool_append_preserves_prefix(profile) {
+                tracing::debug!(%profile,reason="folded_tool_prefix_change","invalidating measured context baseline");
+                tracker.last_request_shape = None;
+            }
             let estimate = items
                 .iter()
                 .filter_map(TranscriptItem::model_request_item)
                 .map(|item| {
-                    estimate_model_request_item_for_profile(item, profile)
-                        .unwrap_or_else(|_| estimate_model_request_item(item))
+                    zevria_model::estimates::estimate_model_request_item_with_policy(
+                        item,
+                        profile,
+                        &tracker.image_policy,
+                    )
                 })
-                .fold(
-                    ContextTokenEstimate::default(),
-                    ContextTokenEstimate::saturating_add,
-                );
-            tracker.appended_tokens(estimate);
+                .try_fold(ContextTokenEstimate::default(), |total, estimate| {
+                    estimate.map(|estimate| total.saturating_add(estimate))
+                });
+            match estimate {
+                Ok(estimate) => {
+                    tracker.unmeasured_images |=
+                        estimate.image_count > 0 || !estimate.unresolved_media.is_empty();
+                    tracker.appended_tokens(estimate);
+                }
+                Err(_) => {
+                    tracker.last_request_shape = None;
+                }
+            }
             tracker.unmeasured_images |= added_images;
         }
         changed

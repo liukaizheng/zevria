@@ -297,6 +297,24 @@ pub fn preflight_with_compatibility(
     tool_options: crate::tools::ToolRendererOptions,
     additional_tools: bool,
 ) -> anyhow::Result<ReplayPreflight> {
+    preflight_with_policy(
+        input,
+        target,
+        developer_messages,
+        tool_options,
+        additional_tools,
+        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+    )
+}
+pub fn preflight_with_policy(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    developer_messages: bool,
+    tool_options: crate::tools::ToolRendererOptions,
+    additional_tools: bool,
+    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+) -> anyhow::Result<ReplayPreflight> {
+    policy.validate(false)?;
     let sources = input
         .iter()
         .filter_map(|item| match item {
@@ -327,23 +345,22 @@ pub fn preflight_with_compatibility(
         tool_options,
         additional_tools,
     )?;
-    let mut tokens = zevria_model::compaction::estimate_responses_input_tokens(&projected, 0);
+    let mut estimate = zevria_model::media_accounting::responses_input(&projected, 0, policy);
     if !additional_tools {
         // Projection omits inline items in fold mode, but their declarations
         // still consume capacity in the request's top-level tools.
         for item in input {
             if let ModelRequestItem::AdditionalTools(tools) = item {
                 let rendered = crate::tools::render(tools, tool_options)?;
-                tokens =
-                    tokens.saturating_add(zevria_model::compaction::approximate_tokens_from_bytes(
-                        serde_json::to_vec(&rendered)?.len(),
-                    ));
+                let tokens = zevria_model::compaction::approximate_tokens_from_bytes(
+                    serde_json::to_vec(&rendered)?.len(),
+                );
+                estimate = estimate
+                    .saturating_add(zevria_model::ContextTokenEstimate::new(tokens, tokens));
             }
         }
     }
-    Ok(ReplayPreflight::Compatible(
-        zevria_model::ContextTokenEstimate::new(tokens, tokens),
-    ))
+    Ok(ReplayPreflight::Compatible(estimate))
 }
 
 /// Capacity validation retains correlation context, not old projected payloads.
@@ -355,6 +372,8 @@ pub struct PreflightCache {
 struct PreflightPrefix {
     target: ModelProfileRef,
     compatibility: [bool; 3],
+    policy: zevria_foundation::image_accounting::ImageAccountingPolicy,
+    policy_version: u32,
     count: usize,
     digest: [u8; 32],
     projection: InputProjection,
@@ -372,6 +391,27 @@ impl PreflightCache {
         tool_options: crate::tools::ToolRendererOptions,
         additional_tools: bool,
     ) -> anyhow::Result<ReplayPreflight> {
+        self.assess_with_policy(
+            input,
+            identity,
+            target,
+            developer_messages,
+            tool_options,
+            additional_tools,
+            &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+        )
+    }
+    pub fn assess_with_policy(
+        &mut self,
+        input: &[ModelRequestItem<'_>],
+        identity: &zevria_model::ModelInputIdentity,
+        target: &ModelProfileRef,
+        developer_messages: bool,
+        tool_options: crate::tools::ToolRendererOptions,
+        additional_tools: bool,
+        policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+    ) -> anyhow::Result<ReplayPreflight> {
+        policy.validate(false)?;
         anyhow::ensure!(
             identity.len() == input.len(),
             "preflight identity length mismatch"
@@ -383,6 +423,8 @@ impl PreflightCache {
         ];
         let cached = self.prefix.take().filter(|prefix| {
             prefix.target == *target
+                && prefix.policy == *policy
+                && prefix.policy_version == policy.version()
                 && prefix.compatibility == compatibility
                 && identity.prefix(prefix.count) == Some(prefix.digest)
         });
@@ -396,6 +438,8 @@ impl PreflightCache {
             }
             _ => PreflightPrefix {
                 target: target.clone(),
+                policy: policy.clone(),
+                policy_version: policy.version(),
                 compatibility,
                 count: 0,
                 digest: [0; 32],
@@ -429,7 +473,9 @@ impl PreflightCache {
             tool_options,
             additional_tools,
         )?;
-        prefix.estimate.append(&prefix.projection.take_input());
+        prefix
+            .estimate
+            .append_with_policy(&prefix.projection.take_input(), policy);
         if !additional_tools {
             for item in suffix {
                 if let ModelRequestItem::AdditionalTools(tools) = item {
@@ -443,14 +489,14 @@ impl PreflightCache {
         }
         prefix.count = identity.len();
         prefix.digest = identity.digest();
-        let tokens = prefix
+        let tokens = prefix.folded_tools;
+        let estimate = prefix
             .estimate
-            .tokens(0)
-            .saturating_add(prefix.folded_tools);
+            .estimate(0)
+            .saturating_add(zevria_model::ContextTokenEstimate::new(tokens, tokens))
+            .enforce_request_constraints(policy);
         self.prefix = Some(prefix);
-        Ok(ReplayPreflight::Compatible(
-            zevria_model::ContextTokenEstimate::new(tokens, tokens),
-        ))
+        Ok(ReplayPreflight::Compatible(estimate))
     }
 }
 

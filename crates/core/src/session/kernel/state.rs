@@ -67,7 +67,12 @@ mod policy_fingerprint_tests {
         let shape = request_shape_fingerprint(&base);
         let mut usage = ContextUsageTracker::default();
         usage.provider_reported(100, 10, shape);
-        assert_eq!(usage.compactable_tokens_for(shape), Some(90));
+        assert_eq!(
+            usage
+                .compactable_estimate_for(shape)
+                .and_then(|estimate| estimate.complete_tokens()),
+            Some(90)
+        );
         let bound = base.clone().with_workspace(WorkspaceBinding {
             root: "/child".into(),
             startup: "/startup".into(),
@@ -80,7 +85,7 @@ mod policy_fingerprint_tests {
         ] {
             let changed_shape = request_shape_fingerprint(&changed);
             assert_ne!(shape, changed_shape);
-            assert_eq!(usage.compactable_tokens_for(changed_shape), None);
+            assert_eq!(usage.compactable_estimate_for(changed_shape), None);
         }
         for workspace in [
             WorkspaceBinding {

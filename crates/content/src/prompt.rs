@@ -25,8 +25,6 @@ pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 pub const MAX_PROMPT_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_IMAGE_DIMENSION: u32 = 16_384;
 pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
-/// Approximate fallback, not a conservative upper bound or a model tokenizer.
-pub const ESTIMATED_IMAGE_TOKENS: usize = 1_600;
 const MAX_BASE64_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,7 +134,9 @@ impl PromptImage {
         let bytes = STANDARD
             .decode(data)
             .map_err(|_| PromptError("invalid image base64"))?;
-        Self::from_encoded(mime, bytes)
+        let image = Self::from_encoded(mime, bytes)?;
+        crate::image_facts::remember_validated(&image, data);
+        Ok(image)
     }
 
     /// Detect the raster format from file contents, then validate without transcoding.
@@ -238,10 +238,14 @@ impl PromptImage {
         )
     }
     pub fn to_user_content(&self) -> UserContent {
-        UserContent::image_base64(self.base64(), Some(self.0.raster.media_type()), None)
+        let data = self.base64();
+        crate::image_facts::remember_validated(self, &data);
+        UserContent::image_base64(data, Some(self.0.raster.media_type()), None)
     }
     pub fn to_tool_result_content(&self) -> ToolResultContent {
-        ToolResultContent::image_base64(self.base64(), Some(self.0.raster.media_type()), None)
+        let data = self.base64();
+        crate::image_facts::remember_validated(self, &data);
+        ToolResultContent::image_base64(data, Some(self.0.raster.media_type()), None)
     }
     pub fn from_user_content(content: &UserContent) -> Result<Self, PromptError> {
         let UserContent::Image(image) = content else {

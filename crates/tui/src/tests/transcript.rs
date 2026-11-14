@@ -4390,7 +4390,9 @@ fn explore_panes_inherit_profiles_and_override_nominal_build_turns() {
             snapshot: ContextTokenSnapshot {
                 profile: ModelProfileRef::new("runtime-explore", "explore-v2"),
                 model_role: ModelRole::Explore,
-                projected_input_tokens: 7_500,
+                projected_input_tokens: Some(7_500),
+                known_input_tokens: 7_500,
+                unresolved_media: Default::default(),
                 source: ContextTokenSource::Exact,
                 automatic_trigger: 40_000,
                 input_token_limit: 50_000,
@@ -4402,7 +4404,7 @@ fn explore_panes_inherit_profiles_and_override_nominal_build_turns() {
     let rendered = rendered_views_text(&mut views, 360, 12);
     assert!(rendered.contains("explore · inspect routing · starting"));
     assert!(rendered.contains("runtime-explore/explore-v2"));
-    assert!(rendered.contains("next 7.5k/50.0k exact"));
+    assert!(rendered.contains("next 7.5k/50.0k provider count"));
     assert!(!rendered.contains("provider-build/build-model"));
 
     let restored_id = SubtaskId::new("restored-profiled-child");

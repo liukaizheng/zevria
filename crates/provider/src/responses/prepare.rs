@@ -25,6 +25,38 @@ pub(crate) struct PreparedRequest {
     pub(super) replay_source: ReplaySource,
 }
 
+/// Pure declaration rendering shared by transport and local capacity assessment.
+/// Folding replaces declarations in place, rather than counting every revision.
+pub(crate) fn rendered_tools(
+    request: &ModelRequest<'_>,
+    compatibility: &crate::config::ResponsesCompatibilityConfig,
+    web_search: &zevria_responses::WebSearchConfig,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let options = ToolRendererOptions {
+        strict_tools: compatibility.strict_tools,
+    };
+    let declarations = zevria_model::ToolDeclarations::new(request.tools.to_vec())?;
+    let declarations = if compatibility.additional_tools {
+        declarations
+    } else {
+        declarations.fold(request.input.iter().filter_map(|item| match item {
+            zevria_model::ModelRequestItem::AdditionalTools(tools) => Some(*tools),
+            _ => None,
+        }))
+    };
+    let mut tools = zevria_responses::tools::render(&declarations, options)?;
+    if web_search.enabled
+        && request.allowed_tool_names.is_none_or(|names| {
+            names
+                .iter()
+                .any(|name| name == zevria_foundation::WEB_SEARCH_TOOL_NAME)
+        })
+    {
+        tools.push(serde_json::to_value(web_search.tool()?)?);
+    }
+    Ok(tools)
+}
+
 pub(crate) async fn prepare_turn_request(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
@@ -32,7 +64,6 @@ pub(crate) async fn prepare_turn_request(
     let tool_options = ToolRendererOptions {
         strict_tools: openai.compatibility.strict_tools,
     };
-    let declarations = zevria_model::ToolDeclarations::new(model_request.tools.to_vec())?;
     let additions = model_request
         .input
         .iter()
@@ -41,22 +72,7 @@ pub(crate) async fn prepare_turn_request(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let folded = if openai.compatibility.additional_tools {
-        declarations
-    } else {
-        declarations.fold(additions.iter().copied())
-    };
-    let mut tools = zevria_responses::tools::render(&folded, tool_options)?;
-
-    let search_advertised = openai.web_search.enabled
-        && model_request.allowed_tool_names.is_none_or(|names| {
-            names
-                .iter()
-                .any(|name| name == zevria_foundation::WEB_SEARCH_TOOL_NAME)
-        });
-    if search_advertised {
-        tools.push(serde_json::to_value(openai.web_search.tool()?)?);
-    }
+    let tools = rendered_tools(model_request, &openai.compatibility, &openai.web_search)?;
 
     let mut request_properties = openai
         .prepared_responses_parameters()

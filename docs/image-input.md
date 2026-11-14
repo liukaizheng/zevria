@@ -40,15 +40,82 @@ Submitted images render as bounded labels, for example `[image 1 · png · 1440�
 
 Zevria never silently resizes, crops, reduces quality, or substitutes an animation's first frame. GIF frames are validated within a bounded work/allocation budget. The pinned decoder APIs do not offer the required pre-frame guarantees for animated WebP/APNG, so those are explicitly rejected. Native clipboard APIs may allocate a decoded bitmap before Zevria can inspect its dimensions; application-side checks cannot prevent that backend allocation.
 
-Images not yet covered by compatible provider-reported usage prefer exact
-endpoint input-token counting when configured and available. Once usage covers
-those images, ordinary tool rounds and text-only appends reuse it plus local
-deltas; adding images or losing the compatible baseline counts again. Near-limit,
-near-trigger, disagreement and forced-recheck rules still count measured images.
-The local fallback adds **approximately 1,600 tokens per image**, plus text and
-protocol overhead—not the base64 string length. This is not an upper bound or a
-model-specific tokenizer. Large images can cost more. Count provenance, capacity
-failures, unsupported count endpoints, and model/provider errors remain visible.
+## Model-aware context accounting
+
+Encoded raster/PDF bytes are **never prose tokens**. Accounting recognizes direct
+images, image tool results, Responses tool-output arrays, Messages nested
+`tool_result` blocks, and supported native replay. Image-looking text and arbitrary
+tool JSON remain literal content. Binary PDF processing is unmeasured locally;
+there is no PDF tokenizer or encoded-byte allowance. Unknown provider-native
+processing remains an unmeasured opaque provider item; its keys cannot invent
+images or turn an unknown encoded blob into prose tokens.
+
+Images not covered by compatible completed-response usage prefer provider input
+counting. Once usage covers them, same-mode text/tool appends retain that baseline
+and add only the suffix. Cached input is already part of input usage, never an
+extra context charge. The last response's usage and the **next input projection**
+are different quantities. History edits, compaction, incompatible request/profile
+changes, and accounting-policy changes invalidate measurements. Resume derives
+local facts again; it does not invent a durable measured baseline from old usage.
+
+There is no universal per-image allowance. Each `models.jsonc` model can set a
+**local-only** `image_accounting` policy, for either protocol:
+
+```jsonc
+"image_accounting": { "rule": "auto" } // default
+// Explicitly keep an unmapped model unresolved:
+// "image_accounting": { "rule": "unresolved" }
+// Only after verifying that this gateway alias uses this exact documented rule:
+// "image_accounting": { "rule": "preset", "model": "gpt-4.1-mini-2025-04-14" }
+```
+
+Automatic lookup requires both an exact allowlisted model identity and an official
+HTTPS endpoint. A gateway label, compatible protocol, or similar model name is not
+evidence of equivalent processing. Presets/rule version 1 are pinned in
+`crates/foundation/src/image_accounting.rs`, with provider-source provenance and
+golden tests. Unsupported identities/details remain unknown. Verified tile-model
+`auto` uses the documented high-detail sizing rule; verified patch presets map
+low/high/auto according to their own model table, not another family's defaults.
+The Anthropic renderer sends no detail preference, so Rig detail never changes
+its local calculation.
+
+Expert overrides can select `openai_patch`, `openai_tile`, or `anthropic_patch`.
+Patch parameters include patch size, resizing edge/budget, rational multiplier,
+and optional low/original-detail rules; tile parameters include base/tile costs,
+tile size, maximum/short edge, and effective auto detail. Anthropic parameters
+include patch size, resolution/patch limits, and the whole-request many-image
+threshold/dimension constraint. Invalid, zero, excessive, or protocol-incompatible
+parameters are rejected. These parameters affect **accounting only**: they never
+resize images, change transmitted detail, insert instructions, or alter prompt
+cache/continuation identity. Intrinsic facts are policy-independent; numerical
+caches include the policy and rule version. Each duplicate occurrence is charged.
+Image facts reuse validated attachments or bounded header parsing; URLs/file IDs
+are not fetched to discover dimensions.
+
+Local text/envelope estimates remain approximate even with complete media
+coverage. Provider counts take precedence (Claude qualifies its counts as
+estimates). HTTP 404/405/501 cache endpoint unsupported status; temporary counting
+failures suppress retries for the turn, not the provider's capability forever.
+
+When image costs remain unresolved after counting is unavailable, Zevria uses
+**best effort**: it shows `estimated known portion: N; 3 unmeasured images`, not a
+fabricated total or percentage, and permits a bounded ordinary completion. This
+can exceed the configured **local input-token budget**, even if the provider
+accepts it. A large known portion can spend one compaction attempt. Known complete
+over-limit requests, invalid/unsupported content, persistence/replay failures, and
+cancellation are not bypassed.
+
+A confirmed **pre-execution token-window rejection** can spend the pending model
+round's one remaining compaction/retry allowance. Admission/pre-dispatch
+compaction spends the same allowance; changing the request fingerprint does not
+replenish it. Completed local tool batches are not rerun, failed partial calls
+never execute, and attempt evidence remains display-only. A second rejection,
+spent/disarmed budget, unavailable/failed summary, or uncertain upstream effects
+stops recovery. A bare HTTP 413 is an upload/body-size failure, not proof of token
+overflow; auth/quota/output limits and possibly executed failed/incomplete
+responses cannot trigger this replay. Synthetic summary calls and existing
+bounded transport retries are separate from the one ordinary completion retry,
+so recovery may involve more than two wire transmissions.
 
 ## Model image reads (`read_image`)
 
@@ -85,9 +152,9 @@ request-fewer-images diagnostic; an individual result is not partially kept.
 This is a per-response budget, not a cap on all images accumulated in a session.
 Image results participate in the same context accounting as pasted images:
 unmeasured images prefer exact endpoint counts when available, compatible
-provider usage covers existing images, and the local fallback estimates roughly
-1,600 tokens per image plus text/protocol overhead. Reading a file again adds a
-new image occurrence and consumes context again.
+provider usage covers existing images, and local fallback uses the destination's
+verified image policy or explicit incomplete-accounting best effort. Reading a
+file again adds a new image occurrence and consumes context again.
 
 **Read image bytes persist as plaintext base64 in session history**, like pasted
 images, and are included in later model requests and restored on resume. There

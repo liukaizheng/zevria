@@ -226,6 +226,14 @@ impl ProviderConfig {
                         .input_token_limit
                         .unwrap_or(model.context_window_tokens),
                     retained_user_tokens: model.retained_user_tokens,
+                    image_accounting: model
+                        .image_accounting
+                        .resolve(
+                            key,
+                            official_image_endpoint(&config.base_url, "api.openai.com"),
+                            false,
+                        )
+                        .expect("validated accounting policy"),
                     reasoning_levels: model.reasoning_levels.clone(),
                 })
                 .collect(),
@@ -383,12 +391,26 @@ impl NetworkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
+    #[serde(default = "automatic_image_accounting")]
+    pub image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy,
     pub context_window_tokens: u64,
     #[serde(default)]
     pub input_token_limit: Option<u64>,
     pub retained_user_tokens: u64,
     pub reasoning_levels: Vec<ReasoningLevel>,
     pub reasoning_summary_level: ReasoningSummaryLevel,
+}
+
+fn automatic_image_accounting() -> zevria_foundation::image_accounting::ImageAccountingPolicy {
+    zevria_foundation::image_accounting::ImageAccountingPolicy::Auto
+}
+
+pub(super) fn official_image_endpoint(url: &str, host: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some(host)
+            && url.port_or_known_default() == Some(443)
+    })
 }
 
 impl ModelConfig {
@@ -398,6 +420,7 @@ impl ModelConfig {
         model: &str,
         auto_trigger_percent: u64,
     ) -> anyhow::Result<()> {
+        self.image_accounting.validate(false)?;
         let prefix = format!("providers.{provider}.models.{model}");
         anyhow::ensure!(
             !self.reasoning_levels.is_empty(),
@@ -699,6 +722,7 @@ impl fmt::Debug for ProviderEndpoint {
 /// Fully owned runtime profile selected by one or more model roles.
 #[derive(Debug, Clone)]
 pub struct ResolvedModelProfile {
+    pub image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy,
     pub profile: ModelProfileRef,
     pub protocol: ProfileProtocol,
     pub context_window_tokens: u64,
@@ -714,6 +738,7 @@ impl ResolvedModelProfile {
             context_window_tokens: self.context_window_tokens,
             input_token_limit: self.input_token_limit,
             retained_user_tokens: self.retained_user_tokens,
+            image_accounting: self.image_accounting.clone(),
         }
     }
 }
@@ -881,8 +906,47 @@ mod tests {
         ModelRouting::resolve(&providers, modes, percent)
     }
 
+    #[test]
+    fn image_policy_resolution_requires_verified_identity_origin_or_explicit_override() {
+        use zevria_foundation::image_accounting::ImageAccountingPolicy;
+        let id = "gpt-4.1-mini-2025-04-14";
+        let mut endpoint = provider("https://api.openai.com/v1", "unused");
+        let mut entry = model(100_000);
+        entry.image_accounting = ImageAccountingPolicy::Auto;
+        endpoint.models = BTreeMap::from([(id.to_string(), entry)]);
+        let resolved = ProviderConfig::Responses(endpoint.clone())
+            .resolved_profiles("arbitrary-provider-label");
+        assert!(matches!(
+            resolved[0].image_accounting,
+            ImageAccountingPolicy::OpenaiPatch { .. }
+        ));
+        endpoint.base_url = "https://compatible.invalid/v1".into();
+        assert_eq!(
+            ProviderConfig::Responses(endpoint.clone()).resolved_profiles("openai")[0]
+                .image_accounting,
+            ImageAccountingPolicy::Unresolved
+        );
+        endpoint.models.get_mut(id).unwrap().image_accounting =
+            ImageAccountingPolicy::Preset { model: id.into() };
+        assert!(endpoint.validate("gateway", 90).is_ok());
+        assert!(matches!(
+            ProviderConfig::Responses(endpoint.clone()).resolved_profiles("gateway")[0]
+                .image_accounting,
+            ImageAccountingPolicy::OpenaiPatch { .. }
+        ));
+        endpoint.models.get_mut(id).unwrap().image_accounting = ImageAccountingPolicy::Preset {
+            model: "claude-opus-4-6".into(),
+        };
+        assert!(endpoint.validate("gateway", 90).is_err());
+        endpoint.models.get_mut(id).unwrap().image_accounting = ImageAccountingPolicy::Preset {
+            model: "gpt-5.1-codex-max".into(),
+        };
+        assert!(endpoint.validate("gateway", 90).is_err());
+    }
+
     fn model(window: u64) -> ModelConfig {
         ModelConfig {
+            image_accounting: Default::default(),
             context_window_tokens: window,
             input_token_limit: None,
             retained_user_tokens: window / 10,

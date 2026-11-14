@@ -148,7 +148,7 @@ async fn headers_streaming_usage_counting_and_local_compaction() {
     );
     assert_eq!(
         provider.count_input_tokens(request(&user)).await.unwrap(),
-        InputTokenCount::Exact(123)
+        InputTokenCount::Approximate(123)
     );
     assert_eq!(
         provider.compact(request(&user)).await.unwrap(),
@@ -231,7 +231,7 @@ async fn terminal_statuses_stops_and_prompt_capacity_are_not_retried() {
             json!({"error":{"message":"prompt is too long"}}).to_string(),
             true,
         ),
-        ("413 Too Large", String::new(), true),
+        ("413 Too Large", String::new(), false),
         (
             "200 OK",
             response(vec![json!({"type":"text","text":"partial"})], "refusal"),
@@ -256,6 +256,11 @@ async fn terminal_statuses_stops_and_prompt_capacity_are_not_retried() {
             .await
             .unwrap_err();
         assert_eq!(error.is::<ModelInputTooLarge>(), too_large, "{error:?}");
+        assert_eq!(ModelInputTooLarge::safe_to_replay(&error), too_large);
+        assert_eq!(
+            error.is::<zevria_model::ModelRequestBodyTooLarge>(),
+            status.starts_with("413")
+        );
         server.await.unwrap();
     }
 }

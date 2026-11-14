@@ -42,6 +42,8 @@ impl fmt::Debug for AnthropicProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnthropicModelConfig {
+    #[serde(default = "automatic_image_accounting")]
+    pub image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy,
     pub context_window_tokens: u64,
     #[serde(default)]
     pub input_token_limit: Option<u64>,
@@ -61,6 +63,7 @@ impl AnthropicModelConfig {
         })
     }
     pub(crate) fn validate(&self, provider: &str, key: &str, percent: u64) -> anyhow::Result<()> {
+        self.image_accounting.validate(true)?;
         let prefix = format!("providers.{provider}.models.{key}");
         anyhow::ensure!(
             self.max_output_tokens > 0 && self.max_output_tokens < self.context_window_tokens,
@@ -78,6 +81,7 @@ impl AnthropicModelConfig {
             "{prefix}.input_token_limit may not exceed context_window_tokens - max_output_tokens"
         );
         ModelConfig {
+            image_accounting: Default::default(),
             context_window_tokens: self.context_window_tokens,
             input_token_limit: Some(self.effective_input_limit()),
             retained_user_tokens: self.retained_user_tokens,
@@ -206,6 +210,14 @@ impl AnthropicProviderConfig {
                 context_window_tokens: model.context_window_tokens,
                 input_token_limit: model.effective_input_limit(),
                 retained_user_tokens: model.retained_user_tokens,
+                image_accounting: model
+                    .image_accounting
+                    .resolve(
+                        key,
+                        official_image_endpoint(&self.base_url, "api.anthropic.com"),
+                        true,
+                    )
+                    .expect("validated accounting policy"),
                 reasoning_levels: model.reasoning_levels.clone(),
             })
             .collect()

@@ -280,7 +280,7 @@ impl ProviderRouter {
                 )?;
             }
             ProfileProtocol::Anthropic { endpoint, .. } => {
-                return Ok(self.slots[index]
+                let prepared = self.slots[index]
                     .anthropic_history
                     .lock()
                     .map_err(|_| anyhow::anyhow!("Anthropic history cache lock poisoned"))?
@@ -289,8 +289,16 @@ impl ProviderRouter {
                         request.input_identity,
                         &profile.profile,
                         &endpoint.compatibility,
-                    )?
-                    .history);
+                    )?;
+                anyhow::ensure!(
+                    matches!(
+                        prepared.assessment,
+                        zevria_model::models::ReplayPreflight::Compatible(_)
+                    ),
+                    "cannot send opaque history to profile {}: conversion required",
+                    profile.profile
+                );
+                return Ok(prepared.history);
             }
         }
         Ok(None)
@@ -439,7 +447,7 @@ impl ModelProvider for ProviderRouter {
         let index = self.profile_slot(target)?;
         match &self.slots[index].profile.protocol {
             ProfileProtocol::Responses { endpoint, .. } => {
-                zevria_responses::replay::preflight_with_compatibility(
+                zevria_responses::replay::preflight_with_policy(
                     input,
                     target,
                     endpoint.compatibility.developer_messages,
@@ -447,14 +455,20 @@ impl ModelProvider for ProviderRouter {
                         strict_tools: endpoint.compatibility.strict_tools,
                     },
                     endpoint.compatibility.additional_tools,
+                    &self.slots[index].profile.image_accounting,
                 )
             }
             ProfileProtocol::Anthropic { endpoint, .. } => Ok(self.slots[index]
                 .anthropic_history
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Anthropic history cache lock poisoned"))?
-                .prepare(input, None, target, &endpoint.compatibility)?
-                .assessment),
+                .assess(
+                    input,
+                    None,
+                    target,
+                    &endpoint.compatibility,
+                    &self.slots[index].profile.image_accounting,
+                )?),
         }
     }
 
@@ -473,13 +487,18 @@ impl ModelProvider for ProviderRouter {
                 .anthropic_history
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Anthropic history cache lock poisoned"))?
-                .prepare(input, Some(identity), target, &endpoint.compatibility)?
-                .assessment),
+                .assess(
+                    input,
+                    Some(identity),
+                    target,
+                    &endpoint.compatibility,
+                    &slot.profile.image_accounting,
+                )?),
             ProfileProtocol::Responses { endpoint, .. } => slot
                 .responses_preflight
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Responses preflight cache lock poisoned"))?
-                .assess(
+                .assess_with_policy(
                     input,
                     identity,
                     target,
@@ -488,8 +507,135 @@ impl ModelProvider for ProviderRouter {
                         strict_tools: endpoint.compatibility.strict_tools,
                     },
                     endpoint.compatibility.additional_tools,
+                    &slot.profile.image_accounting,
                 ),
         }
+    }
+
+    fn tool_append_preserves_prefix(&self, target: &zevria_foundation::ModelProfileRef) -> bool {
+        let Ok(index) = self.profile_slot(target) else {
+            return false;
+        };
+        match &self.slots[index].profile.protocol {
+            ProfileProtocol::Responses { endpoint, .. } => endpoint.compatibility.additional_tools,
+            ProfileProtocol::Anthropic { endpoint, .. } => {
+                endpoint.compatibility.inline_tools && endpoint.compatibility.system_messages
+            }
+        }
+    }
+
+    fn assess_request(
+        &self,
+        context: &zevria_foundation::ModelContextPolicy,
+        request: &ModelRequest<'_>,
+    ) -> anyhow::Result<zevria_model::models::ReplayPreflight> {
+        let slot = &self.slots[self.profile_slot(&context.profile)?];
+        anyhow::ensure!(
+            context.image_accounting == slot.profile.image_accounting,
+            "accounting policy differs from resolved destination"
+        );
+        let assessment = self.preflight_input_with_identity(
+            &context.profile,
+            &request.input,
+            request.input_identity,
+        )?;
+        let zevria_model::models::ReplayPreflight::Compatible(mut estimate) = assessment else {
+            return Ok(assessment);
+        };
+        estimate.validate_media_constraints()?;
+        let additions = request
+            .input
+            .iter()
+            .filter_map(|item| match item {
+                zevria_model::ModelRequestItem::AdditionalTools(tools) => Some(*tools),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (instructions, tool_tokens, folded_tokens) = match &slot.profile.protocol {
+            ProfileProtocol::Responses { endpoint, .. } => {
+                let options = zevria_responses::tools::ToolRendererOptions {
+                    strict_tools: endpoint.compatibility.strict_tools,
+                };
+                let tools = crate::responses::rendered_tools(
+                    request,
+                    &endpoint.compatibility,
+                    &endpoint.web_search,
+                )?;
+                let mut folded = 0u64;
+                if !endpoint.compatibility.additional_tools {
+                    for tools in &additions {
+                        folded = folded.saturating_add(
+                            zevria_model::compaction::approximate_tokens_from_bytes(
+                                serde_json::to_vec(&zevria_responses::tools::render(
+                                    tools, options,
+                                )?)?
+                                .len(),
+                            ),
+                        );
+                    }
+                }
+                (
+                    zevria_model::compaction::approximate_tokens(request.instructions),
+                    if tools.is_empty() {
+                        0
+                    } else {
+                        zevria_model::compaction::approximate_tokens_from_bytes(
+                            serde_json::to_vec(&tools)?.len(),
+                        )
+                    },
+                    folded,
+                )
+            }
+            ProfileProtocol::Anthropic { endpoint, .. } => {
+                let tools =
+                    zevria_anthropic::body::rendered_tools(request, &endpoint.compatibility)?;
+                let mut folded = 0u64;
+                if !(endpoint.compatibility.inline_tools && endpoint.compatibility.system_messages)
+                {
+                    for tools in &additions {
+                        let tools = tools
+                            .iter()
+                            .map(|tool| {
+                                zevria_anthropic::body::tool_definition(
+                                    tool,
+                                    endpoint.compatibility.eager_tool_input_streaming,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        folded = folded.saturating_add(
+                            zevria_model::compaction::approximate_tokens_from_bytes(
+                                serde_json::to_vec(&tools)?.len(),
+                            ),
+                        );
+                    }
+                }
+                (
+                    zevria_model::compaction::approximate_tokens_from_bytes(
+                        serde_json::to_vec(&zevria_anthropic::body::rendered_system(
+                            request.instructions,
+                        ))?
+                        .len(),
+                    ),
+                    if tools.is_null() {
+                        0
+                    } else {
+                        zevria_model::compaction::approximate_tokens_from_bytes(
+                            serde_json::to_vec(&tools)?.len(),
+                        )
+                    },
+                    folded,
+                )
+            }
+        };
+        // History-only management preflight includes provisional folded additions.
+        // Replace that contribution with the actual top-level folded declaration set,
+        // including name replacements, exactly once using the transport renderer.
+        estimate.payload_tokens = estimate.payload_tokens.saturating_sub(folded_tokens);
+        estimate.estimated_tokens = estimate.estimated_tokens.saturating_sub(folded_tokens);
+        let fixed = instructions.saturating_add(tool_tokens);
+        Ok(zevria_model::models::ReplayPreflight::Compatible(
+            estimate.saturating_add(zevria_model::ContextTokenEstimate::new(fixed, fixed)),
+        ))
     }
 
     fn complete_profile<'a>(

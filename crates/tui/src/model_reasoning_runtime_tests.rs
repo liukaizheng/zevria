@@ -34,6 +34,7 @@ fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_con
             panic!("list")
         };
         let context = zevria_foundation::ModelContextPolicy {
+            image_accounting: Default::default(),
             profile: profile.clone(),
             context_window_tokens: 10000,
             input_token_limit: 9000,

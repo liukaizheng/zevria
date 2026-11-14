@@ -655,7 +655,8 @@ or running Review/Explore can therefore change both limits without opening a
 new root session.
 
 `ContextUsageUpdated` supplies the projected count and its authority:
-`exact`, `usage+delta`, or `conservative estimate`. The
+`provider count`, `provider estimate`, `estimated usage+delta`, `local estimate`,
+or `incomplete estimate`. The
 metadata also includes `projectedProvider`, `projectedModel`, and
 `projectedRole`. `UsageUpdated` remains accounting for the latest completed
 provider response. Its existing `inputTokens`, `cachedTokens`, `outputTokens`,
@@ -668,6 +669,15 @@ independently and combines them when either event arrives, so a later failure
 or reversed event order does not erase one quantity. Synthetic local-summary
 compaction inference remains suppressed and does not fabricate completed
 response usage.
+
+Incomplete accounting emits **no numeric `UsageUpdate`**: the known subtotal is
+not a total, zero is not substituted, and downstream ensemble accounting cannot
+mistake it for complete usage. Instead, an `AgentThoughtChunk` diagnostic with
+`_meta.zevria` carries `contextTotalAvailable: false`,
+`projectedInputTokens: null`, `knownEstimatedInputTokens`, and `unresolvedMedia`
+counts/reasons. Clients should clear/suspend an older projected gauge on this
+diagnostic. Completed-response usage remains independently retained in metadata.
+Complete snapshots set `contextTotalAvailable: true` and emit normal usage.
 
 ## Stdio and logging
 

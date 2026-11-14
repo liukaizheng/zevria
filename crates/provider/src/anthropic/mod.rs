@@ -384,13 +384,21 @@ impl AnthropicProvider {
                 Err((mut error, request_id)) => {
                     progress.stream_cleared();
                     let kind = error.kind;
+                    let pre_execution = error.pre_execution;
                     let delay = error.retry_after;
                     if let Some(id) = &request_id {
                         error.message.push_str(&format!(" (request-id: {id})"));
                     }
                     let error: anyhow::Error = error.into();
                     if kind == ErrorKind::InputTooLarge {
-                        return Err(ModelInputTooLarge::new(error).into());
+                        return Err(if plan.attempt == 1 && pre_execution {
+                            ModelInputTooLarge::pre_execution(error).into()
+                        } else {
+                            ModelInputTooLarge::new(error).into()
+                        });
+                    }
+                    if kind == ErrorKind::RequestBodyTooLarge {
+                        return Err(zevria_model::ModelRequestBodyTooLarge(error).into());
                     }
                     let strip_thinking =
                         kind == ErrorKind::ThinkingBindingMismatch && !stripped_retry;
@@ -533,13 +541,12 @@ impl AnthropicProvider {
                             error.message
                         );
                     }
-                    if error.kind == ErrorKind::InputTooLarge {
-                        return Err(ModelInputTooLarge::new(error).into());
-                    }
+                    // Counting-stage rejection is not a rejected completion and
+                    // must never authorize completion replay.
                     return Err(error.into());
                 }
                 let value: Value = response.json().await?;
-                Ok(InputTokenCount::Exact(
+                Ok(InputTokenCount::Approximate(
                     value["input_tokens"].as_u64().ok_or_else(|| {
                         anyhow::anyhow!("Anthropic count_tokens response omitted input_tokens")
                     })?,
@@ -551,6 +558,9 @@ impl AnthropicProvider {
     }
 }
 impl ModelProvider for AnthropicProvider {
+    fn tool_append_preserves_prefix(&self, _target: &zevria_foundation::ModelProfileRef) -> bool {
+        self.endpoint.compatibility.inline_tools && self.endpoint.compatibility.system_messages
+    }
     fn application_prompt(&self) -> &str {
         &self.preamble
     }

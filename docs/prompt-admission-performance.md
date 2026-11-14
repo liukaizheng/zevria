@@ -17,7 +17,7 @@ below. Transcript-format results remain separate in
 
 The current [`AdmissionFixture`](../crates/core/src/session/benchmark.rs)
 wrappers exercise production paths in
-[`session/prompt.rs`](../crates/core/src/session/prompt.rs):
+[`session/workflow/prompt.rs`](../crates/core/src/session/workflow/prompt.rs):
 
 - `admit_prompt`: preflight and synchronous preparation, including rendered
   instructions, context limits and an irreducible-input estimate. No
@@ -33,6 +33,42 @@ Tool serialization and request-shape fingerprinting now happen during
 measurement, not synchronous preparation. Stage 2 below records the earlier
 boundary, which included those costs in preparation; its figures have not been
 remeasured for the current implementation.
+
+## Image-accounting regression measurements (November 14, 2026)
+
+Release-profile Criterion quick run on `aarch64-apple-darwin`, rustc
+`1.100.0-nightly (fb6531d55 2026-08-23)`:
+
+```sh
+rtk cargo bench --profile release -p zevria-responses --bench preflight -- --quick
+```
+
+`cargo bench` does not accept `--release`; `--profile release` selects the
+optimized profile explicitly. Fixture construction, image validation, identity
+hashing, and cache priming are outside timed work. Three occurrences of a
+synthetic noise PNG (1024×512) exercise multi-MiB encoded history; no private
+session media is included. These are short local observations, not latency
+assertions or an end-to-end turn benchmark.
+
+| History | Full preflight | Unchanged cached | Append |
+| --- | ---: | ---: | ---: |
+| 100 text/replay items | ~170 µs | ~52.8 ns | ~3.72 µs / pair |
+| 1,000 text/replay items | ~1.67 ms | ~50.7 ns | ~4.01 µs / pair |
+| Three large image occurrences | ~3.62 ms | ~51.2 ns | ~0.74 µs / text |
+
+The stored local Criterion comparison reported a roughly 12 ns increase in
+unchanged-cache overhead (policy/version checks and the richer result), while
+full/append text paths improved; this was not a controlled baseline capture for
+this repair. Do not infer provider token costs from these timings. Structural
+tests, not elapsed-time thresholds, verify full/incremental equality, unchanged
+appends, policy invalidation, geometry derivation reuse, and unchanged wire
+identity. The Messages local assessment prepares only substituted media views;
+transport history remains separately bound to actual system/tools.
+
+An opt-in ignored provider test reads `ZEVRIA_ACCOUNTING_SESSION` as an **absolute
+local path**, assesses its retained checkpoint through the real router, verifies
+that no provider runtime initialized, and checks the original file is byte-for-byte
+unchanged. It neither sends private media nor commits it as a fixture.
 
 ## Stage 1: synchronous admission replay reuse
 

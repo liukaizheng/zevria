@@ -84,6 +84,7 @@ impl Default for CompactionPolicy {
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             input_token_limit: DEFAULT_CONTEXT_WINDOW_TOKENS,
             retained_user_tokens: 20_000,
+            image_accounting: Default::default(),
         };
         Self::new(
             config,

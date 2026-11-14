@@ -29,6 +29,7 @@ impl PrefixProvider {
             catalog: true,
             counting,
             context: ModelContextPolicy {
+                image_accounting: Default::default(),
                 profile: test_profile(),
                 context_window_tokens: 3500,
                 input_token_limit: 3500,
@@ -197,10 +198,12 @@ fn captured_source(input: &[OwnedModelRequestItem]) -> CompactionSource {
     }
 }
 fn size_error() -> anyhow::Result<Message> {
-    Err(anyhow::Error::new(ModelInputTooLarge::new(anyhow::anyhow!(
-        "structured size diagnostic"
-    )))
-    .context("request-id wrapper"))
+    Err(
+        anyhow::Error::new(ModelInputTooLarge::pre_execution(anyhow::anyhow!(
+            "structured size diagnostic"
+        )))
+        .context("request-id wrapper"),
+    )
 }
 fn turn() -> TurnContext {
     TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new())

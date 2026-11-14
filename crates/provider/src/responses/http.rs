@@ -22,7 +22,7 @@ use super::driver::TerminalResponse;
 use super::driver::log_terminal_response;
 use super::driver::{DriverContext, DriverFailure, DriverTransport, ResponseDriver};
 use super::errors::classify_input_size;
-use super::errors::structured_input_size;
+use super::errors::{structured_input_size, validation_input_size_rejection};
 use super::prepare::PreparedRequest;
 pub(super) fn http_request_body(
     prepared: &PreparedRequest,
@@ -174,15 +174,17 @@ pub(super) async fn run_http_model_request_inner(
         let detail = tokio::time::timeout(policy.send_timeout, bounded_http_error_body(response))
             .await
             .unwrap_or_else(|_| "<error body read timed out>".to_string());
-        let size_rejection = status == reqwest::StatusCode::PAYLOAD_TOO_LARGE
-            || serde_json::from_str::<serde_json::Value>(&detail)
-                .is_ok_and(|value| structured_input_size(&value));
-        let insufficient_quota =
-            serde_json::from_str::<serde_json::Value>(&detail).is_ok_and(|value| {
-                ["code", "type"]
-                    .iter()
-                    .any(|key| value["error"][key].as_str() == Some("insufficient_quota"))
-            });
+        let structured = serde_json::from_str::<serde_json::Value>(&detail).ok();
+        let size_rejection = structured.as_ref().is_some_and(structured_input_size);
+        let body_rejection = status == reqwest::StatusCode::PAYLOAD_TOO_LARGE;
+        let validation_rejection = structured
+            .as_ref()
+            .is_some_and(validation_input_size_rejection);
+        let insufficient_quota = structured.as_ref().is_some_and(|value| {
+            ["code", "type"]
+                .iter()
+                .any(|key| value["error"][key].as_str() == Some("insufficient_quota"))
+        });
         let error = CompletionError::from_http_response(status, detail)
             .with_provider_request_id(upstream_request_id.clone());
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -198,7 +200,20 @@ pub(super) async fn run_http_model_request_inner(
         }
         if size_rejection {
             return Err(HttpAttemptError::Terminal {
-                error: classify_input_size(true, error.into()),
+                error: if request_attempt == 1
+                    && validation_rejection
+                    && matches!(status.as_u16(), 400 | 413 | 422)
+                {
+                    zevria_model::ModelInputTooLarge::pre_execution(error).into()
+                } else {
+                    classify_input_size(true, error.into())
+                },
+                upstream_request_id,
+            });
+        }
+        if body_rejection {
+            return Err(HttpAttemptError::Terminal {
+                error: zevria_model::ModelRequestBodyTooLarge(error.into()).into(),
                 upstream_request_id,
             });
         }

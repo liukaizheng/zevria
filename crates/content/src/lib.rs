@@ -4,6 +4,7 @@ pub mod message;
 pub use message::assistant_plain_text;
 pub mod citations;
 pub mod image_diagnostics;
+pub mod image_facts;
 pub mod prompt;
 pub mod readable;
 pub mod reasoning;

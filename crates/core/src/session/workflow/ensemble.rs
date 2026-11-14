@@ -1,7 +1,6 @@
 //! Ensemble orchestration.
 
 use crate::session::SessionEngine;
-use crate::session::kernel::capacity::prepared_fixed_tokens;
 use crate::session::kernel::records::{RecordChange, TurnAnchor};
 use crate::session::kernel::request_plan::HistoryView;
 use crate::session::turn::execution::{
@@ -25,7 +24,6 @@ use zevria_foundation::{
 use zevria_instructions::prompts::{
     ENSEMBLE_PLAN_SYNTHESIS_INSTRUCTIONS, ENSEMBLE_REVIEW_SYNTHESIS_INSTRUCTIONS,
 };
-use zevria_model::estimates::estimate_model_input_for_profile;
 use zevria_model::request::{InputTokenCount, ModelRequest, ModelRequestItem};
 use zevria_session_api::EnsembleLaunchRequest;
 use zevria_session_api::event::{ProgressReporter, SessionEvent, SessionEventSender};
@@ -268,16 +266,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .and_then(TranscriptItem::model_request_item),
         );
         input.extend(updates.iter().map(ModelRequestItem::DeveloperInstruction));
-        let estimate = estimate_model_input_for_profile(input.clone(), &context.profile)?;
         let tools = self.request_tools(HistoryView::Committed, &policy);
         let instructions = self.rendered_instructions(&policy);
-        let mut tokens = estimate
-            .conservative_tokens
-            .saturating_add(prepared_fixed_tokens(
-                &instructions,
-                &serde_json::to_vec(&tools)?,
-            ));
-        let mut measurement = "estimated";
+        let mut measurement = "local estimate";
         let request = ModelRequest {
             input_identity: None,
             instructions: &instructions,
@@ -287,24 +278,35 @@ impl<P: ModelProvider> SessionEngine<P> {
             model_role: policy.model_role,
             allowed_tool_names: policy.allowed_tool_names.as_deref(),
         };
+        let zevria_model::models::ReplayPreflight::Compatible(estimate) =
+            self.provider.assess_request(&context, &request)?
+        else {
+            anyhow::bail!("synthesis requires history conversion");
+        };
+        let mut tokens = estimate.complete_tokens();
         match self
             .context
             .count_input_tokens(&mut self.provider, request, turn)
             .await
         {
             Ok(InputTokenCount::Exact(count)) => {
-                tokens = count;
-                measurement = "exact";
+                tokens = Some(count);
+                measurement = "provider count";
             }
-            Ok(InputTokenCount::Unsupported) => {}
+            Ok(InputTokenCount::Approximate(count)) => {
+                tokens = Some(count);
+                measurement = "provider estimate";
+            }
+            Ok(InputTokenCount::Unsupported | InputTokenCount::Suppressed) => {}
             Err(error) if turn.is_cancelled() => return Err(error),
             Err(error) => {
-                tracing::warn!(%error, "synthesis exact input count failed; using approximate image accounting")
+                tracing::warn!(%error, "synthesis provider count failed; retaining local accounting (best effort if incomplete)")
             }
         }
         anyhow::ensure!(
-            tokens <= context.input_token_limit,
-            "potential root synthesis requires {tokens} input tokens ({measurement}), exceeding the {} input-token limit; reduce evidence or compact root history before confirming; input was not accepted",
+            tokens.is_none_or(|tokens| tokens <= context.input_token_limit),
+            "potential root synthesis requires {} input tokens ({measurement}), exceeding the {} input-token limit; reduce evidence or compact root history before confirming; input was not accepted",
+            tokens.expect("over-limit rejection requires a complete measurement"),
             context.input_token_limit
         );
         Ok(())

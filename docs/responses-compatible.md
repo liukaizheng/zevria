@@ -828,15 +828,16 @@ continuation comparisons, reconnect fallback and token-count requests use the
 same canonical content. Provider/model vision restrictions are surfaced as
 errors; Zevria does not fetch images or silently resize/drop them.
 
-Local canonical and wire accounting charge approximately **1,600 tokens per
-image**, plus ordinary text/protocol overhead, rather than base64 string length.
-Only temporary accounting projections omit encoded bytes; persisted messages,
-outgoing requests, digests and continuation identity remain unchanged. The
-historical `conservative_tokens` field is not an upper bound for image cost.
-Exact endpoint counts are preferred when available. Correlated tool-output
-trimming uses the same image accounting instead of deleting useful tool text to
-make room for storage bytes. Source images remain real blocks in compaction and
-summarization requests; textual summaries do not reproduce the image bytes.
+Local accounting separates text/envelope estimates from destination-specific
+image costs. Real encoded image bytes at direct, tool-array, and supported native
+replay locations never become text estimates. The model's `image_accounting`
+policy uses a verified rule, explicit override, or an unresolved cost—no universal
+image allowance. Unknown costs prefer provider counting, then explicit best effort
+which may exceed the configured local budget. Persisted messages, outgoing bytes,
+digests, detail/MIME/order, prefix/cache keys and continuation identity remain
+unchanged. Binary file/PDF costs are unmeasured locally rather than bytes/4.
+Source images remain real blocks in summary requests; textual summaries do not
+reproduce them.
 See [image input](image-input.md) for formats, limits, clipboard and history privacy.
 
 ## Source-aware replay v1
@@ -961,9 +962,10 @@ configure the values separately, for example:
 Before accepting or dispatching a request, Zevria selects one projected-input
 snapshot. Exact provider counts win; otherwise same-profile completed usage
 plus appended semantic deltas wins; without a valid usage baseline, an
-opaque-safe conservative estimate is used. Raw serialized replay size is never
-an unconditional maximum. The same snapshot controls the automatic trigger
-and hard gate.
+opaque-safe local estimate is used. If media costs are unresolved, the snapshot
+has no projected total and exposes only a known estimated portion and missing
+items; approved best effort may exceed the local budget. Raw replay byte size is
+never a maximum. The same prepared-request assessment controls all full gates.
 
 At or above the trigger, or above the hard limit, Zevria can compact once for
 that prepared dispatch, rebuild the complete request, and remeasure it. It

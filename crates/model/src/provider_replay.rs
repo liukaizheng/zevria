@@ -17,7 +17,7 @@ use crate::{
     ModelProfileRef,
     compaction::{
         ContextTokenEstimate, approximate_tokens_from_bytes, estimate_message_tokens,
-        opaque_safe_provider_json, semantic_json_bytes,
+        semantic_json_bytes,
     },
 };
 
@@ -433,29 +433,50 @@ impl ProviderReplay {
     /// opaque-safe serialized representation so capacity remains
     /// conservative without charging for ciphertext length.
     pub fn replay_only_token_estimate(&self) -> ContextTokenEstimate {
-        let sanitized = opaque_safe_provider_json(&serde_json::Value::Array(self.items.clone()));
-        let conservative_tokens = crate::compaction::estimate_responses_input_tokens(
-            sanitized.as_array().expect("array projection"),
-            0,
-        );
-        let payload_tokens = self.items.iter().fold(0_u64, |total, item| {
-            let payload = match self.protocol() {
-                Some(ReplayProtocol::Anthropic) => anthropic_replay_item_payload_bytes(item),
-                _ => replay_item_payload_bytes(item),
-            };
-            let tokens = payload.map_or_else(
-                || {
-                    let sanitized = opaque_safe_provider_json(item);
-                    crate::compaction::estimate_responses_input_tokens(
-                        std::slice::from_ref(&sanitized),
-                        0,
-                    )
-                },
-                approximate_tokens_from_bytes,
-            );
-            total.saturating_add(tokens)
-        });
-        ContextTokenEstimate::new(payload_tokens, conservative_tokens)
+        self.replay_only_token_estimate_with_policy(
+            &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+        )
+    }
+    pub fn replay_only_token_estimate_with_policy(
+        &self,
+        policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+    ) -> ContextTokenEstimate {
+        let mut estimate = match self.protocol() {
+            Some(ReplayProtocol::Anthropic) => {
+                crate::media_accounting::anthropic_replay(&self.items, policy)
+            }
+            _ => crate::media_accounting::responses_replay(&self.items, policy),
+        };
+        estimate.payload_tokens = self
+            .items
+            .iter()
+            .map(|item| {
+                let bytes = match self.protocol() {
+                    Some(ReplayProtocol::Anthropic) => anthropic_replay_item_payload_bytes(item),
+                    _ => replay_item_payload_bytes(item),
+                };
+                bytes.map_or_else(
+                    || match self.protocol() {
+                        Some(ReplayProtocol::Anthropic) => {
+                            crate::media_accounting::anthropic_replay(
+                                std::slice::from_ref(item),
+                                policy,
+                            )
+                            .payload_tokens
+                        }
+                        _ => {
+                            crate::media_accounting::responses_replay(
+                                std::slice::from_ref(item),
+                                policy,
+                            )
+                            .payload_tokens
+                        }
+                    },
+                    approximate_tokens_from_bytes,
+                )
+            })
+            .fold(0_u64, u64::saturating_add);
+        estimate
     }
 
     /// Canonical native estimate. Destination-aware callers must estimate the
@@ -508,7 +529,7 @@ fn replay_item_payload_bytes(item: &serde_json::Value) -> Option<usize> {
                 let bytes = match block.get("type")?.as_str()? {
                     "output_text" | "input_text" => visible_text_bytes(block.get("text")),
                     "refusal" => visible_text_bytes(block.get("refusal")),
-                    "input_image" => crate::prompt::ESTIMATED_IMAGE_TOKENS.saturating_mul(4),
+                    "input_image" | "input_file" => 0,
                     _ => return None,
                 };
                 Some(total.saturating_add(bytes))
@@ -519,7 +540,20 @@ fn replay_item_payload_bytes(item: &serde_json::Value) -> Option<usize> {
                 .saturating_add(object.get("arguments").map_or(0, semantic_argument_bytes)),
         ),
         "function_call_output" | "custom_tool_call_output" => {
-            Some(object.get("output").map_or(0, semantic_json_bytes))
+            Some(object.get("output").map_or(0, |value| {
+                if let Some(blocks) = value.as_array() {
+                    blocks
+                        .iter()
+                        .map(|block| match block["type"].as_str() {
+                            Some("input_image" | "input_file") => 0,
+                            Some("input_text") => visible_text_bytes(block.get("text")),
+                            _ => semantic_json_bytes(block),
+                        })
+                        .sum()
+                } else {
+                    semantic_json_bytes(value)
+                }
+            }))
         }
         "reasoning" => {
             let mut total = 0_usize;
@@ -624,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_only_input_images_use_the_shared_allowance_without_mutating_payloads() {
+    fn replay_only_input_images_remain_unmeasured_without_mutating_payloads() {
         let estimate = |data: String| {
             let replay = ProviderReplay::openai_responses(
                 test_profile(),
@@ -640,11 +674,10 @@ mod tests {
         let small = estimate("data:image/png;base64,abcd".into());
         let large = estimate(format!("data:image/png;base64,{}", "a".repeat(2_000_000)));
         assert_eq!(small, large);
-        assert_eq!(
-            small.payload_tokens,
-            crate::prompt::ESTIMATED_IMAGE_TOKENS as u64
-        );
-        assert!(small.conservative_tokens < 1_700);
+        assert_eq!(small.payload_tokens, 0);
+        assert_eq!(small.unresolved_media.images, 1);
+        assert_eq!(small.complete_tokens(), None);
+        assert!(small.known_tokens() < 100);
     }
 
     #[test]

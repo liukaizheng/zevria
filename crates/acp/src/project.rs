@@ -369,6 +369,18 @@ pub(crate) fn usage_update(
     );
     zevria.insert("countSource".to_string(), json!(context.source.label()));
     zevria.insert(
+        "contextTotalAvailable".to_string(),
+        json!(context.projected_input_tokens.is_some()),
+    );
+    zevria.insert(
+        "knownEstimatedInputTokens".to_string(),
+        json!(context.known_input_tokens),
+    );
+    zevria.insert(
+        "unresolvedMedia".to_string(),
+        json!(context.unresolved_media),
+    );
+    zevria.insert(
         "inputTokenLimit".to_string(),
         json!(context.input_token_limit),
     );
@@ -420,9 +432,13 @@ pub(crate) fn usage_update(
     }
     let mut meta = Map::new();
     meta.insert("zevria".to_string(), Value::Object(zevria));
-    AcpSessionUpdate::UsageUpdate(
-        UsageUpdate::new(context.projected_input_tokens, context.input_token_limit).meta(meta),
-    )
+    match context.projected_input_tokens {
+        Some(tokens) => AcpSessionUpdate::UsageUpdate(UsageUpdate::new(tokens, context.input_token_limit).meta(meta)),
+        None => AcpSessionUpdate::AgentThoughtChunk(content_chunk(
+            format!("Context accounting incomplete: estimated known portion: {}; {}. Best effort may exceed the local input budget.",context.known_input_tokens,context.unresolved_media.description()),
+            "zevria-context-accounting",
+        ).meta(meta)),
+    }
 }
 
 pub(crate) fn diagnostic_update(
@@ -809,7 +825,9 @@ mod tests {
         let context = ContextTokenSnapshot {
             profile: response.profile.clone(),
             model_role: response.model_role,
-            projected_input_tokens: 91,
+            projected_input_tokens: Some(91),
+            known_input_tokens: 91,
+            unresolved_media: Default::default(),
             source: zevria_model::ContextTokenSource::UsagePlusDelta,
             automatic_trigger: 90_000,
             input_token_limit: 100_000,
@@ -830,6 +848,33 @@ mod tests {
         ] {
             assert!(wire.contains(expected), "missing {expected}: {wire}");
         }
+    }
+
+    #[test]
+    fn incomplete_context_emits_metadata_diagnostic_not_numeric_usage() {
+        let context = ContextTokenSnapshot {
+            profile: ModelProfileRef::new("test", "model"),
+            model_role: ModelRole::Build,
+            projected_input_tokens: None,
+            known_input_tokens: 1234,
+            unresolved_media: zevria_model::media_accounting::UnresolvedMedia {
+                images: 3,
+                unknown_policy: 3,
+                ..Default::default()
+            },
+            source: zevria_model::ContextTokenSource::IncompleteEstimate,
+            automatic_trigger: 90_000,
+            input_token_limit: 100_000,
+            context_window_tokens: 128_000,
+        };
+        let update = usage_update(None, &context);
+        assert!(matches!(update, AcpSessionUpdate::AgentThoughtChunk(_)));
+        let value = serde_json::to_value(update).unwrap();
+        assert!(value.get("used").is_none());
+        let wire = value.to_string();
+        assert!(wire.contains("estimated known portion: 1234; 3 unmeasured images"));
+        assert!(wire.contains("contextTotalAvailable"));
+        assert!(wire.contains("knownEstimatedInputTokens"));
     }
 
     #[test]

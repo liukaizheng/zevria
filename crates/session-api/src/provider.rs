@@ -104,6 +104,46 @@ pub trait ModelProvider: Send + 'static {
         self.preflight_input(target, input)
     }
 
+    /// Accounting compatibility only: inline declarations extend history;
+    /// folded declarations replace the fixed tool prefix and invalidate usage.
+    fn tool_append_preserves_prefix(&self, _target: &ModelProfileRef) -> bool {
+        true
+    }
+
+    /// Pure assessment of the fully prepared logical request. Adapters override
+    /// rendering, never request bytes. Incomplete media is compatible, not zero.
+    fn assess_request(
+        &self,
+        context: &zevria_foundation::ModelContextPolicy,
+        request: &ModelRequest<'_>,
+    ) -> anyhow::Result<crate::models::ReplayPreflight> {
+        let assessment = self.preflight_input_with_identity(
+            &context.profile,
+            &request.input,
+            request.input_identity,
+        )?;
+        let crate::models::ReplayPreflight::Compatible(mut estimate) = assessment else {
+            return Ok(assessment);
+        };
+        if context.image_accounting
+            != zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved
+        {
+            estimate = zevria_model::estimates::estimate_model_input_with_policy(
+                request.input.clone(),
+                &context.profile,
+                &context.image_accounting,
+            )?;
+        }
+        estimate.validate_media_constraints()?;
+        let fixed = zevria_model::compaction::approximate_tokens(request.instructions)
+            .saturating_add(zevria_model::compaction::approximate_tokens_from_bytes(
+                rig_core::serde_json::to_vec(request.tools)?.len(),
+            ));
+        Ok(crate::models::ReplayPreflight::Compatible(
+            estimate.saturating_add(zevria_model::ContextTokenEstimate::new(fixed, fixed)),
+        ))
+    }
+
     /// Explicit-profile maintenance never temporarily changes a role route.
     fn complete_profile<'a>(
         &'a mut self,

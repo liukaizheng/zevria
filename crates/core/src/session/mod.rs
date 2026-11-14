@@ -23,7 +23,6 @@ use zevria_foundation::policy::{SessionMode, SessionPolicies, TurnId, TurnPolicy
 use zevria_instructions::skill::{ActiveSkills, SkillCatalog};
 use zevria_model::ToolDeclarations;
 use zevria_model::config::CompactionPolicy;
-use zevria_model::estimates::estimate_model_input;
 use zevria_model::request::ModelRequestItem;
 use zevria_session_api::EnsembleLauncher;
 use zevria_session_api::command::{ManagementCommand, SessionCommand, TurnCommand};
@@ -157,6 +156,8 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> anyhow::Result<Self> {
         let application_prompt = provider.application_prompt().to_string();
         conversation.replay()?;
+        let mut context = ContextAccounting::default();
+        context.recompute_arming(conversation.items());
         Ok(Self {
             application_prompt,
             guidance: GuidanceState::default(),
@@ -174,7 +175,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             compaction: CompactionPolicy::default(),
             incremental_tools: true,
             phase: EnginePhase::Idle,
-            context: ContextAccounting::default(),
+            context,
             request_plans: Mutex::new(Vec::new()),
             capabilities: RootCapabilities::default(),
             next_turn_id: 1,
@@ -354,21 +355,12 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
     }
 
-    pub fn context_tokens(&self) -> Result<u64, SessionReplayError> {
+    /// Complete projected total when available; an unknown media cost is not zero.
+    pub fn context_tokens(&self) -> anyhow::Result<Option<u64>> {
+        self.ensure_replay_valid()?;
         let policy = self.policies.policy(self.selected_mode());
-        let current = self.projected_context_tokens(policy)?;
-        let updates = self
-            .reconcile_instruction_state(self.directive_state()?, policy, self.active_skills()?)
-            .map_err(|error| SessionReplayError::Directives(error.to_string()))?;
-        Ok(current.saturating_add(
-            estimate_model_input(
-                updates
-                    .iter()
-                    .map(ModelRequestItem::DeveloperInstruction)
-                    .collect(),
-            )
-            .conservative_tokens,
-        ))
+        let (local, usage) = self.local_context_candidates(policy)?;
+        Ok(usage.unwrap_or(local).complete_tokens())
     }
 
     pub fn active_skills(&self) -> Result<&ActiveSkills, SessionReplayError> {

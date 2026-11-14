@@ -47,6 +47,16 @@ impl<P: ModelProvider> SessionEngine<P> {
             "cannot summarize an empty compaction source"
         );
         anyhow::ensure!(!turn.is_cancelled(), "turn cancelled");
+        // Count failure suppression is scoped to this operation/turn, not a
+        // permanent endpoint capability. Carry a prior ordinary count failure.
+        self.context.count_failures.clear();
+        if self.context.input_count
+            == (crate::session::kernel::accounting::TurnInputCountState::Failed {
+                turn_id: turn.id,
+            })
+        {
+            self.context.count_failures.insert(context.profile.clone());
+        }
         let full = source
             .request
             .input
@@ -99,10 +109,16 @@ impl<P: ModelProvider> SessionEngine<P> {
                         )
                     })?
                     .reasoning_level;
-                if !self
+                let fits = self
                     .request_fits_view(context, reasoning, request.clone(), turn.cancellation())
-                    .await?
-                {
+                    .await?;
+                if self.context.count_failures.contains(&context.profile) {
+                    self.context.input_count =
+                        crate::session::kernel::accounting::TurnInputCountState::Failed {
+                            turn_id: turn.id,
+                        };
+                }
+                if !fits {
                     tracing::debug!(
                         source_items = history.len(),
                         prefix_items = k,
@@ -169,7 +185,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                         );
                         return Ok((summary, k));
                     }
-                    Err(error) if error.chain().any(|cause| cause.is::<ModelInputTooLarge>()) => {
+                    Err(error) if ModelInputTooLarge::safe_to_replay(&error) => {
                         tracing::debug!(
                             source_items = history.len(),
                             prefix_items = k,
@@ -179,6 +195,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                         last_size_error = Some(error);
                         break;
                     }
+                    Err(error) if error.is::<ModelInputTooLarge>() => return Err(error.context("summary token-window failure was not confirmed pre-execution; refusing to replay possibly executed upstream work")),
                     Err(error) => return Err(error),
                 }
             }

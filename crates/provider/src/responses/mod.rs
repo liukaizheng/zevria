@@ -43,6 +43,7 @@ pub(crate) use prepare::PreparedRequest;
 pub(crate) use prepare::ProjectionCache;
 #[cfg(test)]
 pub(crate) use prepare::prepare_turn_request;
+pub(crate) use prepare::rendered_tools;
 use recovery_loop::run_model_request_with_reconnect;
 #[cfg(test)]
 use recovery_loop::{run_model_request_with_recovery, run_prepared_with_recovery};
@@ -191,6 +192,9 @@ pub(crate) async fn run_turn_request_with_recovery(
 }
 
 impl ModelProvider for OpenAiProvider {
+    fn tool_append_preserves_prefix(&self, _target: &zevria_foundation::ModelProfileRef) -> bool {
+        self.compatibility.additional_tools
+    }
     fn application_prompt(&self) -> &str {
         &self.preamble
     }

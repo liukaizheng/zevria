@@ -140,7 +140,7 @@ async fn structured_http_and_sse_size_errors_preserve_status_details_and_request
         "413 Payload Too Large",
         "text/plain",
         "body exceeds capacity".into(),
-        true,
+        false,
     ));
     cases.push((
         "400 Bad Request",
@@ -194,6 +194,14 @@ async fn structured_http_and_sse_size_errors_preserve_status_details_and_request
             expected,
             "{label}: {error:#}"
         );
+        assert_eq!(
+            ModelInputTooLarge::safe_to_replay(&error),
+            expected && status.starts_with("400") && content_type == "application/json"
+        );
+        assert_eq!(
+            error.is::<zevria_model::ModelRequestBodyTooLarge>(),
+            status.starts_with("413")
+        );
         let diagnostic = format!("{error:#}");
         assert!(diagnostic.contains("req_size_test"), "{diagnostic}");
         if status != "200 OK" {
@@ -207,6 +215,200 @@ async fn structured_http_and_sse_size_errors_preserve_status_details_and_request
         }
         assert!(state.result.is_empty());
         server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn non_success_terminal_size_bodies_never_prove_pre_execution_rejection() {
+    let validation = json!({"error":{"code":"context_length_exceeded","type":"invalid_request_error","message":"input validation failed"}});
+    let terminal = json!({
+        "id":"resp_already_accepted",
+        "status":"incomplete",
+        "incomplete_details":{"reason":"context_length_exceeded"},
+        "output":[{"type":"web_search_call","status":"completed"}]
+    });
+    let mut cases = vec![
+        ("validation rejection".to_string(), validation.clone(), true),
+        (
+            "typed validation rejection".to_string(),
+            json!({"type":"error","error":{"code":"context_length_exceeded","type":"invalid_request_error"}}),
+            true,
+        ),
+        ("accepted terminal response".to_string(), terminal, false),
+        (
+            "incomplete reason alone".to_string(),
+            json!({"incomplete_details":{"reason":"context_length_exceeded"}}),
+            false,
+        ),
+    ];
+    // Any response-envelope evidence vetoes replay even with an otherwise valid
+    // validation error. Empty output/zero usage do not prove non-execution.
+    for (key, value) in [
+        ("id", json!("resp_accepted")),
+        ("response_id", json!("resp_accepted")),
+        ("object", json!("response")),
+        ("status", json!("failed")),
+        ("type", json!("response.incomplete")),
+        ("output", json!([])),
+        ("output", Value::Null),
+        ("usage", json!({"input_tokens":0,"output_tokens":0})),
+        ("usage", Value::Null),
+        (
+            "incomplete_details",
+            json!({"reason":"context_length_exceeded"}),
+        ),
+        (
+            "response",
+            json!({"id":"resp_accepted","output":[{"type":"web_search_call","status":"completed"}]}),
+        ),
+    ] {
+        let mut body = validation.clone();
+        body[key] = value;
+        cases.push((format!("validation error with {key}"), body, false));
+    }
+    let mut malformed_type = validation;
+    malformed_type["error"]["type"] = Value::Null;
+    cases.push((
+        "malformed validation type".to_string(),
+        malformed_type,
+        false,
+    ));
+    for status in [
+        "400 Bad Request",
+        "413 Payload Too Large",
+        "422 Unprocessable Entity",
+    ] {
+        for (label, body, safe) in &cases {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+            let body = body.to_string();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                receive_http_json(&mut stream).await;
+                send_http_response_with_raw_request_id(
+                    &mut stream,
+                    status,
+                    "application/json",
+                    Some(b"req_terminal_size"),
+                    body,
+                )
+                .await;
+            });
+            let mut provider = connect_http_test_provider(url).await;
+            let parts = RequestParts {
+                tools: Default::default(),
+                forbid_tool_calls: false,
+                prompt: Message::user("pending completion"),
+                history: vec![],
+                instructions: String::new(),
+                allowed_tool_names: Some(vec![]),
+            };
+            let error = run_turn_request_with_recovery(
+                parts.request(),
+                &mut provider,
+                &mut AttemptState::default(),
+                &discard_updates(),
+                &fast_recovery_policy(2),
+            )
+            .await
+            .unwrap_err()
+            .context("outer wrapper");
+            assert!(
+                error.is::<ModelInputTooLarge>(),
+                "retain the token-window diagnostic: {status}, {label}: {error:#}"
+            );
+            assert_eq!(
+                ModelInputTooLarge::safe_to_replay(&error),
+                *safe,
+                "{status}, {label}: {error:#}"
+            );
+            let diagnostic = format!("{error:#}");
+            assert!(diagnostic.contains("req_terminal_size"));
+            assert!(diagnostic.contains(&status[..3]));
+            server.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn non_success_terminal_size_body_does_not_start_core_compaction_or_replay() {
+    for status in [
+        "400 Bad Request",
+        "413 Payload Too Large",
+        "422 Unprocessable Entity",
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            receive_http_json(&mut stream).await;
+            send_http_response(
+                &mut stream,
+                status,
+                "application/json",
+                json!({
+                    "id":"resp_already_accepted","status":"incomplete",
+                    "incomplete_details":{"reason":"context_length_exceeded"},
+                    "output":[{"type":"web_search_call","status":"completed"}],
+                    "usage":{"input_tokens":100,"output_tokens":1}
+                })
+                .to_string(),
+            )
+            .await;
+            // Bound a buggy replay too, so the regression fails rather than
+            // hanging while the engine tries synthetic compaction.
+            match tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept())
+                .await
+            {
+                Err(_) => 1,
+                Ok(Ok((mut stream, _))) => {
+                    receive_http_json(&mut stream).await;
+                    send_http_response(&mut stream,"400 Bad Request","application/json",json!({"error":{"code":"invalid_request_error","message":"unexpected replay"}}).to_string()).await;
+                    2
+                }
+                Ok(Err(error)) => panic!("listener failed: {error}"),
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let provider = connect_http_test_provider(url).await;
+        let mut engine = SessionEngine::new(
+            provider,
+            ToolServer::new().run(),
+            test_policies(),
+            TranscriptWriter::create(directory.path()).unwrap(),
+            Arc::new(SkillCatalog::default()),
+        )
+        .unwrap();
+        let (events, mut receiver) = session_event_channel(128);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            engine.handle_command(
+                SessionCommand::Turn(zevria_session_api::TurnCommand::Submit {
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                    text: "ordinary pending round".into(),
+                    mode: SessionMode::Build,
+                }),
+                &events,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let updates = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            !updates.iter().any(|update| matches!(
+                update,
+                SessionUpdate::Lifecycle(SessionEvent::CompactionStarted { .. })
+            )),
+            "{status}: accepted upstream work must not trigger compaction/replay"
+        );
+        assert!(updates.iter().any(|update| matches!(update,SessionUpdate::Lifecycle(SessionEvent::TurnFailed {error,..}) if error.contains("not confirmed pre-execution"))),"{status}");
+        assert!(!engine.conversation().items().iter().any(|item| matches!(item,zevria_transcript::transcript::TranscriptItem::IncompleteResponse(record) if record.input_rejection.is_some())),"terminal evidence must not become a pre-execution rejection record");
+        assert_eq!(
+            server.await.unwrap(),
+            1,
+            "{status}: no second provider invocation"
+        );
     }
 }
 

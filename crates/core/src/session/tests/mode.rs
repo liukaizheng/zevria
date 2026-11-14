@@ -515,7 +515,10 @@ async fn modes_keep_distinct_policy_identity_capacity_and_skill_permissions() {
     let orchestrate =
         engine.prospective_skill_overhead(&orchestrate_policy, engine.active_skills().unwrap());
     assert!(orchestrate > build + 1000);
-    let initial = engine.context_tokens().unwrap();
+    let initial = engine
+        .context_tokens()
+        .unwrap()
+        .expect("complete text-only estimate");
     let before = engine.restored_model_contexts().unwrap();
     engine = engine.with_model_management(Arc::new(ModeSettings), "revision".into());
     let management = engine.capabilities.models.as_mut().unwrap();
@@ -537,6 +540,7 @@ async fn modes_keep_distinct_policy_identity_capacity_and_skill_permissions() {
         reason: "conversion".into(),
     });
     engine.context.input_count = TurnInputCountState::Prepared {
+        source: ContextTokenSource::Exact,
         turn_id: TurnId::new(77),
         role: ModelRole::Build,
         identity: engine.request_shape(&build_policy).unwrap(),
@@ -554,7 +558,13 @@ async fn modes_keep_distinct_policy_identity_capacity_and_skill_permissions() {
             .preview
             .is_none()
     );
-    assert!(engine.context_tokens().unwrap() > initial + 1000);
+    assert!(
+        engine
+            .context_tokens()
+            .unwrap()
+            .expect("complete text-only estimate")
+            > initial + 1000
+    );
     let after = engine.restored_model_contexts().unwrap();
     assert_eq!(after.len(), 2);
     assert_eq!(

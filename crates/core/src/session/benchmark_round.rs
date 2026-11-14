@@ -136,6 +136,7 @@ impl EngineRoundFixture {
             .run();
         let policy = TurnPolicy::new("Synthetic engine round", None, ModelRole::Build, true);
         let context = ModelContextPolicy {
+            image_accounting: Default::default(),
             profile: crate::transcript_bench::profile(),
             context_window_tokens: 10_000_000,
             input_token_limit: 10_000_000,

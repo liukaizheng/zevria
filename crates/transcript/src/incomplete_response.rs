@@ -15,6 +15,13 @@ pub enum IncompleteResponseOutcome {
     Interrupted,
 }
 
+/// Durable diagnostic evidence only. Never authorizes replay on resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputRejectionKind {
+    TokenWindowBeforeExecution,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IncompleteResponse {
@@ -24,6 +31,8 @@ pub struct IncompleteResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
     pub outcome: IncompleteResponseOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_rejection: Option<InputRejectionKind>,
     pub presentation: Vec<AssistantPresentationPart>,
     pub hosted_activity: Vec<HostedActivity>,
 }
@@ -55,6 +64,7 @@ impl IncompleteResponse {
             profile: attempt.profile.clone(),
             response_id: attempt.response_id.clone(),
             outcome,
+            input_rejection: None,
             presentation,
             hosted_activity: attempt.hosted_activity.clone(),
         };
@@ -62,7 +72,33 @@ impl IncompleteResponse {
         Ok(Some(record))
     }
 
+    pub fn token_window_rejection(attempt: &ResponseAttempt) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !attempt.has_display() && attempt.response_id.is_none(),
+            "pre-execution rejection cannot carry upstream output or an accepted response ID"
+        );
+        let record = Self {
+            version: INCOMPLETE_RESPONSE_VERSION,
+            attempt_id: attempt.id.clone(),
+            profile: attempt.profile.clone(),
+            response_id: attempt.response_id.clone(),
+            outcome: IncompleteResponseOutcome::Failed,
+            input_rejection: Some(InputRejectionKind::TokenWindowBeforeExecution),
+            presentation: Vec::new(),
+            hosted_activity: Vec::new(),
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
     pub fn to_attempt(&self) -> ResponseAttempt {
+        let mut presentation = self.presentation.clone();
+        if self.input_rejection.is_some() {
+            presentation.push(AssistantPresentationPart {
+                source: zevria_content::AssistantSourceAddress { output_index:0,part:zevria_content::AssistantPartIdentity::Summary(0),item_id:None },
+                content: AssistantPresentationContent::Reasoning {text:"Zevria diagnostic: provider rejected the input token window before execution. This attempt is display-only and cannot authorize replay on resume.".into()},
+            });
+        }
         ResponseAttempt {
             id: self.attempt_id.clone(),
             profile: self.profile.clone(),
@@ -72,7 +108,7 @@ impl IncompleteResponse {
                 IncompleteResponseOutcome::Interrupted => ResponseAttemptOutcome::Interrupted,
             },
             revision: 1,
-            presentation: self.presentation.clone(),
+            presentation,
             hosted_activity: self.hosted_activity.clone(),
         }
     }
@@ -82,6 +118,15 @@ impl IncompleteResponse {
             self.version == INCOMPLETE_RESPONSE_VERSION,
             "unsupported incomplete response version; expected {INCOMPLETE_RESPONSE_VERSION}"
         );
+        if self.input_rejection.is_some() {
+            anyhow::ensure!(
+                self.outcome == IncompleteResponseOutcome::Failed
+                    && self.presentation.is_empty()
+                    && self.hosted_activity.is_empty()
+                    && self.response_id.is_none(),
+                "pre-execution rejection evidence must be failed and contain no upstream output"
+            );
+        }
         let attempt = self.to_attempt();
         attempt.validate()?;
         anyhow::ensure!(

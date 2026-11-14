@@ -1461,7 +1461,7 @@ async fn exact_count_compacts_once_rechecks_and_dispatches_when_it_fits() {
         event,
         SessionEvent::ContextUsageUpdated { snapshot, .. }
             if snapshot.source == ContextTokenSource::Exact
-                && snapshot.projected_input_tokens == 400
+                && snapshot.projected_input_tokens == Some(400)
     )));
     assert!(matches!(
         events.last(),
@@ -1701,20 +1701,26 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
             if exact {
                 ContextTokenSource::Exact
             } else {
-                ContextTokenSource::ConservativeEstimate
+                ContextTokenSource::LocalEstimate
             }
         );
         assert_eq!(
-            rebuilt.projected_input_tokens <= rebuilt.input_token_limit,
+            rebuilt
+                .projected_input_tokens
+                .is_some_and(|tokens| tokens <= rebuilt.input_token_limit),
             fits
         );
         if exact {
             assert_eq!(
                 rebuilt.projected_input_tokens,
-                if fits { 600 } else { 1_100 }
+                Some(if fits { 600 } else { 1_100 })
             );
             // Even above the trigger, one rebuilt dispatch cannot compact twice.
-            assert!(rebuilt.projected_input_tokens >= rebuilt.automatic_trigger);
+            assert!(
+                rebuilt
+                    .projected_input_tokens
+                    .is_some_and(|tokens| tokens >= rebuilt.automatic_trigger)
+            );
         }
         let requests = requests.lock().expect("requests");
         assert_eq!(requests.len(), if fits { 2 } else { 1 });
@@ -2001,7 +2007,7 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
             event,
             SessionEvent::ContextUsageUpdated { snapshot, .. }
                 if snapshot.source == ContextTokenSource::UsagePlusDelta
-                    && snapshot.projected_input_tokens == projected_tokens
+                    && snapshot.projected_input_tokens == Some(projected_tokens)
                     && snapshot.automatic_trigger == 1_000
         )));
         assert!(matches!(
@@ -2087,8 +2093,8 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
             assert!(emitted[compact_event..].iter().any(|event| matches!(
                 event,
                 SessionEvent::ContextUsageUpdated { snapshot, .. }
-                    if snapshot.source == ContextTokenSource::ConservativeEstimate
-                        && snapshot.projected_input_tokens < snapshot.automatic_trigger
+                    if snapshot.source == ContextTokenSource::LocalEstimate
+                        && snapshot.projected_input_tokens.is_some_and(|tokens| tokens < snapshot.automatic_trigger)
             )));
         } else {
             assert_eq!(requests.len(), 2);

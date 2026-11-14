@@ -258,6 +258,7 @@ fn pending_mode_selection_blocks_model_picker_cancellation_and_repeated_switches
     };
     assert_eq!(captured, SessionMode::Build);
     let context = zevria_foundation::ModelContextPolicy {
+        image_accounting: Default::default(),
         profile: zevria_foundation::ModelProfileRef::new("shared", "build"),
         context_window_tokens: 10_000,
         input_token_limit: 9_000,

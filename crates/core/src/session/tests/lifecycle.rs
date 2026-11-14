@@ -1632,7 +1632,8 @@ fn provider_usage_baselines_require_the_same_request_shape() {
         engine
             .local_context_candidates(&build)
             .expect("Build candidates")
-            .2,
+            .1
+            .map(|estimate| estimate.known_tokens()),
         Some(900)
     );
 
@@ -1641,7 +1642,7 @@ fn provider_usage_baselines_require_the_same_request_shape() {
         engine
             .local_context_candidates(&plan)
             .expect("Plan candidates")
-            .2,
+            .1,
         None,
         "a same-profile baseline from another role must not be reused"
     );
@@ -1652,7 +1653,7 @@ fn provider_usage_baselines_require_the_same_request_shape() {
         engine
             .local_context_candidates(&changed_tools)
             .expect("changed-tool candidates")
-            .2,
+            .1,
         None,
         "policy changes must invalidate the provider-usage baseline"
     );
@@ -1714,7 +1715,7 @@ async fn exact_below_trigger_overrides_a_high_usage_tracker() {
                 event,
                 SessionEvent::ContextUsageUpdated { snapshot, .. }
                     if snapshot.source == ContextTokenSource::Exact
-                        && snapshot.projected_input_tokens == 400
+                        && snapshot.projected_input_tokens == Some(400)
             ))
     );
 }
@@ -1783,7 +1784,7 @@ async fn exact_above_trigger_overrides_a_low_usage_tracker() {
                 event,
                 SessionEvent::ContextUsageUpdated { snapshot, .. }
                     if snapshot.source == ContextTokenSource::Exact
-                        && snapshot.projected_input_tokens == 400
+                        && snapshot.projected_input_tokens == Some(400)
             ))
     );
 }
@@ -1877,7 +1878,7 @@ async fn opaque_replay_regression_uses_usage_delta_instead_of_legacy_wire_maximu
         event,
         SessionEvent::ContextUsageUpdated { snapshot, .. }
             if snapshot.source == ContextTokenSource::UsagePlusDelta
-                && snapshot.projected_input_tokens < 244_800
+                && snapshot.projected_input_tokens.is_some_and(|tokens| tokens < 244_800)
                 && snapshot.input_token_limit == 272_000
     )));
     assert!(matches!(

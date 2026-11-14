@@ -25,20 +25,24 @@ impl TokenUsage {
 pub enum ContextTokenSource {
     Exact,
     UsagePlusDelta,
-    ConservativeEstimate,
+    LocalEstimate,
+    IncompleteEstimate,
+    ProviderEstimate,
 }
 
 impl ContextTokenSource {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Exact => "exact",
-            Self::UsagePlusDelta => "usage+delta",
-            Self::ConservativeEstimate => "conservative estimate",
+            Self::Exact => "provider count",
+            Self::UsagePlusDelta => "estimated usage+delta",
+            Self::LocalEstimate => "local estimate",
+            Self::IncompleteEstimate => "incomplete estimate",
+            Self::ProviderEstimate => "provider estimate",
         }
     }
 
     pub const fn is_estimated(self) -> bool {
-        matches!(self, Self::ConservativeEstimate)
+        !matches!(self, Self::Exact)
     }
 }
 
@@ -47,7 +51,9 @@ impl ContextTokenSource {
 pub struct ContextTokenSnapshot {
     pub profile: ModelProfileRef,
     pub model_role: ModelRole,
-    pub projected_input_tokens: u64,
+    pub projected_input_tokens: Option<u64>,
+    pub known_input_tokens: u64,
+    pub unresolved_media: crate::media_accounting::UnresolvedMedia,
     pub source: ContextTokenSource,
     pub automatic_trigger: u64,
     pub input_token_limit: u64,

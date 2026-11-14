@@ -136,9 +136,11 @@ impl<P: ModelProvider> SessionEngine<P> {
                 })?;
             state.force_exact_recheck = false;
             let compaction_available = self.conversation.has_compaction_prompt();
-            let over_limit = snapshot.projected_input_tokens > snapshot.input_token_limit;
+            let over_limit = snapshot
+                .projected_input_tokens
+                .is_some_and(|tokens| tokens > snapshot.input_token_limit);
             let automatic_due = self.context.is_armed(policy.model_role)
-                && (snapshot.projected_input_tokens >= snapshot.automatic_trigger || over_limit);
+                && (snapshot.known_input_tokens >= snapshot.automatic_trigger || over_limit);
             if !state.compaction_attempted && compaction_available && automatic_due {
                 let trigger = if state.dispatched_once {
                     CompactionTrigger::AutomaticMidTurn
@@ -261,6 +263,7 @@ impl<P: ModelProvider> SessionEngine<P> {
 
     async fn settle_attempts(
         &mut self,
+        policy: &TurnPolicy,
         progress: &ProgressReporter,
         dispatched: DispatchedModel,
     ) -> Result<ReadyResponse, Failure> {
@@ -293,6 +296,10 @@ impl<P: ModelProvider> SessionEngine<P> {
         let committed_id = committed.and_then(|(_, id, _)| id.as_deref());
         let committed_item = committed.map(|(_, _, item)| item);
         let mut attempts = progress.drain_attempts();
+        let observed_execution = !checkpointed.is_empty()
+            || attempts
+                .iter()
+                .any(|attempt| attempt.has_display() || attempt.response_id.is_some());
         let mut retained = Vec::new();
         for attempt in &mut attempts {
             if Some(attempt.id.as_str()) == committed_id {
@@ -314,6 +321,29 @@ impl<P: ModelProvider> SessionEngine<P> {
                 }
             }
         }
+        if !observed_execution
+            && completion_result.as_ref().is_some_and(|result| {
+                result
+                    .as_ref()
+                    .is_err_and(zevria_model::ModelInputTooLarge::safe_to_replay)
+            })
+        {
+            // Even a rejection with no generated tokens needs durable attempt
+            // evidence before recovery. Its diagnostic is model-inert on replay.
+            let attempt = attempts.first().cloned().unwrap_or_else(|| {
+                zevria_content::ResponseAttempt::new(
+                    self.context_policy(policy.model_role).profile.clone(),
+                )
+            });
+            let record = zevria_transcript::IncompleteResponse::token_window_rejection(&attempt)?;
+            let display = record.to_attempt();
+            if let Some(attempt) = attempts.iter_mut().find(|attempt| attempt.id == display.id) {
+                *attempt = display;
+            } else {
+                attempts.push(display);
+            }
+            retained.push(TranscriptItem::IncompleteResponse(record));
+        }
         let recovery_failure = recoverable(self.record_completed(retained))?;
         let persistence_failure = checkpoint_failure
             .map(anyhow::Error::msg)
@@ -327,6 +357,19 @@ impl<P: ModelProvider> SessionEngine<P> {
         let (usage, attempt_id, completed) = match response {
             Ok(response) => response,
             Err(error) => {
+                // Adapter proof is necessary, but observed output/hosted activity
+                // from any transmission also vetoes automatic replay.
+                let error =
+                    if observed_execution
+                        && zevria_model::ModelInputTooLarge::safe_to_replay(&error)
+                    {
+                        zevria_model::ModelInputTooLarge::new(error.context(
+                            "observed upstream output/attempt evidence makes replay unsafe",
+                        ))
+                        .into()
+                    } else {
+                        error
+                    };
                 self.publish_attempts(progress, attempts, persistence_failure.as_ref())
                     .await?;
                 return Err(error.into());
@@ -372,6 +415,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         {
             self.report_provider_usage(policy, usage.total_tokens)?;
             progress.usage_updated(usage).await;
+            self.publish_usage_projection(policy, progress).await?;
         }
         if disposition == ResponseDisposition::Intermediate {
             let _ = progress
@@ -519,12 +563,91 @@ impl<P: ModelProvider> SessionEngine<P> {
                 self.deliver_job_notices(policy, &submission_gate, &progress)
                     .await?;
             }
-            self.prepare_dispatch(policy, &progress, &mut state).await?;
-            call += 1;
-            let dispatched = self
-                .dispatch_model(policy, &progress, call, &mut timings)
-                .await?;
-            let response = self.settle_attempts(&progress, dispatched).await?;
+            let response = loop {
+                self.prepare_dispatch(policy, &progress, &mut state).await?;
+                call += 1;
+                let dispatched = self
+                    .dispatch_model(policy, &progress, call, &mut timings)
+                    .await?;
+                // Always settle/durably retain attempt evidence before considering
+                // a retry. No failed response ever reaches executable tool calls.
+                match self.settle_attempts(policy, &progress, dispatched).await {
+                    Ok(response) => break response,
+                    Err(Failure::Failed {
+                        error,
+                        retained,
+                        usage,
+                    }) if zevria_model::ModelInputTooLarge::safe_to_replay(&error)
+                        && retained.is_empty()
+                        && usage.is_none()
+                        && !state.compaction_attempted
+                        && self.context.is_armed(policy.model_role)
+                        && self.conversation.has_compaction_prompt() =>
+                    {
+                        if progress.turn().is_cancelled() {
+                            return Err(Failure::Cancelled);
+                        }
+                        self.ensure_replay_valid()?;
+                        // Persistence failure/cancellation outranks extra upstream work.
+                        self.gate_persistence(progress.events()).await.map_err(
+                            |error| match error {
+                                crate::session::turn::execution::Rejection::Cancelled => {
+                                    Failure::Cancelled
+                                }
+                                crate::session::turn::execution::Rejection::Fatal(error) => {
+                                    Failure::Fatal(error)
+                                }
+                                crate::session::turn::execution::Rejection::Rejected(error) => {
+                                    anyhow::anyhow!(error).into()
+                                }
+                            },
+                        )?;
+                        state.compaction_attempted = true;
+                        tracing::warn!(
+                            role = policy.model_role.name(),
+                            normal_completion_invocations = call,
+                            "confirmed pre-execution token-window rejection; spending remaining compaction/retry budget"
+                        );
+                        self.compact_context(
+                            if state.dispatched_once {
+                                CompactionTrigger::AutomaticMidTurn
+                            } else {
+                                CompactionTrigger::AutomaticPreTurn
+                            },
+                            policy,
+                            progress.events(),
+                            progress.turn(),
+                        )
+                        .await?;
+                        // Normal checkpoint installation resets continuation and measurements.
+                        state.force_exact_recheck = true;
+                        if progress.turn().is_cancelled() {
+                            return Err(Failure::Cancelled);
+                        }
+                    }
+                    Err(Failure::Failed {
+                        error,
+                        retained,
+                        usage,
+                    }) if error.is::<zevria_model::ModelInputTooLarge>() => {
+                        let diagnostic = if !zevria_model::ModelInputTooLarge::safe_to_replay(
+                            &error,
+                        ) {
+                            "token-window failure was not confirmed pre-execution (or followed an ambiguous transport attempt); refusing automatic replay of possible upstream work"
+                        } else if state.compaction_attempted {
+                            "token-window rejection: the pending model round has already spent its one compaction/retry budget; select a larger compatible model or reduce input"
+                        } else {
+                            "token-window rejection: no armed, replay-safe compaction source is available; select a larger compatible model or start a fresh session"
+                        };
+                        return Err(Failure::Failed {
+                            error: error.context(diagnostic),
+                            retained,
+                            usage,
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
             // Replay-backed responses expose their one authoritative cached message.
             let assistant = response
                 .completed
@@ -763,14 +886,14 @@ impl<P: ModelProvider> SessionEngine<P> {
             if let Some(usage) = usage {
                 let policy = self.ensemble_policy(*workflow);
                 self.report_provider_usage(&policy, usage.total_tokens)?;
-                ProgressReporter::for_turn(
+                let progress = ProgressReporter::for_turn(
                     events.clone(),
                     turn.clone(),
                     policy.model_role,
                     self.context_policy(policy.model_role),
-                )
-                .usage_updated(usage)
-                .await;
+                );
+                progress.usage_updated(usage).await;
+                self.publish_usage_projection(&policy, &progress).await?;
             }
             if let Some(error) = result {
                 self.persistence_failed(&error, events).await?;

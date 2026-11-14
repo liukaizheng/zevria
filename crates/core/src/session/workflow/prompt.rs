@@ -19,13 +19,9 @@ use std::sync::Arc;
 use zevria_foundation::config::ModelContextPolicy;
 use zevria_foundation::policy::{SessionMode, TurnPolicy};
 use zevria_instructions::skill::{ActiveSkills, SkillApplication, SkillInvocation, SkillName};
-use zevria_model::compaction::{CompactionCheckpoint, ContextTokenEstimate};
-use zevria_model::estimates::{
-    estimate_model_input_for_profile, estimate_model_request_item,
-    estimate_model_request_item_for_profile,
-};
+use zevria_model::compaction::CompactionCheckpoint;
 use zevria_model::request::{InputTokenCount, ModelRequest, ModelRequestItem};
-use zevria_model::telemetry::ContextTokenSnapshot;
+use zevria_model::telemetry::{ContextTokenSnapshot, ContextTokenSource};
 use zevria_session_api::command::{
     TranscriptEdit, TranscriptEditReplacement, TranscriptEditTarget,
 };
@@ -145,7 +141,7 @@ impl PreparedPrompt {
 
 pub(in crate::session) struct PromptMeasurement {
     assessment: CapacityAssessment,
-    exact: Option<u64>,
+    exact: Option<(u64, ContextTokenSource)>,
     identity: Option<RequestShapeFingerprint>,
 }
 
@@ -531,45 +527,82 @@ impl<P: ModelProvider> SessionEngine<P> {
             fixed_tokens,
             prepared_fixed_tokens(&context.instructions.instructions, &plan.tool_bytes)
         );
-        let explicit = estimate_model_input_for_profile(input.clone(), &limits.profile)
-            .map_err(|error| {
-                format!(
-                    "cannot project the prepared request for profile {}: {error:#}",
-                    limits.profile
-                )
-            })?
-            .saturating_add(ContextTokenEstimate::new(fixed_tokens, fixed_tokens));
-        // Only a compatible append baseline merits estimating the addition.
-        // Never carry old provider usage through a checkpoint rebuild.
-        let baseline = if prepared.anchor == TurnAnchor::Append && checkpoint.is_none() {
-            self.context
-                .projected_tokens(&limits.profile, shape, fixed_tokens)
+        // Extend trusted lineage with only the prospective suffix. This lets
+        // accounting reuse historical image facts/projections without recopying media.
+        let accounting_identity = if prepared.anchor == TurnAnchor::Append && checkpoint.is_none() {
+            self.conversation
+                .input_identity()
+                .filter(|identity| identity.len() <= input.len())
+                .map(|identity| {
+                    let mut next = identity.clone();
+                    next.extend(input[identity.len()..].iter().copied())?;
+                    Ok::<_, anyhow::Error>(next)
+                })
+                .transpose()
+                .map_err(Rejection::from)?
         } else {
             None
         };
-        let usage = baseline.map(|existing| {
-            let addition = prepared
+        let request = ModelRequest {
+            input_identity: accounting_identity.as_ref(),
+            instructions: &context.instructions.instructions,
+            tools,
+            forbid_tool_calls: false,
+            input: input.clone(),
+            model_role: policy.model_role,
+            allowed_tool_names: policy.allowed_tool_names.as_deref(),
+        };
+        let explicit = match self
+            .provider
+            .assess_request(limits, &request)
+            .map_err(|error| {
+                format!(
+                    "cannot assess prepared request for {}: {error:#}",
+                    limits.profile
+                )
+            })? {
+            zevria_model::models::ReplayPreflight::Compatible(estimate) => estimate,
+            zevria_model::models::ReplayPreflight::ConversionRequired { .. } => {
+                return Err(Rejection::Rejected(format!(
+                    "profile {} requires history conversion",
+                    limits.profile
+                )));
+            }
+        };
+        let baseline = if prepared.anchor == TurnAnchor::Append
+            && checkpoint.is_none()
+            && (tool_update.is_none()
+                || self.provider.tool_append_preserves_prefix(&limits.profile))
+        {
+            self.context
+                .projected_estimate(&limits.profile, shape, fixed_tokens)
+        } else {
+            None
+        };
+        let addition = zevria_model::estimates::estimate_model_input_with_policy(
+            prepared
                 .records
                 .iter()
                 .filter_map(TranscriptItem::model_request_item)
-                .map(|item| {
-                    estimate_model_request_item_for_profile(item, &limits.profile)
-                        .unwrap_or_else(|_| estimate_model_request_item(item))
-                        .payload_tokens
-                })
-                .fold(0_u64, u64::saturating_add);
-            let prospective_tools = tool_update
-                .as_ref()
-                .and_then(TranscriptItem::model_request_item)
-                .map(estimate_model_request_item)
-                .map_or(0, |estimate| estimate.conservative_tokens);
-            existing
-                .saturating_add(addition)
-                .saturating_add(prospective_tools)
+                .chain(
+                    tool_update
+                        .as_ref()
+                        .and_then(TranscriptItem::model_request_item),
+                )
+                .collect(),
+            &limits.profile,
+            &limits.image_accounting,
+        )
+        .map_err(|error| {
+            Rejection::Rejected(format!("cannot estimate prepared suffix: {error:#}"))
+        })?;
+        let usage = baseline.map(|existing| {
+            let mut delta = addition;
+            delta.estimated_tokens = delta.payload_tokens;
+            existing.saturating_add(delta)
         });
         let candidates = |exact| CapacityCandidates {
-            payload: explicit.payload_tokens,
-            conservative: explicit.conservative_tokens,
+            local: explicit,
             usage,
             exact,
         };
@@ -577,17 +610,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         let mut assessment =
             self.context
                 .assess(candidates(None), trigger, limits.input_token_limit);
-        let has_images = input
-            .iter()
-            .copied()
-            .filter_map(ModelRequestItem::message_ref)
-            .any(zevria_content::prompt::message_contains_images);
-        let added_images = prepared
-            .records
-            .iter()
-            .filter_map(TranscriptItem::model_request_item)
-            .filter_map(ModelRequestItem::message_ref)
-            .any(zevria_content::prompt::message_contains_images);
+        let has_images = explicit.image_count > 0 || !explicit.unresolved_media.is_empty();
+        let added_images = addition.image_count > 0 || !addition.unresolved_media.is_empty();
         let unmeasured_images = self.context.needs_image_count(
             &limits.profile,
             has_images,
@@ -597,7 +621,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         let mut exact = None;
         if unmeasured_images || assessment.needs_exact() || force_exact {
             let request = ModelRequest {
-                input_identity: None,
+                input_identity: accounting_identity.as_ref(),
                 instructions: &context.instructions.instructions,
                 tools,
                 forbid_tool_calls: false,
@@ -610,22 +634,34 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .count_input_tokens(&mut self.provider, request, turn)
                 .await
             {
-                Ok(InputTokenCount::Exact(tokens)) => {
-                    exact = Some(tokens);
+                Ok(count @ (InputTokenCount::Exact(_) | InputTokenCount::Approximate(_))) => {
+                    exact = Some(match count {
+                        InputTokenCount::Exact(tokens) => (tokens, ContextTokenSource::Exact),
+                        InputTokenCount::Approximate(tokens) => {
+                            (tokens, ContextTokenSource::ProviderEstimate)
+                        }
+                        _ => unreachable!(),
+                    });
                     assessment =
                         self.context
                             .assess(candidates(exact), trigger, limits.input_token_limit);
                 }
-                Ok(InputTokenCount::Unsupported) => {}
+                Ok(InputTokenCount::Unsupported | InputTokenCount::Suppressed) => {}
                 Err(_) if turn.is_cancelled() => return Err(Rejection::Cancelled),
                 Err(error) => {
-                    tracing::warn!(profile = %limits.profile, role = policy.model_role.name(), %error, "exact prepared-prompt counting failed; using the local fallback")
+                    tracing::warn!(profile = %limits.profile, role = policy.model_role.name(), %error, "provider prepared-prompt counting failed; retaining local accounting (best effort if incomplete)")
                 }
             }
         }
         let identity = exact.and_then(|_| {
             prepared_request_identity(shape, &context.instructions.instructions, &input).ok()
         });
+        tracing::debug!(profile=%limits.profile,role=policy.model_role.name(),
+            checkpoint_reassessment=checkpoint.is_some(),source=assessment.source.label(),
+            projected_input_tokens=?assessment.tokens,known_input_tokens=assessment.known_tokens,
+            unresolved_media=?assessment.unresolved_media,image_policy=limits.image_accounting.label(),
+            image_policy_version=limits.image_accounting.version(),
+            "prospective prepared-input assessment before/after checkpoint");
         Ok(PromptMeasurement {
             assessment,
             exact,
@@ -650,6 +686,8 @@ impl<P: ModelProvider> SessionEngine<P> {
             profile: limits.profile.clone(),
             model_role: role,
             projected_input_tokens: measurement.assessment.tokens,
+            known_input_tokens: measurement.assessment.known_tokens,
+            unresolved_media: measurement.assessment.unresolved_media,
             source: measurement.assessment.source,
             automatic_trigger: self.compaction.trigger_tokens(role),
             input_token_limit: limits.input_token_limit,
@@ -766,12 +804,14 @@ impl<P: ModelProvider> SessionEngine<P> {
         if matches!(prepared.anchor, TurnAnchor::ReplaceFrom(_)) {
             self.capabilities.job_follow.raise_floor(turn.id);
         }
-        if let (Some(tokens), Some(identity)) = (measurement.exact, measurement.identity) {
+        if let (Some((tokens, source)), Some(identity)) = (measurement.exact, measurement.identity)
+        {
             self.context.input_count = TurnInputCountState::Prepared {
                 turn_id: turn.id,
                 role: context.policy.model_role,
                 identity,
                 tokens,
+                source,
             };
         }
         // Acceptance effects follow durability, in their established order.

@@ -136,7 +136,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         &mut self,
     ) -> Result<(), SessionReplayError> {
         self.provider.reset();
-        let profiles = ModelRole::ALL.map(|role| self.context_policy(role).profile.clone());
+        let profiles = ModelRole::ALL.map(|role| self.context_policy(role).clone());
         self.context
             .on_history_replaced(&self.conversation, profiles);
         Ok(())
@@ -159,7 +159,14 @@ impl<P: ModelProvider> SessionEngine<P> {
         });
         let start = self.conversation.items().len();
         let history_replaced = matches!(change.anchor, TurnAnchor::ReplaceFrom(_));
-        let reestimate = history_replaced || persist_mode.is_some();
+        let mode_replaced = persist_mode.is_some_and(|mode| {
+            self.conversation
+                .replay()
+                .ok()
+                .and_then(|replay| replay.instructions.persisted_mode())
+                != Some(mode)
+        });
+        let reestimate = history_replaced || mode_replaced;
         let empty = change.items.is_empty() && persist_mode.is_none() && !history_replaced;
         if empty {
             return Ok(Committed {
@@ -228,6 +235,14 @@ impl<P: ModelProvider> SessionEngine<P> {
             self.context.recompute_arming(self.conversation.items());
         }
         if committed.reestimate {
+            tracing::debug!(
+                reason = if committed.history_replaced {
+                    "edited_history"
+                } else {
+                    "mode_or_header_replacement"
+                },
+                "invalidating measured context baselines"
+            );
             self.invalidate_mode_accounting();
         } else {
             self.append_committed_estimates(committed.range.clone());

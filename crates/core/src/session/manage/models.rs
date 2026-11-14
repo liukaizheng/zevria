@@ -2,7 +2,6 @@
 //! failure saving defaults may leave a useful portable checkpoint, never a
 //! new route with history it cannot read.
 use crate::session::SessionEngine;
-use crate::session::kernel::capacity::prepared_fixed_tokens;
 use crate::session::kernel::request_plan::HistoryView;
 use crate::session::kernel::state::{EnginePhase, ModelManagement, ModelManagementContext};
 use crate::session::turn::tools::assistant_tool_calls;
@@ -68,12 +67,21 @@ impl<P: ModelProvider> SessionEngine<P> {
                 let policy = self.policies.policy(mode);
                 let role = policy.model_role;
                 let context = self.context_policy(role);
-                let (_, projected_input_tokens, _) = self.local_context_candidates(policy).ok()?;
+                let (local, usage) = self.local_context_candidates(policy).ok()?;
+                let estimate = usage.unwrap_or(local);
                 Some(ContextTokenSnapshot {
                     profile: context.profile.clone(),
                     model_role: role,
-                    projected_input_tokens,
-                    source: ContextTokenSource::ConservativeEstimate,
+                    projected_input_tokens: estimate.complete_tokens(),
+                    known_input_tokens: estimate.known_tokens(),
+                    unresolved_media: estimate.unresolved_media,
+                    source: if estimate.complete_tokens().is_none() {
+                        ContextTokenSource::IncompleteEstimate
+                    } else if usage.is_some() {
+                        ContextTokenSource::UsagePlusDelta
+                    } else {
+                        ContextTokenSource::LocalEstimate
+                    },
                     automatic_trigger: self.compaction.trigger_tokens(role),
                     input_token_limit: context.input_token_limit,
                     context_window_tokens: context.context_window_tokens,
@@ -313,23 +321,24 @@ impl<P: ModelProvider> SessionEngine<P> {
         request: ModelRequest<'_>,
         cancellation: &CancellationToken,
     ) -> anyhow::Result<bool> {
-        let ReplayPreflight::Compatible(estimate) = self
-            .provider
-            .preflight_input(&context.profile, &request.input)?
+        let ReplayPreflight::Compatible(estimate) =
+            self.provider.assess_request(context, &request)?
         else {
             anyhow::bail!(
                 "profile {} cannot read this opaque checkpoint; select its exact source or start a fresh session",
                 context.profile
             );
         };
-        let overhead =
-            prepared_fixed_tokens(request.instructions, &serde_json::to_vec(request.tools)?);
-        let estimate = estimate.conservative_tokens.saturating_add(overhead);
-        if estimate < context.trigger_tokens(self.compaction.auto_trigger_percent()) {
+        let fallback_fits = estimate
+            .complete_tokens()
+            .is_none_or(|tokens| tokens <= context.input_token_limit);
+        if estimate.complete_tokens().is_some_and(|tokens| {
+            tokens < context.trigger_tokens(self.compaction.auto_trigger_percent())
+        }) {
             return Ok(true);
         }
         if self.context.count_failures.contains(&context.profile) {
-            return Ok(estimate <= context.input_token_limit);
+            return Ok(fallback_fits);
         }
         let selection = ModelSelection::new(context.profile.clone(), reasoning_level);
         let count = {
@@ -338,12 +347,14 @@ impl<P: ModelProvider> SessionEngine<P> {
             tokio::select! { biased; () = cancellation.cancelled() => anyhow::bail!("model selection cancelled"), result = &mut count => result }
         };
         match count {
-            Ok(InputTokenCount::Exact(tokens)) => Ok(tokens <= context.input_token_limit),
-            Ok(InputTokenCount::Unsupported) => Ok(estimate <= context.input_token_limit),
+            Ok(InputTokenCount::Exact(tokens) | InputTokenCount::Approximate(tokens)) => {
+                Ok(tokens <= context.input_token_limit)
+            }
+            Ok(InputTokenCount::Unsupported | InputTokenCount::Suppressed) => Ok(fallback_fits),
             Err(error) => {
                 self.context.count_failures.insert(context.profile.clone());
-                tracing::warn!(%error, "request exact count failed; using conservative estimate");
-                Ok(estimate <= context.input_token_limit)
+                tracing::warn!(%error, "request count failed; using local accounting (best effort if incomplete)");
+                Ok(fallback_fits)
             }
         }
     }
@@ -720,7 +731,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     .then_some(revision),
             });
         }
-        if same_profile && !checkpoint_installed {
+        if same_profile && !checkpoint_installed && context == *self.context_policy(role) {
             if !same_selection {
                 self.provider.install_model_update(role, &target);
             }
@@ -750,14 +761,18 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
         self.context.reset_for_model_update(role);
         self.reestimate_context_usage();
+        let (estimate, _) = self.local_context_candidates(&policy)?;
         let snapshot = ContextTokenSnapshot {
             profile: context.profile.clone(),
             model_role: role,
-            projected_input_tokens: self.local_context_candidates(&policy).map_or_else(
-                |_| self.projected_context_tokens(&policy),
-                |(_, conservative, _)| Ok(conservative),
-            )?,
-            source: ContextTokenSource::ConservativeEstimate,
+            projected_input_tokens: estimate.complete_tokens(),
+            known_input_tokens: estimate.known_tokens(),
+            unresolved_media: estimate.unresolved_media,
+            source: if estimate.complete_tokens().is_some() {
+                ContextTokenSource::LocalEstimate
+            } else {
+                ContextTokenSource::IncompleteEstimate
+            },
             automatic_trigger: self.compaction.trigger_tokens(role),
             input_token_limit: context.input_token_limit,
             context_window_tokens: context.context_window_tokens,

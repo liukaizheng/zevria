@@ -163,32 +163,62 @@ pub fn approximate_tokens(text: &str) -> u64 {
     approximate_tokens_from_bytes(text.len())
 }
 
-/// Two complementary local measurements of model-visible context.
-///
-/// `payload_tokens` counts semantic text and tool payload without JSON wire
-/// punctuation or protocol metadata. `conservative_tokens` retains the
-/// serialized envelope, but replaces opaque reasoning material with bounded
-/// type markers so ciphertext size can never dominate a capacity decision.
+/// Local approximate text/envelope accounting, resolved media costs, and explicit gaps.
+/// Unknown costs are never encoded as a numeric total. Media tokens are not bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextTokenEstimate {
     pub payload_tokens: u64,
-    pub conservative_tokens: u64,
+    pub estimated_tokens: u64,
+    pub media_tokens: u64,
+    pub image_count: u64,
+    pub max_image_edge: u32,
+    pub unresolved_media: crate::media_accounting::UnresolvedMedia,
 }
-
 impl ContextTokenEstimate {
-    pub const fn new(payload_tokens: u64, conservative_tokens: u64) -> Self {
+    pub const fn new(payload_tokens: u64, estimated_tokens: u64) -> Self {
         Self {
             payload_tokens,
-            conservative_tokens,
+            estimated_tokens,
+            media_tokens: 0,
+            image_count: 0,
+            max_image_edge: 0,
+            unresolved_media: crate::media_accounting::UnresolvedMedia {
+                images: 0,
+                files: 0,
+                opaque_items: 0,
+                unknown_policy: 0,
+                unknown_geometry: 0,
+                external_reference: 0,
+                unsupported_detail: 0,
+                request_constraint: 0,
+            },
         }
     }
-
+    pub const fn known_tokens(self) -> u64 {
+        self.estimated_tokens.saturating_add(self.media_tokens)
+    }
+    pub const fn known_payload_tokens(self) -> u64 {
+        self.payload_tokens.saturating_add(self.media_tokens)
+    }
+    pub const fn complete_tokens(self) -> Option<u64> {
+        if self.unresolved_media.is_empty() {
+            Some(self.known_tokens())
+        } else {
+            None
+        }
+    }
     pub const fn saturating_add(self, other: Self) -> Self {
         Self {
             payload_tokens: self.payload_tokens.saturating_add(other.payload_tokens),
-            conservative_tokens: self
-                .conservative_tokens
-                .saturating_add(other.conservative_tokens),
+            estimated_tokens: self.estimated_tokens.saturating_add(other.estimated_tokens),
+            media_tokens: self.media_tokens.saturating_add(other.media_tokens),
+            image_count: self.image_count.saturating_add(other.image_count),
+            max_image_edge: if self.max_image_edge > other.max_image_edge {
+                self.max_image_edge
+            } else {
+                other.max_image_edge
+            },
+            unresolved_media: self.unresolved_media.add(other.unresolved_media),
         }
     }
 }
@@ -244,14 +274,17 @@ fn message_payload_bytes(message: &Message) -> usize {
                         total.saturating_add(match item {
                             ToolResultContent::Text(text) => text.text.len(),
                             ToolResultContent::Json { value } => semantic_json_bytes(value),
-                            ToolResultContent::Image(image) => serialized_semantic_bytes(image),
+                            ToolResultContent::Image(_) => 0,
                         })
                     }),
                 ),
-                UserContent::Image(image) => serialized_semantic_bytes(image),
-                UserContent::Audio(audio) => serialized_semantic_bytes(audio),
-                UserContent::Video(video) => serialized_semantic_bytes(video),
-                UserContent::Document(document) => serialized_semantic_bytes(document),
+                UserContent::Image(_) => 0,
+                UserContent::Audio(_) => 0,
+                UserContent::Video(_) => 0,
+                UserContent::Document(document) => match &document.data {
+                    rig_core::message::DocumentData::Text(text) => text.len(),
+                    _ => 0,
+                },
             };
             total.saturating_add(bytes)
         }),
@@ -275,77 +308,11 @@ fn message_payload_bytes(message: &Message) -> usize {
                             })
                         })
                 }
-                AssistantContent::Image(image) => serialized_semantic_bytes(image),
+                AssistantContent::Image(_) => 0,
                 other => serialized_semantic_bytes(other),
             };
             total.saturating_add(bytes)
         }),
-    }
-}
-
-fn replace_reasoning_opaque_content(value: &mut serde_json::Value) {
-    let Some(message) = value.as_object_mut() else {
-        return;
-    };
-    if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
-        return;
-    }
-    let Some(content) = message
-        .get_mut("content")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return;
-    };
-    for block in content {
-        let Some(block) = block.as_object_mut() else {
-            continue;
-        };
-        if block.get("type").and_then(serde_json::Value::as_str) != Some("reasoning") {
-            continue;
-        }
-        if let Some(item) = block
-            .get_mut("native")
-            .and_then(|native| native.get_mut("item"))
-        {
-            *item = opaque_safe_provider_json(item);
-        }
-        let Some(reasoning) = block
-            .get_mut("content")
-            .and_then(serde_json::Value::as_array_mut)
-        else {
-            continue;
-        };
-        for item in reasoning {
-            let Some(item) = item.as_object_mut() else {
-                continue;
-            };
-            match item.get("type").and_then(serde_json::Value::as_str) {
-                Some("encrypted") => {
-                    item.insert(
-                        "content".to_string(),
-                        serde_json::Value::String(ENCRYPTED_REASONING_MARKER.to_string()),
-                    );
-                }
-                Some("redacted") => {
-                    if let Some(payload) = item.get_mut("content") {
-                        *payload = serde_json::json!({"data": REDACTED_REASONING_MARKER});
-                    }
-                }
-                Some("text") => {
-                    if let Some(signature) = item.get_mut("signature") {
-                        *signature = serde_json::Value::String(SIGNATURE_MARKER.to_string());
-                    }
-                    if let Some(payload) = item
-                        .get_mut("content")
-                        .and_then(serde_json::Value::as_object_mut)
-                        .and_then(|payload| payload.get_mut("signature"))
-                    {
-                        *payload = serde_json::Value::String(SIGNATURE_MARKER.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 }
 
@@ -395,41 +362,31 @@ pub fn opaque_safe_provider_json(value: &serde_json::Value) -> serde_json::Value
     sanitized
 }
 
-/// Estimate a typed canonical message without charging for opaque reasoning
-/// blobs or treating JSON escaping and protocol metadata as model prose.
+/// Destination-independent fallback is explicitly incomplete for every image.
 pub fn estimate_message_tokens(message: &Message) -> ContextTokenEstimate {
-    let (message, images) = image_accounting_projection(message);
-    let image_tokens = (images as u64).saturating_mul(crate::prompt::ESTIMATED_IMAGE_TOKENS as u64);
-    let payload_tokens =
-        approximate_tokens_from_bytes(message_payload_bytes(&message)).saturating_add(image_tokens);
-    let mut conservative = serde_json::to_value(&message).unwrap_or(serde_json::Value::Null);
-    replace_reasoning_opaque_content(&mut conservative);
-    let conservative_tokens = serde_json::to_vec(&conservative)
-        .map_or(0, |bytes| approximate_tokens_from_bytes(bytes.len()));
-    ContextTokenEstimate::new(
-        payload_tokens,
-        conservative_tokens.saturating_add(image_tokens),
+    estimate_message_tokens_with_policy(
+        message,
+        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
     )
 }
-
-/// Temporary typed accounting copy only. Never use it for transport, storage,
-/// request identity, or continuation comparisons.
-fn image_accounting_projection(message: &Message) -> (Message, usize) {
-    let mut message = message.clone();
-    let mut count = 0;
-    let mut strip = |image: &mut rig_core::message::Image| {
-        count += 1;
-        image.data = rig_core::message::DocumentSourceKind::Base64(String::new());
+pub fn estimate_message_tokens_with_policy(
+    message: &Message,
+    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+) -> ContextTokenEstimate {
+    let payload = approximate_tokens_from_bytes(message_payload_bytes(message));
+    let mut estimate = ContextTokenEstimate::new(payload, payload.saturating_add(16));
+    let mut image = |image: &rig_core::message::Image| {
+        estimate = estimate.saturating_add(crate::media_accounting::canonical_image(image, policy));
     };
-    match &mut message {
+    match message {
         Message::User { content } => {
             for block in content {
                 match block {
-                    UserContent::Image(image) => strip(image),
+                    UserContent::Image(value) => image(value),
                     UserContent::ToolResult(result) => {
-                        for block in &mut result.content {
-                            if let ToolResultContent::Image(image) = block {
-                                strip(image);
+                        for block in &result.content {
+                            if let ToolResultContent::Image(value) = block {
+                                image(value);
                             }
                         }
                     }
@@ -438,101 +395,38 @@ fn image_accounting_projection(message: &Message) -> (Message, usize) {
             }
         }
         Message::Assistant(assistant) => {
-            for block in &mut assistant.content {
-                if let AssistantContent::Image(image) = block {
-                    strip(image);
+            for block in &assistant.content {
+                if let AssistantContent::Image(value) = block {
+                    image(value);
                 }
             }
         }
         _ => {}
     }
-    (message, count)
-}
-
-/// Responses input accounting at actual wire image locations. Arbitrary tool
-/// JSON/string lookalikes are ordinary text and are never recursively scrubbed.
-/// The 1,600/image component is explicitly approximate, even when protocol
-/// overhead uses the historical `conservative_tokens` field.
-/// Exact additive form of the local Responses estimate. Only newly projected
-/// items need sanitization/serialization when validating an append lineage.
-#[derive(Default)]
-pub struct ResponsesInputEstimate {
-    payload_bytes: usize,
-    items: usize,
-    images: u64,
-}
-
-impl ResponsesInputEstimate {
-    pub fn append(&mut self, input: &[serde_json::Value]) {
-        if input.is_empty() {
-            return;
-        }
-        let (bytes, images) = responses_input_size(input);
-        self.payload_bytes = self
-            .payload_bytes
-            .saturating_add(bytes.saturating_sub(2))
-            .saturating_add(usize::from(self.items > 0));
-        self.items = self.items.saturating_add(input.len());
-        self.images = self.images.saturating_add(images);
-    }
-    pub fn tokens(&self, property_bytes: usize) -> u64 {
-        approximate_tokens_from_bytes(
-            self.payload_bytes
-                .saturating_add(2)
-                .saturating_add(property_bytes),
-        )
-        .saturating_add(
-            self.images
-                .saturating_mul(crate::prompt::ESTIMATED_IMAGE_TOKENS as u64),
-        )
-    }
-}
-
-pub fn estimate_responses_input_tokens(input: &[serde_json::Value], property_bytes: usize) -> u64 {
-    let mut estimate = ResponsesInputEstimate::default();
-    estimate.append(input);
-    estimate.tokens(property_bytes)
-}
-
-fn responses_input_size(input: &[serde_json::Value]) -> (usize, u64) {
-    let mut projected = input.to_vec();
-    let mut images = 0u64;
-    for item in &mut projected {
-        let kind = item.get("type").and_then(serde_json::Value::as_str);
-        if matches!(kind, Some("reasoning" | "compaction")) {
-            *item = opaque_safe_provider_json(item);
-            continue;
-        }
-        if !matches!(kind, None | Some("message"))
-            || !matches!(
-                item.get("role").and_then(serde_json::Value::as_str),
-                Some("user" | "assistant")
-            )
-        {
-            continue;
-        }
-        if let Some(content) = item
-            .get_mut("content")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for block in content {
-                if block.get("type").and_then(serde_json::Value::as_str) == Some("input_image")
-                    && let Some(object) = block.as_object_mut()
+    if let Message::User { content } = message {
+        for block in content {
+            match block {
+                UserContent::Document(document)
+                    if matches!(document.data, rig_core::message::DocumentData::File(_)) =>
                 {
-                    if let Some(data) = object.get_mut("image_url") {
-                        *data = serde_json::Value::String(String::new());
-                    }
-                    if let Some(data) = object.get_mut("file_id") {
-                        *data = serde_json::Value::String(String::new());
-                    }
-                    images = images.saturating_add(1);
+                    estimate.add_file()
                 }
+                UserContent::Audio(_) | UserContent::Video(_) => estimate.add_file(),
+                _ => {}
             }
         }
     }
-    (
-        serde_json::to_vec(&projected).map_or(usize::MAX, |bytes| bytes.len()),
-        images,
+    estimate.enforce_request_constraints(policy)
+}
+pub use crate::media_accounting::ResponsesInputEstimate;
+pub fn estimate_responses_input_tokens(
+    input: &[serde_json::Value],
+    property_bytes: usize,
+) -> ContextTokenEstimate {
+    crate::media_accounting::responses_input(
+        input,
+        property_bytes,
+        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
     )
 }
 

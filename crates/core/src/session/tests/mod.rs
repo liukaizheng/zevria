@@ -65,6 +65,7 @@ fn role_compaction_policy(
 ) -> CompactionPolicy {
     let context = |(model, context_window_tokens, retained_user_tokens): (&str, u64, u64)| {
         ModelContextPolicy {
+            image_accounting: Default::default(),
             profile: ModelProfileRef::new("test-provider", model),
             context_window_tokens,
             input_token_limit: context_window_tokens,

@@ -12,7 +12,7 @@ use zevria_presentation::{ConversationTail, SessionModel, status_icon::StatusIco
 #[derive(Debug, PartialEq)]
 pub struct ContextGauge {
     pub label: String,
-    pub fraction: f32,
+    pub fraction: Option<f32>,
     pub warning: bool,
 }
 impl ContextGauge {
@@ -24,8 +24,26 @@ impl ContextGauge {
         };
         Self {
             label: format!("{} of {}", compact_number(input), compact_number(window)),
-            fraction,
+            fraction: Some(fraction),
             warning: fraction > 0.8,
+        }
+    }
+    fn from_snapshot(context: &zevria_model::ContextTokenSnapshot) -> Self {
+        match context.projected_input_tokens {
+            Some(tokens) => {
+                let mut gauge = Self::new(tokens, context.context_window_tokens);
+                gauge.label = format!("next {} ({})", gauge.label, context.source.label());
+                gauge
+            }
+            None => Self {
+                label: format!(
+                    "estimated known portion: {}; {}",
+                    compact_number(context.known_input_tokens),
+                    context.unresolved_media.description()
+                ),
+                fraction: None,
+                warning: false,
+            },
         }
     }
 }
@@ -83,9 +101,7 @@ impl StatusLine {
                 .session
                 .reasoning(role)
                 .map(|r| format!("{r:?}").to_lowercase()),
-            context: telemetry
-                .context()
-                .map(|c| ContextGauge::new(c.projected_input_tokens, c.context_window_tokens)),
+            context: telemetry.context().map(ContextGauge::from_snapshot),
             output: telemetry
                 .response()
                 .map(|r| format!("{} output tokens", compact_number(r.usage().output_tokens))),
@@ -294,7 +310,7 @@ impl DesktopWindow {
                     .items_center()
                     .gap(px(8.))
                     .text_color(t.text.muted)
-                    .when(!self.compact, |d| {
+                    .when(!self.compact && context.fraction.is_some(), |d| {
                         d.child(
                             div()
                                 .w(px(64.))
@@ -303,7 +319,7 @@ impl DesktopWindow {
                                 .bg(tones(cx).hairline)
                                 .child(
                                     div()
-                                        .w(px(64. * context.fraction))
+                                        .w(px(64. * context.fraction.expect("complete gauge")))
                                         .h_full()
                                         .rounded_full()
                                         .bg(if context.warning {
@@ -350,10 +366,35 @@ mod tests {
         }
         assert!(!ContextGauge::new(80, 100).warning);
         assert!(ContextGauge::new(81, 100).warning);
-        assert_eq!(ContextGauge::new(150, 100).fraction, 1.);
-        assert_eq!(ContextGauge::new(10, 0).fraction, 0.);
+        assert_eq!(ContextGauge::new(150, 100).fraction, Some(1.));
+        assert_eq!(ContextGauge::new(10, 0).fraction, Some(0.));
         assert_eq!(ContextGauge::new(41000, 200000).label, "41k of 200k");
     }
+    #[::core::prelude::v1::test]
+    fn incomplete_context_has_no_numeric_gauge_or_threshold_warning() {
+        let context = zevria_model::ContextTokenSnapshot {
+            profile: zevria_foundation::ModelProfileRef::new("test", "model"),
+            model_role: ModelRole::Build,
+            projected_input_tokens: None,
+            known_input_tokens: 90_000,
+            unresolved_media: zevria_model::media_accounting::UnresolvedMedia {
+                images: 3,
+                ..Default::default()
+            },
+            source: zevria_model::ContextTokenSource::IncompleteEstimate,
+            automatic_trigger: 80_000,
+            input_token_limit: 100_000,
+            context_window_tokens: 128_000,
+        };
+        let gauge = ContextGauge::from_snapshot(&context);
+        assert_eq!(gauge.fraction, None);
+        assert!(!gauge.warning);
+        assert_eq!(
+            gauge.label,
+            "estimated known portion: 90k; 3 unmeasured images"
+        );
+    }
+
     #[::core::prelude::v1::test]
     fn authoritative_activity_priority() {
         assert_eq!(

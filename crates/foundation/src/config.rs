@@ -93,6 +93,9 @@ pub struct ModelContextPolicy {
     /// Hard ceiling used for input-cost admission and automatic compaction.
     pub input_token_limit: u64,
     pub retained_user_tokens: u64,
+    /// Resolved local accounting policy, never serialized into a provider prompt.
+    #[serde(default)]
+    pub image_accounting: crate::image_accounting::ImageAccountingPolicy,
 }
 
 impl ModelContextPolicy {

@@ -42,6 +42,29 @@ fn replay() -> TranscriptItem {
 }
 
 #[test]
+fn empty_pre_execution_rejection_is_durable_diagnostic_only_and_never_model_input() {
+    let attempt = ResponseAttempt::new(ModelProfileRef::new("provider", "model"));
+    let record = IncompleteResponse::token_window_rejection(&attempt).unwrap();
+    assert!(record.input_rejection.is_some());
+    assert!(record.presentation.is_empty());
+    let item = TranscriptItem::IncompleteResponse(record);
+    let loaded: TranscriptItem =
+        serde_json::from_slice(&serde_json::to_vec(&item).unwrap()).unwrap();
+    assert_eq!(loaded, item);
+    assert!(loaded.model_request_item().is_none());
+    assert!(model_input(&[loaded.clone()]).is_empty());
+    let restored = restored_attempt(&loaded, 0).unwrap();
+    assert!(restored.has_display());
+    assert_eq!(restored.outcome, ResponseAttemptOutcome::Failed);
+    assert!(format!("{restored:?}").contains("Zevria diagnostic"));
+    assert!(
+        IncompleteResponse::token_window_rejection(&restored).is_err(),
+        "display evidence may not masquerade as a fresh pre-execution proof"
+    );
+    SessionReplayError::validate(&[loaded]).unwrap();
+}
+
+#[test]
 fn immutable_recovery_round_trip_is_model_inert_and_restore_is_pure() {
     let item = item();
     let bytes = serde_json::to_vec(&item).unwrap();

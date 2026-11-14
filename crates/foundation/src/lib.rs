@@ -3,6 +3,7 @@ pub mod atomic_file;
 pub mod command_job;
 pub mod config;
 pub mod contained_read;
+pub mod image_accounting;
 pub mod logging;
 pub mod policy;
 pub mod process;

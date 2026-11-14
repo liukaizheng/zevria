@@ -65,6 +65,7 @@ fn model_telemetry_changes_only_after_matching_scope_mode_and_request_success() 
     ] {
         let old = ModelProfileRef::new("configured", "old");
         let context = ModelContextPolicy {
+            image_accounting: Default::default(),
             profile: ModelProfileRef::new("configured", "new"),
             context_window_tokens: 10000,
             input_token_limit: 9000,
@@ -117,8 +118,10 @@ fn model_telemetry_changes_only_after_matching_scope_mode_and_request_success() 
         let snapshot = ContextTokenSnapshot {
             profile: context.profile.clone(),
             model_role: ModelRole::Plan,
-            projected_input_tokens: 123,
-            source: ContextTokenSource::ConservativeEstimate,
+            projected_input_tokens: Some(123),
+            known_input_tokens: 123,
+            unresolved_media: Default::default(),
+            source: ContextTokenSource::LocalEstimate,
             automatic_trigger: 8100,
             input_token_limit: context.input_token_limit,
             context_window_tokens: context.context_window_tokens,

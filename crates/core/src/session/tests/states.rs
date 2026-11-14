@@ -190,7 +190,13 @@ async fn failed_replay_has_no_payload_and_rejects_every_command_and_reseeding() 
     assert!(engine.conversation.replay().is_err());
     assert_eq!(engine.active_skills().unwrap_err(), error);
     assert_eq!(engine.plan_state().unwrap_err(), error);
-    assert_eq!(engine.context_tokens().unwrap_err(), error);
+    assert_eq!(
+        engine
+            .context_tokens()
+            .unwrap_err()
+            .downcast_ref::<SessionReplayError>(),
+        Some(&error)
+    );
     assert_eq!(engine.restored_model_contexts().unwrap_err(), error);
     for anchor in [TurnAnchor::Append, TurnAnchor::ReplaceFrom(0)] {
         assert!(matches!(
@@ -627,6 +633,7 @@ async fn control_transitions_preserve_management_but_never_restore_confirmation(
 fn prepared_counts_are_one_use_and_bound_to_turn_and_role() {
     let turn = TurnId::new(2);
     let mut state = TurnInputCountState::Prepared {
+        source: ContextTokenSource::Exact,
         turn_id: turn,
         role: ModelRole::Plan,
         identity: RequestShapeFingerprint([0; 32]),
@@ -638,6 +645,7 @@ fn prepared_counts_are_one_use_and_bound_to_turn_and_role() {
     );
     assert_eq!(state, TurnInputCountState::Empty);
     state = TurnInputCountState::Prepared {
+        source: ContextTokenSource::Exact,
         turn_id: turn,
         role: ModelRole::Plan,
         identity: RequestShapeFingerprint([0; 32]),
@@ -645,13 +653,14 @@ fn prepared_counts_are_one_use_and_bound_to_turn_and_role() {
     };
     assert_eq!(
         state.take_prepared(turn, ModelRole::Plan, RequestShapeFingerprint([0; 32])),
-        Some(42)
+        Some((42, ContextTokenSource::Exact))
     );
     assert_eq!(
         state.take_prepared(turn, ModelRole::Plan, RequestShapeFingerprint([0; 32])),
         None
     );
     state = TurnInputCountState::Prepared {
+        source: ContextTokenSource::Exact,
         turn_id: turn,
         role: ModelRole::Build,
         identity: RequestShapeFingerprint([0; 32]),
@@ -766,6 +775,7 @@ async fn stale_prepared_count_is_replaced_by_next_turn_failure_and_invalidation_
     ]);
     let calls = engine.provider.input_count_calls.clone();
     engine.context.input_count = TurnInputCountState::Prepared {
+        source: ContextTokenSource::Exact,
         turn_id: TurnId::new(1),
         role: ModelRole::Build,
         identity: RequestShapeFingerprint([0; 32]),
@@ -808,7 +818,7 @@ async fn stale_prepared_count_is_replaced_by_next_turn_failure_and_invalidation_
         )
         .await
         .unwrap(),
-        InputTokenCount::Unsupported
+        InputTokenCount::Suppressed
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let next = TurnContext::new(TurnId::new(3), SessionMode::Build, CancellationToken::new());

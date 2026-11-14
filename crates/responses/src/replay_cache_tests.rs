@@ -201,3 +201,54 @@ fn incremental_estimate_is_identical_to_full_for_images_opaque_data_and_tool_pay
         }
     }
 }
+
+#[test]
+fn accounting_policy_changes_recompute_numbers_but_leave_transport_identity_unchanged() {
+    use zevria_foundation::image_accounting::ImageAccountingPolicy;
+    let target = ModelProfileRef::new("gateway", "unmapped-model");
+    let prompt = zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(
+        zevria_content::PromptImage::from_rgba(1, 1, &[9, 7, 5, 255]).unwrap(),
+    )])
+    .unwrap();
+    let history = [prompt.to_message(), Message::user("text only suffix")];
+    let input = history
+        .iter()
+        .map(zevria_model::ModelRequestItem::Message)
+        .collect::<Vec<_>>();
+    let identity = ModelInputIdentity::from_items(&input).unwrap();
+    let wire = project(&input, &target).unwrap().0;
+    let mut cache = PreflightCache::default();
+    for policy in [
+        ImageAccountingPolicy::Unresolved,
+        ImageAccountingPolicy::preset("gpt-4.1-mini-2025-04-14").unwrap(),
+        ImageAccountingPolicy::Unresolved,
+    ] {
+        for end in 0..=input.len() {
+            let identity = ModelInputIdentity::from_items(&input[..end]).unwrap();
+            assert_eq!(
+                cache
+                    .assess_with_policy(
+                        &input[..end],
+                        &identity,
+                        &target,
+                        true,
+                        Default::default(),
+                        true,
+                        &policy
+                    )
+                    .unwrap(),
+                crate::replay::preflight_with_policy(
+                    &input[..end],
+                    &target,
+                    true,
+                    Default::default(),
+                    true,
+                    &policy
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(ModelInputIdentity::from_items(&input).unwrap(), identity);
+        assert_eq!(project(&input, &target).unwrap().0, wire);
+    }
+}

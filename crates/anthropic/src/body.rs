@@ -30,6 +30,33 @@ pub fn tool_definition(tool: &ToolDeclaration, eager: bool) -> Value {
     value
 }
 
+/// Pure prefix rendering shared with local prepared-request assessment.
+pub fn rendered_system(instructions: &str) -> Value {
+    json!([{"type":"text","text":instructions}])
+}
+pub fn rendered_tools(
+    request: &ModelRequest<'_>,
+    compatibility: &Compatibility,
+) -> anyhow::Result<Value> {
+    let mut declarations = ToolDeclarations::new(request.tools.to_vec())?;
+    if !(compatibility.inline_tools && compatibility.system_messages) {
+        declarations = declarations.fold(request.input.iter().filter_map(|item| match item {
+            ModelRequestItem::AdditionalTools(tools) => Some(*tools),
+            _ => None,
+        }));
+    }
+    let selected = declarations
+        .iter()
+        .map(|tool| tool_definition(tool, compatibility.eager_tool_input_streaming))
+        .collect::<Vec<_>>();
+    let tools = if selected.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(selected)
+    };
+    Ok(tools)
+}
+
 /// Render the exact declared tools, independent of engine call permissions.
 pub fn build(
     request: &ModelRequest<'_>,
@@ -54,23 +81,8 @@ pub fn build_with_history(
         options.max_tokens > 0,
         "max_output_tokens must be greater than zero"
     );
-    let mut declarations = ToolDeclarations::new(request.tools.to_vec())?;
-    if !(options.compatibility.inline_tools && options.compatibility.system_messages) {
-        declarations = declarations.fold(request.input.iter().filter_map(|item| match item {
-            ModelRequestItem::AdditionalTools(tools) => Some(*tools),
-            _ => None,
-        }));
-    }
-    let selected = declarations
-        .iter()
-        .map(|tool| tool_definition(tool, options.compatibility.eager_tool_input_streaming))
-        .collect::<Vec<_>>();
-    let tools = if selected.is_empty() {
-        Value::Null
-    } else {
-        Value::Array(selected)
-    };
-    let system = json!([{"type":"text", "text":request.instructions}]);
+    let tools = rendered_tools(request, options.compatibility)?;
+    let system = rendered_system(request.instructions);
     let projected = if let Some(history) = history {
         anyhow::ensure!(
             history.matches(

@@ -308,13 +308,20 @@ async fn guidance_inheritance_discards_notices_and_combined_budget_rejects_befor
 async fn instruction_set_is_stable_within_build_and_counted_as_fixed_context() {
     let (_directory, mut engine) = engine(4);
     let policy = engine.policies.policy(SessionMode::Build).clone();
-    let before = engine.context_tokens().unwrap();
+    let before = engine
+        .context_tokens()
+        .unwrap()
+        .expect("complete text-only estimate");
     let original = engine.rendered_instructions(&policy);
     assert_eq!(before, engine.fixed_input_tokens(&policy));
     engine.application_prompt = "Application context ".repeat(400);
     let rendered = engine.rendered_instructions(&policy);
     assert_eq!(
-        engine.context_tokens().unwrap() - before,
+        engine
+            .context_tokens()
+            .unwrap()
+            .expect("complete text-only estimate")
+            - before,
         zevria_model::compaction::approximate_tokens(&rendered)
             - zevria_model::compaction::approximate_tokens(&original)
     );

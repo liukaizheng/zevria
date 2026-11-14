@@ -107,7 +107,7 @@ async fn command_count_tokens_refresh_excludes_helper_time_from_deadline() {
             .count_input_tokens(request(&Message::user("count")))
             .await
             .unwrap(),
-        InputTokenCount::Exact(123)
+        InputTokenCount::Approximate(123)
     );
     assert_eq!(helper.runs(), 2);
     server.await.unwrap();

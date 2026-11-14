@@ -288,11 +288,23 @@ fn build_candidate(view: &StatusBarView, options: RenderOptions) -> StatusCandid
                 format_token_count(context.size)
             ));
         } else if let Some(context) = &view.context {
-            let mut summary = format!(
-                "next {}/{}",
-                format_token_count(context.projected_input_tokens),
-                format_token_count(context.input_token_limit)
-            );
+            let mut summary = match context.projected_input_tokens {
+                Some(tokens) => format!(
+                    "next {}{}/{}",
+                    if context.source.is_estimated() {
+                        "~"
+                    } else {
+                        ""
+                    },
+                    format_token_count(tokens),
+                    format_token_count(context.input_token_limit)
+                ),
+                None => format!(
+                    "next known ~{}; {}",
+                    format_token_count(context.known_input_tokens),
+                    context.unresolved_media.description()
+                ),
+            };
             if options.context_source {
                 summary.push(' ');
                 summary.push_str(context.source.label());
@@ -357,7 +369,9 @@ mod tests {
             context: Some(ContextTokenSnapshot {
                 profile: ModelProfileRef::new("provider", "model-wide"),
                 model_role: ModelRole::Explore,
-                projected_input_tokens: 17_800,
+                projected_input_tokens: Some(17_800),
+                known_input_tokens: 17_800,
+                unresolved_media: Default::default(),
                 source: ContextTokenSource::UsagePlusDelta,
                 automatic_trigger: 90_000,
                 input_token_limit: 100_000,
@@ -388,6 +402,28 @@ mod tests {
             " ".repeat(padding),
             candidate.right
         )
+    }
+
+    #[test]
+    fn incomplete_context_never_looks_like_a_total_even_without_source_label() {
+        let mut view = complete_view();
+        let context = view.context.as_mut().unwrap();
+        context.projected_input_tokens = None;
+        context.source = ContextTokenSource::IncompleteEstimate;
+        context.unresolved_media.images = 3;
+        let candidate = build_candidate(
+            &view,
+            RenderOptions {
+                context_source: false,
+                ..Default::default()
+            },
+        );
+        assert!(
+            candidate
+                .right
+                .contains("next known ~17.8k; 3 unmeasured images")
+        );
+        assert!(!candidate.right.contains("17.8k/100k"));
     }
 
     #[test]

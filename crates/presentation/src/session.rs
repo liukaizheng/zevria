@@ -1483,7 +1483,9 @@ mod tests {
         let snapshot = ContextTokenSnapshot {
             profile: old.clone(),
             model_role: ModelRole::Build,
-            projected_input_tokens: 12_000,
+            projected_input_tokens: Some(12_000),
+            known_input_tokens: 12_000,
+            unresolved_media: Default::default(),
             source: zevria_model::ContextTokenSource::Exact,
             automatic_trigger: 80_000,
             input_token_limit: 100_000,

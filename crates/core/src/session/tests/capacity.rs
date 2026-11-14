@@ -10,43 +10,43 @@ fn capacity_assessment_boundaries_and_authority_are_shared() {
     ] {
         let assessment = CapacityAssessment::from_candidates(
             CapacityCandidates {
-                payload: tokens,
-                conservative: tokens,
+                local: ContextTokenEstimate::new(tokens, tokens),
                 usage: None,
                 exact: None,
             },
             80,
             100,
         );
-        assert_eq!(assessment.tokens, tokens);
+        assert_eq!(assessment.tokens, Some(tokens));
         assert_eq!(assessment.band, band);
         assert_eq!(assessment.needs_exact(), band != CapacityBand::Fits);
         assert!(!assessment.measurements_disagree);
     }
     for (usage, exact, tokens, source) in [
-        (None, None, 90, ContextTokenSource::ConservativeEstimate),
+        (None, None, 90, ContextTokenSource::LocalEstimate),
         (Some(70), None, 70, ContextTokenSource::UsagePlusDelta),
         (Some(70), Some(60), 60, ContextTokenSource::Exact),
     ] {
         let assessment = CapacityAssessment::from_candidates(
             CapacityCandidates {
-                payload: 60,
-                conservative: 90,
-                usage,
-                exact,
+                local: ContextTokenEstimate::new(60, 90),
+                usage: usage.map(|tokens| ContextTokenEstimate::new(tokens, tokens)),
+                exact: exact.map(|tokens| (tokens, ContextTokenSource::Exact)),
             },
             80,
             100,
         );
-        assert_eq!((assessment.tokens, assessment.source), (tokens, source));
+        assert_eq!(
+            (assessment.tokens, assessment.source),
+            (Some(tokens), source)
+        );
         assert!(assessment.measurements_disagree);
         assert_eq!(assessment.needs_exact(), exact.is_none());
     }
     let assessment = CapacityAssessment::from_candidates(
         CapacityCandidates {
-            payload: 20,
-            conservative: 30,
-            usage: Some(101),
+            local: ContextTokenEstimate::new(20, 30),
+            usage: Some(ContextTokenEstimate::new(101, 101)),
             exact: None,
         },
         80,
@@ -557,7 +557,7 @@ async fn transient_exact_count_failure_is_attempted_once_per_turn() {
         )
         .await
         .expect("same-turn attempt is suppressed"),
-        InputTokenCount::Unsupported
+        InputTokenCount::Suppressed
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 

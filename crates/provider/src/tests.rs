@@ -409,6 +409,7 @@ fn resolved_profile(
     context_window_tokens: u64,
 ) -> ResolvedModelProfile {
     ResolvedModelProfile {
+        image_accounting: Default::default(),
         profile: zevria_foundation::ModelProfileRef::new(provider, model),
         protocol: ProfileProtocol::Responses {
             endpoint: ProviderEndpoint {

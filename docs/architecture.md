@@ -1916,40 +1916,59 @@ declarations still affect ordinary admission, but compaction can discard them.
 
 ## Context measurement and capacity
 
-Context decisions use semantic token estimates rather than serialized
-transcript byte size. The payload estimate walks typed messages and counts
-unescaped visible text, reasoning summaries, tool names and arguments, tool
-results, and user JSON. Encrypted or redacted reasoning contributes only a
-constant marker; provider IDs, signatures, status fields, and JSON envelope
-punctuation do not become semantic payload. A second conservative estimate
-retains non-opaque envelope overhead after replacing opaque blobs with constant
-markers.
+All full-request gates assess the destination's prepared projection and rendered
+instruction/tool declarations through `ModelProvider::assess_request`: prospective
+prompts/edits, dispatch, model views, ensemble synthesis, summary fitting, and
+checkpoint/restoration reassessment. Canonical item estimates are retained only
+for compatible semantic suffix deltas. Local accounting does not call completion,
+fetch URLs, change request bytes, or mutate continuation ownership.
 
-Replay-backed history is estimated from its canonical message for both its
-source profile and a portable foreign-profile projection. Replay-only
-checkpoints decode known Responses output shapes and use an opaque-safe
-conservative fallback for future shapes. Native replay remains lossless at
-dispatch; this normalization applies only to capacity measurement.
+`ContextTokenEstimate` separates approximate semantic text, envelope estimates,
+resolved media tokens, occurrence counts, and typed unresolved-media reasons.
+`complete_tokens()` returns `None` when any processing cost is unknown; neither
+zero nor a sentinel represents an unknown total. Borrowed structural visitors
+substitute real encoded media before counting bytes, without sanitized payload
+clones. Responses and Messages use their own explicit structural rules; arbitrary
+tool JSON and image-looking text are not recursively guessed/scrubbed. Provider
+reasoning opacity never sanitizes matching user-owned keys.
 
-One `ContextTokenSnapshot` is authoritative at every admission and dispatch
-boundary. An exact provider count wins. Otherwise a valid same-profile
-completed-response usage baseline plus locally appended semantic deltas wins;
-without that baseline, the conservative opaque-safe estimate is used. The
-payload estimate remains a diagnostic candidate. Zevria requests an exact
-count when candidates disagree across the automatic trigger or hard ceiling,
-or before an estimated compaction or rejection. Definitive unsupported
-responses fall back locally. A transient failure suppresses further exact-count
-attempts for that turn, while a later turn may retry.
+Policy-independent image facts are indexed by immutable content identity;
+validated attachment geometry is reused and imported headers are parsed with
+bounded work. No URLs are fetched. Versioned destination policies implement a
+small verified model allowlist or explicit parameter/preset overrides. Compatible
+gateway labels and model-name resemblance do not select a tokenizer. Accounting
+policy/version invalidates numeric caches and local shape compatibility, never
+transport projections, request prefix bytes, cache keys, or continuation identity.
 
-The same snapshot drives prompt and edit admission, skill activation, ensemble
-synthesis, automatic-compaction eligibility, and the final gate before every
-provider call. A prepared request can trigger at most one automatic compaction:
-Zevria installs the checkpoint, rebuilds the complete request, measures again,
-and rejects only if the rebuilt request still exceeds `input_token_limit`. A
-post-compaction request above the trigger but within the ceiling proceeds, so
-the loop cannot repeatedly compact one dispatch. Diagnostics identify whether
-the value was exact, usage-backed, or estimated and whether compaction was
-attempted or unavailable.
+An authoritative snapshot exposes an optional projected total and its known
+estimated portion/missing media. Priority is a matching provider count, compatible
+completed usage plus estimated suffix, then complete/incomplete local estimates.
+Claude count endpoints retain their own estimate qualification. Usage-plus-delta
+is visibly estimated; cached usage is already included in input and historical
+response totals are never accumulated as context. Same-mode persisted appends
+preserve the baseline; edited history, true mode/header replacement, compaction,
+and incompatible policy/request/profile changes invalidate it. Resume without
+in-memory measurements uses local accounting rather than fabricating a baseline.
+
+New unmeasured media and near/disagreeing capacity boundaries prefer provider
+counting. Unsupported endpoints (404/405/501) and temporary per-turn failure
+suppression are different states. If media remains unmeasured, approved best
+effort shows the known portion and missing items, without a total/gauge, and may
+exceed the local input budget. Unknown media alone neither rejects admission nor
+prunes the full replay-safe summary source. A large known portion can trigger one
+compaction; complete over-limit input still fails the normal hard gate.
+
+One pending model round has one shared automatic compaction/retry allowance,
+including admission, predictive dispatch compaction, and recovery from confirmed
+pre-execution token rejection. Settlement retains failed attempt evidence before
+recovery and never exposes partial calls to tools. Recovery checks replay,
+persistence and cancellation, installs one checkpoint, resets continuation,
+reassesses, and retries only the pending completion. A second size rejection,
+body-size 413, exhausted/disarmed allowance, unsafe upstream outcome, or failed
+compaction stops. Only established successful model/tool progress rearms it.
+Synthetic summaries and transport retries have separate finite limits. See
+[image accounting](image-input.md#model-aware-context-accounting) for policies,
+best-effort tradeoffs, and provider limitations.
 
 Compaction anchors are independent of editable prompt rows. Ordinary and
 direct-skill prompts, typed Plan `Handoff` records, and ensemble `ReportsReady`

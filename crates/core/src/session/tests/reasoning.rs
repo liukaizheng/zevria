@@ -40,6 +40,7 @@ impl ModelProvider for Provider {
         .into_iter()
         .map(|profile| ModelCandidate {
             context: ModelContextPolicy {
+                image_accounting: Default::default(),
                 profile,
                 context_window_tokens: 100_000,
                 input_token_limit: 100_000,
