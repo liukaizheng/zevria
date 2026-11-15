@@ -32,7 +32,15 @@ impl ContextGauge {
         match context.projected_input_tokens {
             Some(tokens) => {
                 let mut gauge = Self::new(tokens, context.context_window_tokens);
-                gauge.label = format!("next {} ({})", gauge.label, context.source.label());
+                gauge.label = format!(
+                    "next {}{}",
+                    if context.source.is_estimated() {
+                        "~"
+                    } else {
+                        ""
+                    },
+                    gauge.label
+                );
                 gauge
             }
             None => Self {
@@ -57,7 +65,7 @@ pub struct StatusLine {
     pub reasoning: Option<String>,
     pub context: Option<ContextGauge>,
     pub cache: Option<String>,
-    pub output: Option<String>,
+    pub total: Option<String>,
     pub network: Option<String>,
 }
 impl StatusLine {
@@ -111,8 +119,8 @@ impl StatusLine {
                     usage.cached_percent(),
                 )
             }),
-            output: response_usage
-                .map(|usage| format!("{} output tokens", compact_number(usage.output_tokens))),
+            total: response_usage
+                .map(|usage| format!("total {}", compact_number(usage.total_tokens))),
             network: model.session.network_message().map(|(m, _)| m),
         }
     }
@@ -331,14 +339,18 @@ impl DesktopWindow {
                     .when(!self.compact && context.fraction.is_some(), |d| {
                         d.child(
                             div()
+                                .id("status-context-gauge")
+                                .test_support()
+                                // Let the gauge shrink with the context group so the label stays visible.
                                 .w(px(64.))
-                                .flex_shrink_0()
                                 .h(px(4.))
                                 .rounded_full()
                                 .bg(tones(cx).hairline)
                                 .child(
                                     div()
-                                        .w(px(64. * context.fraction.expect("complete gauge")))
+                                        .id("status-context-fill")
+                                        .test_support()
+                                        .w(relative(context.fraction.expect("complete gauge")))
                                         .h_full()
                                         .rounded_full()
                                         .bg(if context.warning {
@@ -369,14 +381,14 @@ impl DesktopWindow {
                         .child(cache),
                 );
             }
-            if let Some(output) = status.output {
+            if let Some(total) = status.total {
                 row = row.child(
                     div()
-                        .id("status-output")
+                        .id("status-total")
                         .test_support()
                         .flex_shrink_0()
                         .text_color(t.text.muted)
-                        .child(output),
+                        .child(total),
                 );
             }
         }
@@ -449,26 +461,26 @@ mod tests {
     #[::core::prelude::v1::test]
     fn cache_count_and_rate_match_last_response_rounding() {
         let mut model = running_model();
-        for (input, cached, expected) in [
-            (12_300, 10_200, "cached 10.2k (83%)"),
-            (1_000, 124, "cached 124 (12%)"),
-            (1_000, 126, "cached 126 (13%)"),
-            (12_300, 0, "cached 0 (0%)"),
-            (12_300, 12_300, "cached 12.3k (100%)"),
-            (0, 0, "cached 0 (0%)"),
-            (0, 100, "cached 100 (0%)"),
+        for (input, cached, expected_cache, expected_total) in [
+            (12_300, 10_200, "cached 10.2k (83%)", "total 14.4k"),
+            (1_000, 124, "cached 124 (12%)", "total 3.1k"),
+            (1_000, 126, "cached 126 (13%)", "total 3.1k"),
+            (12_300, 0, "cached 0 (0%)", "total 14.4k"),
+            (12_300, 12_300, "cached 12.3k (100%)", "total 14.4k"),
+            (0, 0, "cached 0 (0%)", "total 2.1k"),
+            (0, 100, "cached 100 (0%)", "total 2.1k"),
             // Preserve the shared helper's semantics, including no clamping.
-            (1_000, 1_200, "cached 1.2k (120%)"),
+            (1_000, 1_200, "cached 1.2k (120%)", "total 3.1k"),
         ] {
             model.reduce(response_event(input, cached, 2_100));
             let status = StatusLine::new(&model, false);
-            assert_eq!(status.cache.as_deref(), Some(expected));
-            assert_eq!(status.output.as_deref(), Some("2.1k output tokens"));
+            assert_eq!(status.cache.as_deref(), Some(expected_cache));
+            assert_eq!(status.total.as_deref(), Some(expected_total));
         }
     }
 
     #[::core::prelude::v1::test]
-    fn absent_response_usage_has_no_cache_or_output_segment() {
+    fn absent_response_usage_has_no_cache_or_total_segment() {
         let mut model = running_model();
         assert_eq!(StatusLine::new(&model, false).cache, None);
         model.reduce(context_event(
@@ -479,7 +491,7 @@ mod tests {
         let status = StatusLine::new(&model, false);
         assert!(status.context.is_some());
         assert_eq!(status.cache, None);
-        assert_eq!(status.output, None);
+        assert_eq!(status.total, None);
     }
 
     #[::core::prelude::v1::test]
@@ -506,16 +518,13 @@ mod tests {
         ));
         let status = StatusLine::new(&model, false);
         assert_eq!(status.cache.as_deref(), Some("cached 10.2k (83%)"));
-        assert_eq!(status.output.as_deref(), Some("2.1k output tokens"));
-        assert_eq!(
-            status.context.unwrap().label,
-            "next 41k of 128k (provider count)"
-        );
+        assert_eq!(status.total.as_deref(), Some("total 14.4k"));
+        assert_eq!(status.context.unwrap().label, "next 41k of 128k");
 
         model.reduce(response_event(20_000, 10_000, 3_000));
         let status = StatusLine::new(&model, false);
         assert_eq!(status.cache.as_deref(), Some("cached 10k (50%)"));
-        assert_eq!(status.output.as_deref(), Some("3k output tokens"));
+        assert_eq!(status.total.as_deref(), Some("total 23k"));
         model.reduce(E::TurnCompleted {
             turn_id: TURN,
             message: Message::assistant("Done"),
@@ -553,7 +562,7 @@ mod tests {
         let status = StatusLine::new(&model, false);
         assert_eq!(status.profile, "test/replacement");
         assert_eq!(status.cache, None);
-        assert_eq!(status.output, None);
+        assert_eq!(status.total, None);
         model.reduce(response_event(12_300, 10_200, 2_100));
         model.reduce(E::TurnCompleted {
             turn_id: TURN,
@@ -568,7 +577,7 @@ mod tests {
         assert_eq!(status.profile, "test/plan");
         assert!(status.context.is_some());
         assert_eq!(status.cache, None);
-        assert_eq!(status.output, None);
+        assert_eq!(status.total, None);
     }
 
     #[::core::prelude::v1::test]
@@ -589,6 +598,32 @@ mod tests {
         assert_eq!(ContextGauge::new(10, 0).fraction, Some(0.));
         assert_eq!(ContextGauge::new(41000, 200000).label, "41k of 200k");
     }
+    #[::core::prelude::v1::test]
+    fn context_labels_only_mark_estimates() {
+        for (source, expected) in [
+            (ContextTokenSource::Exact, "next 17.8k of 128k"),
+            (ContextTokenSource::UsagePlusDelta, "next ~17.8k of 128k"),
+            (ContextTokenSource::LocalEstimate, "next ~17.8k of 128k"),
+            (ContextTokenSource::ProviderEstimate, "next ~17.8k of 128k"),
+        ] {
+            let context = ContextTokenSnapshot {
+                profile: ModelProfileRef::new("test", "model"),
+                model_role: ModelRole::Build,
+                projected_input_tokens: Some(17_800),
+                known_input_tokens: 17_800,
+                unresolved_media: Default::default(),
+                source,
+                automatic_trigger: 80_000,
+                input_token_limit: 100_000,
+                context_window_tokens: 128_000,
+            };
+            let gauge = ContextGauge::from_snapshot(&context);
+            assert_eq!(gauge.label, expected, "{source:?}");
+            assert_eq!(gauge.fraction, ContextGauge::new(17_800, 128_000).fraction);
+            assert!(!gauge.warning);
+        }
+    }
+
     #[::core::prelude::v1::test]
     fn incomplete_context_has_no_numeric_gauge_or_threshold_warning() {
         let context = zevria_model::ContextTokenSnapshot {

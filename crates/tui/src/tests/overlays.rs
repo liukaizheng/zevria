@@ -1228,7 +1228,7 @@ fn mode_and_approval_states_render_distinct_titles_bodies_and_cursor_visibility(
 #[test]
 fn token_usage_renders_in_the_footer_and_survives_failures() {
     let mut app = App::new();
-    let stats = "last in 12.3k · cached 10.2k (83%) · out 1.4k · total 13.7k";
+    let stats = "cached 10.2k (83%) · total 13.7k";
     assert!(
         !rendered_text(&mut app, 120, 8).contains("cached"),
         "the footer stays empty until the first completed response"
@@ -1307,7 +1307,7 @@ fn projected_and_last_response_usage_render_separately_and_survive_failure() {
             },
         },
     );
-    let summary = "next ~17.8k/100.0k estimated usage+delta · last total 13.7k";
+    let summary = "next ~17.8k/100.0k · cached 10.2k (83%) · total 13.7k";
     // Leave room for the active engine-local turn suffix as well as telemetry.
     assert!(rendered_text(&mut app, 100, 8).contains(summary));
 

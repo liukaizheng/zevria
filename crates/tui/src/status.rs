@@ -89,7 +89,6 @@ enum ModelDetail {
 struct RenderOptions {
     jobs: bool,
     response: ResponseDetail,
-    context_source: bool,
     optional_left: bool,
     compact_controls: bool,
     model: ModelDetail,
@@ -101,7 +100,6 @@ impl Default for RenderOptions {
         Self {
             jobs: true,
             response: ResponseDetail::Full,
-            context_source: true,
             optional_left: true,
             compact_controls: false,
             model: ModelDetail::Full,
@@ -199,11 +197,6 @@ fn select_candidate(view: &StatusBarView, width: usize) -> StatusCandidate {
         return candidate;
     }
 
-    options.context_source = false;
-    if let Some(candidate) = fitting_candidate(view, options, width) {
-        return candidate;
-    }
-
     options.optional_left = false;
     if let Some(candidate) = fitting_candidate(view, options, width) {
         return candidate;
@@ -288,7 +281,7 @@ fn build_candidate(view: &StatusBarView, options: RenderOptions) -> StatusCandid
                 format_token_count(context.size)
             ));
         } else if let Some(context) = &view.context {
-            let mut summary = match context.projected_input_tokens {
+            let summary = match context.projected_input_tokens {
                 Some(tokens) => format!(
                     "next {}{}/{}",
                     if context.source.is_estimated() {
@@ -305,27 +298,20 @@ fn build_candidate(view: &StatusBarView, options: RenderOptions) -> StatusCandid
                     context.unresolved_media.description()
                 ),
             };
-            if options.context_source {
-                summary.push(' ');
-                summary.push_str(context.source.label());
-            }
             right.push(summary);
         }
     }
     if let Some(usage) = view.response {
         match options.response {
             ResponseDetail::Full => right.push(format!(
-                "last in {} · cached {} ({:.0}%) · out {} · total {}",
-                format_token_count(usage.input_tokens),
+                "cached {} ({:.0}%) · total {}",
                 format_token_count(usage.cached_tokens),
                 usage.cached_percent(),
-                format_token_count(usage.output_tokens),
                 format_token_count(usage.total_tokens),
             )),
-            ResponseDetail::Total => right.push(format!(
-                "last total {}",
-                format_token_count(usage.total_tokens)
-            )),
+            ResponseDetail::Total => {
+                right.push(format!("total {}", format_token_count(usage.total_tokens)))
+            }
             ResponseDetail::Omitted => {}
         }
     }
@@ -405,25 +391,35 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_context_never_looks_like_a_total_even_without_source_label() {
+    fn context_labels_only_mark_estimates() {
+        let mut view = complete_view();
+        view.response = None;
+        for (source, expected) in [
+            (ContextTokenSource::Exact, "next 17.8k/100.0k"),
+            (ContextTokenSource::UsagePlusDelta, "next ~17.8k/100.0k"),
+            (ContextTokenSource::LocalEstimate, "next ~17.8k/100.0k"),
+            (ContextTokenSource::ProviderEstimate, "next ~17.8k/100.0k"),
+        ] {
+            view.context.as_mut().unwrap().source = source;
+            let candidate = build_candidate(&view, RenderOptions::default());
+            assert_eq!(candidate.right, expected, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn incomplete_context_never_looks_like_a_total() {
         let mut view = complete_view();
         let context = view.context.as_mut().unwrap();
         context.projected_input_tokens = None;
         context.source = ContextTokenSource::IncompleteEstimate;
         context.unresolved_media.images = 3;
-        let candidate = build_candidate(
-            &view,
-            RenderOptions {
-                context_source: false,
-                ..Default::default()
-            },
-        );
+        let candidate = build_candidate(&view, RenderOptions::default());
         assert!(
             candidate
                 .right
                 .contains("next known ~17.8k; 3 unmeasured images")
         );
-        assert!(!candidate.right.contains("17.8k/100k"));
+        assert!(!candidate.right.contains("17.8k/100.0k"));
     }
 
     #[test]
@@ -491,7 +487,7 @@ mod tests {
             select_candidate(&view, without_jobs.minimum_width()),
             without_jobs
         );
-        assert!(without_jobs.right.contains("last in"));
+        assert!(without_jobs.right.contains("cached"));
         assert!(!without_jobs.tail.contains("2 jobs"));
     }
 
@@ -511,8 +507,8 @@ mod tests {
         assert_eq!(select_candidate(&view, full.minimum_width()), full);
         assert_eq!(select_candidate(&view, total.minimum_width()), total);
         assert!(total.tail.contains("Ctrl+O back, Ctrl+B/F page"));
-        assert!(total.right.contains("last total"));
-        assert!(!total.right.contains("last in"));
+        assert!(total.right.contains("total"));
+        assert!(!total.right.contains("cached"));
     }
 
     #[test]
@@ -530,32 +526,23 @@ mod tests {
             },
             RenderOptions {
                 response: ResponseDetail::Omitted,
-                context_source: false,
-                ..RenderOptions::default()
-            },
-            RenderOptions {
-                response: ResponseDetail::Omitted,
-                context_source: false,
                 optional_left: false,
                 ..RenderOptions::default()
             },
             RenderOptions {
                 response: ResponseDetail::Omitted,
-                context_source: false,
                 optional_left: false,
                 model: ModelDetail::ModelOnly,
                 ..RenderOptions::default()
             },
             RenderOptions {
                 response: ResponseDetail::Omitted,
-                context_source: false,
                 optional_left: false,
                 model: ModelDetail::Omitted,
                 ..RenderOptions::default()
             },
             RenderOptions {
                 response: ResponseDetail::Omitted,
-                context_source: false,
                 optional_left: false,
                 compact_controls: true,
                 model: ModelDetail::Omitted,
@@ -583,17 +570,19 @@ mod tests {
             }
         }
 
-        assert!(candidates[0].right.contains("last in 12.3k"));
-        assert!(candidates[1].right.contains("last total 13.7k"));
-        assert!(!candidates[2].right.contains("last"));
-        assert!(!candidates[3].right.contains("usage+delta"));
-        assert!(!candidates[4].tail.contains("Ctrl+O back"));
-        assert!(candidates[4].tail.contains("provider/model-wide"));
-        assert!(candidates[5].tail.contains("model-wide"));
-        assert!(!candidates[5].tail.contains("provider/"));
-        assert!(!candidates[6].tail.contains("model-wide"));
-        assert!(candidates[6].right.contains("next"));
-        assert!(candidates[7].right.is_empty());
+        assert_eq!(
+            candidates[0].right,
+            "next ~17.8k/100.0k · cached 10.2k (83%) · total 13.7k"
+        );
+        assert!(candidates[1].right.contains("total 13.7k"));
+        assert!(!candidates[2].right.contains("total"));
+        assert!(!candidates[3].tail.contains("Ctrl+O back"));
+        assert!(candidates[3].tail.contains("provider/model-wide"));
+        assert!(candidates[4].tail.contains("model-wide"));
+        assert!(!candidates[4].tail.contains("provider/"));
+        assert!(!candidates[5].tail.contains("model-wide"));
+        assert!(candidates[5].right.contains("next"));
+        assert!(candidates[6].right.is_empty());
     }
 
     #[test]

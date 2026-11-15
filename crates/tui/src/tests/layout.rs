@@ -229,9 +229,9 @@ fn footer_owns_state_and_accounting_while_composer_chrome_is_action_only() {
     let footer = rows.last().expect("footer");
     let body = rows[..rows.len() - 1].concat();
     assert!(footer.contains("test/model"));
-    assert!(footer.contains("last in 12.3k"));
+    assert!(footer.contains("cached 10.2k"));
     assert!(!body.contains("test/model"));
-    assert!(!body.contains("last in 12.3k"));
+    assert!(!body.contains("cached 10.2k"));
 
     let artifact = test_plan_artifact();
     let version = artifact.version;

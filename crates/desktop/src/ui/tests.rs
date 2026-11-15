@@ -136,18 +136,18 @@ mod status {
         window: Window,
         controller: &Entity<SessionController>,
         cache: Option<&str>,
-        output: Option<&str>,
+        total: Option<&str>,
         cx: &mut TestAppContext,
     ) {
         controller.read_with(cx, |c, _| {
             let status = StatusLine::new(c.model.visible(), c.cancelling);
             assert_eq!(status.cache.as_deref(), cache);
-            assert_eq!(status.output.as_deref(), output);
+            assert_eq!(status.total.as_deref(), total);
         });
         cx.update_window(window.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(window.try_find("status-cache").is_some(), cache.is_some());
-            assert_eq!(window.try_find("status-output").is_some(), output.is_some());
+            assert_eq!(window.try_find("status-total").is_some(), total.is_some());
         })
         .unwrap();
     }
@@ -182,7 +182,7 @@ mod status {
             controller.read_with(cx, |c, _| {
                 let status = StatusLine::new(c.model.visible(), c.cancelling);
                 assert_eq!(status.cache.as_deref(), Some("cached 10.2k (83%)"));
-                assert_eq!(status.output.as_deref(), Some("2.1k output tokens"));
+                assert_eq!(status.total.as_deref(), Some("total 14.4k"));
                 assert!(status.network.unwrap().starts_with("No response progress"));
             });
             cx.update_window(window.into(), |_, window, cx| {
@@ -206,25 +206,36 @@ mod status {
                 ];
                 if compact {
                     assert!(window.try_find("status-cache").is_none());
-                    assert!(window.try_find("status-output").is_none());
+                    assert!(window.try_find("status-total").is_none());
                 } else {
-                    segments.extend(["status-cache", "status-output"]);
+                    segments.extend([
+                        "status-context-gauge",
+                        "status-context-fill",
+                        "status-cache",
+                        "status-total",
+                    ]);
+                    let gauge = window.find("status-context-gauge").bounds();
+                    let fill = window.find("status-context-fill").bounds();
+                    assert!(gauge.size.width <= px(64.), "{width}px gauge {gauge:?}");
+                    assert!(fill.origin.x >= gauge.origin.x && fill.right() <= gauge.right());
                     let cache = window.find("status-cache").bounds();
-                    let output = window.find("status-output").bounds();
-                    let widths = (cache.size.width, output.size.width);
+                    let total = window.find("status-total").bounds();
+                    let widths = (cache.size.width, total.size.width);
                     assert_eq!(
                         *response_widths.get_or_insert(widths),
                         widths,
                         "{width}px response"
                     );
-                    assert!(cache.right() <= output.origin.x);
+                    assert!(cache.right() <= total.origin.x);
                 }
                 for id in segments {
                     let segment = window.find(id);
                     let bounds = segment.bounds();
                     assert!(
                         segment.visible() && bounds.size.width > px(0.),
-                        "{width}px: {id}"
+                        "{width}px: {id} {bounds:?}; context {:?}; network {:?}; bar {bar:?}",
+                        window.find("status-context").bounds(),
+                        window.find("status-network").bounds(),
                     );
                     assert!(
                         bounds.origin.x >= bar.origin.x && bounds.right() <= bar.right(),
@@ -253,7 +264,7 @@ mod status {
             window,
             &controller,
             Some("cached 10.2k (83%)"),
-            Some("2.1k output tokens"),
+            Some("total 14.4k"),
             cx,
         );
 
@@ -270,7 +281,7 @@ mod status {
             window,
             &controller,
             Some("cached 10k (50%)"),
-            Some("3k output tokens"),
+            Some("total 23k"),
             cx,
         );
         event(&controller, context_event("model", 41_000), cx);
@@ -278,7 +289,7 @@ mod status {
             window,
             &controller,
             Some("cached 10k (50%)"),
-            Some("3k output tokens"),
+            Some("total 23k"),
             cx,
         );
 
@@ -293,7 +304,7 @@ mod status {
             window,
             &controller,
             Some("cached 5k (100%)"),
-            Some("400 output tokens"),
+            Some("total 5.4k"),
             cx,
         );
         event(
@@ -309,7 +320,7 @@ mod status {
             window,
             &controller,
             Some("cached 5k (100%)"),
-            Some("400 output tokens"),
+            Some("total 5.4k"),
             cx,
         );
         event(

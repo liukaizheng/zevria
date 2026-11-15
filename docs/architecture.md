@@ -3043,10 +3043,10 @@ The status line resolves `provider/model` from the displayed role, projected
 next-request context separately from the latest completed response, and ACP
 `used/size` context without cost or a fabricated model. Width admission uses
 terminal display cells and grapheme-safe truncation. Compression keeps its
-fixed order: full latest-response detail, response total only, no response,
-context without its source, no optional detail or inspect controls, shortened
-model identity, no model identity, no projected context, and only then an
-ellipsized mandatory primary state. The right telemetry group remains aligned
+fixed order: cached count and percentage plus response total, response total
+only, no response, no optional detail or inspect controls, shortened model
+identity, no model identity, no projected context, and only then an ellipsized
+mandatory primary state. The right telemetry group remains aligned
 to the inset rectangle's right edge and the line never wraps. Interactive
 frames shorter than five rows and inspect frames shorter than four omit the
 status line and give the complete frame back to the existing body layout.
