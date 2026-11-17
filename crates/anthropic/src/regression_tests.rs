@@ -268,8 +268,9 @@ fn tool_results_precede_text_and_directives_and_images_documents_errors_map() {
     let AssistantContent::ToolCall(call) = &assistant.content[0] else {
         panic!()
     };
+    let prepared = zevria_content::test_support::prepared_image().image;
     let image = Image {
-        data: DocumentSourceKind::Base64("image-bytes".into()),
+        data: DocumentSourceKind::Base64(prepared.base64()),
         media_type: Some(ImageMediaType::PNG),
         ..Default::default()
     };
@@ -317,6 +318,15 @@ fn tool_results_precede_text_and_directives_and_images_documents_errors_map() {
     assert_eq!(content[0]["content"][0]["text"], "{\"ok\":false}");
     assert_eq!(content[0]["content"][1]["type"], "image");
     assert_eq!(content[2]["source"]["media_type"], "image/png");
+    assert_eq!(
+        content[0]["content"][1]["source"]["data"],
+        prepared.base64()
+    );
+    assert_eq!(content[2]["source"]["data"], prepared.base64());
+    assert!(
+        prepared.base64().len() + zevria_content::image_preparation::DATA_URL_RESERVE
+            <= zevria_content::image_preparation::MAX_IMAGE_TRANSPORT_BYTES
+    );
     assert_eq!(content[3]["type"], "document");
     assert_eq!(content[4]["text"], directive.text);
 }

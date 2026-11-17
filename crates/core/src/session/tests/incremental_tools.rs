@@ -214,6 +214,8 @@ async fn resume_redefines_only_changed_tools_without_rewriting_initial_or_additi
     submit(&mut engine, SessionMode::Build, "first").await;
     let path = engine.conversation.path().to_path_buf();
     let initial = records(&engine)[0].clone();
+    let prefix_bytes = std::fs::read(&path).unwrap();
+    let prefix_input = snapshot_model_input(engine.conversation.model_input()).unwrap();
     drop(engine);
     let mut resumed = SessionEngine::new(
         ScriptedProvider::new([
@@ -233,8 +235,14 @@ async fn resume_redefines_only_changed_tools_without_rewriting_initial_or_additi
     assert_eq!(declarations[0], &initial);
     assert_eq!(names(&declarations[1].tools), ["command"]);
     assert_eq!(declarations[1].tools[0].description, "new description");
+    assert_eq!(
+        declarations[1].placement,
+        ToolDeclarationPlacement::Additional
+    );
+    assert!(std::fs::read(&path).unwrap().starts_with(&prefix_bytes));
     let requests = resumed.provider.requests.lock().unwrap();
     assert_eq!(requests[0].tools, initial.tools);
+    assert!(requests[0].input.starts_with(&prefix_input));
     let position = requests[0]
         .input
         .iter()

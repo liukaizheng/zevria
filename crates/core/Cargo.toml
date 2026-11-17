@@ -31,6 +31,7 @@ uuid = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
+zevria-content = { workspace = true, features = ["test-support"] }
 zevria-transcript = { workspace = true, features = ["test-support"] }
 zevria-instructions = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

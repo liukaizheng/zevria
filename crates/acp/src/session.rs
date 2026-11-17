@@ -65,6 +65,7 @@ struct State {
     mode: SessionMode,
     plan: PlanWorkflowState,
     pending: Option<PendingPrompt>,
+    preparing: Option<(u64, CancellationToken)>,
     pending_mode: Option<PendingMode>,
     skill_requests: HashMap<String, PendingSkillRequest>,
     last_terminal_turn: Option<TurnId>,
@@ -150,6 +151,61 @@ pub(crate) struct PromptWait {
     pub response: oneshot::Receiver<Result<StopReason, AcpError>>,
 }
 
+/// Reserves request order and the idle/management lock without beginning an
+/// engine turn. Dropping a failed/cancelled preparation releases the reservation.
+pub(crate) struct InputPreparation {
+    live: Arc<LiveSession>,
+    id: u64,
+    cancellation: CancellationToken,
+}
+impl InputPreparation {
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+    pub(crate) fn interrupted_error(&self) -> AcpError {
+        let state = self.live.state.lock().expect("ACP session state poisoned");
+        state
+            .unavailable
+            .as_ref()
+            .map_or_else(AcpError::request_cancelled, |error| {
+                AcpError::internal_error().data(error.clone())
+            })
+    }
+    pub(crate) fn begin_prompt(
+        self,
+        prompt: zevria_content::UserPrompt,
+        behavior: zevria_foundation::RequestBehavior,
+    ) -> Result<PromptWait, AcpError> {
+        self.live
+            .begin_input(Some(prompt), None, behavior, Some(self.id))
+    }
+    pub(crate) fn begin_skill(
+        self,
+        name: zevria_instructions::skill::SkillName,
+        args: zevria_content::UserPrompt,
+    ) -> Result<PromptWait, AcpError> {
+        self.live.check_skill_input(&args)?;
+        self.live.begin_input(
+            None,
+            Some((name, args)),
+            zevria_foundation::RequestBehavior::Standard,
+            Some(self.id),
+        )
+    }
+}
+impl Drop for InputPreparation {
+    fn drop(&mut self) {
+        let mut state = self.live.state.lock().expect("ACP session state poisoned");
+        if state
+            .preparing
+            .as_ref()
+            .is_some_and(|(id, _)| *id == self.id)
+        {
+            state.preparing = None;
+        }
+    }
+}
+
 pub(crate) struct ModeWait {
     pub request_id: String,
     pub response: oneshot::Receiver<Result<(), AcpError>>,
@@ -190,6 +246,7 @@ impl LiveSession {
                 mode,
                 plan: initial_plan,
                 pending: None,
+                preparing: None,
                 pending_mode: None,
                 skill_requests: HashMap::new(),
                 last_terminal_turn: None,
@@ -325,7 +382,7 @@ impl LiveSession {
             if self.is_closed() {
                 return Err(invalid_params("session is closed"));
             }
-            if state.pending.is_some() {
+            if state.pending.is_some() || state.preparing.is_some() {
                 return Err(invalid_params("cannot change mode during an active prompt"));
             }
             if state.pending_mode.is_some() || !state.skill_requests.is_empty() {
@@ -485,7 +542,7 @@ impl LiveSession {
                     "mode selection is pending; skill request was not queued",
                 ));
             }
-            if request.is_mutation() && state.pending.is_some() {
+            if request.is_mutation() && (state.pending.is_some() || state.preparing.is_some()) {
                 return Err(invalid_params(
                     "skill mutations require an idle session; request was not queued",
                 ));
@@ -526,22 +583,49 @@ impl LiveSession {
         }
     }
 
-    pub(crate) fn begin_skill(
-        &self,
-        name: zevria_instructions::skill::SkillName,
-        args: zevria_content::UserPrompt,
-    ) -> Result<PromptWait, AcpError> {
+    pub(crate) fn reserve_input_preparation(
+        self: &Arc<Self>,
+    ) -> Result<InputPreparation, AcpError> {
+        let mut state = self.state.lock().expect("ACP session state poisoned");
+        if let Some(error) = &state.unavailable {
+            return Err(AcpError::internal_error().data(error.clone()));
+        }
+        if self.is_closed() {
+            return Err(invalid_params("session is closed"));
+        }
+        if state.pending.is_some() || state.preparing.is_some() {
+            return Err(invalid_params(
+                "this session already has an in-flight prompt",
+            ));
+        }
+        if state.pending_mode.is_some()
+            || state
+                .skill_requests
+                .values()
+                .any(|request| request.mutation)
+        {
+            return Err(invalid_params(
+                "session management is pending; prompt was not queued",
+            ));
+        }
+        let id = self.next_management_request.fetch_add(1, Ordering::Relaxed);
+        let cancellation = CancellationToken::new();
+        state.preparing = Some((id, cancellation.clone()));
+        Ok(InputPreparation {
+            live: Arc::clone(self),
+            id,
+            cancellation,
+        })
+    }
+
+    fn check_skill_input(&self, args: &zevria_content::UserPrompt) -> Result<(), AcpError> {
         if self.profile.is_worker() {
             return Err(invalid_params("skills are disabled for ensemble workers"));
         }
         if args.text_len() > 64 * 1024 {
             return Err(invalid_params("skill arguments exceed 64 KiB"));
         }
-        self.begin_input(
-            None,
-            Some((name, args)),
-            zevria_foundation::RequestBehavior::Standard,
-        )
+        Ok(())
     }
 
     #[cfg(test)]
@@ -552,12 +636,13 @@ impl LiveSession {
         self.begin_prompt_with_behavior(text, zevria_foundation::RequestBehavior::Standard)
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_prompt_with_behavior(
         &self,
         text: zevria_content::UserPrompt,
         behavior: zevria_foundation::RequestBehavior,
     ) -> Result<PromptWait, AcpError> {
-        self.begin_input(Some(text), None, behavior)
+        self.begin_input(Some(text), None, behavior, None)
     }
 
     fn begin_input(
@@ -568,6 +653,7 @@ impl LiveSession {
             zevria_content::UserPrompt,
         )>,
         behavior: zevria_foundation::RequestBehavior,
+        reservation: Option<u64>,
     ) -> Result<PromptWait, AcpError> {
         let prompt = text
             .as_ref()
@@ -592,6 +678,16 @@ impl LiveSession {
             let mut state = self.state.lock().expect("ACP session state poisoned");
             if let Some(error) = &state.unavailable {
                 return Err(AcpError::internal_error().data(error.clone()));
+            }
+            if let Some(id) = reservation {
+                match &state.preparing {
+                    Some((current, token)) if *current == id && !token.is_cancelled() => {}
+                    _ => return Err(AcpError::request_cancelled()),
+                }
+            } else if state.preparing.is_some() {
+                return Err(invalid_params(
+                    "this session already has an in-flight prompt",
+                ));
             }
             if state.pending.is_some() {
                 return Err(invalid_params(
@@ -708,6 +804,7 @@ impl LiveSession {
                 ),
                 _ => (PromptPhase::Normal, state.mode, input),
             };
+            state.preparing = None;
             state.pending = Some(PendingPrompt {
                 outcome,
                 turn_id: None,
@@ -732,6 +829,9 @@ impl LiveSession {
         self.cancel_elicitations();
         let (turn_id, complete_now) = {
             let mut state = self.state.lock().expect("ACP session state poisoned");
+            if let Some((_, cancellation)) = &state.preparing {
+                cancellation.cancel();
+            }
             let Some(pending) = &mut state.pending else {
                 return;
             };
@@ -1744,6 +1844,9 @@ impl LiveSession {
                 return;
             }
             state.unavailable = Some(error.clone());
+            if let Some((_, cancellation)) = &state.preparing {
+                cancellation.cancel();
+            }
         }
         self.finish_prompt(Err(AcpError::internal_error().data(error.clone())));
         self.interrupt_mode(None, AcpError::internal_error().data(error.clone()));

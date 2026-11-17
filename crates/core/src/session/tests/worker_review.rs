@@ -54,12 +54,13 @@ impl EnsembleLauncher for InteractiveLauncher {
     }
     fn start_review(
         &self,
-        _: EnsembleLaunchRequest,
+        request: EnsembleLaunchRequest,
         states: Vec<WorkerReviewState>,
         _: SessionEventSender,
         turn: TurnContext,
     ) -> anyhow::Result<EnsembleReviewExecution> {
         let cancellation = turn.cancellation().child_token();
+        let image_capable = request.start.prompt.has_images();
         let (tx, rx) = mpsc::channel(32);
         let mut commands = HashMap::new();
         for state in states {
@@ -85,6 +86,9 @@ impl EnsembleLauncher for InteractiveLauncher {
                             .unwrap();
                     }
                 };
+                if image_capable {
+                    send(WorkerReviewEvent::ImageCapability { supported: true }).await;
+                }
                 if let Some(initial) = state.pending.front().cloned() {
                     send(WorkerReviewEvent::Dispatched {
                         generation: initial.generation,
@@ -128,6 +132,7 @@ impl EnsembleLauncher for InteractiveLauncher {
                                 break;
                             }
                             Some(WorkerActorCommand::Prompt(input)) => {
+                                assert!(input.text.images().all(|image| zevria_content::image_preparation::fits_transport(image.encoded_len())));
                                 send(WorkerReviewEvent::Dispatched { generation: input.generation, attempt: 2 }).await;
                                 if input.text != "prose only".into() {
                                     send(WorkerReviewEvent::Published { generation: input.generation, plan: zevria_workflow::AgentStructuredPlan { plan_id: None, markdown: Some("# Revised proposal\n".into()), entries: vec![] }, replay: false }).await;
@@ -155,10 +160,12 @@ async fn next_snapshot(
 ) -> (WorkerControlTarget, Box<WorkerReviewState>) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Some(SessionUpdate::Lifecycle(SessionEvent::WorkerReviewUpdated {
-                target,
-                state,
-            })) = receiver.recv().await
+            let update = receiver
+                .recv()
+                .await
+                .expect("worker review event channel closed before the expected snapshot");
+            if let SessionUpdate::Lifecycle(SessionEvent::WorkerReviewUpdated { target, state }) =
+                update
                 && predicate(&state)
             {
                 return (target, state);
@@ -289,7 +296,13 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
     let start = EnsembleStart {
         run_id: EnsembleRunId::new(),
         workflow: EnsembleWorkflow::Plan,
-        prompt: "plan it".into(),
+        prompt: zevria_content::UserPrompt::new(vec![
+            zevria_content::PromptBlock::Text("plan it".into()),
+            zevria_content::PromptBlock::Image(
+                zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap(),
+            ),
+        ])
+        .unwrap(),
         agents: launcher.workers(EnsembleWorkflow::Plan).unwrap(),
     };
     engine
@@ -328,11 +341,22 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
     assert!(!runner.is_finished());
     // A duplicate accepted request returns the original result, not another receipt.
     router.route(first_confirmation).unwrap();
+    let original_image = zevria_content::test_support::oversized_image();
+    let prepared_image = zevria_content::image_preparation::prepare_encoded(
+        original_image.mime_type(),
+        original_image.encoded_bytes().to_vec(),
+    )
+    .unwrap()
+    .image;
     let feedback = WorkerControl {
         request_id: WorkerControlId::new(),
         target: first.0.clone(),
         action: WorkerControlAction::SendFeedback {
-            text: "revise".into(),
+            text: zevria_content::UserPrompt::new(vec![
+                zevria_content::PromptBlock::Text("revise".into()),
+                zevria_content::PromptBlock::Image(original_image),
+            ])
+            .unwrap(),
         },
     };
     router.route(feedback.clone()).unwrap();
@@ -343,6 +367,11 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
     })
     .await;
     assert!(revised.1.confirmation.is_none());
+    assert_eq!(revised.1.incorporated_images.len(), 1);
+    assert_eq!(
+        revised.1.incorporated_images[0].text.images().next(),
+        Some(&prepared_image)
+    );
     // Deduplicated accepted feedback must not allocate generation 3.
     router.route(feedback).unwrap();
     router.route(confirm(second.0.clone(), &second.1)).unwrap();
@@ -366,6 +395,19 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
     assert!(requests.lock().unwrap().is_empty());
     let items = zevria_transcript::transcript::load(&path).unwrap();
     assert_eq!(items, engine.conversation.items());
+    let accepted_feedback = items.iter().filter_map(|item| match item {
+        TranscriptItem::Ensemble(EnsembleRecord::WorkerReview { event, result: Some(result), .. }) if matches!(event.as_ref(), WorkerReviewEvent::InputAccepted { input } if input.generation == 2) => Some(result),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(
+        accepted_feedback.len(),
+        1,
+        "duplicate must not advance the accepted generation"
+    );
+    let WorkerControlAction::SendFeedback { text } = &accepted_feedback[0].control.action else {
+        panic!("feedback receipt")
+    };
+    assert_eq!(text.images().next(), Some(&prepared_image));
     zevria_transcript::validate_ensemble_review_history(&items).unwrap();
     assert_eq!(
         items

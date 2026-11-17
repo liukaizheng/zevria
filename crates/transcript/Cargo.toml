@@ -23,5 +23,6 @@ uuid = { workspace = true }
 test-support = ["zevria-model/test-support"]
 
 [dev-dependencies]
+zevria-content = { workspace = true, features = ["test-support"] }
 zevria-model = { workspace = true, features = ["test-support"] }
 toml = { workspace = true }

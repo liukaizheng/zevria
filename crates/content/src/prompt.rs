@@ -28,7 +28,7 @@ pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 const MAX_BASE64_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromptError(&'static str);
+pub struct PromptError(pub(crate) &'static str);
 impl fmt::Display for PromptError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0)
@@ -37,14 +37,14 @@ impl fmt::Display for PromptError {
 impl std::error::Error for PromptError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Raster {
+pub(crate) enum Raster {
     Png,
     Jpeg,
     Webp,
     Gif,
 }
 impl Raster {
-    fn from_mime(mime: &str) -> Result<Self, PromptError> {
+    pub(crate) fn from_mime(mime: &str) -> Result<Self, PromptError> {
         match mime {
             "image/png" => Ok(Self::Png),
             "image/jpeg" => Ok(Self::Jpeg),
@@ -55,7 +55,7 @@ impl Raster {
             )),
         }
     }
-    fn mime(self) -> &'static str {
+    pub(crate) fn mime(self) -> &'static str {
         match self {
             Self::Png => "image/png",
             Self::Jpeg => "image/jpeg",
@@ -63,7 +63,7 @@ impl Raster {
             Self::Gif => "image/gif",
         }
     }
-    fn format(self) -> ImageFormat {
+    pub(crate) fn format(self) -> ImageFormat {
         match self {
             Self::Png => ImageFormat::Png,
             Self::Jpeg => ImageFormat::Jpeg,
@@ -160,23 +160,10 @@ impl PromptImage {
 
     pub fn from_encoded(mime: &str, bytes: Vec<u8>) -> Result<Self, PromptError> {
         let raster = Raster::from_mime(mime)?;
-        if bytes.is_empty() {
-            return Err(PromptError("empty image data"));
-        }
         if bytes.len() > MAX_IMAGE_BYTES {
             return Err(PromptError("image exceeds the 5 MiB encoded-byte limit"));
         }
-        if image::guess_format(&bytes).ok() != Some(raster.format()) {
-            return Err(PromptError("image content does not match its MIME type"));
-        }
-        let mut reader = ImageReader::with_format(Cursor::new(&bytes), raster.format());
-        reader.limits(decoder_limits());
-        let decoder = reader.into_decoder().map_err(|_| {
-            PromptError("invalid image header or decoder allocation limit exceeded")
-        })?;
-        let (width, height) = decoder.dimensions();
-        validate_dimensions(width, height)?;
-        drop(decoder);
+        let (width, height) = raster_dimensions(&bytes, raster)?;
         validate_raster(&bytes, raster, width, height)?;
         let digest = Sha256::digest(&bytes).into();
         Ok(Self(Arc::new(ImageData {
@@ -325,7 +312,7 @@ fn validate_png_container(bytes: &[u8]) -> Result<(), PromptError> {
     Err(PromptError("missing PNG end marker"))
 }
 
-fn decoder_limits() -> Limits {
+pub(crate) fn decoder_limits() -> Limits {
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
     limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
@@ -334,7 +321,7 @@ fn decoder_limits() -> Limits {
     limits.max_alloc = Some(MAX_IMAGE_PIXELS * 8);
     limits
 }
-fn validate_dimensions(width: u32, height: u32) -> Result<u64, PromptError> {
+pub(crate) fn validate_dimensions(width: u32, height: u32) -> Result<u64, PromptError> {
     if width == 0 || height == 0 {
         return Err(PromptError("image dimensions must be nonzero"));
     }
@@ -354,7 +341,7 @@ fn validate_dimensions(width: u32, height: u32) -> Result<u64, PromptError> {
 /// Inspect GIF framing without decoding or allocating pixel buffers. This lets
 /// us reserve exactly the declared frame work before advancing the codec, rather
 /// than charging another frame just to discover the terminating trailer.
-fn gif_frames(bytes: &[u8], width: u32, height: u32) -> Result<usize, PromptError> {
+pub(crate) fn gif_frames(bytes: &[u8], width: u32, height: u32) -> Result<usize, PromptError> {
     let invalid = PromptError("invalid or truncated GIF container");
     let skip_blocks = |offset: &mut usize| -> Result<(), PromptError> {
         loop {
@@ -413,7 +400,26 @@ fn gif_frames(bytes: &[u8], width: u32, height: u32) -> Result<usize, PromptErro
     }
 }
 
-fn validate_raster(
+pub(crate) fn raster_dimensions(bytes: &[u8], raster: Raster) -> Result<(u32, u32), PromptError> {
+    if bytes.is_empty() {
+        return Err(PromptError("empty image data"));
+    }
+    if image::guess_format(bytes).ok() != Some(raster.format()) {
+        return Err(PromptError("image content does not match its MIME type"));
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), raster.format());
+    reader.limits(decoder_limits());
+    let decoder = reader
+        .into_decoder()
+        .map_err(|_| PromptError("invalid image header or decoder allocation limit exceeded"))?;
+    let dimensions = decoder.dimensions();
+    validate_dimensions(dimensions.0, dimensions.1)?;
+    Ok(dimensions)
+}
+
+/// Container/framing checks shared by lossless validation and new-input preparation.
+/// Pixel decoding is still required after this check.
+pub(crate) fn validate_container(
     bytes: &[u8],
     raster: Raster,
     width: u32,
@@ -460,24 +466,38 @@ fn validate_raster(
             }
         }
         Raster::Gif => {
-            // GIF's iterator does enforce allocation limits. Reserve the canvas,
-            // compositing and output buffers before each frame; never collect frames.
             if bytes.last() != Some(&0x3b) {
                 return Err(PromptError("missing GIF end marker"));
             }
-            let mut decoder =
-                image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).map_err(invalid)?;
-            decoder.set_limits(decoder_limits()).map_err(invalid)?;
-            let count = gif_frames(bytes, width, height)?;
-            let mut frames = decoder.into_frames();
-            for _ in 0..count {
-                frames
-                    .next()
-                    .ok_or(PromptError("missing GIF frame"))?
-                    .map_err(invalid)?;
-            }
-            return Ok(());
+            gif_frames(bytes, width, height)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_raster(
+    bytes: &[u8],
+    raster: Raster,
+    width: u32,
+    height: u32,
+) -> Result<(), PromptError> {
+    validate_container(bytes, raster, width, height)?;
+    let invalid =
+        |_| PromptError("invalid or truncated image, or decoder allocation limit exceeded");
+    if raster == Raster::Gif {
+        // Reserve frame work before advancing the bounded iterator. Never collect frames.
+        let mut decoder =
+            image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).map_err(invalid)?;
+        decoder.set_limits(decoder_limits()).map_err(invalid)?;
+        let count = gif_frames(bytes, width, height)?;
+        let mut frames = decoder.into_frames();
+        for _ in 0..count {
+            frames
+                .next()
+                .ok_or(PromptError("missing GIF frame"))?
+                .map_err(invalid)?;
+        }
+        return Ok(());
     }
     let mut reader = ImageReader::with_format(Cursor::new(bytes), raster.format());
     reader.limits(decoder_limits());

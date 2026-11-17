@@ -1,8 +1,10 @@
 //! Shared ordered embedded-content adapter. No URL or resource resolution.
 use agent_client_protocol::schema::v1::{ContentBlock, Error, ImageContent, TextContent};
 use zevria_content::PromptBlock;
+#[cfg(test)]
 use zevria_content::PromptImage;
 use zevria_content::UserPrompt;
+use zevria_content::image_preparation;
 
 pub const ORCHESTRATION_EXTENSION: &str = "zevria.orchestration";
 
@@ -46,8 +48,8 @@ pub fn from_content(blocks: &[ContentBlock]) -> Result<UserPrompt, Error> {
                 if images > zevria_content::prompt::MAX_PROMPT_IMAGES {
                     return Err(Error::invalid_params().data("a prompt may contain at most eight images"));
                 }
-                let image = PromptImage::from_base64(&image.mime_type, &image.data)
-                    .map_err(|error| Error::invalid_params().data(error.to_string()))?;
+                let image = image_preparation::prepare_base64(&image.mime_type, &image.data)
+                    .map_err(|error| Error::invalid_params().data(error.to_string()))?.image;
                 bytes += image.encoded_len();
                 if bytes > zevria_content::prompt::MAX_PROMPT_IMAGE_BYTES {
                     return Err(Error::invalid_params().data("prompt images exceed 20 MiB"));
@@ -107,6 +109,41 @@ mod tests {
         assert_eq!(
             literal.text_projection(),
             "/orchestrate $orchestrate literal"
+        );
+    }
+
+    #[test]
+    fn oversized_images_are_prepared_in_order_and_aggregate_is_checked_afterwards() {
+        let original = zevria_content::test_support::oversized_image();
+        let blocks = vec![
+            ContentBlock::from("before"),
+            ContentBlock::Image(ImageContent::new(original.base64(), original.mime_type())),
+            ContentBlock::from("after"),
+            ContentBlock::Image(ImageContent::new(original.base64(), original.mime_type())),
+        ];
+        let prepared = from_content(&blocks).unwrap();
+        assert_eq!(prepared.text_projection(), "beforeafter");
+        assert_eq!(prepared.images().count(), 2);
+        assert_eq!(prepared.images().next(), prepared.images().nth(1));
+        assert!(
+            prepared
+                .images()
+                .all(|i| image_preparation::fits_transport(i.encoded_len())
+                    && i.dimensions().0 < original.dimensions().0)
+        );
+        assert_eq!(from_content(&to_content(&prepared)).unwrap(), prepared);
+        let bytes = zevria_content::test_support::padded_png(4_730_667);
+        let source = PromptImage::from_file_bytes(bytes).unwrap();
+        let block = ContentBlock::Image(ImageContent::new(source.base64(), "image/png"));
+        assert_eq!(from_content(&vec![block; 6]).unwrap().images().count(), 6);
+        let source = PromptImage::from_file_bytes(zevria_content::test_support::padded_png(
+            image_preparation::MAX_PREPARED_IMAGE_BYTES,
+        ))
+        .unwrap();
+        let block = ContentBlock::Image(ImageContent::new(source.base64(), "image/png"));
+        assert!(
+            from_content(&vec![block; 6]).is_err(),
+            "compliant images must not be shrunk to fit an aggregate budget"
         );
     }
 

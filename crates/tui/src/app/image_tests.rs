@@ -43,6 +43,34 @@ fn clipboard_press_is_insert_only_and_pending_input_is_locked_and_cancellable() 
     assert!(app.handle_event(Event::Key(repeat)).is_none());
 }
 #[test]
+fn resized_clipboard_notice_is_local_and_stale_results_stay_silent() {
+    let mut app = App::new();
+    app.interaction.enter_insert();
+    let prepared = zevria_content::test_support::prepared_image();
+    let metadata = prepared.preparation.unwrap();
+    let (generation, cursor) = paste(&mut app);
+    app.handle_event(key('c'));
+    app.clipboard_completed(
+        generation,
+        cursor,
+        ClipboardResult::ResizedImage(prepared.image.clone(), metadata.clone()),
+    );
+    assert!(app.composer.is_empty());
+    assert!(!rendered_text(&mut app).contains("Clipboard image resized"));
+    app.interaction.enter_insert();
+    let (generation, cursor) = paste(&mut app);
+    app.clipboard_completed(
+        generation,
+        cursor,
+        ClipboardResult::ResizedImage(prepared.image.clone(), metadata),
+    );
+    assert!(rendered_text(&mut app).contains("Clipboard image resized"));
+    let prompt = app.composer.prompt();
+    assert_eq!(prompt.text_projection(), "");
+    assert_eq!(prompt.images().next(), Some(&prepared.image));
+}
+
+#[test]
 fn clear_and_undo_restore_completed_images_but_never_a_stale_clipboard_read() {
     let mut app = App::new();
     app.interaction.enter_insert();

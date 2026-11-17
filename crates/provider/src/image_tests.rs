@@ -5,7 +5,13 @@ use zevria_content::PromptImage;
 use zevria_content::UserPrompt;
 
 fn prompt() -> UserPrompt {
-    let image = PromptImage::from_rgba(2, 1, &[1, 2, 3, 255, 4, 5, 6, 255]).unwrap();
+    static IMAGE: std::sync::OnceLock<PromptImage> = std::sync::OnceLock::new();
+    let image = IMAGE
+        .get_or_init(|| zevria_content::test_support::prepared_image().image)
+        .clone();
+    assert!(zevria_content::image_preparation::fits_transport(
+        image.encoded_len()
+    ));
     UserPrompt::new(vec![
         PromptBlock::Text("before".into()),
         PromptBlock::Image(image.clone()),
@@ -32,7 +38,15 @@ async fn image_websocket_delta_and_reconnect_keep_complete_occurrences() {
     );
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async_with_config(
+            stream,
+            Some(
+                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                    .max_frame_size(Some(64 * 1024 * 1024)),
+            ),
+        )
+        .await
+        .unwrap();
         let first = receive_json(&mut socket).await;
         let assert_images = |request: &Value, count| {
             let images = content(request["input"].as_array().unwrap())
@@ -53,7 +67,15 @@ async fn image_websocket_delta_and_reconnect_keep_complete_occurrences() {
         assert_images(&delta, 2);
         drop(socket);
         let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async_with_config(
+            stream,
+            Some(
+                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                    .max_frame_size(Some(64 * 1024 * 1024)),
+            ),
+        )
+        .await
+        .unwrap();
         let full = receive_json(&mut socket).await;
         assert!(full.get("previous_response_id").is_none());
         assert_images(&full, 4);
@@ -97,51 +119,80 @@ async fn image_websocket_delta_and_reconnect_keep_complete_occurrences() {
 #[tokio::test]
 async fn provider_error_diagnostics_do_not_echo_image_payloads() {
     let image = prompt().images().next().unwrap().clone();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let detail = format!("bad image data:image/png;base64,{}", image.base64());
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let _request = receive_http_json(&mut stream).await;
-        send_http_response(
-            &mut stream,
-            "400 Bad Request",
-            "application/json",
-            json!({"error":{"code":"context_length_exceeded", "message":detail}}).to_string(),
+    let base64 = image.base64();
+    for full_payload in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let echoed = if full_payload {
+            base64.as_str()
+        } else {
+            &base64[..1024]
+        };
+        let detail = format!("bad image data:image/png;base64,{echoed}");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _request = receive_http_json(&mut stream).await;
+            let body =
+                json!({"error":{"code":"context_length_exceeded", "message":detail}}).to_string();
+            if full_payload {
+                use tokio::io::AsyncWriteExt as _;
+                let headers = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                // The client intentionally stops after its 4 KiB diagnostic
+                // allowance; a large error body need not finish writing.
+                if let Err(error) = stream.write_all(body.as_bytes()).await {
+                    assert!(matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionAborted
+                    ));
+                }
+            } else {
+                send_http_response(&mut stream, "400 Bad Request", "application/json", body).await;
+            }
+        });
+        let mut provider = connect_http_test_provider_with_options(
+            format!("http://{address}/v1/responses"),
+            ResponsesCompatibilityConfig::default(),
+            BTreeMap::new(),
+            "image-error",
         )
         .await;
-    });
-    let mut provider = connect_http_test_provider_with_options(
-        format!("http://{address}/v1/responses"),
-        ResponsesCompatibilityConfig::default(),
-        BTreeMap::new(),
-        "image-error",
-    )
-    .await;
-    let parts = RequestParts {
-        tools: zevria_model::ToolDeclarations::default(),
-        forbid_tool_calls: false,
-        prompt: prompt().to_message(),
-        history: vec![],
-        instructions: "Image test".into(),
-        allowed_tool_names: None,
-    };
-    let error = run_turn_request_with_recovery(
-        parts.request(),
-        &mut provider,
-        &mut AttemptState::default(),
-        &discard_updates(),
-        &fast_recovery_policy(1),
-    )
-    .await
-    .unwrap_err();
-    assert!(!error.to_string().contains(&image.base64()));
-    assert!(
-        error
-            .downcast_ref::<zevria_model::ModelInputTooLarge>()
-            .is_some()
-    );
-    server.await.unwrap();
+        let parts = RequestParts {
+            tools: zevria_model::ToolDeclarations::default(),
+            forbid_tool_calls: false,
+            prompt: prompt().to_message(),
+            history: vec![],
+            instructions: "Image test".into(),
+            allowed_tool_names: None,
+        };
+        let error = run_turn_request_with_recovery(
+            parts.request(),
+            &mut provider,
+            &mut AttemptState::default(),
+            &discard_updates(),
+            &fast_recovery_policy(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(!error.to_string().contains(&base64[..256]));
+        assert!(!error.to_string().contains(&base64));
+        // The existing 4 KiB error-body bound intentionally prevents structured
+        // classification of a multi-MiB, truncated JSON diagnostic. Both forms
+        // must remain payload-free; only complete JSON has a trustworthy code.
+        if !full_payload {
+            assert!(
+                error
+                    .downcast_ref::<zevria_model::ModelInputTooLarge>()
+                    .is_some()
+            );
+        }
+        server.await.unwrap();
+    }
 }
 
 #[test]
@@ -207,12 +258,25 @@ fn accounting_does_not_charge_base64_or_scrub_arbitrary_tool_json() {
     assert_eq!(prompt.images().count(), 2);
 }
 #[tokio::test]
-async fn full_http_sse_request_keeps_real_image_data() {
+async fn full_http_sse_retry_keeps_prepared_user_and_tool_image_data() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
+        let first = receive_http_json(&mut stream).await;
+        send_http_response(
+            &mut stream,
+            "503 Service Unavailable",
+            "text/plain",
+            "retry",
+        )
+        .await;
+        let (mut stream, _) = listener.accept().await.unwrap();
         let request = receive_http_json(&mut stream).await;
+        assert_eq!(
+            first.body, request.body,
+            "retry must reuse the exact accepted payload"
+        );
         send_http_response(
             &mut stream,
             "200 OK",
@@ -229,11 +293,27 @@ async fn full_http_sse_request_keeps_real_image_data() {
         "image-session",
     )
     .await;
+    let image = prompt().images().next().unwrap().clone();
+    let call = zevria_content::message::tool_call_from_wire(
+        "image-item",
+        "image-call",
+        rig_core::message::ToolFunction::new(
+            rig_core::message::ToolName::new("read_image").unwrap(),
+            json!({}),
+        ),
+    );
+    let result = call.result(vec![
+        ToolResultContent::text("prepared file"),
+        image.to_tool_result_content(),
+    ]);
     let parts = RequestParts {
         tools: zevria_model::ToolDeclarations::default(),
         forbid_tool_calls: false,
         prompt: prompt().to_message(),
-        history: vec![],
+        history: vec![
+            Message::from(vec![AssistantContent::ToolCall(call)]),
+            Message::from(result),
+        ],
         instructions: "Image test".into(),
         allowed_tool_names: None,
     };
@@ -243,7 +323,7 @@ async fn full_http_sse_request_keeps_real_image_data() {
         &mut provider,
         &mut state,
         &discard_updates(),
-        &fast_recovery_policy(1),
+        &fast_recovery_policy(2),
     )
     .await
     .unwrap();
@@ -258,6 +338,25 @@ async fn full_http_sse_request_keeps_real_image_data() {
         .filter(|b| b["type"] == "input_image")
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
+    let tool_images = captured.body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["output"].as_array())
+        .flatten()
+        .filter(|block| block["type"] == "input_image")
+        .collect::<Vec<_>>();
+    assert_eq!(tool_images.len(), 1);
+    assert_eq!(
+        tool_images[0]["image_url"],
+        format!("data:{};base64,{}", image.mime_type(), image.base64())
+    );
+    for block in actual.into_iter().chain(tool_images) {
+        assert!(
+            block["image_url"].as_str().unwrap().len()
+                <= zevria_content::image_preparation::MAX_IMAGE_TRANSPORT_BYTES
+        );
+    }
 }
 
 /// Explicit opt-in, read-only incident validation. No endpoint is initialized.
@@ -358,18 +457,7 @@ async fn retained_screenshots_404_counting_resume_and_same_mode_followup_use_rea
         CompactionBackend, CompactionCheckpoint, CompactionConfig, CompactionPolicy,
         CompactionTrigger, OwnedModelRequestItem,
     };
-    let mut seed = 0x89abcdefu32;
-    let mut pixels = vec![0u8; 600 * 400 * 4];
-    for pixel in pixels.chunks_exact_mut(4) {
-        for channel in &mut pixel[..3] {
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            *channel = seed as u8;
-        }
-        pixel[3] = 255;
-    }
-    let screenshot = PromptImage::from_rgba(600, 400, &pixels).unwrap();
+    let screenshot = prompt().images().next().unwrap().clone();
     assert!(
         screenshot.base64().len() * 3 / 4 > 500_000,
         "fixture must reproduce the encoded-byte spike"
@@ -398,6 +486,11 @@ async fn retained_screenshots_404_counting_resume_and_same_mode_followup_use_rea
     for mapped in [false, true] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let expected_url = format!(
+            "data:{};base64,{}",
+            screenshot.mime_type(),
+            screenshot.base64()
+        );
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let count = receive_http_json(&mut stream).await;
@@ -414,9 +507,15 @@ async fn retained_screenshots_404_counting_resume_and_same_mode_followup_use_rea
                     .filter_map(|item| item["output"].as_array())
                     .flatten()
                     .filter(|block| block["type"] == "input_image")
-                    .count();
+                    .collect::<Vec<_>>();
+                assert!(
+                    images
+                        .iter()
+                        .all(|image| image["image_url"] == expected_url)
+                );
                 assert_eq!(
-                    images, 3,
+                    images.len(),
+                    3,
                     "every saved occurrence must still be transmitted"
                 );
                 let mut event = completed_event(

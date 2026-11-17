@@ -9,7 +9,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::mpsc;
-use zevria_content::PromptImage;
+use zevria_content::{
+    PromptImage,
+    image_preparation::{self, ImagePreparation},
+};
 
 static NATIVE_ACTIVE: LazyLock<Arc<AtomicBool>> =
     LazyLock::new(|| Arc::new(AtomicBool::new(false)));
@@ -18,6 +21,7 @@ pub(crate) const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 #[derive(Debug)]
 pub(crate) enum ClipboardResult {
     Image(PromptImage),
+    ResizedImage(PromptImage, ImagePreparation),
     Text(String),
     Empty,
     Error(String),
@@ -56,8 +60,11 @@ impl ClipboardBackend for Native {
 pub(crate) fn read(backend: &mut impl ClipboardBackend) -> ClipboardResult {
     let image = backend.image();
     if let Ok(Some(bitmap)) = image {
-        return match PromptImage::from_rgba(bitmap.width, bitmap.height, &bitmap.rgba) {
-            Ok(image) => ClipboardResult::Image(image),
+        return match image_preparation::prepare_rgba(bitmap.width, bitmap.height, &bitmap.rgba) {
+            Ok(prepared) => match prepared.preparation {
+                Some(metadata) => ClipboardResult::ResizedImage(prepared.image, metadata),
+                None => ClipboardResult::Image(prepared.image),
+            },
             Err(error) => ClipboardResult::Error(error.to_string()),
         };
     }
@@ -166,6 +173,26 @@ mod tests {
         assert!(matches!(read(&mut fake), ClipboardResult::Error(_)));
         assert_eq!(fake.text_reads, 0);
     }
+    #[test]
+    fn oversized_bitmap_succeeds_without_text_fallback() {
+        let mut fake = Fake {
+            image: Ok(Some(Bitmap {
+                width: 1300,
+                height: 1100,
+                rgba: zevria_content::test_support::entropy_rgba(1300, 1100),
+            })),
+            text: Ok(Some("must not replace the image".into())),
+            text_reads: 0,
+        };
+        let ClipboardResult::ResizedImage(image, metadata) = read(&mut fake) else {
+            panic!("oversized clipboard must be prepared")
+        };
+        assert_eq!(fake.text_reads, 0);
+        assert_eq!(metadata.original_dimensions, (1300, 1100));
+        assert!(image.dimensions().0 < 1300);
+        assert!(image_preparation::fits_transport(image.encoded_len()));
+    }
+
     #[tokio::test]
     async fn blocked_backend_retains_the_single_permit_after_receiver_replacement() {
         let mut service = ClipboardService::new();

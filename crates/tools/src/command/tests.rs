@@ -345,31 +345,53 @@ mod tests {
     #[tokio::test]
     async fn timeout_terminates_the_process_group_and_returns_partial_output() {
         let directory = tempfile::tempdir().expect("temporary directory should create");
+        let ready = directory.path().join("ready");
         let marker = directory.path().join("finished");
+        let timeout = Duration::from_secs(60);
         let tool = CommandTool::with_limits(
             directory.path().to_path_buf(),
             CommandLimits {
-                // Leave enough time for a loaded CI host to spawn the shell
-                // and flush its first bytes before exercising termination.
-                timeout: Duration::from_millis(if cfg!(windows) { 1500 } else { 250 }),
+                timeout,
                 capture_bytes: 4 * 1024,
             },
         )
         .expect("valid limits");
 
-        let error = run(
-            &tool,
-            "printf started; sleep 10; printf finished > finished",
-        )
+        let worker = tokio::spawn(async move {
+            run(
+                &tool,
+                "(sleep 60; printf finished > finished) & printf started; printf ready > ready; wait",
+            )
+            .await
+        });
+        // Shell startup is not what this test measures. Wait in real time until
+        // a descendant exists and the shell has written its partial stdout.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .expect_err("command should time out");
-        let CommandError::Timeout { output, .. } = error else {
+        .expect("command should signal readiness before testing its timeout");
+
+        // Expire the job deterministically, without racing a loaded CI host's
+        // shell startup. Resume real time for OS termination and pipe draining.
+        tokio::time::pause();
+        tokio::time::advance(timeout).await;
+        tokio::time::resume();
+        let error = tokio::time::timeout(Duration::from_secs(10), worker)
+            .await
+            .expect("timed-out command should resolve promptly")
+            .expect("command worker should not panic")
+            .expect_err("command should time out");
+        let CommandError::Timeout { seconds, output } = error else {
             panic!("expected timeout error, got {error:?}");
         };
+        assert_eq!(seconds, timeout.as_secs());
         assert!(output.starts_with("duration: "));
         assert!(!output.contains("status:"));
         assert!(!output.contains("exit_code:"));
-        assert!(output.contains("<stdout>\nstarted\n</stdout>"));
+        assert!(output.contains("<stdout>\nstarted\n</stdout>"), "{output}");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!marker.exists(), "a timed-out descendant must not survive");
     }

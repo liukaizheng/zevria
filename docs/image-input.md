@@ -13,7 +13,7 @@ Image-only prompts and multiple images work. Pasting the same image twice create
 
 Ctrl-V acts only on an editable Insert-mode composer. It does not switch modes. Busy, selected-history, inspect-only, and modal views do not read the clipboard. During a paste the originating draft is briefly locked, but pane navigation and Ctrl-C remain available. Switching panes cannot redirect a pending result. Clipboard failures and timeouts leave the previous draft unchanged. One native operation may run at a time, including after a timeout or session switch.
 
-Image retrieval has priority over accompanying clipboard text. If no bitmap is returned (including a native retrieval error), Zevria tries text. If a bitmap is returned but fails validation or PNG encoding, the paste is rejected without text substitution. Native text fallback uses multiline caret insertion. Terminal bracketed-paste events remain **text-only**. Copied paths, URLs, and data URLs are never opened or fetched as images. OSC 52 copying remains independent of native reading.
+Image retrieval has priority over accompanying clipboard text. If no bitmap is returned (including a native retrieval error), Zevria tries text. If a bitmap is returned but fails validation or bounded image preparation, the paste is rejected without text substitution. Oversized clipboard images are prepared on the same worker thread; a resized notice is local display only, never model instructions or history. Native text fallback uses multiline caret insertion. Terminal bracketed-paste events remain **text-only**. Copied paths, URLs, and data URLs are never opened or fetched as images. OSC 52 copying remains independent of native reading.
 
 ## Workflows, recall, and controls
 
@@ -30,15 +30,28 @@ Submitted images render as bounded labels, for example `[image 1 · png · 1440�
 | Limit | Value |
 |---|---|
 | Images per prompt | 8 |
-| Encoded raster bytes per image | 5 MiB, after base64 decoding |
-| Aggregate encoded image bytes | 20 MiB per prompt |
+| Encoded source bytes per image | At most 32 MiB before preparation; base64 is bounded before decoding |
+| Prepared raster bytes per new image | At most 3,932,112 bytes after base64 decoding |
+| Per-image base64 transport budget | 5,242,880 bytes (5 MiB), including a 64-byte data-URL reserve |
+| Aggregate prepared raster bytes | 20 MiB per prompt; at most 8 ordered occurrences, including duplicates |
 | Width or height | At most 16,384 pixels; nonzero |
 | Decoded pixel/work budget | 40 million per image, including animation frame allocations/work |
 | Clipboard bitmap encoding | Lossless PNG |
-| Embedded ACP formats | PNG, JPEG, WebP, GIF; original bytes and canonical MIME retained |
+| Embedded ACP formats | PNG, JPEG, static WebP, GIF; compliant bytes and MIME retained exactly |
+| Preparation work / buffers | At most 12 encodes, 640 million cumulative pixel-work units, 512 MiB major-buffer budget |
 | Worker feedback / ACP skill prose | Separate 64 KiB text limit; image bytes are not prose |
 
-Zevria never silently resizes, crops, reduces quality, or substitutes an animation's first frame. GIF frames are validated within a bounded work/allocation budget. The pinned decoder APIs do not offer the required pre-frame guarantees for animated WebP/APNG, so those are explicitly rejected. Native clipboard APIs may allocate a decoded bitmap before Zevria can inspect its dimensions; application-side checks cannot prevent that backend allocation.
+### Automatic preparation of new images
+
+Validated images within the prepared-raster cap remain byte-for-byte unchanged, including MIME. Only oversized new inputs are re-encoded: first at the same dimensions to remove nonessential metadata, then downscaled if the actual encoding still exceeds the target. Resizing preserves aspect ratio (within integer rounding), never upscales or crops, and samples each candidate from the original decoded pixels using the pinned image library's Catmull–Rom bicubic filter. No sharpening pass is applied; small text may lose readability after substantial reduction.
+
+Clipboard/PNG and oversized single-frame GIF use lossless PNG; JPEG uses fixed quality 90; static WebP uses lossless WebP. Transparency is preserved with premultiplied-alpha resampling. Re-encoding applies EXIF orientation and keeps supported ICC color profiles up to 1 MiB. Submitted MIME, dimensions, byte counts, identity, and context accounting describe the actual output. Local source files and clipboard content are never overwritten.
+
+The raster cap is derived as `3 * ((5 * 1024 * 1024 - 64) / 4)`; both the final raster length and `4 * ceil(raster_bytes / 3) + 64 <= 5,242,880` are checked. This conservative per-image compatibility policy is **not a whole-request size guarantee**, a provider limit claim, or an accounting rule. No model-name heuristics or provider-specific resizing settings are used. The separate eight-image / 20 MiB normalized aggregate budget still applies: Zevria does not drop occurrences or shrink an entire prompt to fit it.
+
+GIF frames are validated within bounded work/allocation limits. Under-target GIF bytes remain unchanged, including animation. Oversized multi-frame GIF is rejected with a manual-conversion diagnostic rather than flattened. Animated WebP/APNG are explicitly unsupported, with no first-frame substitution. Inputs exceeding source, dimension, decoder, profile, preparation-buffer, work, or attempt limits may require manual conversion/downscaling into a temporary PNG/JPEG. Native clipboard APIs may allocate a bitmap before Zevria can inspect it; application-side checks cannot prevent that backend allocation.
+
+Preparation happens once, before accepting/persisting new clipboard, ACP, programmatic, recalled-and-resubmitted, edited, skill, ensemble, or worker-feedback input. Already prepared attachments are a cheap no-op. Cancellation/preparation failure does not partially accept a prompt or evidence; retries, synthesis forwarding, replay, and resume reuse accepted bytes without another transformation.
 
 ## Model-aware context accounting
 
@@ -58,7 +71,7 @@ are different quantities. History edits, compaction, incompatible request/profil
 changes, and accounting-policy changes invalidate measurements. Resume derives
 local facts again; it does not invent a durable measured baseline from old usage.
 
-There is no universal per-image allowance. Each `models.jsonc` model can set a
+There is no universal per-image **token** allowance. Each `models.jsonc` model can set a
 **local-only** `image_accounting` policy, for either protocol:
 
 ```jsonc
@@ -137,13 +150,14 @@ provider: check the requested path and protect local files and session history.
 Use `command` to read text files.
 
 The image format is detected from file contents, regardless of extension. PNG,
-JPEG, WebP, and GIF use the same validation as pasted images: **5 MiB** of encoded
-raster bytes per image (after base64 decoding), **16,384 pixels** per side, and a
-**40 million** decoded-pixel/work budget. Animated WebP and APNG are rejected.
-Images are never resized, cropped, transcoded, or replaced with a first frame.
-For SVG, BMP, TIFF, HEIC, PDF, unsupported images, or oversized captures, use
-`command` to convert/downscale into a temporary PNG/JPEG and read that file.
-Loading and raster validation run on a blocking thread, not the async event loop.
+JPEG, WebP, and GIF use the same source/preparation limits as pasted images:
+**32 MiB** encoded source bytes, **3,932,112 bytes** prepared raster,
+**16,384 pixels** per side, and a **40 million** decoded-pixel/animation-work
+budget. Oversized static images are automatically prepared without changing the
+source file. When preparation changes an image, the summary also reports the
+original-to-prepared dimensions and encoded size. Unsupported animations and
+images beyond safety limits need manual conversion to a temporary PNG/JPEG.
+Loading, validation, and preparation run on a blocking thread, not the async event loop.
 
 Across all tool calls in **one model response**, at most **8 images / 20 MiB** of
 image data (before base64 expansion) are admitted in assistant-call order. A
@@ -161,7 +175,8 @@ images, and are included in later model requests and restored on resume. There
 is no automatic temporary-file cleanup or encrypted image store. Tool
 declarations are registered last in the stable root registry; older resumed
 sessions append the newly available declaration as `Additional` rather than
-rewriting their pinned declaration prefix. Availability does not vary by model
+rewriting their pinned declaration prefix. Revised guidance likewise appends an
+`Additional` declaration without rewriting the initial prefix. Availability does not vary by model
 or turn.
 
 There is no per-model vision-capability gate. A text-only model that calls
@@ -170,7 +185,7 @@ subsequent requests can keep failing until compaction or a new session removes
 it from active context. Providers may enforce stricter image/request limits,
 and some Responses-compatible gateways may reject image-bearing
 `function_call_output` arrays. These failures remain visible; Zevria never
-silently drops or resizes an image to make a request succeed.
+silently drops images or rewrites accepted history to make a request succeed.
 
 ## ACP and ensembles
 
@@ -183,6 +198,8 @@ Root synthesis carries each original image occurrence once, outside the quoted r
 ## Persistence and privacy
 
 **Submitted screenshots persist in plaintext session history as embedded base64.** Root transcripts and associated worker journals are self-contained for resume, recall, retry, and recovery; changing the clipboard later does not alter submitted images. Root and worker records have a 64 MiB bounded read/write ceiling to accommodate image-bearing mirrors and base64 expansion. Skills use dedicated `zevria_skill_invocation` records with ordered arguments; worker/review formats remain version 1. Unsupported owned formats are rejected, not automatically migrated.
+
+Historical images are **not automatically migrated or newly rejected** for exceeding the new preparation target. Stored-image deserialization, recall, native/generic provider replay, transport, and accounting remain lossless; unchanged history, instructions, pinned declarations, and cache keys are not rewritten. If an old attachment causes provider failure, use compaction/new session and reattach, or deliberately replace it through the existing transcript-edit workflow. Recalling alone does not mutate history; submitting the recalled draft is new input and prepares only that replacement/suffix. Lower gateway limits, whole-request HTTP 413 errors, provider dimension restrictions, unsupported vision models, image URLs, and file IDs remain outside this per-image policy.
 
 Normal image labels and diagnostic copies omit payloads. Known structured image fields, data URLs, and long opaque base64 diagnostic runs are redacted; this is not a general secret scrubber for arbitrary model or tool prose.
 

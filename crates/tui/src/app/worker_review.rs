@@ -155,16 +155,47 @@ impl WorkerReviewUiState {
         composer: &mut ComposerState,
         drafts: &mut DraftSubmissions,
     ) -> Option<Option<String>> {
+        // Accepted feedback may carry newly prepared image bytes. Correlate its
+        // identity/target and ordered non-image content without decoding images
+        // on the UI thread. All other receipts still require exact equality.
+        let matches = |control: &WorkerControl| {
+            control == &result.control
+                || (result.accepted
+                    && control.request_id == result.control.request_id
+                    && control.target == result.control.target
+                    && match (&control.action, &result.control.action) {
+                        (
+                            WorkerControlAction::SendFeedback { text: before },
+                            WorkerControlAction::SendFeedback { text: after },
+                        ) => {
+                            before.blocks().len() == after.blocks().len()
+                                && before.blocks().iter().zip(after.blocks()).all(|(a, b)| {
+                                    match (a, b) {
+                                        (
+                                            zevria_content::PromptBlock::Text(a),
+                                            zevria_content::PromptBlock::Text(b),
+                                        ) => a == b,
+                                        (
+                                            zevria_content::PromptBlock::Image(_),
+                                            zevria_content::PromptBlock::Image(_),
+                                        ) => true,
+                                        _ => false,
+                                    }
+                                })
+                        }
+                        _ => false,
+                    })
+        };
         let draft = if self
             .pending
             .as_ref()
-            .is_some_and(|(control, _)| control == &result.control)
+            .is_some_and(|(control, _)| matches(control))
         {
             self.pending.take().map(|(_, draft)| draft)
         } else {
             self.urgent
                 .iter()
-                .position(|(control, _)| control == &result.control)
+                .position(|(control, _)| matches(control))
                 .map(|index| self.urgent.remove(index).1)
         }?;
         if result.accepted {

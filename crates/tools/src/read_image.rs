@@ -11,7 +11,9 @@ use rig_core::{
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
-use zevria_content::{PromptImage, prompt::MAX_IMAGE_BYTES};
+#[cfg(test)]
+use zevria_content::PromptImage;
+use zevria_content::image_preparation::{self, MAX_IMAGE_SOURCE_BYTES};
 use zevria_foundation::READ_IMAGE_TOOL_NAME;
 
 use crate::FileToolError;
@@ -21,8 +23,9 @@ const DESCRIPTION: &str = r#"Read a local raster image and return it as viewable
 Usage:
 - `file_path` may be an absolute path anywhere readable, or relative to the startup workspace. Symlinks are followed; the target must be a regular file.
 - Formats are detected from content, not the extension: PNG, JPEG, WebP, and GIF. Animated WebP and APNG are rejected.
-- Limits: 5 MiB of encoded raster bytes, at most 16,384 pixels per side, and a 40 million decoded-pixel/work budget per image. Images are never resized, cropped, transcoded, or replaced by an animation's first frame.
-- Convert SVG/BMP/TIFF/HEIC/PDF or unsupported or oversized images with `command` into a temporary PNG/JPEG first; downscale if needed, then read that file.
+- Source limit: 32 MiB encoded bytes, at most 16,384 pixels per side, and a 40 million decoded-pixel/animation-work budget. Oversized static images are automatically re-encoded, then bicubically downscaled only if needed, to fit 3,932,112 raster bytes (5 MiB base64 transport including a 64-byte reserve). Originals are never modified, upscaled, or cropped.
+- PNG stays lossless PNG; resized JPEG uses quality 90; static WebP stays lossless WebP. Under-budget GIF stays unchanged; oversized single-frame GIF becomes PNG. Oversized animated GIF, animated WebP, and APNG require manual conversion; no first-frame substitution.
+- Convert SVG/BMP/TIFF/HEIC/PDF or images exceeding source, processing, or animation safety limits with `command` into a temporary PNG/JPEG first; downscale if needed, then read that file.
 - Each image costs substantial model context. One response may return at most 8 images or 20 MiB of image data across all tool calls; request fewer images per response if needed.
 - Use `command` for text files."#;
 
@@ -63,44 +66,54 @@ impl ReadImageTool {
         }
         let too_large = || {
             FileToolError::invalid_arguments(format!(
-                "{}: image exceeds the 5 MiB encoded-byte limit ({MAX_IMAGE_BYTES} bytes); {CONVERSION_GUIDANCE}",
+                "{}: image exceeds the 32 MiB encoded source limit ({MAX_IMAGE_SOURCE_BYTES} bytes); {CONVERSION_GUIDANCE}",
                 path.display()
             ))
         };
-        if metadata.len() > MAX_IMAGE_BYTES as u64 {
+        if metadata.len() > MAX_IMAGE_SOURCE_BYTES as u64 {
             return Err(too_large());
         }
-        let mut bytes = Vec::new();
-        File::open(&path)
-            .and_then(|file| {
-                file.take(MAX_IMAGE_BYTES as u64 + 1)
-                    .read_to_end(&mut bytes)
-            })
-            .map_err(|error| {
-                FileToolError::io(format!("failed to read {}: {error}", path.display()))
-            })?;
-        if bytes.len() > MAX_IMAGE_BYTES {
+        let bytes = File::open(&path).and_then(read_source).map_err(|error| {
+            FileToolError::io(format!("failed to read {}: {error}", path.display()))
+        })?;
+        if bytes.len() > MAX_IMAGE_SOURCE_BYTES {
             return Err(too_large());
         }
-        let image = PromptImage::from_file_bytes(bytes).map_err(|error| {
+        let prepared = image_preparation::prepare_file_bytes(bytes).map_err(|error| {
             FileToolError::invalid_arguments(format!(
                 "{}: {error}; {CONVERSION_GUIDANCE}",
                 path.display()
             ))
         })?;
+        let image = prepared.image;
         let (width, height) = image.dimensions();
-        let summary = format!(
+        let mut summary = format!(
             "image: {}\nformat: {}\ndimensions: {width}×{height}\nbytes: {}",
             path.display(),
             image.mime_type(),
             image.encoded_len()
         );
+        if let Some(preparation) = prepared.preparation {
+            let (ow, oh) = preparation.original_dimensions;
+            let original_bytes = preparation.original_bytes.expect("file source length");
+            summary.push_str(&format!("\nprepared: {ow}×{oh}, {original_bytes} bytes → {width}×{height}, {} bytes (original file unchanged)", image.encoded_len()));
+        }
         ToolOutput::content(vec![
             ToolResultContent::text(summary),
             image.to_tool_result_content(),
         ])
         .map_err(|error| FileToolError::io(error.to_string()))
     }
+}
+
+/// Read at most one byte beyond the source allowance even if a regular file
+/// grows after metadata inspection. The caller rejects that sentinel byte.
+fn read_source(reader: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_IMAGE_SOURCE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -276,7 +289,7 @@ mod tests {
         // Invalid image bytes would give a format error if decoding were attempted.
         File::create(workspace.path().join("oversized.png"))
             .unwrap()
-            .set_len(MAX_IMAGE_BYTES as u64 + 1)
+            .set_len(MAX_IMAGE_SOURCE_BYTES as u64 + 1)
             .unwrap();
         let tool = ReadImageTool::new(workspace.path().to_path_buf());
         let error = tool
@@ -284,8 +297,56 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, FileToolError::InvalidArguments(_)));
-        assert!(error.to_string().contains("5 MiB encoded-byte limit"));
+        assert!(error.to_string().contains("32 MiB encoded source limit"));
         assert!(error.to_string().contains(CONVERSION_GUIDANCE));
+    }
+
+    #[test]
+    fn growing_source_read_is_bounded_to_limit_plus_one() {
+        let bytes = read_source(std::io::repeat(0)).unwrap();
+        assert_eq!(bytes.len(), MAX_IMAGE_SOURCE_BYTES + 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_sources_are_prepared_and_summarized_without_writing_files() {
+        let workspace = TempDir::new().unwrap();
+        let tool = ReadImageTool::new(workspace.path().to_path_buf());
+        for bytes in [
+            zevria_content::test_support::padded_png(6_307_556),
+            zevria_content::test_support::oversized_image()
+                .encoded_bytes()
+                .to_vec(),
+        ] {
+            let path = workspace.path().join("original.bin");
+            fs::write(&path, &bytes).unwrap();
+            let expected = image_preparation::prepare_file_bytes(bytes.clone()).unwrap();
+            let output = tool
+                .call(&mut ToolContext::new(), args("original.bin"))
+                .await
+                .unwrap();
+            let [
+                ToolResultContent::Text(summary),
+                ToolResultContent::Image(image),
+            ] = output.as_content()
+            else {
+                panic!("summary then image")
+            };
+            assert!(summary.text.contains("prepared:"));
+            assert!(summary.text.contains("original file unchanged"));
+            assert!(
+                summary
+                    .text
+                    .contains(&format!("bytes: {}", expected.image.encoded_len()))
+            );
+            assert_eq!(
+                image.data,
+                DocumentSourceKind::Base64(expected.image.base64())
+            );
+            assert_eq!(fs::read(path).unwrap(), bytes);
+            assert!(image_preparation::fits_transport(
+                expected.image.encoded_len()
+            ));
+        }
     }
 
     #[cfg(unix)]

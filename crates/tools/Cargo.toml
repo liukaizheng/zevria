@@ -25,6 +25,8 @@ tokio-util = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+zevria-content = { workspace = true, features = ["test-support"] }
 zevria-model = { workspace = true }
 zevria-core = { workspace = true }
 zevria-transcript = { workspace = true }

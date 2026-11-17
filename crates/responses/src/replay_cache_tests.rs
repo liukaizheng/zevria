@@ -78,6 +78,78 @@ fn incremental_projection_matches_full_at_every_split_and_rebuilds_for_native_co
 }
 
 #[test]
+fn prepared_and_historical_images_are_byte_preserving_in_generic_and_native_replay() {
+    let target = ModelProfileRef::new("test", "model");
+    let prepared = zevria_content::test_support::prepared_image().image;
+    let historical = zevria_content::PromptImage::from_file_bytes(
+        zevria_content::test_support::padded_png(4_730_667),
+    )
+    .unwrap();
+    let url = format!("data:{};base64,{}", prepared.mime_type(), prepared.base64());
+    let historical_url = format!(
+        "data:{};base64,{}",
+        historical.mime_type(),
+        historical.base64()
+    );
+    let native = json!({"type":"function_call_output", "call_id":"native-image-call", "output":[{"type":"input_text","text":"original summary"},{"type":"input_image","image_url":url},{"type":"input_image","image_url":historical_url}]});
+    let replay = ProviderReplay::openai_responses(
+        target.clone(),
+        vec![
+            json!({"type":"function_call","id":"native-image-item","call_id":"native-image-call","name":"read_image","arguments":"{}","status":"completed"}),
+            native.clone(),
+        ],
+    );
+    let prompt = zevria_content::UserPrompt::new(vec![
+        zevria_content::PromptBlock::Image(prepared.clone()),
+        zevria_content::PromptBlock::Image(prepared),
+    ])
+    .unwrap();
+    let history = vec![
+        OwnedModelRequestItem::message(prompt.to_message()),
+        OwnedModelRequestItem::replay_only(replay).unwrap(),
+    ];
+    let input = history
+        .iter()
+        .map(OwnedModelRequestItem::as_borrowed)
+        .collect::<Vec<_>>();
+    let (full, _) = project(&input, &target).unwrap();
+    assert!(full.last() == Some(&native), "native replay bytes changed");
+    assert!(
+        full[0]["content"][0]["image_url"] == url,
+        "first generic image bytes changed"
+    );
+    assert!(
+        full[1]["content"][0]["image_url"] == url,
+        "second generic image bytes changed"
+    );
+    for split in 0..=input.len() {
+        let mut projection = InputProjection::default();
+        projection
+            .extend(
+                &input[..split],
+                &target,
+                true,
+                ToolRendererOptions::default(),
+                true,
+            )
+            .unwrap();
+        projection
+            .extend(
+                &input[split..],
+                &target,
+                true,
+                ToolRendererOptions::default(),
+                true,
+            )
+            .unwrap();
+        assert!(
+            projection.take_input() == full,
+            "native replay is never a normalization opportunity"
+        );
+    }
+}
+
+#[test]
 fn incremental_preflight_matches_full_across_appends_edits_and_compatibility_changes() {
     let target = ModelProfileRef::new("test", "model");
     let mut history = history(&target);

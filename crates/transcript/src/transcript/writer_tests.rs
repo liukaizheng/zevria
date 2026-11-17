@@ -17,6 +17,55 @@ fn items_round_trip_through_a_session_file() {
 }
 
 #[test]
+fn prepared_occurrences_and_historical_images_survive_file_resume_exactly() {
+    use zevria_content::{PromptBlock, PromptImage, UserPrompt};
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = TranscriptWriter::create(dir.path()).unwrap();
+    let prepared = zevria_content::test_support::prepared_image().image;
+    let historical =
+        PromptImage::from_file_bytes(zevria_content::test_support::padded_png(4_730_667)).unwrap();
+    let prompt = UserPrompt::new(vec![
+        PromptBlock::Text("prefix".into()),
+        PromptBlock::Image(prepared.clone()),
+        PromptBlock::Image(prepared),
+        PromptBlock::Text("suffix".into()),
+    ])
+    .unwrap();
+    let old = UserPrompt::new(vec![PromptBlock::Image(historical.clone())]).unwrap();
+    let mut items = vec![
+        mode_item(),
+        TranscriptItem::Message(prompt.to_message()),
+        TranscriptItem::Message(Message::assistant("accepted")),
+        TranscriptItem::Message(old.to_message()),
+    ];
+    for item in &items {
+        writer.append(item).unwrap();
+    }
+    let path = writer.path().to_path_buf();
+    let prefix = std::fs::read(&path).unwrap();
+    drop(writer);
+    let loaded = load(&path).unwrap();
+    assert_eq!(loaded, items);
+    assert_eq!(
+        UserPrompt::from_message(loaded[1].message().unwrap()).unwrap(),
+        prompt
+    );
+    assert_eq!(
+        UserPrompt::from_message(loaded[3].message().unwrap())
+            .unwrap()
+            .images()
+            .next(),
+        Some(&historical)
+    );
+    let mut resumed = TranscriptWriter::append_to(path.clone()).unwrap();
+    let next = TranscriptItem::Message(Message::user("new suffix"));
+    resumed.append(&next).unwrap();
+    items.push(next);
+    assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+    assert_eq!(load(&path).unwrap(), items);
+}
+
+#[test]
 fn create_names_the_file_after_the_session_id() {
     let dir = tempfile::tempdir().expect("temp dir should create");
     let writer = TranscriptWriter::create(dir.path()).expect("writer should create");

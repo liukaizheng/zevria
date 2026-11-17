@@ -77,6 +77,64 @@ async fn production_synthesis_overlays_include_shared_inspection_once_without_ex
 }
 
 #[tokio::test]
+async fn new_ensemble_images_are_prepared_before_start_and_forwarded_unchanged() {
+    for fail in [false, true] {
+        let (_directory, transcript) = test_transcript();
+        let path = transcript.path().to_path_buf();
+        let launcher = Arc::new(StubEnsembleLauncher::successful(["worker report"]));
+        let launches = launcher.launches.clone();
+        let image = if fail {
+            zevria_content::test_support::oversized_animated_gif()
+        } else {
+            zevria_content::test_support::oversized_image()
+        };
+        let prompt =
+            zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(image)])
+                .unwrap();
+        let mut engine = SessionEngine::new(
+            ScriptedProvider::new([Ok(Message::assistant("synthesis"))]),
+            ToolServer::new().run(),
+            test_policies(),
+            transcript,
+            Arc::new(SkillCatalog::default()),
+        )
+        .unwrap()
+        .with_ensemble_launcher(launcher);
+        let (events, mut receiver) = session_event_channel(128);
+        engine
+            .handle_command(
+                SessionCommand::Turn(TurnCommand::RunEnsemble {
+                    workflow: EnsembleWorkflow::Review,
+                    prompt,
+                }),
+                &events,
+            )
+            .await
+            .unwrap();
+        collect_events(&mut receiver).await;
+        let loaded = zevria_transcript::transcript::load(&path).unwrap();
+        let start = loaded.iter().find_map(|item| match item {
+            TranscriptItem::Ensemble(EnsembleRecord::Started { start }) => Some(start),
+            _ => None,
+        });
+        if fail {
+            assert!(start.is_none());
+            assert_eq!(launches.load(Ordering::SeqCst), 0);
+            assert!(engine.provider.requests.lock().unwrap().is_empty());
+        } else {
+            let image = start.unwrap().prompt.images().next().unwrap();
+            assert!(zevria_content::image_preparation::fits_transport(
+                image.encoded_len()
+            ));
+            assert!(image.dimensions().0 < 1100);
+            let requests = engine.provider.requests.lock().unwrap();
+            let synthesis = zevria_content::UserPrompt::from_message(&requests[0].prompt).unwrap();
+            assert_eq!(synthesis.images().next(), Some(image));
+        }
+    }
+}
+
+#[tokio::test]
 async fn whitespace_only_ensemble_prompt_fails_before_calling_the_launcher() {
     let provider = ScriptedProvider::new(std::iter::empty::<anyhow::Result<Message>>());
     let requests = provider.requests.clone();

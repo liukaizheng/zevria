@@ -3,6 +3,10 @@ name = "zevria-content"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Deterministic raster fixtures shared by cross-crate ingress/wire regressions.
+test-support = []
+
 [dependencies]
 zevria-foundation = { workspace = true }
 anyhow = { workspace = true }

@@ -25,5 +25,6 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+zevria-content = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 toml = { workspace = true }

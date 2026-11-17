@@ -34,6 +34,36 @@ use crate::{
 
 const SESSION_PAGE_SIZE: usize = 32;
 
+async fn prepare_content(
+    blocks: Vec<agent_client_protocol::schema::v1::ContentBlock>,
+    reservation: &crate::session::InputPreparation,
+    cancellation: &agent_client_protocol::RequestCancellation,
+) -> Result<zevria_content::UserPrompt, AcpError> {
+    if cancellation.is_cancelled() || reservation.cancellation().is_cancelled() {
+        return Err(reservation.interrupted_error());
+    }
+    if blocks.iter().all(|block| {
+        matches!(
+            block,
+            agent_client_protocol::schema::v1::ContentBlock::Text(_)
+        )
+    }) {
+        return crate::prompt::from_content(&blocks);
+    }
+    let result = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(reservation.interrupted_error()),
+        () = reservation.cancellation().cancelled() => return Err(reservation.interrupted_error()),
+        result = tokio::task::spawn_blocking(move || crate::prompt::from_content(&blocks)) => {
+            result.map_err(|_| AcpError::internal_error().data("image preparation task failed"))?
+        }
+    };
+    if cancellation.is_cancelled() || reservation.cancellation().is_cancelled() {
+        return Err(reservation.interrupted_error());
+    }
+    result
+}
+
 pub async fn serve_stdio(
     config: AcpConfig,
     startup_workspace: PathBuf,
@@ -280,11 +310,19 @@ pub(crate) async fn serve_on(
         .on_receive_request(
             async move |request: PromptRequest, responder, connection| {
                 let live = prompt_state.session(&request.session_id)?;
-                let text = crate::prompt::from_content(&request.prompt)?;
                 let behavior = crate::prompt::request_behavior(request.meta.as_ref().and_then(|meta| meta.get(crate::prompt::ORCHESTRATION_EXTENSION)))?;
-                let wait = live.begin_prompt_with_behavior(text, behavior)?;
+                // Reserve on the receive path, but never decode/resample there.
+                let reservation = live.reserve_input_preparation()?;
                 let cancellation = responder.cancellation();
                 connection.spawn(async move {
+                    let prepared = prepare_content(request.prompt, &reservation, &cancellation).await;
+                    let wait = match prepared.and_then(|text| reservation.begin_prompt(text, behavior)) {
+                        Ok(wait) => wait,
+                        Err(error) if error.code == agent_client_protocol::schema::v1::ErrorCode::RequestCancelled => {
+                            return responder.respond_with_result(Ok(PromptResponse::new(agent_client_protocol::schema::v1::StopReason::Cancelled)));
+                        }
+                        Err(error) => return responder.respond_with_result(Err(error)),
+                    };
                     let mut response = Box::pin(wait.response);
                     let result = tokio::select! {
                         biased;
@@ -350,9 +388,17 @@ pub(crate) async fn serve_on(
             async move |request: crate::skills::SkillInvokeRequest, responder, connection| {
                 crate::skills::check_version(request.version)?;
                 let live = skills_invoke_state.session(&request.session_id)?;
-                let wait = live.begin_skill(request.name, crate::prompt::from_content(&request.args)?)?;
+                let reservation = live.reserve_input_preparation()?;
                 let cancellation = responder.cancellation();
                 connection.spawn(async move {
+                    let prepared = prepare_content(request.args, &reservation, &cancellation).await;
+                    let wait = match prepared.and_then(|args| reservation.begin_skill(request.name, args)) {
+                        Ok(wait) => wait,
+                        Err(error) if error.code == agent_client_protocol::schema::v1::ErrorCode::RequestCancelled => {
+                            return responder.respond_with_result(Ok(crate::skills::SkillInvokeResponse { version: crate::skills::SKILLS_EXTENSION_VERSION, stop_reason: agent_client_protocol::schema::v1::StopReason::Cancelled }));
+                        }
+                        Err(error) => return responder.respond_with_result(Err(error)),
+                    };
                     let mut response = Box::pin(wait.response);
                     let outcome = tokio::select! {
                         biased;

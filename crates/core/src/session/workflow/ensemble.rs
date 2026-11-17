@@ -391,7 +391,6 @@ impl<P: ModelProvider> SessionEngine<P> {
                 workflow.slash_command()
             )));
         }
-        self.gate_persistence(events).await?;
         self.skill_state_for_anchor(
             anchor,
             "cannot edit an ensemble in a transcript prefix with an invalid skill lifecycle",
@@ -410,6 +409,8 @@ impl<P: ModelProvider> SessionEngine<P> {
                 "{workflow} has no configured workers"
             )));
         }
+        let prompt = super::prompt::prepare_new_prompt(prompt, turn).await?;
+        self.gate_persistence(events).await?;
         let start = EnsembleStart {
             run_id: EnsembleRunId::new(),
             workflow,

@@ -30,6 +30,7 @@ tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+zevria-content = { workspace = true, features = ["test-support"] }
 rig-agent = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 zevria-tools = { workspace = true }

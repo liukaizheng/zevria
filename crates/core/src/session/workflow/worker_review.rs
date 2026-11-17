@@ -300,15 +300,21 @@ impl<P: ModelProvider> SessionEngine<P> {
                 biased;
                 () = turn.cancellation().cancelled() => return Err(Failure::Cancelled),
                 incoming = controls.recv() => {
-                    let Some(control) = incoming else { return Err(anyhow::anyhow!("worker control router closed").into()) };
+                    let Some(mut control) = incoming else { return Err(anyhow::anyhow!("worker control router closed").into()) };
                     *last_control = Some(control.clone());
-                    let reject = |detail| WorkerControlResult::rejected(control.clone(), detail);
+                    let rejected_control = control.clone();
+                    let reject = |detail| WorkerControlResult::rejected(rejected_control.clone(), detail);
                     if control.request_id.0.trim().is_empty() || control.request_id.0.len() > 128 {
                         let _ = events.send(SessionEvent::WorkerControlResult { result: reject("invalid control request identity") }).await;
                         continue;
                     }
                     if let Some(prior) = results.get(&control.request_id) {
-                        let result = if prior.control == control { prior.clone() } else { reject("request ID was already used for a different action") };
+                        let same = tokio::select! {
+                            biased;
+                            () = turn.cancellation().cancelled() => return Err(Failure::Cancelled),
+                            same = matches_accepted_control(&prior.control, &control) => same,
+                        };
+                        let result = if same { prior.clone() } else { reject("request ID was already used for a different action") };
                         let _ = events.send(SessionEvent::WorkerControlResult { result }).await;
                         continue;
                     }
@@ -324,6 +330,21 @@ impl<P: ModelProvider> SessionEngine<P> {
                     if state.abandoned {
                         let _ = events.send(SessionEvent::WorkerControlResult { result: reject("worker is permanently abandoned for this run") }).await;
                         continue;
+                    }
+                    if let WorkerControlAction::SendFeedback { text } = &mut control.action {
+                        if text.has_images() && state.image_capability != Some(true) {
+                            let _ = events.send(SessionEvent::WorkerControlResult { result: reject("worker image capability is unsupported or not yet negotiated; draft was not accepted") }).await;
+                            continue;
+                        }
+                        match super::prompt::prepare_new_prompt(std::mem::take(text), turn).await {
+                            Ok(prepared) => *text = prepared,
+                            Err(crate::session::turn::execution::Rejection::Cancelled) => return Err(Failure::Cancelled),
+                            Err(error) => {
+                                let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&format!("image preparation: {error:?}")) }).await;
+                                continue;
+                            }
+                        }
+                        *last_control = Some(control.clone());
                     }
                     let mut actor_command = None;
                     let transition: Result<Option<WorkerReviewEvent>, String> = match &control.action {
@@ -415,6 +436,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                             continue;
                         }
                     }
+                    if turn.is_cancelled() { return Err(Failure::Cancelled); }
                     let mut result = WorkerControlResult { control: control.clone(), accepted: true, detail: match &control.action {
                         WorkerControlAction::SendFeedback { .. } => "Feedback durably accepted and queued on this worker session.",
                         WorkerControlAction::Confirm { .. } => "Exact proposal revision confirmed; reopenable until all participating workers confirm.",
@@ -584,6 +606,34 @@ impl<P: ModelProvider> SessionEngine<P> {
         Ok(())
     }
 }
+/// Receipts contain accepted bytes, not a second original payload. A duplicate
+/// raw feedback submission must still deduplicate after normalization, including
+/// during cancellation/seal drains. Historical receipts and Retry are lossless.
+async fn matches_accepted_control(prior: &WorkerControl, submitted: &WorkerControl) -> bool {
+    if prior == submitted {
+        return true;
+    }
+    if prior.request_id != submitted.request_id || prior.target != submitted.target {
+        return false;
+    }
+    let (
+        WorkerControlAction::SendFeedback { text: accepted },
+        WorkerControlAction::SendFeedback { text },
+    ) = (&prior.action, &submitted.action)
+    else {
+        return false;
+    };
+    if !zevria_content::image_preparation::prompt_needs_preparation(text) {
+        return false;
+    }
+    let text = text.clone();
+    tokio::task::spawn_blocking(move || zevria_content::image_preparation::prepare_prompt(text))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some_and(|prepared| &prepared == accepted)
+}
+
 async fn settle_worker_controls(
     controls: &mut mpsc::Receiver<WorkerControl>,
     results: &HashMap<WorkerControlId, WorkerControlResult>,
@@ -594,16 +644,17 @@ async fn settle_worker_controls(
     // Reject already-routed controls on every exit, not just a seal.
     // A failure after durable acceptance preserves its accepted result.
     if !sealed && let Some(control) = last_control {
-        let result = results
-            .get(&control.request_id)
-            .filter(|prior| prior.control == control)
-            .cloned()
-            .unwrap_or_else(|| {
-                WorkerControlResult::rejected(
-                    control,
-                    "worker review stopped before durable acceptance; draft retained",
-                )
-            });
+        let prior = results.get(&control.request_id);
+        let result = if let Some(prior) = prior
+            && matches_accepted_control(&prior.control, &control).await
+        {
+            prior.clone()
+        } else {
+            WorkerControlResult::rejected(
+                control,
+                "worker review stopped before durable acceptance; draft retained",
+            )
+        };
         let _ = events
             .send(SessionEvent::WorkerControlResult { result })
             .await;
@@ -612,20 +663,21 @@ async fn settle_worker_controls(
     // lose a correlated result or retarget it to the next ensemble.
     controls.close();
     while let Some(control) = controls.recv().await {
-        let result = results
-            .get(&control.request_id)
-            .filter(|prior| prior.control == control)
-            .cloned()
-            .unwrap_or_else(|| {
-                WorkerControlResult::rejected(
-                    control,
-                    if sealed {
-                        "all-worker review is sealed"
-                    } else {
-                        "worker review stopped; draft was not accepted"
-                    },
-                )
-            });
+        let prior = results.get(&control.request_id);
+        let result = if let Some(prior) = prior
+            && matches_accepted_control(&prior.control, &control).await
+        {
+            prior.clone()
+        } else {
+            WorkerControlResult::rejected(
+                control,
+                if sealed {
+                    "all-worker review is sealed"
+                } else {
+                    "worker review stopped; draft was not accepted"
+                },
+            )
+        };
         let _ = events
             .send(SessionEvent::WorkerControlResult { result })
             .await;

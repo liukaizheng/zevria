@@ -8,11 +8,17 @@ async fn image_only_messages_and_skill_arguments_are_durable_before_provider_fai
     for skill in [false, true] {
         let (_directory, transcript) = test_transcript();
         let path = transcript.path().to_path_buf();
-        let image = zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
-        let prompt = zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(
-            image.clone(),
-        )])
-        .unwrap();
+        let original = zevria_content::test_support::oversized_image();
+        let image = zevria_content::image_preparation::prepare_encoded(
+            original.mime_type(),
+            original.encoded_bytes().to_vec(),
+        )
+        .unwrap()
+        .image;
+        assert!(image.dimensions().0 < original.dimensions().0);
+        let prompt =
+            zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(original)])
+                .unwrap();
         let mut engine = SessionEngine::new(
             ScriptedProvider::new([Err(anyhow::anyhow!("vision endpoint rejected the input"))]),
             test_skill_tools(),
@@ -66,6 +72,122 @@ async fn image_only_messages_and_skill_arguments_are_durable_before_provider_fai
                 .next(),
             Some(&image)
         );
+    }
+}
+
+#[tokio::test]
+async fn recalled_new_submission_and_intentional_edit_prepare_only_the_new_suffix() {
+    let (_directory, mut transcript) = test_transcript();
+    let path = transcript.path().to_path_buf();
+    let historical = zevria_content::PromptImage::from_file_bytes(
+        zevria_content::test_support::padded_png(4_730_667),
+    )
+    .unwrap();
+    let recalled = zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(
+        historical.clone(),
+    )])
+    .unwrap();
+    let items = vec![
+        TranscriptItem::Message(Message::user("fixed prefix")),
+        TranscriptItem::Message(Message::assistant("fixed answer")),
+        TranscriptItem::Message(recalled.to_message()),
+        TranscriptItem::Message(Message::assistant("old image")),
+    ];
+    persist_fixture(&mut transcript, &items);
+    let prefix = std::fs::read(&path).unwrap();
+    let mut engine = SessionEngine::new(
+        ScriptedProvider::new([
+            Ok(Message::assistant("new image")),
+            Ok(Message::assistant("edited image")),
+        ]),
+        ToolServer::new().run(),
+        test_policies(),
+        transcript,
+        Arc::new(SkillCatalog::default()),
+    )
+    .unwrap()
+    .with_fixture(items.clone())
+    .unwrap();
+    let (events, mut receiver) = session_event_channel(128);
+    engine
+        .handle_command(
+            SessionCommand::Turn(TurnCommand::Submit {
+                behavior: zevria_foundation::RequestBehavior::Standard,
+                text: recalled.clone(),
+                mode: SessionMode::Build,
+            }),
+            &events,
+        )
+        .await
+        .unwrap();
+    collect_events(&mut receiver).await;
+    assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+    let request = engine.provider.requests.lock().unwrap()[0].clone();
+    assert!(request.history.iter().any(|m| {
+        zevria_content::UserPrompt::from_message(m)
+            .is_ok_and(|p| p.images().next() == Some(&historical))
+    }));
+    let accepted = zevria_content::UserPrompt::from_message(&request.prompt).unwrap();
+    assert!(accepted.images().next().unwrap().encoded_len() < 1024);
+    assert_eq!(
+        &engine.conversation.items()[..items.len()],
+        items.as_slice()
+    );
+    engine
+        .handle_command(
+            prompt_message_edit(1, recalled, SessionMode::Build),
+            &events,
+        )
+        .await
+        .unwrap();
+    collect_events(&mut receiver).await;
+    let requests = engine.provider.requests.lock().unwrap();
+    assert_eq!(
+        zevria_content::UserPrompt::from_message(&requests[1].prompt).unwrap(),
+        accepted
+    );
+    assert_eq!(&engine.conversation.items()[..2], &items[..2]);
+}
+
+#[tokio::test]
+async fn failed_or_cancelled_preparation_never_commits_a_new_prompt() {
+    for cancelled in [false, true] {
+        let (_directory, transcript) = test_transcript();
+        let path = transcript.path().to_path_buf();
+        let before = std::fs::read(&path).unwrap();
+        let mut engine = SessionEngine::new(
+            ScriptedProvider::new([]),
+            ToolServer::new().run(),
+            test_policies(),
+            transcript,
+            Arc::new(SkillCatalog::default()),
+        )
+        .unwrap();
+        let prompt = zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(
+            zevria_content::test_support::oversized_animated_gif(),
+        )])
+        .unwrap();
+        let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new());
+        if cancelled {
+            turn.cancellation().cancel();
+        }
+        let (events, _) = session_event_channel(32);
+        let result = engine
+            .prepare_and_accept_prompt(
+                crate::session::kernel::records::TurnAnchor::Append,
+                crate::session::workflow::prompt::PromptTurnInput::Message {
+                    text: prompt,
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                },
+                SessionMode::Build,
+                &events,
+                &turn,
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert!(engine.provider.requests.lock().unwrap().is_empty());
+        assert!(engine.conversation.items().is_empty());
     }
 }
 

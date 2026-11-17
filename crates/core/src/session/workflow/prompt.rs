@@ -71,6 +71,36 @@ pub(in crate::session) struct PromptContext {
     request_boundaries: bool,
 }
 
+/// Off-loop, admission-only normalization. Retained history is never passed here.
+/// A cancelled blocking job may finish privately, but can never commit its result.
+pub(in crate::session) async fn prepare_new_prompt(
+    prompt: UserPrompt,
+    turn: &TurnContext,
+) -> Result<UserPrompt, Rejection> {
+    if turn.is_cancelled() {
+        return Err(Rejection::Cancelled);
+    }
+    let prepared = if zevria_content::image_preparation::prompt_needs_preparation(&prompt) {
+        tokio::select! {
+            biased;
+            () = turn.cancellation().cancelled() => return Err(Rejection::Cancelled),
+            result = tokio::task::spawn_blocking(move || zevria_content::image_preparation::prepare_prompt(prompt)) => {
+                result.map_err(|_| Rejection::Rejected("image preparation task failed; prompt was not accepted".into()))?
+                    .map_err(|error| Rejection::Rejected(error.to_string()))?
+            }
+        }
+    } else {
+        prompt
+    };
+    if turn.is_cancelled() {
+        return Err(Rejection::Cancelled);
+    }
+    prepared
+        .validate()
+        .map_err(|error| Rejection::Rejected(error.to_string()))?;
+    Ok(prepared)
+}
+
 pub(in crate::session) enum PromptTurnInput {
     Message {
         text: UserPrompt,
@@ -721,7 +751,15 @@ impl<P: ModelProvider> SessionEngine<P> {
         events: &SessionEventSender,
         turn: &TurnContext,
     ) -> Result<AcceptedTurn, Rejection> {
-        let checked = self.preflight_prompt(anchor, input, mode)?;
+        let mut checked = self.preflight_prompt(anchor, input, mode)?;
+        let prompt = match &mut checked.input {
+            PromptTurnInput::Message { text, .. }
+            | PromptTurnInput::RevisionMessage { text, .. } => text,
+            PromptTurnInput::Skill { args, .. } | PromptTurnInput::RevisionSkill { args, .. } => {
+                args
+            }
+        };
+        *prompt = prepare_new_prompt(std::mem::take(prompt), turn).await?;
         let role = checked.policy.model_role;
         let progress = ProgressReporter::for_turn(
             events.clone(),

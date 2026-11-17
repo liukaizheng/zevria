@@ -132,6 +132,38 @@ fn artifact() -> PlanArtifact {
 }
 
 #[tokio::test]
+async fn preparation_reserves_order_and_management_but_never_begins_cancelled_input() {
+    // The harness deadline bounds protocol routing, not image codec work.
+    // Prepare this expensive fixture first: Windows debug builds can otherwise
+    // spend the entire five-second deadline encoding and resizing the image.
+    let prepared = zevria_content::test_support::prepared_image().image;
+    exercise(ExecutionProfile::Interactive, SessionMode::Build, PlanWorkflowState::Idle,
+        async move |live, mut commands| {
+            let reservation = live.reserve_input_preparation()?;
+            assert!(live.reserve_input_preparation().is_err());
+            assert!(live.begin_prompt("cannot overtake".into()).is_err());
+            assert!(live.set_mode(SessionMode::Plan).is_err());
+            assert!(commands.try_recv().is_err());
+            live.cancel();
+            assert!(reservation.cancellation().is_cancelled());
+            assert!(reservation.begin_prompt("cancelled before acceptance".into(), zevria_foundation::RequestBehavior::Standard).is_err());
+            assert!(commands.try_recv().is_err());
+            let reservation = live.reserve_input_preparation()?;
+            // A preparation failure/closed responder drops the reservation,
+            // without allocating a pending engine turn or management command.
+            drop(reservation);
+            assert!(commands.try_recv().is_err());
+            let reservation = live.reserve_input_preparation()?;
+            let args = zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(prepared.clone())]).unwrap();
+            let wait = reservation.begin_skill(zevria_instructions::skill::SkillName::parse("fixture").unwrap(), args)?;
+            assert!(matches!(commands.recv().await, Some(SessionCommand::Turn(zevria_session_api::TurnCommand::InvokeSkill { args, .. })) if args.images().next() == Some(&prepared)));
+            live.finish_prompt(Ok(StopReason::EndTurn));
+            wait.response.await.unwrap()?;
+            Ok(())
+        }).await;
+}
+
+#[tokio::test]
 async fn selection_waits_for_correlated_ack_and_locks_prompt_and_management() {
     let updates = exercise(
         ExecutionProfile::Interactive,

@@ -415,6 +415,42 @@ fn worker_confirmation_binds_revision_and_normal_c_does_not_intercept_inserted_p
     );
 }
 #[test]
+fn prepared_feedback_receipt_settles_the_original_draft_without_accepting_changed_text() {
+    let mut app = worker();
+    app.worker.bound.as_mut().unwrap().1.image_capability = Some(true);
+    app.composer.insert_text("feedback ");
+    app.composer
+        .attach_image(zevria_content::test_support::oversized_image())
+        .unwrap();
+    let Some(UiAction::WorkerControl(mut control)) = app.submit_worker() else {
+        panic!("image feedback")
+    };
+    let WorkerControlAction::SendFeedback { text } = &mut control.action else {
+        panic!("feedback")
+    };
+    *text = zevria_content::image_preparation::prepare_prompt(text.clone()).unwrap();
+    let mut unrelated = control.clone();
+    let WorkerControlAction::SendFeedback { text } = &mut unrelated.action else {
+        unreachable!()
+    };
+    *text = text.with_prefix("changed text ");
+    app.worker_control_result(&WorkerControlResult {
+        control: unrelated,
+        accepted: true,
+        detail: "unrelated".into(),
+    });
+    assert!(app.worker.pending.is_some());
+    assert!(!app.composer.is_empty());
+    app.worker_control_result(&WorkerControlResult {
+        control,
+        accepted: true,
+        detail: "prepared".into(),
+    });
+    assert!(app.worker.pending.is_none());
+    assert!(app.composer.is_empty());
+}
+
+#[test]
 fn worker_root_commands_are_rejected_and_literal_escape_is_available() {
     let mut app = worker();
     app.handle_event(Event::Paste("/ensemble-plan hidden dispatch".into()));

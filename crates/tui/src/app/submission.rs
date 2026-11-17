@@ -378,6 +378,15 @@ impl App {
                     self.push_error(error.to_string());
                 }
             }
+            crate::clipboard::ClipboardResult::ResizedImage(image, preparation) => {
+                if let Err(error) = self.composer.attach_image(image) {
+                    self.push_error(error.to_string());
+                } else {
+                    let (ow, oh) = preparation.original_dimensions;
+                    let (w, h) = preparation.output_dimensions;
+                    self.push_error(format!("Clipboard image resized: {ow}×{oh} → {w}×{h} ({} bytes). Original clipboard content unchanged.", preparation.output_bytes));
+                }
+            }
             crate::clipboard::ClipboardResult::Text(text) => self.composer.insert_text(&text),
             crate::clipboard::ClipboardResult::Empty => {
                 self.push_error("Clipboard has no usable image or text.".into())
