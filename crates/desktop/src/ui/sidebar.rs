@@ -32,10 +32,12 @@ impl DesktopWindow {
         let controller = self.controller.read(cx);
         let t = palette(cx);
         let tone = tones(cx);
-        let transitioning = matches!(
-            controller.phase,
-            crate::controller::Phase::Starting | crate::controller::Phase::Stopping
-        );
+        let model_management = controller.model.models.is_open();
+        let transitioning = model_management
+            || matches!(
+                controller.phase,
+                crate::controller::Phase::Starting | crate::controller::Phase::Stopping
+            );
         let workspace = controller
             .workspace
             .as_ref()
@@ -172,6 +174,7 @@ impl DesktopWindow {
                     .w_full()
                     .justify_start()
                     .track_focus(&self.sidebar_focus[0])
+                    .disabled(model_management)
                     .accessibility_label(format!("This session: {title}"))
                     .border_l_2()
                     .border_color(if selected { mode_ink } else { t.surfaces.panel })
@@ -213,6 +216,7 @@ impl DesktopWindow {
                         .px(px(8.))
                         .py(px(8.))
                         .track_focus(&self.sidebar_focus[index + 1])
+                        .disabled(model_management)
                         .accessibility_label(format!("Inspect {}: {}", child.kind, child.title))
                         .border_l_2()
                         .border_color(if selected { ink } else { tone.hairline })

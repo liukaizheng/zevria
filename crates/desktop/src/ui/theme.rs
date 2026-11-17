@@ -496,6 +496,17 @@ mod tests {
         ] {
             let t = tokens.map(color);
             let tones = Tones::new(t);
+            // Model sheet: normal/selected rows, supporting copy, errors and
+            // keyboard focus use the existing semantic overlay/selection tokens.
+            for background in [
+                t.surfaces.overlay,
+                t.surfaces.overlay.blend(tones.list_active),
+            ] {
+                assert!(contrast(t.text.primary, background) >= 4.5);
+                assert!(contrast(t.text.secondary, background) >= 4.5);
+            }
+            assert!(contrast(t.feedback.error, t.surfaces.overlay) >= 4.5);
+            assert!(contrast(tones.focus, t.surfaces.overlay) >= 3.);
             assert!(apca(tones.pencil, t.surfaces.canvas).abs() >= 75.);
             assert!(contrast(tones.thread, t.surfaces.canvas) >= 3.);
             assert!(contrast(t.workflow.build, tones.build_tint) >= 4.5);

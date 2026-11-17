@@ -4,6 +4,10 @@ use super::{
     theme::{palette, tones},
     window::DesktopWindow,
 };
+use gpui_kit::component::{
+    Disableable, Sizable,
+    button::{Button, ButtonVariants},
+};
 use gpui_kit::{prelude::*, *};
 use std::time::Instant;
 use zevria_foundation::ModelRole;
@@ -158,6 +162,11 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
         blocks::{PresentationBlockKind, PresentedToolStatus},
         conversation::HistoryEntry,
     };
+    if model.session.operation_kind()
+        == Some(zevria_presentation::session::OperationKind::ModelManagement)
+    {
+        return "Choosing a model".into();
+    }
     if cancelling {
         return "Stopping".into();
     }
@@ -268,7 +277,16 @@ impl DesktopWindow {
     pub(super) fn status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let controller = self.controller.read(cx);
         let model = controller.model.visible();
-        let status = StatusLine::new(model, controller.cancelling);
+        let mut status = StatusLine::new(model, controller.cancelling);
+        if controller.model.models.is_open() && !status.persistence_failed {
+            use zevria_presentation::models::ModelPhase;
+            status.activity = match controller.model.models.phase {
+                ModelPhase::Cancelling { .. } => "Cancelling model selection…",
+                ModelPhase::PendingChange { .. } => "Applying model selection…",
+                _ => "Choosing a model…",
+            }
+            .into();
+        }
         let t = palette(cx);
         let mut row = div()
             .id("status-bar")
@@ -312,18 +330,49 @@ impl DesktopWindow {
                     .child(status.activity),
             ),
         );
-        if !self.compact {
-            let mut profile = div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .min_w_0()
-                .text_color(t.text.secondary)
-                .child(div().truncate().child(status.profile));
-            if let Some(reasoning) = status.reasoning {
-                profile = profile.child(div().truncate().text_color(t.text.muted).child(reasoning));
-            }
-            row = row.child(profile);
+        let label = format!(
+            "{}{}",
+            status.profile,
+            status
+                .reasoning
+                .as_ref()
+                .map_or_else(String::new, |r| format!(" · {r}"))
+        );
+        if controller.model.selected_child.is_none() {
+            let unavailable = controller.model_selection_available().err();
+            let tooltip = format!(
+                "{label}\nChange model and thinking effort for this session only (⌃⌘M).{}",
+                unavailable.map_or_else(String::new, |reason| format!("\n{reason}"))
+            );
+            row = row.child(
+                Button::new("status-model")
+                    .ghost()
+                    .small()
+                    .h(px(22.))
+                    .min_w(px(64.))
+                    .max_w(px(if self.compact { 160. } else { 300. }))
+                    .accessibility_label(format!("Change model and thinking effort: {label}"))
+                    .tooltip(tooltip)
+                    .disabled(unavailable.is_some())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(t.text.secondary)
+                            .child(label),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.open_models(cx))),
+            );
+        } else {
+            row = row.child(
+                div()
+                    .id("status-child-model")
+                    .min_w_0()
+                    .max_w(px(200.))
+                    .truncate()
+                    .text_color(t.text.secondary)
+                    .child(label),
+            );
         }
         row = row.child(div().flex_1());
         if let Some(context) = status.context {

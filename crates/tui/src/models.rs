@@ -7,17 +7,20 @@ use ratatui::{
     text::Line,
     widgets::{List, ListItem, Paragraph, Wrap},
 };
-use std::{
-    collections::VecDeque,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::ops::{Deref, DerefMut};
 use zevria_foundation::SessionMode;
+#[cfg(test)]
 use zevria_model::models::ModelManagementRequest as Request;
 use zevria_model::models::ModelManagementResult as Result;
+#[cfg(test)]
 use zevria_model::models::ModelSelectionPreview;
 use zevria_model::models::ModelSelectionScope;
+#[cfg(test)]
 use zevria_model::models::mode_role;
+#[cfg(test)]
 use zevria_model::models::{ModelCandidate, ModelSelection};
+use zevria_presentation::models::{ModelPhase, ModelPicker as PickerState, SelectionStep};
+#[cfg(test)]
 use zevria_session_api::SessionCommand;
 
 use crate::hints::{Eligibility, hint_line};
@@ -27,74 +30,13 @@ use zevria_tui_widgets::overlay::{ListNav, modal};
 #[cfg(test)]
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
 #[cfg(test)]
 #[path = "model_tests.rs"]
 mod tests;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SelectionStep {
-    Model,
-    Reasoning { profile: usize, selected: usize },
-}
-
-/// One modal lifecycle. Cancellation retains the submitted target until its
-/// correlated result settles; a late catalog/preview cannot reopen selection.
-#[derive(Default)]
-enum ModelPhase {
-    #[default]
-    Settled,
-    Loading,
-    Selecting(SelectionStep),
-    Conversion {
-        preview: ModelSelectionPreview,
-        back: SelectionStep,
-    },
-    PendingChange {
-        target: ModelSelection,
-        back: SelectionStep,
-    },
-    Cancelling {
-        target: Option<ModelSelection>,
-    },
-    Error {
-        message: String,
-        back: SelectionStep,
-    },
-}
-
-impl ModelPhase {
-    fn step(&self) -> SelectionStep {
-        match self {
-            Self::Selecting(step) => *step,
-            Self::Conversion { back, .. }
-            | Self::PendingChange { back, .. }
-            | Self::Error { back, .. } => *back,
-            _ => SelectionStep::Model,
-        }
-    }
-
-    fn target(&self) -> Option<&ModelSelection> {
-        match self {
-            Self::Conversion { preview, .. } => Some(&preview.target),
-            Self::PendingChange { target, .. } => Some(target),
-            Self::Cancelling { target } => target.as_ref(),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct ModelPicker {
-    phase: ModelPhase,
-    pub commands: VecDeque<SessionCommand>,
-    request_id: String,
-    mode: Option<SessionMode>,
-    scope: Option<ModelSelectionScope>,
-    profiles: Vec<ModelCandidate>,
-    current: Option<ModelSelection>,
-    revision: String,
+    state: PickerState,
     filter: crate::composer::ComposerState,
     nav: ListNav,
     reasoning: ListNav,
@@ -103,32 +45,18 @@ pub(crate) struct ModelPicker {
     filtering: bool,
 }
 
+impl Deref for ModelPicker {
+    type Target = PickerState;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+impl DerefMut for ModelPicker {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
 impl ModelPicker {
-    pub(crate) fn is_open(&self) -> bool {
-        !matches!(self.phase, ModelPhase::Settled)
-    }
-
-    fn pending(&self) -> bool {
-        matches!(
-            self.phase,
-            ModelPhase::Loading | ModelPhase::PendingChange { .. } | ModelPhase::Cancelling { .. }
-        )
-    }
-
-    fn preview(&self) -> Option<&ModelSelectionPreview> {
-        match &self.phase {
-            ModelPhase::Conversion { preview, .. } => Some(preview),
-            _ => None,
-        }
-    }
-
-    fn error(&self) -> Option<&str> {
-        match &self.phase {
-            ModelPhase::Error { message, .. } => Some(message),
-            _ => None,
-        }
-    }
-
     pub(crate) fn invalidate_geometry(&mut self) {
         self.nav.invalidate_geometry();
         self.reasoning.invalidate_geometry();
@@ -136,135 +64,34 @@ impl ModelPicker {
     }
 
     pub fn show(&mut self, mode: SessionMode, scope: ModelSelectionScope) {
-        *self = Self {
-            phase: ModelPhase::Loading,
-            mode: Some(mode),
-            scope: Some(scope),
-            request_id: format!("model-{}", REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)),
-            ..Self::default()
-        };
-        self.send(Request::List { mode, scope });
-    }
-    fn send(&mut self, request: Request) {
-        self.commands.push_back(SessionCommand::Manage(
-            zevria_session_api::ManagementCommand::Models {
-                request_id: self.request_id.clone(),
-                request,
-            },
-        ));
-    }
-    pub fn cancel(&mut self) {
-        if self.is_open() && !matches!(self.phase, ModelPhase::Cancelling { .. }) {
-            self.phase = ModelPhase::Cancelling {
-                target: self.phase.target().cloned(),
-            };
-            self.send(Request::Cancel);
+        if self.state.is_open() {
+            return;
         }
+        *self = Self::default();
+        self.state.show(mode, scope);
     }
-    /// Late responses from an earlier picker/session cannot update telemetry.
     pub fn accept(&mut self, request_id: &str, result: &Result) -> bool {
-        if !self.is_open() || self.request_id != request_id {
+        if !self.state.accept(request_id, result) {
             return false;
         }
-        // Validate captured mode/scope before changing any modal state or
-        // allowing the runtime to install authoritative telemetry.
-        let correlated = match result {
-            Result::Catalog { mode, scope, .. } => {
-                matches!(
-                    self.phase,
-                    ModelPhase::Loading | ModelPhase::Cancelling { .. }
-                ) && Some(*mode) == self.mode
-                    && Some(*scope) == self.scope
-            }
-            Result::ConfirmationRequired(preview) => {
-                matches!(
-                    self.phase,
-                    ModelPhase::PendingChange { .. } | ModelPhase::Cancelling { .. }
-                ) && preview.request_id == self.request_id
-                    && Some(preview.mode) == self.mode
-                    && Some(preview.scope) == self.scope
-                    && preview.revision == self.revision
-                    && self.phase.target() == Some(&preview.target)
-            }
-            Result::Changed {
-                role,
-                scope,
-                context,
-                reasoning_level,
-                ..
-            } => {
-                matches!(
-                    self.phase,
-                    ModelPhase::PendingChange { .. } | ModelPhase::Cancelling { .. }
-                ) && self.mode.map(mode_role) == Some(*role)
-                    && Some(*scope) == self.scope
-                    && self.phase.target().is_some_and(|target| {
-                        target.profile == context.profile
-                            && target.reasoning_level == *reasoning_level
-                    })
-            }
-            Result::Cancelled | Result::Rejected { .. } => true,
-        };
-        if !correlated {
-            return false;
-        }
-        let cancelling = matches!(self.phase, ModelPhase::Cancelling { .. });
         match result {
-            Result::Catalog {
-                current,
-                profiles,
-                revision,
-                ..
-            } => {
-                self.profiles = profiles.clone();
+            Result::Catalog { current, .. } => {
                 self.nav.selected = self
+                    .state
                     .profiles
                     .iter()
-                    .position(|profile| profile.context.profile == current.profile)
+                    .position(|p| p.context.profile == current.profile)
                     .unwrap_or(0);
-                self.current = Some(current.clone());
-                self.revision = revision.clone();
-                if !cancelling {
-                    self.phase = ModelPhase::Selecting(SelectionStep::Model);
-                }
             }
-            Result::ConfirmationRequired(preview) => {
-                if !cancelling {
-                    self.details = ListNav::default();
-                    self.phase = ModelPhase::Conversion {
-                        preview: preview.clone(),
-                        back: self.phase.step(),
-                    };
-                }
-            }
-            Result::Changed { .. } | Result::Cancelled => {
-                self.phase = ModelPhase::Settled;
-            }
-            Result::Rejected {
-                message,
-                current_revision,
-                ..
-            } => {
-                if let Some(revision) = current_revision
-                    && self.scope == Some(ModelSelectionScope::SessionAndDefault)
-                {
-                    self.revision = revision.clone();
-                }
-                self.phase = if cancelling {
-                    ModelPhase::Settled
-                } else {
-                    ModelPhase::Error {
-                        message: message.clone(),
-                        back: self.phase.step(),
-                    }
-                };
-            }
+            Result::ConfirmationRequired(_) => self.details = ListNav::default(),
+            _ => {}
         }
         true
     }
     fn filtered(&self) -> Vec<usize> {
         let query = self.filter.text().to_lowercase();
-        self.profiles
+        self.state
+            .profiles
             .iter()
             .enumerate()
             .filter(|(_, profile)| {
@@ -283,7 +110,7 @@ impl ModelPicker {
             KeyContext::TextEntry
         } else if self.preview().is_some() {
             KeyContext::ModelConfirm
-        } else if matches!(self.phase.step(), SelectionStep::Reasoning { .. }) {
+        } else if matches!(self.state.phase.step(), SelectionStep::Reasoning { .. }) {
             KeyContext::ModelReasoning
         } else {
             KeyContext::ModelList
@@ -348,7 +175,7 @@ impl ModelPicker {
 
     pub fn paste(&mut self, text: &str) {
         if matches!(
-            self.phase,
+            self.state.phase,
             ModelPhase::Selecting(SelectionStep::Model)
                 | ModelPhase::Error {
                     back: SelectionStep::Model,
@@ -378,41 +205,24 @@ impl ModelPicker {
         if self.pending() || !self.is_open() {
             return;
         }
-        if let Some(preview) = self.preview() {
+        if self.preview().is_some() {
             if action == Action::Confirm {
-                let preview = preview.clone();
-                self.phase = ModelPhase::PendingChange {
-                    target: preview.target.clone(),
-                    back: self.phase.step(),
-                };
-                self.send(Request::Confirm { preview });
+                self.state.confirm_conversion();
             } else if let Some(action) = action.list_action() {
                 self.details.pan(action);
             }
             return;
         }
-        if let SelectionStep::Reasoning { profile, selected } = self.phase.step() {
+        if let SelectionStep::Reasoning { profile, selected } = self.state.phase.step() {
             self.reasoning.selected = selected;
-            let candidate = &self.profiles[profile];
+            let candidate = &self.state.profiles[profile];
             match action {
                 Action::Back => {
-                    self.phase = ModelPhase::Selecting(SelectionStep::Model);
+                    self.state.back();
                     return;
                 }
                 Action::Confirm => {
-                    if let Some(level) = candidate.reasoning_levels.get(selected) {
-                        let target = ModelSelection::new(candidate.context.profile.clone(), *level);
-                        self.phase = ModelPhase::PendingChange {
-                            target: target.clone(),
-                            back: SelectionStep::Reasoning { profile, selected },
-                        };
-                        self.send(Request::Select {
-                            mode: self.mode.expect("open picker mode"),
-                            scope: self.scope.expect("open picker scope"),
-                            target,
-                            revision: self.revision.clone(),
-                        });
-                    }
+                    self.state.apply();
                     return;
                 }
                 _ => {
@@ -422,10 +232,7 @@ impl ModelPicker {
                     }
                 }
             }
-            self.phase = ModelPhase::Selecting(SelectionStep::Reasoning {
-                profile,
-                selected: self.reasoning.selected,
-            });
+            self.state.choose_effort(self.reasoning.selected);
             return;
         }
         let filtered = self.filtered();
@@ -433,22 +240,11 @@ impl ModelPicker {
             Action::Filter => self.filtering = true,
             Action::Confirm => {
                 if let Some(index) = filtered.get(self.nav.selected) {
-                    let selected = self
-                        .current
-                        .as_ref()
-                        .and_then(|current| {
-                            self.profiles[*index]
-                                .reasoning_levels
-                                .iter()
-                                .position(|level| *level == current.reasoning_level)
-                        })
-                        .unwrap_or(0);
+                    self.state.choose_model(*index);
                     self.reasoning = ListNav::default();
-                    self.reasoning.selected = selected;
-                    self.phase = ModelPhase::Selecting(SelectionStep::Reasoning {
-                        profile: *index,
-                        selected,
-                    });
+                    if let SelectionStep::Reasoning { selected, .. } = self.state.phase.step() {
+                        self.reasoning.selected = selected;
+                    }
                 }
             }
             _ => {
@@ -456,17 +252,6 @@ impl ModelPicker {
                     self.nav.handle(action, filtered.len());
                 }
             }
-        }
-    }
-    fn scope_label(&self) -> &'static str {
-        match self.scope {
-            Some(ModelSelectionScope::SessionOnly) => {
-                "session only — kept on /new, fresh handoff and resume; config unchanged"
-            }
-            Some(ModelSelectionScope::SessionAndDefault) => {
-                "session and global default — kept on /new, fresh handoff and resume; updates config"
-            }
-            None => "",
         }
     }
     pub fn render(&mut self, frame: &mut Frame, body: Rect) {
@@ -481,8 +266,10 @@ impl ModelPicker {
         let style = crate::chrome::overlay_style();
         let title = format!(
             " {} — {} ",
-            self.scope.map_or("Model", ModelSelectionScope::command),
-            self.mode.map_or("", |mode| match mode {
+            self.state
+                .scope
+                .map_or("Model", ModelSelectionScope::command),
+            self.state.mode.map_or("", |mode| match mode {
                 SessionMode::Build => "Build role",
                 SessionMode::Plan => "Plan role",
             })
@@ -495,11 +282,13 @@ impl ModelPicker {
         let inner = modal(frame, area, title, hints);
         if self.pending() {
             frame.render_widget(
-                Paragraph::new(if matches!(self.phase, ModelPhase::Cancelling { .. }) {
-                    "Cancelling model maintenance…"
-                } else {
-                    "Preparing model selection…"
-                })
+                Paragraph::new(
+                    if matches!(self.state.phase, ModelPhase::Cancelling { .. }) {
+                        "Cancelling model maintenance…"
+                    } else {
+                        "Preparing model selection…"
+                    },
+                )
                 .style(style)
                 .wrap(Wrap { trim: false }),
                 inner,
@@ -525,8 +314,8 @@ impl ModelPicker {
             render_scrollbar(frame, inner, &self.details.viewport);
             return;
         }
-        if let SelectionStep::Reasoning { profile, selected } = self.phase.step() {
-            let candidate = &self.profiles[profile];
+        if let SelectionStep::Reasoning { profile, selected } = self.state.phase.step() {
+            let candidate = &self.state.profiles[profile];
             // Keep at least one choice row when the protected body has any room.
             // Heading/help may be omitted; selection must never become invisible.
             let header_height = inner.height.saturating_sub(1).min(2);
@@ -562,7 +351,21 @@ impl ModelPicker {
                 .skip(visible.start())
                 .take(visible.len())
                 .map(|(index, level)| {
-                    ListItem::new(format!("  {level}")).style(if index == selected {
+                    ListItem::new(format!(
+                        "{} {level}",
+                        if self
+                            .state
+                            .current
+                            .as_ref()
+                            .is_some_and(|c| c.profile == candidate.context.profile
+                                && c.reasoning_level == *level)
+                        {
+                            "*"
+                        } else {
+                            " "
+                        }
+                    ))
+                    .style(if index == selected {
                         crate::chrome::selection_style()
                     } else {
                         style
@@ -589,7 +392,8 @@ impl ModelPicker {
             Paragraph::new(format!(
                 "{}\nCurrent: {}\nStep 1/2 — Filter: {}{}",
                 self.scope_label(),
-                self.current
+                self.state
+                    .current
                     .as_ref()
                     .map_or_else(|| "unavailable".into(), ToString::to_string),
                 self.filter.text(),
@@ -622,8 +426,9 @@ impl ModelPicker {
             .skip(visible.start())
             .take(visible.len())
             .map(|(index, profile)| {
-                let profile = &self.profiles[*profile].context;
+                let profile = &self.state.profiles[*profile].context;
                 let marker = if self
+                    .state
                     .current
                     .as_ref()
                     .is_some_and(|current| current.profile == profile.profile)

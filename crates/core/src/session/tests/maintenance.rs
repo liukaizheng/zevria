@@ -23,7 +23,9 @@ struct MaintenanceProvider {
 impl ModelProvider for MaintenanceProvider {
     fn model_catalog(&self) -> Vec<zevria_model::models::ModelCandidate> {
         vec![zevria_model::models::ModelCandidate {
-            context: test_compaction_policy(1_000, 80, 0)
+            // A genuine context-policy change exercises cancellable capacity
+            // preparation. Effort-only updates intentionally never count.
+            context: test_compaction_policy(1_000, 80, 1)
                 .for_role(ModelRole::Build)
                 .clone(),
             reasoning_levels: zevria_foundation::ReasoningLevel::ALL.to_vec(),

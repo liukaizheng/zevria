@@ -58,6 +58,8 @@ mod native {
         Question,
         Confirm,
         Completion,
+        Models,
+        ModelConversion,
         Math,
         Session,
     }
@@ -82,6 +84,8 @@ mod native {
                 Self::Question => "question",
                 Self::Confirm => "replace-confirmation",
                 Self::Completion => "completion",
+                Self::Models => "model-picker",
+                Self::ModelConversion => "model-conversion",
                 Self::Math => "math",
                 Self::Session => "session",
             }
@@ -95,6 +99,34 @@ mod native {
             });
         std::fs::create_dir_all(&directory)?;
         let light = zevria_theme::ZEVRIA_GRAPHITE_LIGHT;
+        if std::env::var_os("ZEVRIA_DESKTOP_GALLERY_MODELS_ONLY").is_some() {
+            let configured = zevria_theme::generate_theme("#1E1E2E".parse()?)?
+                .palette
+                .tokens();
+            for scene in [Scene::Models, Scene::ModelConversion] {
+                for (width, height) in [(1240., 840.), (720., 520.), (1920., 1080.)] {
+                    for (name, tokens) in [
+                        ("dark", zevria_theme::ZEVRIA_GRAPHITE),
+                        ("light", light),
+                        ("configured", configured),
+                    ] {
+                        capture(
+                            scene,
+                            width,
+                            height,
+                            tokens,
+                            &directory.join(format!(
+                                "{}-{name}-{}x{}.png",
+                                scene.name(),
+                                width as u32,
+                                height as u32
+                            )),
+                        )?;
+                    }
+                }
+            }
+            return Ok(());
+        }
         for width in [1240., 720.] {
             for scene in [
                 Scene::Config,
@@ -115,6 +147,8 @@ mod native {
                 Scene::Question,
                 Scene::Confirm,
                 Scene::Completion,
+                Scene::Models,
+                Scene::ModelConversion,
             ] {
                 capture(
                     scene,
@@ -137,6 +171,8 @@ mod native {
                 Scene::CodeHeavy,
                 Scene::Question,
                 Scene::Plan,
+                Scene::Models,
+                Scene::ModelConversion,
             ] {
                 capture(
                     scene,
@@ -169,7 +205,13 @@ mod native {
                 &directory.join(format!("{}-1920x1080.png", scene.name())),
             )?;
         }
-        for scene in [Scene::ThinkingLive, Scene::Question, Scene::Plan] {
+        for scene in [
+            Scene::ThinkingLive,
+            Scene::Question,
+            Scene::Plan,
+            Scene::Models,
+            Scene::ModelConversion,
+        ] {
             for (name, tokens) in [("dark", zevria_theme::ZEVRIA_GRAPHITE), ("light", light)] {
                 capture(
                     scene,
@@ -284,6 +326,9 @@ mod native {
                     ]);
                     cx.notify();
                 });
+            }
+            if matches!(scene, Scene::Models | Scene::ModelConversion) {
+                model_scene(&controller, scene == Scene::ModelConversion, cx);
             }
             if scene == Scene::CodeHeavy {
                 controller.update(cx, |c, cx| {
@@ -439,6 +484,34 @@ mod native {
             T::Message(Message::assistant("The targeted restore checks passed. The workspace check was stopped before it finished.")),
             T::Error { error: zevria_presentation::TURN_CANCELLED.into() },
         ]
+    }
+    fn model_scene(
+        controller: &Entity<SessionController>,
+        conversion: bool,
+        cx: &mut gpui_kit::App,
+    ) {
+        use zevria_foundation::{ModelContextPolicy, ReasoningLevel as Level};
+        use zevria_model::models::{
+            ModelCandidate, ModelManagementResult, ModelSelection, ModelSelectionPreview,
+            ModelSelectionScope,
+        };
+        controller.update(cx, |c, cx| {
+            let context = ModelContextPolicy { profile: ModelProfileRef::new("configured-provider", "model-with-a-long-configured-profile-name"), context_window_tokens: 128000, input_token_limit: 100000, retained_user_tokens: 10000, image_accounting: Default::default() };
+            let mut other = context.clone();
+            other.profile = ModelProfileRef::new("other-provider", "different-model");
+            for role in ModelRole::ALL { c.model.root.install_model(role, &context, None); c.model.root.install_reasoning(role, Level::Medium); }
+            c.model.root.conversation.restore(vec![zevria_transcript::transcript::TranscriptItem::Message(Message::user("Keep the saved thinking and adjust effort for this session.")), zevria_transcript::transcript::TranscriptItem::Message(thinking_message())]);
+            c.draft = "Keep this draft while choosing a model.".into();
+            c.open_model_picker(ModelSelectionScope::SessionOnly, cx);
+            let request_id = c.model.models.request_id.clone();
+            c.fixture_event(E::ModelsResult { request_id: request_id.clone(), result: ModelManagementResult::Catalog { mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, current: ModelSelection::new(context.profile.clone(), Level::Medium), profiles: vec![ModelCandidate { context: context.clone(), reasoning_levels: vec![Level::Low, Level::Medium, Level::High] }, ModelCandidate { context: other.clone(), reasoning_levels: vec![Level::Medium, Level::High] }], revision: "gallery-revision".into() } }, cx);
+            c.select_model(usize::from(conversion), cx);
+            if conversion {
+                c.apply_model_selection(cx);
+                c.fixture_event(E::ModelsResult { request_id: request_id.clone(), result: ModelManagementResult::ConfirmationRequired(ModelSelectionPreview { request_id, session_generation: "gallery-runtime".into(), generation: 1, mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, source: ModelSelection::new(context.profile, Level::Medium), target: ModelSelection::new(other.profile, Level::Medium), revision: "gallery-revision".into(), reason: "The effective checkpoint contains source-model-only opaque context. The destination cannot replay it without a portable source-model summary.".into() }) }, cx);
+            }
+            cx.notify();
+        });
     }
     fn thinking_message() -> Message {
         Message::Assistant(AssistantMessage::new(vec![AssistantContent::Reasoning(

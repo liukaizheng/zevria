@@ -7,6 +7,7 @@ pub mod command;
 pub mod completion;
 pub mod conversation;
 pub mod jobs;
+pub mod models;
 pub mod projection;
 pub mod session;
 pub mod session_model;

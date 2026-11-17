@@ -277,6 +277,27 @@ different depending on whether you are browsing, writing, or selecting.
 `v` appears to do nothing, make sure you are in Normal mode and transcript content
 is visible; it will not scroll the conversation to find an item for you.
 
+### Choose a model and thinking effort
+
+`Alt+M` opens the model/effort picker from Normal, Insert (including completion),
+or Select mode without submitting or changing your draft. Choose a configured
+model, then confirm one of its supported efforts. This changes only the captured
+Build or Plan assignment **for this session**; it does not cycle models or change
+the Build/Plan shortcut. The desktop equivalent is `Ctrl+Cmd+M`, the Session menu,
+or the model/effort control in the status bar (also visible in compact windows).
+
+Selection requires a live, idle, writable root with no pending operation, Plan
+approval (even when hidden), question, recall, or capturing dialog. Child panes
+cannot change models. `/model-session` uses the same session-only picker;
+`/model` also saves the selected mode's global default.
+
+Changing only effort on the exact same profile and context policy preserves all
+thinking, native reasoning/signatures/encrypted payloads, tools, and checkpoints.
+It does not summarize or compact history, even when already over capacity. Normal
+capacity checks and possible compaction still apply to the next conversational
+turn. A real profile/context change retains compatibility checks and a separate
+conversion confirmation when needed.
+
 ### Move through the conversation
 
 In **Normal** mode:
@@ -540,7 +561,7 @@ Other useful commands:
 | `/resume` | Choose a previous workspace session. |
 | `/compact` | Summarize the active model context into a saved checkpoint. |
 | `/model` | Select this role's model and reasoning level; save to the session and global configuration. |
-| `/model-session` | Select this mode's model and reasoning level; retain on TUI reset/resume without changing global defaults. |
+| `/model-session` | Select this mode's model and reasoning level; retain on reset/resume without changing global defaults. |
 | `/skills` | Inspect, enable, disable, and reload local skills. |
 | `/ensemble-review <prompt>` | Collect independent ACP reviews and synthesize a read-only review. |
 

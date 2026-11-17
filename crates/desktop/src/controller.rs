@@ -46,6 +46,8 @@ pub struct SessionController {
     pub orchestrate: bool,
     pub cancelling: bool,
     pub show_sessions: bool,
+    /// Native capturing dialogs (for example replacement confirmation).
+    pub capturing_dialog: bool,
     /// Changes only with session data, never with the redraw clock.
     pub projection_revision: u64,
     /// Display-only partials. Never sent to the host or persisted.
@@ -104,6 +106,7 @@ impl SessionController {
             orchestrate: false,
             cancelling: false,
             show_sessions: false,
+            capturing_dialog: false,
             projection_revision: 0,
             unsaved_blocks: HashSet::new(),
             draft_generation: 0,
@@ -249,6 +252,7 @@ impl SessionController {
         self.draft_generation = 0;
         self.submitted = None;
         self.cancelling = false;
+        self.capturing_dialog = false;
         self.orchestrate = false;
         let job = cx.global::<EngineRuntime>().spawn(Self::open(
             config,
@@ -260,7 +264,7 @@ impl SessionController {
         cx.notify();
     }
     pub fn replace(&mut self, request: SessionRequest, cx: &mut Context<Self>) {
-        if self.quit_requested {
+        if self.quit_requested || self.model.models.is_open() {
             return;
         }
         match self.phase {
@@ -319,6 +323,8 @@ impl SessionController {
         self.exits.take();
         self.tick.take();
         self.command.take();
+        self.model.models.reset();
+        self.model.root.session.finish_model_management();
         let Some(running) = self.running.take() else {
             if self.quit_requested {
                 self.finish_quit(cx);
@@ -677,10 +683,66 @@ impl SessionController {
         self.ensure_tick(cx);
         cx.notify();
     }
+    /// One admission check for status, keyboard, menu and slash entry.
+    pub fn model_selection_available(&self) -> Result<(), &'static str> {
+        if self.phase != Phase::Live || self.pending.is_some() || self.quit_requested {
+            return Err("Model selection requires a live interactive session.");
+        }
+        if self.capturing_dialog {
+            return Err("Close the current dialog before changing models.");
+        }
+        if self.submitted.is_some() || self.cancelling {
+            return Err("Wait for the pending operation before changing models.");
+        }
+        self.model.model_selection_available()
+    }
+    fn flush_model_commands(&mut self, cx: &mut Context<Self>) {
+        while let Some(command) = self.model.models.commands.pop_front() {
+            self.send(command, cx);
+            if self.phase != Phase::Live {
+                break;
+            }
+        }
+    }
+    pub fn open_model_picker(
+        &mut self,
+        scope: zevria_model::models::ModelSelectionScope,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.model_selection_available().is_err() || !self.model.open_model_picker(scope) {
+            return false;
+        }
+        self.flush_model_commands(cx);
+        self.phase == Phase::Live && self.model.models.is_open()
+    }
+    pub fn select_model(&mut self, profile: usize, cx: &mut Context<Self>) {
+        self.model.models.choose_model(profile);
+        cx.notify();
+    }
+    pub fn select_model_effort(&mut self, effort: usize, cx: &mut Context<Self>) {
+        self.model.models.choose_effort(effort);
+        cx.notify();
+    }
+    pub fn apply_model_selection(&mut self, cx: &mut Context<Self>) {
+        if self.phase == Phase::Live && self.model.models.apply() {
+            self.flush_model_commands(cx);
+        }
+    }
+    pub fn confirm_model_conversion(&mut self, cx: &mut Context<Self>) {
+        if self.phase == Phase::Live && self.model.models.confirm_conversion() {
+            self.flush_model_commands(cx);
+        }
+    }
+    pub fn cancel_model_selection(&mut self, cx: &mut Context<Self>) {
+        self.model.models.cancel();
+        self.flush_model_commands(cx);
+    }
     pub fn submit(&mut self, cx: &mut Context<Self>) {
         if self.phase != Phase::Live
             || self.model.selected_child.is_some()
             || self.model.question.is_some()
+            || self.capturing_dialog
+            || self.model.models.is_open()
         {
             return;
         }
@@ -693,6 +755,15 @@ impl SessionController {
                 });
                 self.send(*command, cx);
             }
+            InputRoute::Models(scope) => {
+                // Management has no TurnStarted acknowledgement and must never
+                // acquire submitted-turn bookkeeping. Only an accepted slash
+                // invocation consumes its own command text.
+                if self.open_model_picker(scope, cx) {
+                    self.draft.clear();
+                    self.draft_generation += 1;
+                }
+            }
             InputRoute::New => self.new_session(cx),
             InputRoute::Resume => {
                 self.show_sessions = true;
@@ -704,6 +775,10 @@ impl SessionController {
         cx.notify();
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
+        if self.model.models.is_open() {
+            self.cancel_model_selection(cx);
+            return;
+        }
         if self.phase != Phase::Live || self.cancelling {
             return;
         }
@@ -713,7 +788,7 @@ impl SessionController {
         }
     }
     pub fn select_mode(&mut self, mode: zevria_foundation::SessionMode, cx: &mut Context<Self>) {
-        if self.phase != Phase::Live {
+        if self.phase != Phase::Live || self.model.models.is_open() || self.capturing_dialog {
             return;
         }
         if let Some(command) = self.model.root.select_mode(mode) {
@@ -725,7 +800,7 @@ impl SessionController {
         decision: zevria_workflow::PlanDecision,
         cx: &mut Context<Self>,
     ) {
-        if self.phase != Phase::Live {
+        if self.phase != Phase::Live || self.model.models.is_open() {
             return;
         }
         if let Some(artifact) = self.model.root.workflow.dialog_artifact() {

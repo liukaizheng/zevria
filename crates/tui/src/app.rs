@@ -83,7 +83,6 @@ use ratatui::crossterm::event::KeyEventKind;
 use pane::PaneState;
 pub(crate) use session::{
     ActivePhase, ConfiguredModelProfiles, OperationKind, RetryCountdown, SessionActivity, TurnTail,
-    role_for_mode,
 };
 use view::ViewState;
 pub(crate) use workflow::{PlanChoice, PlanDialogState};
@@ -92,7 +91,7 @@ use workflow::{PlanIntent, WorkflowKeys};
 use crate::status::{StatusAccent, StatusBarView, StatusTone};
 
 #[cfg(test)]
-pub(crate) use session::RetryNotice;
+pub(crate) use session::{RetryNotice, role_for_mode};
 
 const SCROLL_STEP: usize = 1;
 
@@ -534,6 +533,7 @@ impl App {
         cleared
     }
 
+    #[cfg(test)]
     pub(crate) fn install_reasoning(
         &mut self,
         role: ModelRole,
@@ -546,11 +546,7 @@ impl App {
         if self.capabilities().manage_session.is_err() || self.model.workflow.dialog().is_some() {
             return None;
         }
-        let mode = self.model.session.next_mode();
-        self.model
-            .session
-            .begin_operation(OperationKind::ModelManagement, mode, role_for_mode(mode))
-            .then_some(mode)
+        self.model.begin_model_management()
     }
 
     /// Seed from the actual restored runtime, not startup assignment/usage snapshots.
@@ -567,17 +563,15 @@ impl App {
         }
     }
 
-    pub(crate) fn finish_model_management(&mut self) {
-        self.model.session.finish_model_management();
+    pub(crate) fn install_validated_model_result(
+        &mut self,
+        result: &zevria_model::models::ModelManagementResult,
+    ) {
+        self.model.install_validated_model_result(result);
     }
 
-    pub(crate) fn install_model(
-        &mut self,
-        role: ModelRole,
-        context: &zevria_foundation::ModelContextPolicy,
-        snapshot: Option<zevria_model::ContextTokenSnapshot>,
-    ) {
-        self.model.install_model(role, context, snapshot);
+    pub(crate) fn finish_model_management(&mut self) {
+        self.model.session.finish_model_management();
     }
 
     pub(crate) const fn is_busy(&self) -> bool {
@@ -741,6 +735,11 @@ impl App {
                 Action::Cancel,
             ),
             (self.can_edit_draft(), Action::Insert),
+            (
+                self.capabilities().manage_session.is_ok()
+                    && self.model.workflow.dialog().is_none(),
+                Action::ModelPicker,
+            ),
             (self.can_recall_selected(), Action::Edit),
             (
                 self.drafts.has_recovery() && self.can_edit_draft() && self.composer.is_empty(),

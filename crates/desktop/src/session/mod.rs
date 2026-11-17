@@ -24,6 +24,7 @@ pub struct WorkspaceModel {
     pub root: SessionModel,
     pub children: Vec<ChildPane>,
     pub question: Option<QuestionForm>,
+    pub models: zevria_presentation::models::ModelPicker,
     pub registry: CommandRegistry,
     pub session_id: String,
     pub transcript_path: PathBuf,
@@ -38,6 +39,7 @@ pub enum InputRoute {
     Command(Box<SessionCommand>),
     New,
     Resume,
+    Models(zevria_model::models::ModelSelectionScope),
     Notice(String),
     Retained,
 }
@@ -47,6 +49,7 @@ impl Default for WorkspaceModel {
             root: SessionModel::default(),
             children: Vec::new(),
             question: None,
+            models: Default::default(),
             registry: CommandRegistry::default(),
             session_id: String::new(),
             transcript_path: PathBuf::new(),
@@ -171,6 +174,18 @@ impl WorkspaceModel {
                 WorkspaceReduction::default()
             }
             SessionUpdate::Lifecycle(mut event) => {
+                if let SessionEvent::ModelsResult { request_id, result } = &event {
+                    if self.models.accept(request_id, result) {
+                        self.root.install_validated_model_result(result);
+                        if let Some(notice) = self.models.take_settlement_notice() {
+                            self.root.conversation.push_error(notice);
+                        }
+                        if !self.models.is_open() {
+                            self.root.session.finish_model_management();
+                        }
+                    }
+                    return WorkspaceReduction::default();
+                }
                 let mut fresh = None;
                 match &mut event {
                     SessionEvent::QuestionAsked { turn_id, request }
@@ -258,7 +273,42 @@ impl WorkspaceModel {
     }
     pub fn disconnected(&mut self) -> Reduction {
         self.question = None;
+        self.models.reset();
         self.root.disconnected()
+    }
+    pub fn model_selection_available(&self) -> Result<(), &'static str> {
+        if self.selected_child.is_some() {
+            return Err("Return to the root conversation to change models.");
+        }
+        if self.models.is_open() {
+            return Err("Model selection is already open.");
+        }
+        if self.root.is_busy() {
+            return Err("Wait for the current operation to finish before changing models.");
+        }
+        if self.root.session.persistence_error().is_some() {
+            return Err("Resolve the session saving error before changing models.");
+        }
+        if self.question.is_some() {
+            return Err("Answer the current question before changing models.");
+        }
+        if matches!(
+            self.root.workflow.snapshot(),
+            zevria_workflow::PlanWorkflowState::Ready { .. }
+        ) || self.root.workflow.dialog().is_some()
+        {
+            return Err("Resolve the pending Plan before changing models.");
+        }
+        Ok(())
+    }
+    pub fn open_model_picker(&mut self, scope: zevria_model::models::ModelSelectionScope) -> bool {
+        if self.model_selection_available().is_err() {
+            return false;
+        }
+        let Some(mode) = self.root.begin_model_management() else {
+            return false;
+        };
+        self.models.show(mode, scope)
     }
     pub fn route_input(&mut self, input: &str, orchestrate: bool) -> InputRoute {
         if self.root.is_busy() {
@@ -325,6 +375,14 @@ impl WorkspaceModel {
                         },
                     )
                     .map(SessionCommand::Turn)
+            }
+            ClassifiedInput::Builtin(SlashCommand::Model) => {
+                return InputRoute::Models(
+                    zevria_model::models::ModelSelectionScope::SessionAndDefault,
+                );
+            }
+            ClassifiedInput::Builtin(SlashCommand::ModelSession) => {
+                return InputRoute::Models(zevria_model::models::ModelSelectionScope::SessionOnly);
             }
             ClassifiedInput::Builtin(SlashCommand::New) => return InputRoute::New,
             ClassifiedInput::Builtin(SlashCommand::Resume) => return InputRoute::Resume,

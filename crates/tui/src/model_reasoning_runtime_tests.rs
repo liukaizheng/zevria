@@ -16,10 +16,18 @@ fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_con
         let mut root = App::new()
             .with_model_profiles(ModelRole::ALL.map(|role| (role, profile.clone())))
             .with_reasoning_levels([Level::Medium; ModelRole::COUNT]);
-        root.restore(Vec::new()); // startup restoration must retain the seeded levels
+        root.restore(vec![
+            TranscriptItem::Message(rig_core::message::Message::user("Inspect the saved thinking")),
+            TranscriptItem::provider_message(zevria_model::ProviderReplay::openai_responses(profile.clone(), vec![
+                serde_json::json!({"type":"reasoning","id":"saved-thinking","summary":[{"type":"summary_text","text":"nonempty visible thinking"}],"encrypted_content":"native-cipher"}),
+                serde_json::json!({"type":"message","role":"assistant","id":"saved-message","status":"completed","content":[{"type":"output_text","text":"saved answer","annotations":[]}]}),
+            ])).unwrap(),
+        ]); // startup restoration must retain the seeded levels
         root.set_mode_for_test(SessionMode::Plan);
         let mut views = SessionViews::new(root, PathBuf::from("."));
         let before = views.root.status_for_test();
+        let history = format!("{:?}", views.root.history());
+        let profiles = views.model_profiles.clone();
         views.open_model_picker(scope);
         assert!(views.root.is_busy());
         let Some(SessionCommand::Manage(ManagementCommand::Models {
@@ -83,7 +91,8 @@ fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_con
         assert_eq!(after.profile, before.profile);
         assert_eq!(after.context, before.context);
         assert_eq!(after.response, before.response);
-        assert!(views.root.history().is_empty());
+        assert_eq!(format!("{:?}", views.root.history()), history);
+        assert!(std::sync::Arc::ptr_eq(&profiles, &views.model_profiles));
         views.root.set_mode_for_test(SessionMode::Build);
         assert_eq!(views.root.status_for_test().reasoning, Some(Level::Medium));
     }

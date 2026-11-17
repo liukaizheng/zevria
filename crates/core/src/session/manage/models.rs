@@ -393,6 +393,14 @@ impl<P: ModelProvider> SessionEngine<P> {
             });
         }
         let proposal = self.validate_model_selection(request_id, request, models)?;
+        // Effort is a request property, not a history replacement. Even an
+        // already over-capacity/opaque history must remain byte-for-byte native
+        // here; ordinary next-turn admission owns counting and compaction.
+        if proposal.current.profile == proposal.target.profile
+            && proposal.context == *self.context_policy(proposal.role)
+        {
+            return self.commit_model_selection(proposal, None, cancellation);
+        }
         match self
             .prepare_model_conversion(request_id, &proposal, events, cancellation)
             .await?
@@ -653,7 +661,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         if checkpoint.is_some() || scope == ModelSelectionScope::SessionOnly {
             service.validate(&models.revision)?;
         }
-        if scope == ModelSelectionScope::SessionOnly && same_selection && checkpoint.is_none() {
+        if scope == ModelSelectionScope::SessionOnly
+            && same_selection
+            && checkpoint.is_none()
+            && context == *self.context_policy(role)
+        {
             return Ok(Result::Changed {
                 role,
                 scope,

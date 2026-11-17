@@ -224,7 +224,9 @@ impl TranscriptView {
         let model = controller.model.visible();
         let epoch = format!("{:?}", model.conversation.epoch());
         let history = model.conversation.history();
-        let busy = model.is_busy();
+        // Management is busy for admission/status, never a conversational
+        // live-tip row or a reason to alter thinking/step disclosure phases.
+        let busy = model.session.has_turn_work();
         let call = model.session.call_header();
         let revision = controller.projection_revision;
         let mode_changed = self.final_outputs != self.pane.final_outputs;

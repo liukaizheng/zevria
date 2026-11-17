@@ -303,6 +303,11 @@ Empty, working, question, Plan and completion scenes also have wide Graphite
 1920×1080 captures named `{scene}-1920x1080.png`, showing the centered column.
 Thinking-live, question-dock and Plan-overlay scenes also have dark/light
 720×520 minimum-window captures.
+The model picker and conversion-warning scenes also have dark/light minimum-size
+captures. To capture just model controls at 720×520, 1240×840 and 1920×1080 under
+Graphite, Graphite Light and a generated configured theme, set
+`ZEVRIA_DESKTOP_GALLERY_MODELS_ONLY=1` on the same gallery command.
+
 The gallery covers configuration errors, no workspace, starting, stopping,
 failed/idle/empty sessions, working prose and tool loops with an expanded native
 diff, Plan review, questions, replacement confirmation and completions. Working
@@ -460,7 +465,7 @@ parser boundary separately from the fully covered proof fixture.
   slash/skill completions support click, arrow selection, Tab and Enter. Built-in
   completion Enter executes the selected built-in; skill completion only inserts.
 - Build/Plan selection, next-Build-prompt Orchestrate subtasks switch, Stop / Cmd-. / Esc.
-  Esc first belongs to an open question, review panel or completion. Cancellation
+  Esc first belongs to an open model picker, question, review panel or completion. Cancellation
   targets the pending operation or the learned active turn, never a guessed ID.
 - Plan review: Implement, Implement in fresh session, Revise / recovery Close,
   Copy plan as Markdown and reopen Review plan. Every decision includes the authoritative version.
@@ -474,6 +479,9 @@ parser boundary separately from the fully covered proof fixture.
   unrelated question.
 - Read-only subtask inspection and a breadcrumb back to the root. Child activity
   never takes over root busy state or root question ownership.
+- Session-only model/effort selection from the status control, Ctrl-Cmd-M or
+  Session menu. The model control stays visible and truncates long names in compact
+  windows; its tooltip gives the full profile/effort, scope, shortcut and any blocker.
 - Shared profile/reasoning/context/response/network status and persistence/Plan
   warnings; 250 ms clock updates run only while root work is pending/active.
 - Exact primary/output copy values remain available even when display is bounded.
@@ -492,19 +500,57 @@ outputs only** mode, and turn navigation/beginning/latest actions:
 | ⌥⇧⌘↓ | Jump to latest and resume tail following |
 | ⌘↩ | Send the open question answer or implement the open Plan |
 | ⇧⌘M | Switch the next-turn Build/Plan mode |
+| ⌃⌘M | Open the current mode's session-only model/effort picker |
 
 Shift-Tab remains reverse focus traversal. Esc belongs first to an open
-replacement confirmation, dismissible question, completion or Plan sheet;
+model picker, replacement confirmation, dismissible question, completion or Plan sheet;
 a non-dismissible question cannot be dismissed with Esc. **⌘.** and the Stop
 control still cancel the active root turn, including while a question is open.
 
 Supported shared grammar: ordinary text, `/orchestrate <prompt>`, `$skill [args]`,
-`/compact`, `/implement`, `/implement-fresh`, `/plan`, `/build`, `/new`, `/resume`.
-Model/reasoning, skill-management, worker-review and `/ensemble-*` commands retain
+`/compact`, `/implement`, `/implement-fresh`, `/plan`, `/build`, `/new`, `/resume`,
+`/model`, `/model-session`. Skill-management, worker-review and `/ensemble-*` commands retain
 the draft and show an explicit not-yet-available notice. Input while busy is not
 queued as another turn. A submitted draft stays until acceptance; failures and
 cancellation restore it without replacing a newer draft (Recover draft keeps
 both when necessary).
+
+### Model and thinking-effort sheet
+
+The status control, shortcut and Session-menu item open the same **session-only**
+native sheet. `/model-session` has that scope too; `/model` instead saves the
+selected mode's global default. The mode is captured on open: selecting while in
+Plan changes Plan, not Build, Review or child assignments. Both session-owned
+selections survive `/new`, fresh implementation and resume. Independent sessions
+still start from configuration defaults.
+
+The sheet uses the existing theme-aware sheet/scrim, system UI type and focus
+styles. Search filters configured profiles, the current model/effort is explicit,
+and only supported effort choices appear. Arrow keys and Enter select a model,
+then an effort; Apply confirms it. Tab/Shift-Tab traverse native controls. A real
+history conversion has its own explanation and Convert/Cancel confirmation.
+Loading, applying, cancelling, empty and error states stay in the same sheet.
+Escape cancels the picker before completion or turn cancellation and focus returns
+to the previous valid control on authoritative settlement. Cancellation racing an
+already-committed update still installs that acknowledged selection.
+
+Model selection is idle-only, never queued behind an active turn. Only a live,
+writable root with no pending operation, Plan approval (including a hidden Ready
+Plan), question or capturing dialog can open it. Conflicting submission, mode and
+replacement controls are blocked while it is open. A shortcut/click leaves the
+draft untouched; an accepted slash open consumes only its command, while rejected
+opens retain it. Management never becomes submitted-turn bookkeeping or a
+"waiting for model" conversation row.
+
+Changing only effort with an unchanged exact profile/context policy changes
+metadata/request properties, not conversation content. Thinking disclosures,
+block IDs, projection epoch, scroll and context/response/cache telemetry remain
+intact, as do native reasoning/signatures/encrypted payloads, tool records and
+opaque checkpoints. There is no count, conversion, summary, compaction or socket
+reset during this operation—even if history is already over limit. Ordinary
+next-turn capacity admission remains unchanged. The first changed-effort request
+may need full native replay instead of `previous_response_id`; later continuation
+recovers normally, using the same instructions, tools and cache key.
 
 ## Architecture and ownership
 
@@ -525,7 +571,7 @@ GPUI window + native components
 | `zevria-theme` | Immutable semantic sRGB tokens and concrete user themes, unchanged OKLCH generation and contrast/CVD validation. Generic token groups map to renderer color types. |
 | `zevria-tui-widgets::theme` | Thin, lazy Ratatui color adapter; preserves startup freeze and terminal call sites. |
 | TUI `App` / `SessionViews` | Terminal editor/recall drafts, selection, viewport, folds, overlays and existing worker-review routing. `App` applies `Reduction` hooks instead of interpreting lifecycle events again. |
-| Desktop `WorkspaceModel` | GPUI-free root/child/question routing and command metadata; each pane is the shared `SessionModel`. |
+| Desktop `WorkspaceModel` | GPUI-free root/child/question routing, shared correlated model-picker lifecycle and command metadata; each pane is the shared `SessionModel`. |
 | Desktop `SessionController` | Starting/live/stopping/failed ownership, replacement, event/exit tasks, commands, desktop drafts, session catalog and graceful quit. |
 | Desktop `ui/math/` | Source-faithful math plugins, bounded in-process em layout, direct KaTeX rasterization and evictable images; no provider/persistence dependencies. |
 | Desktop `ui/` | Native retained Markdown/plain text, gutter-led tool/diff/image rows, virtualized list invalidation, composer, sidebar, Plan/question surfaces and status. |
@@ -710,6 +756,12 @@ release:
   Enter/Space on thinking and steps; ⌥⌘→/←; expand/collapse-all; ⇧⌘R;
   ⌥⌘↑/↓ from the focused composer; ⌥⇧⌘↑/↓; ⇧⌘M; ⌘↩ decisions.
   Check every visible focus ring, including virtualized and narrow-window rows.
+- [ ] Open model selection from the status control, ⌃⌘M with composer/search focus,
+  and Session menu. At 720×520 and wide sizes inspect long model names, current
+  effort, search/effort navigation, wrapped conversion warnings, partial-save
+  errors, loading/cancelling states, Tab containment and Escape/focus restoration
+  in light, dark and a configured theme. Compare nonempty thinking disclosures,
+  scroll, draft and telemetry before/after effort-only Apply; verify no model turn.
 - [ ] VoiceOver spot check: Thinking has its Button role, name, supplied preview
   description and expanded state; step summaries announce N steps and their
   breakdown with expanded state; the book toggle announces Show final outputs

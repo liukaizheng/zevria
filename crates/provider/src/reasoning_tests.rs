@@ -1,6 +1,30 @@
 use super::*;
 use zevria_foundation::ReasoningLevel as Level;
 
+// Conversion coverage intentionally changes context policy. Same-profile,
+// unchanged-context effort maintenance must never inspect the opaque history.
+fn with_changed_plan_context(
+    engine: SessionEngine<ProviderRouter>,
+    a: &ResolvedModelProfile,
+    b: &ResolvedModelProfile,
+) -> SessionEngine<ProviderRouter> {
+    let mut plan = b.context_policy();
+    plan.retained_user_tokens += 1;
+    engine.with_compaction_policy(
+        CompactionPolicy::new(
+            Default::default(),
+            [
+                a.context_policy(),
+                plan,
+                a.context_policy(),
+                a.context_policy(),
+                b.context_policy(),
+            ],
+        )
+        .unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continuation() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -15,22 +39,30 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
         let first = receive_json(&mut socket).await;
         assert_eq!(first["reasoning"]["effort"], "medium");
         assert_eq!(first["prompt_cache_key"], cache_key);
-        send_json(&mut socket, completed_event("reason-1", "msg-1", "first")).await;
+        let native = vec![
+            json!({"type":"reasoning", "id":"native-reason", "summary":[{"type":"summary_text","text":"visible thinking"}], "encrypted_content":"native-cipher", "signature":"native-signature"}),
+            json!({"type":"message", "role":"assistant", "id":"msg-1", "status":"completed", "content":[{"type":"output_text", "text":"first", "annotations":[]}]}),
+        ];
+        send_json(
+            &mut socket,
+            completed_output_event("reason-1", native.clone()),
+        )
+        .await;
         let second = receive_json(&mut socket).await;
         assert_eq!(second["reasoning"]["effort"], "high");
         assert!(second.get("previous_response_id").is_none());
-        for field in [
-            "instructions",
-            "tools",
-            "input",
-            "prompt_cache_key",
-            "include",
-        ] {
+        for field in ["instructions", "tools", "prompt_cache_key", "include"] {
             assert_eq!(
                 first[field], second[field],
                 "reasoning switch changed {field}"
             );
         }
+        let prefix = first["input"].as_array().unwrap();
+        let replay = second["input"].as_array().unwrap();
+        assert_eq!(&replay[..prefix.len()], prefix);
+        assert_eq!(&replay[prefix.len()..prefix.len() + native.len()], native);
+        assert_eq!(replay[prefix.len()]["encrypted_content"], "native-cipher");
+        assert_eq!(replay[prefix.len()]["signature"], "native-signature");
         send_json(&mut socket, completed_event("reason-2", "msg-2", "second")).await;
         let third = receive_json(&mut socket).await;
         assert_eq!(third["reasoning"]["effort"], "high");
@@ -97,7 +129,7 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
             )
             .await
             .unwrap();
-        if index == 1 {
+        if index < 2 {
             history.push(response.into_record().into_model_request_item());
             history.push(OwnedModelRequestItem::message(Message::user("next prompt")));
         }
@@ -265,7 +297,7 @@ async fn shared_slot_uses_role_levels_and_explicit_maintenance_uses_requested_le
 }
 
 #[tokio::test]
-async fn converting_history_for_the_same_selected_model_uses_captured_explicit_reasoning() {
+async fn changed_context_conversion_for_same_profile_uses_captured_explicit_reasoning() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a = profile(
         "A",
@@ -305,7 +337,7 @@ async fn converting_history_for_the_same_selected_model_uses_captured_explicit_r
     *models = models
         .with_selection(SessionMode::Plan, target.clone())
         .unwrap();
-    engine = engine.with_transcript_items(items).unwrap();
+    engine = with_changed_plan_context(engine.with_transcript_items(items).unwrap(), &a, &b);
     let Result::ConfirmationRequired(preview) = manage(
         &mut engine,
         Request::Select {
@@ -396,7 +428,7 @@ async fn reasoning_validation_is_local_and_respects_capabilities_and_roles() {
 }
 
 #[tokio::test]
-async fn opaque_source_must_support_the_captured_pre_switch_level_without_fallback() {
+async fn changed_context_opaque_source_must_support_captured_level_without_fallback() {
     let mut a = profile("A", "http://127.0.0.1:1/v1/responses");
     a.reasoning_levels = vec![Level::Medium];
     let b = profile("B", &a.responses_endpoint().unwrap().base_url);
@@ -412,7 +444,7 @@ async fn opaque_source_must_support_the_captured_pre_switch_level_without_fallba
         panic!("header")
     };
     *models = models.with_selection(SessionMode::Plan, current).unwrap();
-    engine = engine.with_transcript_items(items).unwrap();
+    engine = with_changed_plan_context(engine.with_transcript_items(items).unwrap(), &a, &b);
     let before = std::fs::read(engine.conversation().path()).unwrap();
     for scope in [Scope::SessionOnly, Scope::SessionAndDefault] {
         let result = manage(

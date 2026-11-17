@@ -108,6 +108,21 @@ drafts stage at direct dispatch; queued drafts snapshot at enqueue and stage
 independently of the live composer when later dispatched. Worker drafts clear
 only on a matching acknowledgement and only if unchanged.
 
+`Alt+M` opens the session-only model/effort picker from noncapturing composer,
+completion, transcript and selection surfaces. It is resolved at workspace level
+only after capturing-owner routing; help, forms and existing overlays keep their
+keys. Press-only activation never types/submits a slash command, cycles a model,
+or touches the draft/cursor, attachments, undo, folds, scroll or queued prompts.
+Repeated activation cannot start another lifecycle. Admission uses the same idle,
+writable interactive-root capability as `/model-session`, including recall,
+pending operation and hidden Ready Plan guards; child panes cannot retarget roots.
+The captured current mode alone changes. `/model` uses the same picker but saves
+the global default too. Model/effort selection and conversion confirmation use the
+shared presentation lifecycle; navigation and filtering remain terminal-local.
+Same-profile/unchanged-context effort commits preserve all history and telemetry
+without counting, compaction or a synthetic waiting-for-model row. Ordinary next
+turn capacity admission still runs.
+
 `/build` and `/plan` are mode controls; Shift-Tab toggles only those modes.
 `/orchestrate <prompt>` is a one-request Build modifier, not a mode command or
 skill. It strips only its own prefix and never reparses the remainder as a

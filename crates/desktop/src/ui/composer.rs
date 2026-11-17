@@ -14,6 +14,9 @@ use gpui_kit::{prelude::*, *};
 use zevria_foundation::SessionMode;
 impl DesktopWindow {
     pub(super) fn submit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.controller.read(cx).model.models.is_open() {
+            return;
+        }
         let draft = self.composer.read(cx).value().to_string();
         self.controller.update(cx, |this, cx| {
             if this.draft != draft {
@@ -23,6 +26,9 @@ impl DesktopWindow {
         });
     }
     pub(super) fn completions(&self, cx: &App) -> Vec<(String, String)> {
+        if self.controller.read(cx).model.models.is_open() {
+            return Vec::new();
+        }
         let text = self.composer.read(cx).value();
         let cursor = self.composer.read(cx).cursor();
         if self.completion_dismissed.as_ref() == Some(&(text.to_string(), cursor)) {
@@ -77,7 +83,8 @@ impl DesktopWindow {
         let mode = controller.model.root.next_mode();
         let editable = controller.phase == Phase::Live
             && controller.model.root.workflow.dialog().is_none()
-            && controller.model.question.is_none();
+            && controller.model.question.is_none()
+            && !controller.model.models.is_open();
         let orchestrate = controller.orchestrate;
         let mode_disabled = !editable || busy;
         let cancelling = controller.cancelling;

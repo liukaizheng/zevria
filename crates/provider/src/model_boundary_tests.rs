@@ -159,7 +159,7 @@ async fn unavailable_or_multiple_opaque_sources_fail_without_inference() {
 }
 
 #[tokio::test]
-async fn resumed_current_destination_can_request_conversion_without_a_temporary_route_change() {
+async fn unchanged_selection_preserves_foreign_checkpoint_without_conversion() {
     for scope in [Scope::SessionOnly, Scope::SessionAndDefault] {
         let a = profile("A", "http://127.0.0.1:1/v1/responses");
         let b = profile("B", &a.responses_endpoint().unwrap().base_url);
@@ -167,7 +167,9 @@ async fn resumed_current_destination_can_request_conversion_without_a_temporary_
         let (_directory, mut engine) =
             engine(a.clone(), b.clone(), history, Arc::new(Settings::default()));
         // Plan's saved selection is already B, but the shared checkpoint is A.
-        let Result::ConfirmationRequired(preview) = manage(
+        let before = engine.conversation().items().to_vec();
+        let identity = engine.conversation().input_identity().cloned();
+        let result = manage(
             &mut engine,
             Request::Select {
                 scope,
@@ -176,13 +178,20 @@ async fn resumed_current_destination_can_request_conversion_without_a_temporary_
                 revision: String::new(),
             },
         )
-        .await
-        else {
-            panic!("same incompatible default must offer conversion")
-        };
-        assert_eq!(preview.scope, scope);
-        assert_eq!(preview.source.profile, a.profile);
-        assert_eq!(preview.target.profile, b.profile);
+        .await;
+        assert!(
+            matches!(
+                result,
+                Result::Changed {
+                    snapshot: None,
+                    unchanged: true,
+                    ..
+                }
+            ),
+            "{result:?}"
+        );
+        assert_eq!(engine.conversation().items(), before);
+        assert_eq!(engine.conversation().input_identity(), identity.as_ref());
         assert_eq!(engine.provider().initialized_profile_count(), 0);
     }
 }

@@ -273,6 +273,16 @@ const MODE: &[Binding] = &[b!(
         ..key(BackTab)
     }
 )];
+const MODELS: &[Binding] = &[b!(
+    ModelPicker,
+    "model / effort",
+    4,
+    "Session",
+    Key {
+        modifiers: KeyModifiers::ALT,
+        ..key(Char('m'))
+    }
+)];
 const COMPLETION: &[Binding] = &[
     b!(AcceptCompletion, "accept/run", 1, "Completion", key(Enter)),
     b!(
@@ -387,14 +397,15 @@ const HELP_CLOSE: &[Binding] = &[b!(Help, "close", 5, "Help", key(Char('?')))];
 pub fn bindings(context: KeyContext) -> impl Iterator<Item = &'static Binding> {
     use KeyContext::*;
     let groups: &[&[Binding]] = match context {
-        Composer => &[EDITOR, MODE, PANES, GLOBAL],
-        Completion => &[COMPLETION, EDITOR, MODE, &PANES[..1], GLOBAL],
-        Transcript => &[NORMAL, TRANSCRIPT, PAGES, MODE, PANES, GLOBAL, HELP],
+        Composer => &[EDITOR, MODE, MODELS, PANES, GLOBAL],
+        Completion => &[COMPLETION, EDITOR, MODE, MODELS, &PANES[..1], GLOBAL],
+        Transcript => &[NORMAL, TRANSCRIPT, PAGES, MODE, MODELS, PANES, GLOBAL, HELP],
         BlockNav => &[
             SELECTION,
             TRANSCRIPT,
             PHYSICAL_PAGES,
             USER_JUMPS,
+            MODELS,
             PANES,
             GLOBAL,
             HELP,
@@ -524,6 +535,62 @@ impl Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_picker_shortcut_is_noncapturing_press_only_and_keeps_ctrl_m() {
+        for context in [
+            KeyContext::Composer,
+            KeyContext::Completion,
+            KeyContext::Transcript,
+            KeyContext::BlockNav,
+        ] {
+            let mut map = ChordState::default();
+            let key = KeyEvent::new(Char('m'), KeyModifiers::ALT);
+            assert_eq!(map.resolve(context, key), Some(Action::ModelPicker));
+            for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                assert_eq!(map.resolve(context, KeyEvent { kind, ..key }), None);
+            }
+        }
+        for context in [
+            KeyContext::TextEntry,
+            KeyContext::Help,
+            KeyContext::Question,
+            KeyContext::PlanDecision,
+            KeyContext::ModelList,
+        ] {
+            assert_eq!(
+                ChordState::default().resolve(context, KeyEvent::new(Char('m'), KeyModifiers::ALT)),
+                None
+            );
+        }
+        assert_eq!(
+            ChordState::default().resolve(
+                KeyContext::Composer,
+                KeyEvent::new(Char('m'), KeyModifiers::CONTROL)
+            ),
+            None
+        );
+        assert_eq!(
+            ChordState::default().resolve(
+                KeyContext::Composer,
+                KeyEvent::new(Enter, KeyModifiers::NONE)
+            ),
+            Some(Action::Newline)
+        );
+        assert_eq!(
+            ChordState::default().resolve(
+                KeyContext::Composer,
+                KeyEvent::new(Enter, KeyModifiers::CONTROL)
+            ),
+            Some(Action::Submit)
+        );
+        assert_eq!(
+            ChordState::default().resolve(
+                KeyContext::Composer,
+                KeyEvent::new(BackTab, KeyModifiers::NONE)
+            ),
+            Some(Action::ToggleMode)
+        );
+    }
     #[test]
     fn chords_are_context_scoped_and_intervening_keys_consume_them() {
         let mut map = ChordState::default();

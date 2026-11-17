@@ -22,7 +22,14 @@ gpui_kit::actions!(
         JumpToBeginning,
         JumpToLatest,
         ConfirmDecision,
-        ToggleMode
+        ToggleMode,
+        OpenModels,
+        ModelPrevious,
+        ModelNext,
+        ModelAccept,
+        ModelBack,
+        ModelFocusNext,
+        ModelFocusPrevious
     ]
 );
 pub fn install(cx: &mut App) {
@@ -65,6 +72,21 @@ pub fn install(cx: &mut App) {
         ),
         KeyBinding::new("cmd-enter", ConfirmDecision, Some("ZevriaDesktop")),
         KeyBinding::new("shift-cmd-m", ToggleMode, Some("ZevriaDesktop")),
+        KeyBinding::new("ctrl-cmd-m", OpenModels, Some("ZevriaDesktop")),
+        KeyBinding::new("ctrl-cmd-m", OpenModels, Some("ZevriaDesktop > Input")),
+        KeyBinding::new("alt-left", ModelBack, Some("ZevriaModels")),
+        KeyBinding::new("up", ModelPrevious, Some("ZevriaModels > Input")),
+        KeyBinding::new("down", ModelNext, Some("ZevriaModels > Input")),
+        KeyBinding::new("enter", ModelAccept, Some("ZevriaModels > Input")),
+        KeyBinding::new("escape", Cancel, Some("ZevriaModels > Input")),
+        KeyBinding::new("tab", ModelFocusNext, Some("ZevriaModels")),
+        KeyBinding::new("shift-tab", ModelFocusPrevious, Some("ZevriaModels")),
+        KeyBinding::new("tab", ModelFocusNext, Some("ZevriaModels > Input")),
+        KeyBinding::new(
+            "shift-tab",
+            ModelFocusPrevious,
+            Some("ZevriaModels > Input"),
+        ),
         KeyBinding::new("escape", Cancel, Some("ZevriaDesktop")),
         KeyBinding::new("tab", Complete, Some("ZevriaCompletion > Input")),
         KeyBinding::new("up", CompletionUp, Some("ZevriaCompletion > Input")),
@@ -82,6 +104,7 @@ pub fn menus(final_outputs: bool) -> Vec<Menu> {
         ]),
         Menu::new("Session").items([
             MenuItem::action("Switch next-turn mode", ToggleMode),
+            MenuItem::action("Change model and thinking effort…", OpenModels),
             MenuItem::action("Confirm decision", ConfirmDecision),
             MenuItem::action("Stop", Stop),
         ]),

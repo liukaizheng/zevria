@@ -28,6 +28,7 @@ pub enum Action {
     Select,
     Insert,
     ToggleMode,
+    ModelPicker,
     Undo,
     Redo,
     Paste,

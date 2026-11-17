@@ -772,7 +772,11 @@ impl SessionViews {
     }
 
     pub(crate) fn open_model_picker(&mut self, scope: ModelSelectionScope) {
+        if self.overlays.models.is_open() {
+            return;
+        }
         if self.visible.is_none()
+            && !self.overlays.snapshot(self.root.surface()).owner.captures
             && let Some(mode) = self.root.begin_model_management()
         {
             self.overlays.show_models(mode, scope);
@@ -820,24 +824,11 @@ impl SessionViews {
         }
         if let SessionEvent::ModelsResult { request_id, result } = &event {
             if self.overlays.models.accept(request_id, result) {
-                if let zevria_model::models::ModelManagementResult::Changed {
-                    role,
-                    context,
-                    snapshot,
-                    reasoning_level,
-                    unchanged,
-                    ..
-                } = result
-                {
-                    self.root.install_reasoning(*role, *reasoning_level);
-                    if !unchanged
-                        && (self.model_profiles.get(*role) != Some(&context.profile)
-                            || snapshot.is_some())
-                    {
-                        self.root.install_model(*role, context, snapshot.clone());
-                        self.model_profiles = self.root.shared_model_profiles();
-                    }
+                self.root.install_validated_model_result(result);
+                if let Some(notice) = self.overlays.models.take_settlement_notice() {
+                    self.root.push_error(notice);
                 }
+                self.model_profiles = self.root.shared_model_profiles();
                 if !self.overlays.models.is_open() {
                     self.root.finish_model_management();
                 }
@@ -1282,6 +1273,10 @@ impl SessionViews {
                     let eligibility = self.visible_app().hint_eligibility();
                     self.visible_app_mut().close_composer_edit_group();
                     self.overlays.show_help(owner.context(), &eligibility);
+                    return None;
+                }
+                Some(Action::ModelPicker) => {
+                    self.open_model_picker(ModelSelectionScope::SessionOnly);
                     return None;
                 }
                 Some(Action::ReturnRoot) => {

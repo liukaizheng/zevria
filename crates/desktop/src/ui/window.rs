@@ -41,6 +41,7 @@ pub struct DesktopWindow {
     pub(super) plan_width: f32,
     pub(super) plan_overlay: bool,
     pub(super) question_focus: FocusHandle,
+    pub(super) model_ui: Option<super::models::ModelPickerView>,
     pub(super) window_focus: FocusHandle,
     picker: Option<Task<()>>,
     was_live: bool,
@@ -135,6 +136,7 @@ impl DesktopWindow {
             plan_width: 400.,
             plan_overlay: false,
             question_focus: cx.focus_handle(),
+            model_ui: None,
             window_focus: cx.focus_handle(),
             picker: None,
             was_live: false,
@@ -231,9 +233,15 @@ impl DesktopWindow {
             self.screen_error = None;
         }
         self.sync_question(question, window, cx);
+        self.sync_model_picker(window, cx);
     }
     pub(super) fn request_replace(&mut self, replacement: Replacement, cx: &mut Context<Self>) {
+        if self.controller.read(cx).model.models.is_open() {
+            return;
+        }
         if self.controller.read(cx).model.root.is_busy() {
+            self.controller
+                .update(cx, |this, _| this.capturing_dialog = true);
             self.pending_replace = Some(replacement);
             cx.notify();
         } else {
@@ -241,6 +249,11 @@ impl DesktopWindow {
         }
     }
     pub(super) fn perform_replace(&mut self, replacement: Replacement, cx: &mut Context<Self>) {
+        if self.controller.read(cx).model.models.is_open() {
+            return;
+        }
+        self.controller
+            .update(cx, |this, _| this.capturing_dialog = false);
         match replacement {
             Replacement::New => self.controller.update(cx, |this, cx| this.new_session(cx)),
             Replacement::Resume(path) => self.controller.update(cx, |this, cx| {
@@ -268,42 +281,64 @@ impl DesktopWindow {
         }
     }
     pub(super) fn open_workspace(&mut self, cx: &mut Context<Self>) {
+        if self.controller.read(cx).model.models.is_open()
+            || self.controller.read(cx).capturing_dialog
+        {
+            return;
+        }
+        self.controller
+            .update(cx, |this, _| this.capturing_dialog = true);
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
             prompt: Some("Open workspace".into()),
         });
-        self.picker = Some(cx.spawn(async move |owner, cx| match prompt.await {
-            Ok(Ok(Some(paths))) => {
-                if let Some(path) = paths.into_iter().next() {
-                    let _ = owner.update(cx, |this, cx| {
-                        this.request_replace(Replacement::Workspace(path), cx)
-                    });
+        self.picker = Some(cx.spawn(async move |owner, cx| {
+            let result = prompt.await;
+            let _ = owner.update(cx, |this, cx| {
+                this.controller.update(cx, |this, cx| {
+                    this.capturing_dialog = false;
+                    cx.notify();
+                })
+            });
+            match result {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        let _ = owner.update(cx, |this, cx| {
+                            this.request_replace(Replacement::Workspace(path), cx)
+                        });
+                    }
                 }
-            }
-            Ok(Ok(None)) => {}
-            error => {
-                let error = match error {
-                    Ok(Err(error)) => format!("{error:#}"),
-                    Err(error) => error.to_string(),
-                    Ok(Ok(_)) => return,
-                };
-                let _ = owner.update(cx, |this, cx| {
-                    this.controller.update(cx, |controller, cx| {
-                        controller
-                            .model
-                            .root
-                            .conversation
-                            .push_error(format!("Couldn't open the folder picker: {error}"));
-                        cx.notify();
-                    });
-                });
+                Ok(Ok(None)) => {}
+                error => {
+                    let error = match error {
+                        Ok(Err(error)) => format!("{error:#}"),
+                        Err(error) => error.to_string(),
+                        Ok(Ok(_)) => return,
+                    };
+                    let _ =
+                        owner.update(cx, |this, cx| {
+                            this.controller.update(cx, |controller, cx| {
+                                controller.model.root.conversation.push_error(format!(
+                                    "Couldn't open the folder picker: {error}"
+                                ));
+                                cx.notify();
+                            });
+                        });
+                }
             }
         }));
     }
     pub(super) fn cancel(&mut self, cx: &mut Context<Self>) {
+        if self.controller.read(cx).model.models.is_open() {
+            self.controller
+                .update(cx, |this, cx| this.cancel_model_selection(cx));
+            return;
+        }
         if self.pending_replace.take().is_some() {
+            self.controller
+                .update(cx, |this, _| this.capturing_dialog = false);
             cx.notify();
             return;
         }
@@ -336,12 +371,18 @@ impl DesktopWindow {
 }
 impl DesktopWindow {
     fn disclose(&mut self, expanded: bool, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.controller.read(cx).model.models.is_open() {
+            return;
+        }
         let from_composer = self.composer.focus_handle(cx).contains_focused(window, cx);
         self.transcript.update(cx, |view, cx| {
             view.disclose(expanded, all, from_composer, window, cx)
         });
     }
     fn set_final_outputs(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.controller.read(cx).model.models.is_open() {
+            return;
+        }
         let retired_focus = self
             .transcript
             .update(cx, |view, cx| view.set_final_outputs(on, window, cx));
@@ -352,7 +393,7 @@ impl DesktopWindow {
         cx.notify();
     }
     fn confirm_decision(&mut self, cx: &mut Context<Self>) {
-        if self.pending_replace.is_some() {
+        if self.pending_replace.is_some() || self.controller.read(cx).model.models.is_open() {
             return;
         }
         if self.controller.read(cx).model.question.is_some() {
@@ -594,26 +635,39 @@ impl Render for DesktopWindow {
                 }),
             )
             .on_action(cx.listener(|this, _: &actions::PreviousTurn, _, cx| {
+                if this.controller.read(cx).model.models.is_open() {
+                    return;
+                }
                 this.transcript.update(cx, |view, cx| {
                     view.jump_turn(crate::turns::TurnDirection::Previous, cx);
                 });
             }))
             .on_action(cx.listener(|this, _: &actions::NextTurn, _, cx| {
+                if this.controller.read(cx).model.models.is_open() {
+                    return;
+                }
                 this.transcript.update(cx, |view, cx| {
                     view.jump_turn(crate::turns::TurnDirection::Next, cx);
                 });
             }))
             .on_action(cx.listener(|this, _: &actions::JumpToBeginning, _, cx| {
+                if this.controller.read(cx).model.models.is_open() {
+                    return;
+                }
                 this.transcript
                     .update(cx, |view, cx| view.jump_to_beginning(cx));
             }))
             .on_action(cx.listener(|this, _: &actions::JumpToLatest, _, cx| {
+                if this.controller.read(cx).model.models.is_open() {
+                    return;
+                }
                 this.transcript
                     .update(cx, |view, cx| view.jump_to_latest(cx))
             }))
             .on_action(
                 cx.listener(|this, _: &actions::ConfirmDecision, _, cx| this.confirm_decision(cx)),
             )
+            .on_action(cx.listener(|this, _: &actions::OpenModels, _, cx| this.open_models(cx)))
             .on_action(cx.listener(|this, _: &actions::ToggleMode, _, cx| {
                 let mode = if this.controller.read(cx).model.root.next_mode()
                     == zevria_foundation::SessionMode::Build
@@ -667,6 +721,9 @@ impl Render for DesktopWindow {
         }
         if self.pending_replace.is_some() {
             root = root.child(self.confirm_replace(cx));
+        }
+        if let Some(models) = self.model_picker(window, cx) {
+            root = root.child(models);
         }
         root
     }

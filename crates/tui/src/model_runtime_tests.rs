@@ -12,6 +12,91 @@ use zevria_model::models::ModelManagementResult as Result;
 use zevria_model::models::{ModelCandidate, ModelSelection};
 
 #[test]
+fn alt_m_opens_session_only_from_noncapturing_surfaces_without_consuming_drafts() {
+    use crate::app::FocusState;
+    use ratatui::crossterm::event::{KeyEvent, KeyEventKind};
+    for (insert, completion, selection) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        let mut root = App::new();
+        root.restore(vec![
+            TranscriptItem::Message(rig_core::message::Message::user("saved prompt")),
+            TranscriptItem::Message(rig_core::message::Message::assistant("saved answer")),
+        ]);
+        root.set_focus_for_test(if insert {
+            FocusState::Insert
+        } else {
+            FocusState::Normal
+        });
+        let text = if completion {
+            "/mod"
+        } else {
+            "é draft\nsecond line"
+        };
+        root.set_input_for_test(text, if completion { text.len() } else { 2 });
+        let mut views = SessionViews::new(root, PathBuf::from("."));
+        if selection {
+            views.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('v'),
+                KeyModifiers::NONE,
+            )));
+        }
+        let draft = views.root.draft_for_test();
+        let history = format!("{:?}", views.root.history());
+        let surface = views.root.surface();
+        let shortcut = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT);
+        assert!(views.handle_event(Event::Key(shortcut)).is_none());
+        let Some(SessionCommand::Manage(zevria_session_api::ManagementCommand::Models {
+            request_id,
+            request:
+                Request::List {
+                    mode: SessionMode::Build,
+                    scope: ModelSelectionScope::SessionOnly,
+                },
+        })) = views.overlays.models.commands.pop_front()
+        else {
+            panic!("shortcut must list the captured role, session only");
+        };
+        for kind in [
+            KeyEventKind::Press,
+            KeyEventKind::Repeat,
+            KeyEventKind::Release,
+        ] {
+            views.handle_event(Event::Key(KeyEvent { kind, ..shortcut }));
+        }
+        assert!(views.overlays.models.commands.is_empty());
+        assert_eq!(views.root.draft_for_test(), draft);
+        assert_eq!(format!("{:?}", views.root.history()), history);
+        views.overlays.models.cancel();
+        views.apply(SessionEvent::ModelsResult {
+            request_id,
+            result: Result::Cancelled,
+        });
+        assert_eq!(views.root.draft_for_test(), draft);
+        assert_eq!(views.root.surface().id, surface.id);
+        assert!(!views.root.is_busy());
+    }
+}
+
+#[test]
+fn help_retains_shortcut_ownership_and_does_not_open_a_model_lifecycle() {
+    let mut views = SessionViews::new(App::new(), PathBuf::from("."));
+    let owner = views.root.surface();
+    views
+        .overlays
+        .show_help(owner.context(), &views.root.hint_eligibility());
+    views.handle_event(Event::Key(ratatui::crossterm::event::KeyEvent::new(
+        KeyCode::Char('m'),
+        KeyModifiers::ALT,
+    )));
+    assert!(!views.overlays.models.is_open());
+    assert!(!views.root.is_busy());
+}
+
+#[test]
 fn completion_enter_opens_model_selection_with_the_existing_management_scope() {
     for (prefix, command, scope) in [
         (

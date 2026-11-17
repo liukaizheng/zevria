@@ -264,7 +264,17 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
 }
 
 #[tokio::test]
-async fn engine_tool_loop_persists_signed_thinking_and_reload_reproduces_request() {
+async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopened_request() {
+    struct SessionOnlySettings;
+    impl zevria_model::models::ModelSettingsService for SessionOnlySettings {
+        fn validate(&self, revision: &str) -> anyhow::Result<()> {
+            anyhow::ensure!(revision.is_empty(), "stale revision");
+            Ok(())
+        }
+        fn save(&self, _: &str, _: ModelRole, _: &ModelSelection) -> anyhow::Result<String> {
+            panic!("session-only effort must not save config")
+        }
+    }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut profile = profile(format!("http://{address}/v1/messages"));
@@ -352,6 +362,7 @@ async fn engine_tool_loop_persists_signed_thinking_and_reload_reproduces_request
         )
         .unwrap(),
     );
+    engine = engine.with_model_management(Arc::new(SessionOnlySettings), String::new());
     let (events, mut receiver) = session_event_channel(256);
     engine
         .handle_command(
@@ -377,6 +388,37 @@ async fn engine_tool_loop_persists_signed_thinking_and_reload_reproduces_request
     }
     assert!(saw_tool, "{updates:#?}");
     assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let records = engine.conversation().items()[1..].to_vec();
+    let identity = engine.conversation().input_identity().cloned();
+    engine
+        .handle_command(
+            SessionCommand::Manage(zevria_session_api::ManagementCommand::Models {
+                request_id: "anthropic-effort".into(),
+                request: zevria_model::models::ModelManagementRequest::Select {
+                    mode: SessionMode::Build,
+                    scope: zevria_model::models::ModelSelectionScope::SessionOnly,
+                    target: ModelSelection::new(
+                        profile.profile.clone(),
+                        zevria_foundation::ReasoningLevel::Medium,
+                    ),
+                    revision: String::new(),
+                },
+            }),
+            &events,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionUpdate::Lifecycle(SessionEvent::ModelsResult {
+            result: zevria_model::models::ModelManagementResult::Changed { snapshot: None, .. },
+            ..
+        })
+    ));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(&engine.conversation().items()[1..], records);
+    assert_eq!(engine.conversation().input_identity(), identity.as_ref());
+    assert_eq!(engine.provider().initialized_profile_count(), 1);
     drop(engine);
     let instructions = received.await.unwrap();
     let (listener, mut captured) = server.await.unwrap();
@@ -397,7 +439,18 @@ async fn engine_tool_loop_persists_signed_thinking_and_reload_reproduces_request
             .count(),
         2
     );
-    let expected = captured[1].body.clone();
+    assert_eq!(&loaded[1..], records);
+    assert_eq!(
+        zevria_transcript::transcript::load_report(&path)
+            .unwrap()
+            .session_models()
+            .unwrap()
+            .unwrap()
+            .reasoning_for_mode(SessionMode::Build),
+        zevria_foundation::ReasoningLevel::Medium
+    );
+    let mut expected = captured[1].body.clone();
+    expected["output_config"]["effort"] = json!("medium");
     let resume_server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let request = receive_http_json(&mut stream).await;
@@ -408,7 +461,7 @@ async fn engine_tool_loop_persists_signed_thinking_and_reload_reproduces_request
         [(
             ModelRole::Build,
             profile,
-            zevria_foundation::ReasoningLevel::High,
+            zevria_foundation::ReasoningLevel::Medium,
         )],
         "stable",
         "root",

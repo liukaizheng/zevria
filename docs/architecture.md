@@ -535,7 +535,21 @@ order and input precedence; captured input cannot fall through to a pane. A ques
 above a picker owns input while the picker retains its selection. Model management
 has explicit loading, model/reasoning selection, conversion preview, pending-change,
 cancelling, error and settled phases, with request/mode/scope/revision validation.
-Cancellation retains the submitted target until settlement.
+Cancellation retains the submitted target until settlement. The lifecycle is
+`zevria-presentation::models::ModelPicker`, shared with desktop `WorkspaceModel`:
+unique request identity, captured mode/scope, catalog revision/capabilities, current
+and pending target, engine-issued conversion preview, errors and settlement live
+there. Search editing, `ListNav`, Ratatui geometry and GPUI focus/rendering stay
+frontend-local. Late catalog/preview results never reopen a cancelling picker;
+a correlated committed success still wins a cancellation race. Disconnect/new
+session retires identity. Raw `ModelsResult` reduction cannot install metadata;
+only correlated success reaches `SessionModel::install_validated_model_result`,
+which updates effort in place and replaces profile/context telemetry only for a
+changed profile or supplied replacement snapshot. Management has no conversation
+tail/waiting row, including desktop's renderer-specific live tip. If cancellation
+races a partially durable rejection, the lifecycle retains its correlated error
+as a settlement notice; the frontend must report the saved checkpoint/global
+default even though the picker closes.
 
 `runtime` owns the terminal loop, channels, clocks and clipboard execution rather
 than pane collections. The surface policy scopes pane navigation and cursor
@@ -1706,12 +1720,19 @@ cleanup; resolve the error before retrying offline.
 ## Runtime model selection
 
 Bare `/model` and `/model-session` open the same configured-profile picker in the
-idle, writable interactive root composer. It captures the current Build or Plan
-mode and persistence scope; request-local orchestration uses the existing Build role. The picker supports filtering and bounded scrolling, and accepts
+idle, writable interactive root in both frontends. Terminal `Alt+M`, desktop
+`Ctrl+Cmd+M`, the desktop Session-menu item and the compact-visible status control
+open it with session-only scope, without submitting a slash command or touching
+the draft. Capturing-owner routing precedes the terminal shortcut. Desktop has a
+dedicated management slash route: accepted opens consume just the command text,
+rejected opens retain it, and neither acquires submitted-turn bookkeeping.
+The picker captures the current Build or Plan mode and persistence scope;
+request-local orchestration uses the existing Build role. It supports filtering
+and bounded scrolling, and accepts
 two stages: Enter chooses a profile locally, then a supported reasoning level must
 be explicitly confirmed. The current level is highlighted when supported, otherwise
-the first listed level is highlighted. Left/Backspace returns to the profile stage;
-Esc cancels. No selection is saved or applied by the first stage. Both commands are argument-free; a leading
+the first listed level is highlighted. TUI Left/Backspace or desktop Alt-Left
+returns to the profile stage when not pending or confirming conversion; Esc cancels. No selection is saved or applied by the first stage. Both commands are argument-free; a leading
 space sends literal text instead. Recall and inspect-only panes cannot change
 models. Turns, ensembles, maintenance, and pending Plan approval reject model
 mutations rather than queueing them. Turn commands received during counting or
@@ -1724,7 +1745,7 @@ captured at maintenance start; skill mutations remain idle-only.
 | `/model-session` | Save the captured role's complete model/reasoning selection | Neither file is written |
 | `/model` | Save the captured role's complete model/reasoning selection | Save that mode's provider, model, and reasoning level in `config.toml` |
 
-The local picker is labeled **session only — kept on /new, fresh handoff and resume; config unchanged**;
+The local picker explicitly explains **this session only; kept on /new, fresh handoff and resume; config unchanged**;
 `/model` is explicitly labeled as changing the global default too. In Build,
 `/model-session` updates the session's saved Build selection and `/model` also
 updates `modes.build.provider/model/reasoning_level`. Orchestrated requests use
@@ -1732,13 +1753,13 @@ that same selection; there is no `modes.orchestrate` assignment or extra picker.
 The other mutable role's selection, Review, Explore, Builder, external workers,
 tool permissions, and other running sessions are unchanged. Independent fresh roots,
 including separate CLI/ACP launches and native workers, use current globals from the
-startup-captured configuration path. TUI replacement roots (`/new`, `/implement-fresh`,
+startup-captured configuration path. TUI and desktop replacement roots (`/new`, `/implement-fresh`,
 and the fresh-approval dialog action) instead inherit **both current selections**:
 provider, model, and reasoning level for Build and Plan independently. This includes
 choices originally resolved from configuration, not just `/model-session` overrides.
 Configuration-default changes do not retarget either inherited mode; fresh Plan
 implementation uses the saved Build selection, never the Plan model.
-CLI `--continue`, TUI `/resume`, and ACP load/resume restore the **last successfully
+CLI `--continue`, frontend `/resume`, and ACP load/resume restore the **last successfully
 selected Build and Plan identities and reasoning levels** from the version-1 header, including
 changes acknowledged immediately before closing, with no later assistant response,
 **once a conversation has been saved**. Model/mode-only new sessions remain unsaved;
@@ -1755,17 +1776,25 @@ roots without a mode record qualify as abandoned.
 Global configuration revisions remain separate from effective session routing:
 `/model-session` does not advance the config revision. A compatible already-active
 local selection is a no-op, with no transcript rewrite or route/continuation reset.
-It still undergoes preflight and can require conversion. `/model` can promote an
-already-active session-local choice to the global default. The frontend waits for
-a request-, mode-, and scope-correlated authoritative success before changing its
-profile/limits or clearing old response/context telemetry. Management is not a
+For the exact same profile and unchanged `ModelContextPolicy`, validation is
+classified before conversion preparation: no history preflight, remote count,
+preview, summary, checkpoint or history-replacement reset runs, even for an
+over-limit history or a shared foreign opaque checkpoint. Ordinary next-turn
+admission still enforces capacity and replay compatibility. A different exact
+profile/alias or context policy retains preflight and explicit conversion when
+needed. `/model` can promote an already-active session-local choice to the global default. The frontend waits for
+a request-, mode-, scope-, role- and target-correlated authoritative success before
+installing metadata. Effort-only results carry `snapshot: None` and retain all
+existing response/context telemetry; profile/context replacements install their
+new snapshot. Management is not a
 prompt, assistant response, or synthetic turn.
 
-The TUI snapshots complete selections from committed root profiles and reasoning
+Both frontends snapshot complete selections from committed root profiles and reasoning
 state installed by restoration and correlated successful management results, not
 usage telemetry, picker drafts, the active mode, or a stale startup snapshot.
-`UiOutcome::New` and `UiOutcome::Fresh` carry that pair separately from the unchanged
-`PlanHandoff`, including handoffs received while draining an event burst. After
+TUI `UiOutcome::New` and `UiOutcome::Fresh` carry that pair separately from the unchanged
+`PlanHandoff`, including handoffs received while draining an event burst. Desktop
+`SessionController` snapshots the same committed pair for new/fresh replacement. After
 normal outgoing shutdown, `SessionStart::New` or `SessionStart::FromPlan` receives
 explicit inherited selections. Resume has no inherited override. Fresh startup
 reloads catalogs, capabilities, limits, and other-role defaults, validates the
@@ -1864,8 +1893,13 @@ role's level, validated against the source profile. If an opaque source cannot
 support that level, select the source with a supported level before conversion.
 No model-wide fallback is invented.
 
-A compatible same-profile reasoning change follows the unified persistence
-transaction, then updates the route in place. It does not reset/reconnect a socket,
+A same-profile, unchanged-context reasoning change follows the unified persistence
+transaction, then updates only the selected role's route in place. Capability,
+replay/read-only/Plan/persistence admission, revision and cancellation checks
+remain; global save precedes header commit, which precedes live route installation.
+Every non-header transcript record, native replay payload and model-input identity
+survives header replacement/reopen. Reasoning-dependent request plans are invalidated,
+not history, telemetry or projection epochs. It does not reset/reconnect a socket,
 rewrite instructions, tools, or input, or change the prompt-cache key. Reasoning
 never belongs in instructions or cache identity. Request-property comparison
 invalidates only continuation: one full-input resend keeps the identical prefix,

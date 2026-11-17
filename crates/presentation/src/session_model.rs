@@ -869,6 +869,45 @@ impl SessionModel {
     pub fn install_reasoning(&mut self, role: ModelRole, level: ReasoningLevel) {
         self.session.install_reasoning(role, level);
     }
+    /// Called only after the picker has validated request/mode/scope/target
+    /// correlation. Raw ModelsResult events deliberately do nothing in reduce.
+    /// Effort-only acknowledgements retain conversation identity and telemetry.
+    pub fn install_validated_model_result(
+        &mut self,
+        result: &zevria_model::models::ModelManagementResult,
+    ) {
+        use zevria_model::models::ModelManagementResult;
+        if !self.scope.is_root() {
+            return;
+        }
+        if let ModelManagementResult::Changed {
+            role,
+            context,
+            reasoning_level,
+            snapshot,
+            ..
+        } = result
+        {
+            self.install_reasoning(*role, *reasoning_level);
+            if self.model_profiles.get(*role) != Some(&context.profile) || snapshot.is_some() {
+                self.install_model(*role, context, snapshot.clone());
+            }
+        }
+    }
+    pub fn begin_model_management(&mut self) -> Option<SessionMode> {
+        if !self.scope.is_root()
+            || self.is_busy()
+            || self.session.persistence_error().is_some()
+            || matches!(self.workflow.snapshot(), PlanWorkflowState::Ready { .. })
+            || self.workflow.dialog().is_some()
+        {
+            return None;
+        }
+        let mode = self.next_mode();
+        self.session
+            .begin_operation(OperationKind::ModelManagement, mode, role_for_mode(mode))
+            .then_some(mode)
+    }
     pub fn session_models(&self) -> anyhow::Result<zevria_model::models::SessionModels> {
         use zevria_model::models::{ModelSelection, SessionModels, mode_role};
         anyhow::ensure!(
@@ -906,7 +945,10 @@ impl<'a> ConversationTail<'a> {
             SessionActivity::Idle => ConversationTail::None,
             SessionActivity::Pending(pending)
                 if pending.kind.is_plan_decision()
-                    || pending.kind == OperationKind::ModeManagement =>
+                    || matches!(
+                        pending.kind,
+                        OperationKind::ModeManagement | OperationKind::ModelManagement
+                    ) =>
             {
                 ConversationTail::None
             }

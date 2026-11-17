@@ -126,6 +126,109 @@ fn complete_reasoning_selections_roundtrip_without_model_input() {
 }
 
 #[test]
+fn effort_header_replacement_preserves_native_records_projection_and_reopen_identity() {
+    use zevria_foundation::ReasoningLevel as Level;
+    use zevria_model::ProviderReplay;
+    for mode in SessionMode::ALL {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conversation = Conversation::new(TranscriptWriter::create(dir.path()).unwrap());
+        conversation.replace_session_models(selections()).unwrap();
+        conversation
+            .push_required(TranscriptItem::Message(Message::user("original prompt")))
+            .unwrap();
+        conversation.push_required(TranscriptItem::Compaction(CompactionCheckpoint::new(
+            CompactionTrigger::Manual, CompactionBackend::OpenaiResponsesCompact,
+            vec![OwnedModelRequestItem::replay_only(ProviderReplay::openai_responses(selections().for_mode(mode).profile.clone(), vec![json!({"type":"compaction","encrypted_content":"opaque-checkpoint"})])).unwrap()],
+            vec!["original prompt".into()],
+        ).unwrap())).unwrap();
+        for replay in [
+            ProviderReplay::openai_responses(
+                selections().for_mode(SessionMode::Build).profile.clone(),
+                vec![
+                    json!({"type":"reasoning","id":"reason","summary":[{"type":"summary_text","text":"visible reasoning"}],"encrypted_content":"cipher","signature":"responses-signature","future":true}),
+                    json!({"type":"function_call","status":"completed","id":"item","call_id":"call","name":"command","arguments":"{ \"command\": \"pwd\" }"}),
+                ],
+            ),
+            ProviderReplay::anthropic_messages(
+                selections().for_mode(SessionMode::Plan).profile.clone(),
+                vec![
+                    json!({"type":"thinking","thinking":"signed thinking","signature":" exact signature\n"}),
+                    json!({"type":"redacted_thinking","data":"opaque-redacted"}),
+                    json!({"type":"tool_use","id":"toolu_1","name":"command","input":{"command":"pwd"}}),
+                ],
+                None,
+            ),
+        ] {
+            let Message::Assistant(message) = replay.to_message().unwrap() else {
+                unreachable!()
+            };
+            let call = message
+                .content
+                .into_iter()
+                .find_map(|part| match part {
+                    rig_core::message::AssistantContent::ToolCall(call) => Some(call),
+                    _ => None,
+                })
+                .unwrap();
+            conversation
+                .push_required(TranscriptItem::provider_message(replay).unwrap())
+                .unwrap();
+            conversation
+                .push_required(TranscriptItem::Message(Message::User {
+                    content: vec![rig_core::message::UserContent::ToolResult(
+                        rig_core::message::ToolResult {
+                            call: call.id,
+                            name: call.function.name,
+                            is_error: false,
+                            content: vec![rig_core::message::ToolResultContent::text(
+                                "retained output",
+                            )],
+                        },
+                    )],
+                }))
+                .unwrap();
+        }
+        let records = conversation.items()[1..].to_vec();
+        let input = conversation
+            .model_input()
+            .iter()
+            .map(|i| i.to_owned_item().unwrap())
+            .collect::<Vec<_>>();
+        let identity = conversation.input_identity().cloned();
+        conversation
+            .replace_session_models(selections().with_reasoning(mode, Level::High))
+            .unwrap();
+        assert_eq!(&conversation.items()[1..], records);
+        assert_eq!(conversation.input_identity(), identity.as_ref());
+        assert_eq!(
+            conversation
+                .model_input()
+                .iter()
+                .map(|i| i.to_owned_item().unwrap())
+                .collect::<Vec<_>>(),
+            input
+        );
+        let loaded = load_report(conversation.path()).unwrap();
+        let writer = TranscriptWriter::append_loaded(&loaded).unwrap();
+        let restored = Conversation::from_loaded(writer, loaded).unwrap();
+        assert_eq!(&restored.items()[1..], records);
+        assert_eq!(restored.input_identity(), identity.as_ref());
+        assert_eq!(
+            restored
+                .model_input()
+                .iter()
+                .map(|i| i.to_owned_item().unwrap())
+                .collect::<Vec<_>>(),
+            input
+        );
+        assert_eq!(
+            restored.session_models().unwrap().reasoning_for_mode(mode),
+            Level::High
+        );
+    }
+}
+
+#[test]
 fn invalid_selection_metadata_is_never_legacy_or_tail_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid.jsonl");

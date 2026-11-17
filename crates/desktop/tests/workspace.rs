@@ -206,7 +206,7 @@ fn shared_grammar_routes_supported_commands_and_retains_unsupported_drafts() {
     workspace.disconnected();
     assert!(matches!(
         workspace.route_input("/model", false),
-        InputRoute::Notice(_)
+        InputRoute::Models(zevria_model::models::ModelSelectionScope::SessionAndDefault)
     ));
     assert!(matches!(
         workspace.route_input("/new", false),

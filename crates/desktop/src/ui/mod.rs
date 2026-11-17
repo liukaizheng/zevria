@@ -2,6 +2,7 @@ pub mod assets;
 pub mod blocks;
 pub mod composer;
 pub mod math;
+pub mod models;
 pub mod plan;
 pub mod question;
 pub use crate::rows;
