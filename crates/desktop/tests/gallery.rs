@@ -53,7 +53,7 @@ mod native {
         ThinkingInterrupted,
         ThinkingUnsaved,
         CodeHeavy,
-        FinalOutputs,
+        TranscriptFolds,
         Plan,
         Question,
         Confirm,
@@ -79,7 +79,7 @@ mod native {
                 Self::ThinkingInterrupted => "thinking-interrupted",
                 Self::ThinkingUnsaved => "thinking-unsaved",
                 Self::CodeHeavy => "code-heavy-answer",
-                Self::FinalOutputs => "final-outputs",
+                Self::TranscriptFolds => "transcript-folds",
                 Self::Plan => "plan-review",
                 Self::Question => "question",
                 Self::Confirm => "replace-confirmation",
@@ -142,7 +142,7 @@ mod native {
                 Scene::ThinkingInterrupted,
                 Scene::ThinkingUnsaved,
                 Scene::CodeHeavy,
-                Scene::FinalOutputs,
+                Scene::TranscriptFolds,
                 Scene::Plan,
                 Scene::Question,
                 Scene::Confirm,
@@ -153,7 +153,7 @@ mod native {
                 capture(
                     scene,
                     width,
-                    if scene == Scene::FinalOutputs {
+                    if scene == Scene::TranscriptFolds {
                         1600.
                     } else {
                         840.
@@ -184,11 +184,11 @@ mod native {
             }
         }
         capture(
-            Scene::FinalOutputs,
+            Scene::TranscriptFolds,
             1240.,
             1600.,
             light,
-            &directory.join("final-outputs-light-1240.png"),
+            &directory.join("transcript-folds-light-1240.png"),
         )?;
         for scene in [
             Scene::Empty,
@@ -339,9 +339,9 @@ mod native {
                     cx.notify();
                 });
             }
-            if scene == Scene::FinalOutputs {
+            if scene == Scene::TranscriptFolds {
                 controller.update(cx, |c, cx| {
-                    c.model.root.conversation.restore(final_outputs_items());
+                    c.model.root.conversation.restore(fold_items());
                     cx.notify();
                 });
             }
@@ -393,33 +393,9 @@ mod native {
             cx.update(|cx| thinking_scene(scene, &controller, cx));
             settle(&mut cx, window)?;
         }
-        if scene == Scene::Working {
-            let key = controller.read_with(&cx, |c, _| {
-                let conversation = &c.model.root.conversation;
-                conversation
-                    .history()
-                    .iter()
-                    .find_map(|entry| match entry {
-                        zevria_presentation::conversation::HistoryEntry::Conversation(e) => e
-                            .blocks
-                            .iter()
-                            .find(|b| {
-                                b.native_tool()
-                                    .is_some_and(|(call, _)| call.function.name.as_str() == "edit")
-                            })
-                            .map(|b| format!("{:?}-{}", conversation.epoch(), b.id.0)),
-                        _ => None,
-                    })
-                    .expect("fixture contains edit")
-            });
+        if scene == Scene::TranscriptFolds {
             cx.update_window(window, |_, window, cx| {
-                window.within(key).click("expand", cx)
-            })?;
-            settle(&mut cx, window)?;
-        }
-        if scene == Scene::FinalOutputs {
-            cx.update_window(window, |_, window, cx| {
-                window.dispatch_action(Box::new(actions::ToggleFinalOutputs), cx);
+                window.dispatch_action(Box::new(actions::FoldEarlierContent), cx);
                 window.dispatch_action(Box::new(actions::JumpToBeginning), cx);
             })?;
             settle(&mut cx, window)?;
@@ -441,7 +417,7 @@ mod native {
         println!("{}", output.display());
         Ok(())
     }
-    fn final_outputs_items() -> Vec<zevria_transcript::transcript::TranscriptItem> {
+    fn fold_items() -> Vec<zevria_transcript::transcript::TranscriptItem> {
         use zevria_transcript::transcript::TranscriptItem as T;
         let thought = |text: &str| {
             T::Message(Message::Assistant(AssistantMessage::new(vec![
@@ -457,7 +433,7 @@ mod native {
             ])))
         };
         vec![
-            T::Message(Message::user("Fix the restored transcript preview.")),
+            T::Message(Message::user("Fix the restored transcript preview.\n\nThe session picker should show the first real prompt, even when metadata comes first.")),
             T::Message(Message::assistant("I'll reproduce the failure and trace the reader.")),
             thought("Read past the metadata to find the first prompt."),
             tool("preview-test", "command", serde_json::json!({"command":"rtk cargo test --release -p zevria-transcript"})),
@@ -476,13 +452,16 @@ mod native {
                 version: PlanVersion { id: PlanId::new(), revision: 1 }, title: "Cover restored prompt previews".into(), markdown: "## Regression coverage\n\nTest a long metadata prefix, a Unicode prompt and an empty conversation. Keep the persisted format unchanged.".into(), source_turn_id: TurnId::new(2),
             }}),
             tool("coverage-read", "command", serde_json::json!({"command":"rtk rg -n restore_roundtrip crates/transcript"})),
-            T::Message(Message::assistant("The plan keeps the tests at the restore boundary. The document stays visible in this reading mode.")),
+            T::Message(Message::assistant("The plan keeps the tests at the restore boundary. No persisted format change is needed.")),
             T::Message(Message::user("Run the workspace checks.")),
             T::Message(Message::assistant("I'll check the workspace and the prompt-prefix regression tests.")),
             thought("Check the Desktop leaf boundary too."),
             tool("workspace-check", "command", serde_json::json!({"command":"rtk cargo check --release --locked --workspace --all-targets"})),
-            T::Message(Message::assistant("The targeted restore checks passed. The workspace check was stopped before it finished.")),
-            T::Error { error: zevria_presentation::TURN_CANCELLED.into() },
+            T::Message(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(rig_core::message::Reasoning::new("Checked the log and cache boundaries.\n\nThe restored cases preserve the full prompt.")),
+                AssistantContent::Reasoning(rig_core::message::Reasoning::new("Confirmed the targeted tests pass.\n\nThe workspace check ran separately.")),
+                AssistantContent::text("The targeted restore checks passed. The workspace check was stopped before it finished.\n\nThe prompt prefix is unchanged."),
+            ]))),
         ]
     }
     fn model_scene(

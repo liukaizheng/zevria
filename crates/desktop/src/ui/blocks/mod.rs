@@ -7,7 +7,6 @@ use super::{
 use crate::{
     controller::SessionController,
     disclosure::{Phase, TailKind},
-    turns::StepCounts,
 };
 use gpui_kit::base::{AccordionTrigger, text::TextView};
 use gpui_kit::component::clipboard::Clipboard;
@@ -18,15 +17,11 @@ use gpui_kit::component::{
     text::TextViewState,
 };
 use gpui_kit::{prelude::*, *};
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    ops::Range,
-    sync::Arc,
-};
+use std::{ops::Range, sync::Arc};
 use zevria_presentation::{
     blocks::*,
     conversation::HistoryEntry,
+    fold::FoldKey,
     shell::{self, ShellToken},
     status_icon::StatusIcon,
 };
@@ -101,7 +96,7 @@ pub enum BlockKind {
         plain: bool,
     },
     Reasoning,
-    Steps(StepCounts),
+    RangeSummary,
     Tool {
         status: StatusIcon,
         name: String,
@@ -130,6 +125,15 @@ pub enum BlockKind {
     Ensemble,
     Live(LiveTail),
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MessageDisclosure {
+    pub key: FoldKey,
+    pub folded: bool,
+    pub show_speaker: bool,
+    pub blocks: usize,
+    pub speaker: Speaker,
+}
+
 #[derive(Clone)]
 pub struct BlockData {
     pub key: String,
@@ -138,7 +142,9 @@ pub struct BlockData {
     pub gutter: Gutter,
     pub body: String,
     pub plain: bool,
-    pub collapsible: bool,
+    pub row: usize,
+    pub target: Option<FoldKey>,
+    pub(super) message: Option<MessageDisclosure>,
     pub primary: String,
     pub secondary: Option<String>,
     pub subtask: Option<zevria_foundation::SubtaskId>,
@@ -167,27 +173,50 @@ impl BlockData {
             primary: body.clone(),
             body,
             plain,
-            collapsible: false,
+            row: 0,
+            target: None,
+            message: None,
             secondary: None,
             subtask: None,
             image: None,
             changes: Vec::new(),
             turn_boundary: false,
-            expanded: false,
+            expanded: true,
             phase: Phase::Finished,
             source: None,
             header: None,
         }
     }
-    pub fn steps(key: String, counts: StepCounts, gutter: Gutter, phase: Phase) -> Self {
-        let mut hash = DefaultHasher::new();
-        counts.hash(&mut hash);
-        let title = counts.title();
-        let mut data = Self::new(key, BlockKind::Steps(counts), gutter, title, true);
-        data.revision = hash.finish();
-        data.collapsible = true;
-        data.phase = phase;
+    pub fn range(epoch: &str, start: usize, end: usize, count: usize) -> Self {
+        let mut data = Self::new(
+            format!("{epoch}-range-{start}"),
+            BlockKind::RangeSummary,
+            Gutter::None,
+            String::new(),
+            true,
+        );
+        data.body = format!(
+            "{count} earlier message{}",
+            if count == 1 { "" } else { "s" }
+        );
+        data.target = Some(FoldKey::Span { start, end });
+        data.row = start;
+        data.expanded = false;
         data
+    }
+    pub fn speaker(&self) -> Speaker {
+        if let Gutter::Label(speaker) = self.gutter {
+            return speaker;
+        }
+        match self.kind {
+            BlockKind::Notice { .. }
+            | BlockKind::Prose {
+                role: PresentationRole::System,
+                ..
+            } => Speaker::System,
+            BlockKind::Document { .. } => Speaker::Plan,
+            _ => Speaker::Zevria,
+        }
     }
     fn block(epoch: &str, block: &PresentationBlock) -> Self {
         let role = block.role.unwrap_or(PresentationRole::System);
@@ -211,10 +240,8 @@ impl BlockData {
             }
             PresentationBlockKind::Reasoning { .. } => {
                 data.kind = BlockKind::Reasoning;
-                data.collapsible = true;
             }
             PresentationBlockKind::Tool(tool) => {
-                data.collapsible = true;
                 match tool {
                     PresentedTool::Native { call, state } => {
                         let status = native_header_status(call, state);
@@ -478,25 +505,31 @@ pub fn entry(
             block.turn_boundary = header.is_some() && index > 0;
             vec![block]
         }
-        HistoryEntry::Ensemble(e) => vec![BlockData::new(
-            key,
-            BlockKind::Ensemble,
-            Gutter::None,
-            format!(
-                "{}\n\n{}",
+        HistoryEntry::Ensemble(e) => {
+            let mut prompt = BlockData::new(
+                key.clone(),
+                BlockKind::Prose {
+                    role: PresentationRole::User,
+                    plain: true,
+                },
+                Gutter::Label(if child { Speaker::Task } else { Speaker::You }),
                 e.command(),
-                e.workers
-                    .iter()
-                    .map(|w| format!(
-                        "{} {}",
-                        StatusIcon::agent(w.status).glyph(0),
-                        w.descriptor.id
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-            true,
-        )],
+                true,
+            );
+            prompt.header = e.header;
+            prompt.turn_boundary = e.header.is_some() && index > 0;
+            std::iter::once(prompt)
+                .chain(e.workers.iter().enumerate().map(|(i, worker)| {
+                    BlockData::new(
+                        format!("{key}-worker-{i}"),
+                        BlockKind::Ensemble,
+                        Gutter::Glyph(StatusIcon::agent(worker.status)),
+                        worker.copy_text(),
+                        true,
+                    )
+                }))
+                .collect()
+        }
         HistoryEntry::Error(e) => {
             let mut notice = BlockData::new(
                 key,
@@ -530,19 +563,28 @@ pub fn entry(
             true,
         )],
     };
-    for block in &mut blocks {
+    for (content_index, block) in blocks.iter_mut().enumerate() {
         // Gutter changes invalidate retained blocks even when their source revision is unchanged.
         block.revision = block.revision.wrapping_add(revision);
-        if matches!(block.kind, BlockKind::Document { .. }) {
-            block.collapsible = true;
-        }
+        block.row = index;
+        block.target = match block.source {
+            Some(id) => Some(FoldKey::Block {
+                history_index: index,
+                id,
+            }),
+            None if content_index < history.selectable_upper_bound() => Some(FoldKey::Item {
+                history_index: index,
+                content_index,
+            }),
+            None => None,
+        };
     }
     blocks
 }
 impl BlockData {
     pub fn tail_kind(&self) -> Option<TailKind> {
         match self.kind {
-            BlockKind::Steps(_)
+            BlockKind::RangeSummary
             | BlockKind::Tool { .. }
             | BlockKind::Subtask { .. }
             | BlockKind::Live(_) => None,
@@ -557,7 +599,7 @@ impl BlockData {
 }
 #[derive(Clone)]
 pub struct DisclosureChanged {
-    pub key: String,
+    pub target: FoldKey,
     pub expanded: bool,
 }
 
@@ -592,6 +634,7 @@ pub struct BlockView {
     block_focus: FocusHandle,
     action_focus: [FocusHandle; 3],
     disclosure_focus: FocusHandle,
+    message_focus: FocusHandle,
     focus_subscriptions: Vec<Subscription>,
     controller: Entity<SessionController>,
 }
@@ -604,30 +647,38 @@ impl BlockView {
     pub(super) fn text_id(&self) -> EntityId {
         self.text.entity_id()
     }
-    pub(super) fn disclosure_focus(&self) -> FocusHandle {
-        self.disclosure_focus.clone()
+    pub(super) fn fold_focus(&self, key: FoldKey) -> FocusHandle {
+        if matches!(key, FoldKey::Message { .. }) {
+            self.message_focus.clone()
+        } else {
+            self.disclosure_focus.clone()
+        }
     }
-    pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
+    pub(super) fn row(&self) -> usize {
+        self.data.row
+    }
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.block_focus.contains_focused(window, cx)
-            || self.disclosure_focus.contains_focused(window, cx)
-            || self
-                .action_focus
-                .iter()
-                .any(|f| f.contains_focused(window, cx))
+            || self.message_focus.is_focused(window)
+            || self.disclosure_focus.is_focused(window)
+            || self.action_focus.iter().any(|f| f.is_focused(window))
     }
-    pub fn disclose(&mut self, expanded: bool, cx: &mut Context<Self>) {
-        if !self.data.collapsible {
-            return;
+    pub(super) fn focused_target(&self, window: &Window, cx: &App) -> Option<FoldKey> {
+        if let Some(message) = self.data.message
+            && self.message_focus.is_focused(window)
+        {
+            return Some(message.key);
         }
-        self.data.expanded = expanded;
-        cx.emit(DisclosureChanged {
-            key: self.data.key.clone(),
-            expanded,
-        });
-        if expanded {
-            self.prepare_diff(cx);
-        }
-        cx.notify();
+        self.contains_focus(window, cx)
+            .then(|| match self.data.message {
+                Some(message) if message.folded => Some(message.key),
+                _ => self.data.target,
+            })
+            .flatten()
+    }
+    #[cfg(test)]
+    pub(super) fn text_is_clamped(&self, cx: &App) -> bool {
+        self.text.read(cx).is_clamped()
     }
     pub fn new(
         data: BlockData,
@@ -663,7 +714,7 @@ impl BlockView {
                 cx.notify();
             }
         });
-        Self {
+        let mut this = Self {
             data,
             text,
             output,
@@ -678,9 +729,14 @@ impl BlockView {
             block_focus: cx.focus_handle(),
             action_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
             disclosure_focus: cx.focus_handle(),
+            message_focus: cx.focus_handle(),
             focus_subscriptions: Vec::new(),
             controller,
+        };
+        if this.shows_details() {
+            this.prepare_diff(cx);
         }
+        this
     }
     pub fn sync(&mut self, data: BlockData, compact: bool, cx: &mut Context<Self>) {
         if compact != self.compact {
@@ -690,14 +746,16 @@ impl BlockView {
         let metadata_changed = data.expanded != self.data.expanded
             || data.phase != self.data.phase
             || data.key != self.data.key
-            || data.gutter != self.data.gutter;
+            || data.gutter != self.data.gutter
+            || data.target != self.data.target
+            || data.message != self.data.message;
         if data.revision == self.data.revision
             && data.body == self.data.body
             && data.secondary == self.data.secondary
         {
             self.data = data;
             if metadata_changed {
-                if self.data.expanded {
+                if self.shows_details() {
                     self.prepare_diff(cx);
                 }
                 cx.notify();
@@ -737,10 +795,13 @@ impl BlockView {
             self.diff_error = None;
             self.diff_task = None;
         }
-        if self.data.expanded {
+        if self.shows_details() {
             self.prepare_diff(cx);
         }
         cx.notify();
+    }
+    fn shows_details(&self) -> bool {
+        self.data.expanded && !self.data.message.is_some_and(|message| message.folded)
     }
     fn prepare_diff(&mut self, cx: &mut Context<Self>) {
         if self.diff.is_some() || self.diff_task.is_some() || self.data.changes.is_empty() {
@@ -763,50 +824,102 @@ impl BlockView {
     }
     fn disclosure(
         &self,
-        name: &'static str,
+        id: &'static str,
+        target: FoldKey,
+        open: bool,
+        label: impl Into<SharedString>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AccordionTrigger {
         let owner = cx.entity();
-        AccordionTrigger::new("expand")
-            .open(self.data.expanded)
-            .track_focus(&self.disclosure_focus)
-            .aria_label(name)
+        let focus = self.fold_focus(target);
+        let focused = focus.is_focused(window);
+        AccordionTrigger::new(id)
+            .open(open)
+            .key_context("ZevriaDisclosure")
+            .track_focus(&focus)
+            .tab_stop(true)
+            .aria_label(label)
             .relative()
-            .size(px(28.))
+            .min_h(px(28.))
             .flex()
             .items_center()
-            .justify_center()
             .rounded(px(6.))
             .cursor_pointer()
             .hover(|s| s.bg(tones(cx).hover))
             .active(|s| s.bg(tones(cx).pressed))
             .on_change(move |expanded, _, window, cx| {
-                owner.update(cx, |this, cx| {
-                    window.focus(&this.disclosure_focus, cx);
-                    this.disclose(expanded, cx);
-                })
+                window.focus(&focus, cx);
+                owner.update(cx, |_, cx| cx.emit(DisclosureChanged { target, expanded }));
             })
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.disclose(!this.data.expanded, cx);
+                    cx.emit(DisclosureChanged {
+                        target,
+                        expanded: !open,
+                    });
                     cx.stop_propagation();
                 }
             }))
-            .child(
-                Icon::new(if self.data.expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .small(),
+            .when(focused, |trigger| trigger.child(style::focus_ring(6., cx)))
+    }
+    fn block_disclosure(
+        &self,
+        label: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AccordionTrigger> {
+        Some(
+            self.disclosure(
+                "block-disclosure",
+                self.data.target?,
+                self.data.expanded,
+                label.to_owned(),
+                window,
+                cx,
             )
-            .when(self.disclosure_focus.is_focused(window), |trigger| {
-                trigger.child(style::focus_ring(6., cx))
-            })
+            .w(px(28.))
+            .flex_shrink_0()
+            .justify_center()
+            .child(chevron(self.data.expanded).text_color(palette(cx).text.muted)),
+        )
+    }
+    fn copy_scope(&self) -> Option<FoldKey> {
+        self.data
+            .message
+            .filter(|message| message.folded)
+            .map(|message| message.key)
+            .or(self
+                .data
+                .target
+                .filter(|key| matches!(key, FoldKey::Span { .. })))
+    }
+    fn copy_primary(
+        scope: Option<FoldKey>,
+        primary: &str,
+        controller: &Entity<SessionController>,
+        cx: &mut App,
+    ) {
+        let text = if let Some(scope) = scope {
+            let (start, end) = match scope {
+                FoldKey::Span { start, end } => (start, end),
+                FoldKey::Message { history_index } => (history_index, history_index),
+                _ => unreachable!(),
+            };
+            let conversation = &controller.read(cx).model.visible().conversation;
+            (start..=end)
+                .filter_map(|i| conversation.selected_message_text(i, false))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            primary.to_owned()
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
     fn actions(&self, window: &Window, _cx: &mut Context<Self>) -> Div {
         let primary = self.data.primary.clone();
+        let scope = self.copy_scope();
+        let controller = self.controller.clone();
         let focused = self.action_focus.iter().any(|f| f.is_focused(window));
         let mut actions = div()
             .flex()
@@ -818,18 +931,17 @@ impl BlockView {
                 style::icon_button(
                     "copy",
                     IconName::Copy,
-                    if matches!(self.data.kind, BlockKind::Tool { .. }) {
-                        "Copy input"
-                    } else {
-                        "Copy text"
+                    match scope {
+                        Some(FoldKey::Span { .. }) => "Copy messages",
+                        Some(FoldKey::Message { .. }) => "Copy message",
+                        _ if matches!(self.data.kind, BlockKind::Tool { .. }) => "Copy input",
+                        _ => "Copy text",
                     },
                 )
                 .track_focus(&self.action_focus[0])
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(primary.clone()))
-                }),
+                .on_click(move |_, _, cx| Self::copy_primary(scope, &primary, &controller, cx)),
             );
-        if let Some(output) = self.data.secondary.clone() {
+        if let Some(output) = self.data.secondary.clone().filter(|_| scope.is_none()) {
             actions = actions.child(
                 style::icon_button("copy-output", IconName::Copy, "Copy output")
                     .track_focus(&self.action_focus[1])
@@ -838,7 +950,7 @@ impl BlockView {
                     }),
             );
         }
-        if let Some(id) = self.data.subtask.clone() {
+        if let Some(id) = self.data.subtask.clone().filter(|_| scope.is_none()) {
             let controller = self.controller.clone();
             actions = actions.child(
                 style::icon_button("inspect", IconName::Eye, "Inspect subtask")
@@ -853,6 +965,105 @@ impl BlockView {
         }
         actions
     }
+    /// For text we clamp the retained rich-text view, not a character estimate:
+    /// a line that already fits keeps its exact height and rendered contents.
+    fn text_row(
+        &self,
+        view: TextView,
+        label: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let message = self.data.message.filter(|m| m.folded);
+        let folded = message.is_some() || !self.data.expanded;
+        div()
+            .relative()
+            .group("log-block")
+            .flex()
+            .items_start()
+            .when(message.is_none(), |row| {
+                row.children(self.block_disclosure(label, window, cx))
+            })
+            .when(message.is_some(), |row| {
+                row.child(div().size(px(28.)).flex_shrink_0())
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pt(px(3.))
+                    .child(view.when(folded, |v| v.max_lines(1))),
+            )
+            .when_some(message.filter(|m| m.blocks > 1), |row, m| {
+                row.child(
+                    style::meta()
+                        .pt(px(6.))
+                        .pl(px(8.))
+                        .text_color(palette(cx).text.muted)
+                        .child(format!("{} blocks", m.blocks)),
+                )
+            })
+            .child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .child(self.actions(window, cx)),
+            )
+    }
+
+    fn message_preview(
+        &self,
+        message: MessageDisclosure,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let text = match &self.data.kind {
+            BlockKind::Tool { name, summary, .. } if summary.is_empty() => {
+                tool_label(name).to_owned()
+            }
+            BlockKind::Tool { name, summary, .. } => format!("{}  {summary}", tool_label(name)),
+            BlockKind::Subtask { title, .. } | BlockKind::Document { title, .. } => title.clone(),
+            BlockKind::Image { label } => label.clone(),
+            _ => crate::disclosure::preview(&self.data.body),
+        };
+        let t = palette(cx);
+        let thinking = matches!(self.data.kind, BlockKind::Reasoning);
+        div()
+            .group("log-block")
+            .relative()
+            .min_h(px(28.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .when(thinking, |row| {
+                row.child(
+                    style::label()
+                        .text_color(tones(cx).pencil)
+                        .child("Thinking"),
+                )
+            })
+            .child(
+                if thinking {
+                    style::pencil().italic().text_color(tones(cx).pencil)
+                } else {
+                    style::body().text_color(t.text.secondary)
+                }
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(text),
+            )
+            .when(message.blocks > 1, |row| {
+                row.child(
+                    style::meta()
+                        .text_color(t.text.muted)
+                        .child(format!("{} blocks", message.blocks)),
+                )
+            })
+            .child(self.actions(window, cx))
+    }
+
     fn rich_text(&self, document: bool, cx: &App) -> TextView {
         TextView::new(&self.text)
             .markdown_extensions(math::extensions())
@@ -891,13 +1102,22 @@ impl BlockView {
             })
     }
 }
+fn chevron(expanded: bool) -> Icon {
+    Icon::new(if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    })
+    .small()
+}
+
 impl Render for BlockView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.focus_subscriptions.is_empty() {
             for handle in self
                 .action_focus
                 .iter()
-                .chain(std::iter::once(&self.disclosure_focus))
+                .chain([&self.disclosure_focus, &self.message_focus])
             {
                 self.focus_subscriptions
                     .push(cx.on_focus(handle, window, |_, _, cx| cx.notify()));
@@ -910,22 +1130,65 @@ impl Render for BlockView {
         let measure = style::Measure {
             compact: self.compact,
         };
-        let mut gutter = measure.gutter().pt(px(5.));
-        gutter = match self.data.gutter {
-            Gutter::None => gutter,
-            Gutter::Label(speaker) => gutter
-                .text_color(match speaker {
-                    Speaker::You | Speaker::Task => t.roles.you,
-                    Speaker::Zevria if matches!(self.data.kind, BlockKind::Reasoning) => {
-                        tones(cx).pencil
-                    }
-                    Speaker::Zevria => t.roles.assistant,
-                    Speaker::System => t.roles.system,
-                    Speaker::Plan => t.workflow.plan,
-                })
-                .child(speaker.label()),
-            Gutter::Glyph(_) | Gutter::Live => gutter,
+        let message = self.data.message;
+        let folded_message = message.filter(|message| message.folded);
+        let speaker = match self.data.gutter {
+            Gutter::Label(speaker) => Some(speaker),
+            _ => message
+                .filter(|message| message.show_speaker)
+                .map(|message| message.speaker),
         };
+        let mut gutter =
+            measure
+                .gutter()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .when(!self.compact, |g| {
+                    g.justify_end()
+                        .when(self.data.turn_boundary, |g| g.pt(px(16.)))
+                });
+        if let Some(message) = message {
+            gutter = gutter.child(
+                self.disclosure(
+                    "message-disclosure",
+                    message.key,
+                    !message.folded,
+                    format!("{} message", message.speaker.label()),
+                    window,
+                    cx,
+                )
+                .w(px(28.))
+                .flex_shrink_0()
+                .justify_center()
+                .child(chevron(!message.folded).text_color(t.text.muted)),
+            );
+        }
+        // Keep the chevrons on one axis even when a consecutive entry has no label.
+        let label_width = px(44.);
+        if let Some(speaker) = speaker {
+            gutter = gutter.child(
+                style::label()
+                    .when(message.is_some() && !self.compact, |label| {
+                        label.w(label_width).text_left()
+                    })
+                    .text_color(match speaker {
+                        Speaker::You | Speaker::Task => t.roles.you,
+                        Speaker::Zevria if matches!(self.data.kind, BlockKind::Reasoning) => {
+                            tones(cx).pencil
+                        }
+                        Speaker::Zevria => t.roles.assistant,
+                        Speaker::System => t.roles.system,
+                        Speaker::Plan => t.workflow.plan,
+                    })
+                    .child(speaker.label()),
+            );
+        } else if message.is_some() && !self.compact {
+            gutter = gutter.child(div().w(label_width));
+        }
+        if message.is_none() {
+            gutter = gutter.pt(px(7.));
+        }
         if matches!(self.data.kind, BlockKind::Web) {
             gutter = gutter.child(Icon::new(IconName::Globe).small().text_color(t.roles.tools));
         }
@@ -938,7 +1201,21 @@ impl Render for BlockView {
             .relative()
             .py(px(4.))
             .gap(px(8.));
+        let text_like = matches!(
+            self.data.kind,
+            BlockKind::Prose { .. }
+                | BlockKind::Notice { .. }
+                | BlockKind::Web
+                | BlockKind::Ensemble
+        );
         match &self.data.kind {
+            _ if folded_message.is_some() && !text_like => {
+                content = content.max_w(px(style::PROSE)).child(self.message_preview(
+                    folded_message.unwrap(),
+                    window,
+                    cx,
+                ));
+            }
             BlockKind::Prose { role, .. } => {
                 let prompt = *role == PresentationRole::User;
                 if self.data.phase == Phase::Unsaved {
@@ -949,151 +1226,80 @@ impl Render for BlockView {
                     );
                 }
                 content = content.max_w(px(style::PROSE)).child(
-                    div()
-                        .relative()
-                        .group("log-block")
-                        .when(prompt, |d| d.font_weight(FontWeight::MEDIUM))
-                        .child(
-                            self.rich_text(false, cx)
-                                .when(*role == PresentationRole::System, |view| {
-                                    style::SECONDARY.apply(view)
-                                }),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .right_0()
-                                .top_0()
-                                .child(self.actions(window, cx)),
-                        ),
+                    self.text_row(
+                        self.rich_text(false, cx)
+                            .when(prompt, |v| v.font_weight(FontWeight::MEDIUM))
+                            .when(*role == PresentationRole::System, |v| {
+                                style::SECONDARY.apply(v)
+                            }),
+                        if prompt {
+                            "Prompt text"
+                        } else {
+                            "Message text"
+                        },
+                        window,
+                        cx,
+                    ),
                 );
             }
-            BlockKind::Steps(counts) => {
-                let owner = cx.entity();
-                let mut header = AccordionTrigger::new("steps-disclosure")
-                    .open(self.data.expanded)
-                    .track_focus(&self.disclosure_focus)
-                    .aria_label(counts.title())
-                    .aria_description(counts.description())
-                    .relative()
-                    .w_full()
-                    .min_h(px(28.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(|h| h.bg(tones(cx).hover))
-                    .active(|h| h.bg(tones(cx).pressed))
-                    .on_change(move |expanded, _, window, cx| {
-                        owner.update(cx, |this, cx| {
-                            window.focus(&this.disclosure_focus, cx);
-                            this.disclose(expanded, cx);
-                        })
-                    })
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.disclose(!this.data.expanded, cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .child(
-                        Icon::new(if self.data.expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .small()
-                        .text_color(t.text.muted),
+            BlockKind::RangeSummary => {
+                let title = self.data.body.clone();
+                let summary = self
+                    .disclosure(
+                        "range-disclosure",
+                        self.data.target.unwrap(),
+                        false,
+                        title.clone(),
+                        window,
+                        cx,
                     )
-                    .child(style::label().child(counts.title()))
+                    .min_w_0()
+                    .flex_1()
                     .child(
-                        style::meta()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(t.text.muted)
-                            .child(counts.description()),
-                    );
-                if counts.added > 0 {
-                    header = header.child(
-                        style::meta()
+                        div()
+                            .w(px(28.))
                             .flex_shrink_0()
-                            .text_color(t.feedback.success)
-                            .child(format!("+{}", counts.added)),
-                    );
-                }
-                if counts.removed > 0 {
-                    header = header.child(
-                        style::meta()
-                            .flex_shrink_0()
-                            .text_color(t.feedback.error)
-                            .child(format!("−{}", counts.removed)),
-                    );
-                }
-                if self.disclosure_focus.is_focused(window) {
-                    header = header.child(style::focus_ring(6., cx));
-                }
-                content = content.child(header);
-                if !self.data.expanded {
-                    content = content.child(style::thread_marker("⋮", t.text.muted, cx));
-                }
+                            .flex()
+                            .justify_center()
+                            .child(chevron(false).text_color(t.text.muted)),
+                    )
+                    .child(style::label().truncate().child(title));
+                content = content.max_w(px(style::PROSE)).child(
+                    div()
+                        .group("log-block")
+                        .flex()
+                        .min_w_0()
+                        .items_center()
+                        .child(summary)
+                        .child(self.actions(window, cx)),
+                );
             }
             BlockKind::Reasoning => {
                 let preview = crate::disclosure::preview(&self.data.body);
-                let owner = cx.entity();
-                let mut header = AccordionTrigger::new("thinking-disclosure")
-                    .open(self.data.expanded)
-                    .track_focus(&self.disclosure_focus)
-                    .aria_label("Thinking")
-                    .aria_description(preview.clone())
-                    .relative()
-                    .w_full()
-                    .min_h(px(28.))
+                let mut label = div()
                     .flex()
+                    .w_full()
                     .items_center()
                     .gap(px(8.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(|h| h.bg(tones(cx).hover))
-                    .active(|h| h.bg(tones(cx).pressed))
-                    .on_change(move |expanded, _, window, cx| {
-                        owner.update(cx, |this, cx| {
-                            window.focus(&this.disclosure_focus, cx);
-                            this.disclose(expanded, cx);
-                        })
-                    })
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.disclose(!this.data.expanded, cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .child(
-                        Icon::new(if self.data.expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .small()
-                        .text_color(tones(cx).pencil),
-                    )
+                    .min_w_0()
                     .child(
                         style::label()
+                            .flex_shrink_0()
                             .text_color(tones(cx).pencil)
                             .child("Thinking"),
                     );
                 if self.data.phase == Phase::Live {
-                    header = header.child(style::status_glyph(StatusIcon::Running, ink, cx));
+                    label = label.child(style::status_glyph(StatusIcon::Running, ink, cx));
                 }
                 if self.data.phase == Phase::Unsaved {
-                    header = header.child(
+                    label = label.child(
                         style::meta()
                             .text_color(t.feedback.warning)
                             .child("Stopped, not saved to this session"),
                     );
                 }
                 if !self.data.expanded {
-                    header = header
+                    label = label
                         .child(
                             style::pencil()
                                 .flex_1()
@@ -1101,7 +1307,7 @@ impl Render for BlockView {
                                 .truncate()
                                 .italic()
                                 .text_color(tones(cx).pencil)
-                                .child(preview),
+                                .child(preview.clone()),
                         )
                         .child(
                             style::meta()
@@ -1113,9 +1319,31 @@ impl Render for BlockView {
                                 )),
                         );
                 }
-                if self.disclosure_focus.is_focused(window) {
-                    header = header.child(style::focus_ring(6., cx));
-                }
+                let header = if let Some(target) = self.data.target {
+                    self.disclosure(
+                        "block-disclosure",
+                        target,
+                        self.data.expanded,
+                        "Thinking",
+                        window,
+                        cx,
+                    )
+                    .aria_description(preview)
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .w(px(28.))
+                            .flex_shrink_0()
+                            .flex()
+                            .justify_center()
+                            .child(chevron(self.data.expanded).text_color(tones(cx).pencil)),
+                    )
+                    .child(label)
+                    .into_any_element()
+                } else {
+                    label.min_h(px(28.)).into_any_element()
+                };
                 content = content.max_w(px(style::PROSE)).child(
                     div()
                         .group("log-block")
@@ -1127,7 +1355,7 @@ impl Render for BlockView {
                 );
                 if self.data.expanded {
                     content = content.child(
-                        div().pl(px(24.)).child(
+                        div().pl(px(28.)).child(
                             self.rich_text(false, cx)
                                 .style(style::thought_markdown(cx))
                                 .code_block_highlighter(|_| Vec::new())
@@ -1186,6 +1414,11 @@ impl Render for BlockView {
                     .items_center()
                     .gap(px(8.))
                     .group("log-block")
+                    .children(self.block_disclosure(
+                        &format!("{} details", tool_label(name)),
+                        window,
+                        cx,
+                    ))
                     .child(
                         style::label()
                             .text_color(t.text.secondary)
@@ -1233,15 +1466,7 @@ impl Render for BlockView {
                     }
                     _ => {}
                 }
-                row = row.child(self.actions(window, cx)).child(self.disclosure(
-                    if self.data.expanded {
-                        "Hide details"
-                    } else {
-                        "Show details"
-                    },
-                    window,
-                    cx,
-                ));
+                row = row.child(self.actions(window, cx));
                 content = content.child(row);
                 if self.data.expanded {
                     let mut well = div()
@@ -1346,6 +1571,7 @@ impl Render for BlockView {
                         .flex()
                         .items_center()
                         .gap(px(8.))
+                        .children(self.block_disclosure("Subtask details", window, cx))
                         .child(
                             style::label()
                                 .text_color(match kind {
@@ -1357,7 +1583,8 @@ impl Render for BlockView {
                         .child(
                             div()
                                 .flex_1()
-                                .truncate()
+                                .min_w_0()
+                                .when(!self.data.expanded, |title| title.truncate())
                                 .map(|view| style::SECONDARY.apply(view))
                                 .child(title.clone()),
                         )
@@ -1366,6 +1593,7 @@ impl Render for BlockView {
                                 .ghost()
                                 .small()
                                 .label("Inspect")
+                                .track_focus(&self.action_focus[2])
                                 .on_click(move |_, _, cx| {
                                     controller.update(cx, |this, cx| {
                                         this.model.selected_child = id.clone();
@@ -1380,26 +1608,19 @@ impl Render for BlockView {
                 title,
                 version,
             } => {
-                content = content
-                    .bg(t.surfaces.overlay)
-                    .border_1()
-                    .border_color(tones(cx).hairline)
-                    .rounded(px(10.))
-                    .p(px(16.))
-                    .group("log-block")
+                let header = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .children(self.block_disclosure("Plan document", window, cx))
                     .child(
                         div()
-                            .flex()
-                            .items_start()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .map(|view| style::HEADINGS[1].apply(view))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title.clone()),
-                            )
-                            .child(self.actions(window, cx)),
+                            .flex_1()
+                            .min_w_0()
+                            .map(|view| style::HEADINGS[1].apply(view))
+                            .when(!self.data.expanded, |view| view.truncate())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title.clone()),
                     )
                     .child(style::tag(
                         version.clone(),
@@ -1410,26 +1631,41 @@ impl Render for BlockView {
                         },
                         cx,
                     ))
-                    .child(
-                        self.rich_text(true, cx)
-                            .when(!self.data.expanded, |v| v.max_lines(8)),
-                    )
-                    .child(
-                        Button::new("expand")
-                            .ghost()
-                            .small()
-                            .label(if self.data.expanded {
-                                "Show less"
-                            } else {
-                                "Show full plan"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.disclose(!this.data.expanded, cx);
-                            })),
-                    );
+                    .child(self.actions(window, cx));
+                content = content
+                    .group("log-block")
+                    .when(self.data.expanded, |view| {
+                        view.bg(t.surfaces.overlay)
+                            .border_1()
+                            .border_color(tones(cx).hairline)
+                            .rounded(px(10.))
+                            .p(px(16.))
+                    })
+                    .child(header)
+                    .when(self.data.expanded, |view| {
+                        view.child(self.rich_text(true, cx))
+                    });
             }
             BlockKind::Image { label } => {
-                if let Some(image) = &self.data.image {
+                let header = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .group("log-block")
+                    .children(self.block_disclosure("Image", window, cx))
+                    .child(
+                        style::meta()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_color(t.text.muted)
+                            .child(label.trim_matches(['[', ']']).to_owned()),
+                    )
+                    .child(self.actions(window, cx));
+                content = content.child(header);
+                if self.data.expanded
+                    && let Some(image) = &self.data.image
+                {
                     content = content.child(
                         img(image.clone())
                             .w_full()
@@ -1441,15 +1677,6 @@ impl Render for BlockView {
                             .border_color(tones(cx).hairline),
                     );
                 }
-                let mut metadata = div().flex().items_center().gap(px(12.));
-                for segment in label.trim_matches(['[', ']']).split('·') {
-                    metadata = metadata.child(
-                        style::meta()
-                            .text_color(t.text.muted)
-                            .child(segment.trim().to_owned()),
-                    );
-                }
-                content = content.child(metadata);
             }
             BlockKind::Divider => {
                 content = content.child(
@@ -1468,14 +1695,19 @@ impl Render for BlockView {
                 );
             }
             BlockKind::Notice { level } => {
-                content = content.child(
-                    self.rich_text(false, cx)
-                        .map(|view| style::SECONDARY.apply(view))
-                        .text_color(match level {
-                            NoticeLevel::Error => t.feedback.error,
-                            NoticeLevel::Warning => t.feedback.warning,
-                            NoticeLevel::Neutral => t.text.secondary,
-                        }),
+                content = content.max_w(px(style::PROSE)).child(
+                    self.text_row(
+                        self.rich_text(false, cx)
+                            .map(|view| style::SECONDARY.apply(view))
+                            .text_color(match level {
+                                NoticeLevel::Error => t.feedback.error,
+                                NoticeLevel::Warning => t.feedback.warning,
+                                NoticeLevel::Neutral => t.text.secondary,
+                            }),
+                        "Notice",
+                        window,
+                        cx,
+                    ),
                 );
             }
             BlockKind::Live(_) => {
@@ -1489,26 +1721,20 @@ impl Render for BlockView {
                     ));
             }
             BlockKind::Web | BlockKind::Ensemble => {
-                content = content.child(
-                    self.rich_text(false, cx)
-                        .map(|view| style::SECONDARY.apply(view)),
+                content = content.max_w(px(style::PROSE)).child(
+                    self.text_row(
+                        self.rich_text(false, cx)
+                            .map(|view| style::SECONDARY.apply(view)),
+                        if matches!(self.data.kind, BlockKind::Web) {
+                            "Web activity"
+                        } else {
+                            "Worker details"
+                        },
+                        window,
+                        cx,
+                    ),
                 );
             }
-        }
-        if matches!(
-            self.data.kind,
-            BlockKind::Image { .. }
-                | BlockKind::Web
-                | BlockKind::Notice { .. }
-                | BlockKind::Ensemble
-        ) {
-            content = content.relative().group("log-block").child(
-                div()
-                    .absolute()
-                    .right_0()
-                    .top_0()
-                    .child(self.actions(window, cx)),
-            );
         }
         let threaded = !matches!(
             self.data.kind,
@@ -1542,12 +1768,30 @@ impl Render for BlockView {
                 );
             }
         }
-        let show_gutter = !self.compact || matches!(self.data.gutter, Gutter::Label(_));
+        let show_gutter = !self.compact || speaker.is_some() || message.is_some();
         measure
             .row()
             .id(self.data.key.clone())
             .track_focus(&self.block_focus)
             .tab_stop(false)
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Copy, window, cx| {
+                    // TextView owns Copy when it has a selection. Only handle the
+                    // disclosure itself here, never a selection or an input field.
+                    if this.disclosure_focus.is_focused(window)
+                        || this.message_focus.is_focused(window)
+                    {
+                        Self::copy_primary(
+                            this.copy_scope(),
+                            &this.data.primary,
+                            &this.controller,
+                            cx,
+                        );
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
             .test_support()
             .when(self.data.turn_boundary, |r| r.pt(px(32.)))
             .when(show_gutter, |row| row.child(gutter))

@@ -3,7 +3,6 @@
 mod conversation;
 mod draft_submission;
 mod edit;
-mod fold;
 #[cfg(test)]
 mod image_tests;
 mod interaction;
@@ -65,6 +64,7 @@ use crate::completion::{
 };
 use crate::composer::ComposerState;
 use crate::input::{InputEvent, Surface, SurfaceKind, UserInput};
+pub(crate) use zevria_presentation::fold::{EntryFolds, FoldKey, FoldState, SpanRole, TurnFold};
 use zevria_workflow::ensemble_review::*;
 
 pub(crate) use conversation::{
@@ -72,7 +72,6 @@ pub(crate) use conversation::{
     ToolCallStatus, TurnStartTarget,
 };
 use edit::{EditState, RecallEdit};
-pub(crate) use fold::{EntryFolds, FoldKey, FoldState, SpanRole, TurnFold};
 #[cfg(test)]
 pub(crate) use interaction::FocusState;
 pub(crate) use interaction::{ActiveSelection, SelectionScope};
@@ -1158,5 +1157,46 @@ impl std::ops::Deref for App {
 impl std::ops::DerefMut for App {
     fn deref_mut(&mut self) -> &mut SessionModel {
         &mut self.model
+    }
+}
+
+#[cfg(test)]
+mod fold_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn restore_and_projection_replacement_clear_explicit_intent() {
+        for replacement in 0..3 {
+            let mut app = App::new();
+            app.conversation.push_entry(
+                HistoryEntry::from_message(Message::user("original"), ToolCallStatus::Finished)
+                    .unwrap(),
+            );
+            app.folds.fold(FoldKey::Message { history_index: 0 });
+            match replacement {
+                0 => app.restore(vec![
+                    zevria_transcript::transcript::TranscriptItem::Message(Message::user(
+                        "restored",
+                    )),
+                ]),
+                1 => {
+                    let mut projection = ConversationState::default();
+                    projection.push_entry(
+                        HistoryEntry::from_message(
+                            Message::user("replacement with same coordinates"),
+                            ToolCallStatus::Finished,
+                        )
+                        .unwrap(),
+                    );
+                    let change = app.conversation.replace_projection(projection);
+                    assert!(app.apply_conversation_change(change).is_empty());
+                }
+                _ => {
+                    let change = app.conversation.clear_projection();
+                    assert!(app.apply_conversation_change(change).is_empty());
+                }
+            }
+            assert!(!app.folds.entry(0).is_message_folded());
+        }
     }
 }

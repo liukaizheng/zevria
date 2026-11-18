@@ -620,7 +620,10 @@ fn restored_math_and_plan_document_and_panel_render_at_both_widths(cx: &mut Test
                 .unwrap();
         }
         cx.update_window(window.into(), |_, window, cx| {
-            window.within(key).click("expand", cx);
+            assert_eq!(
+                window.within(key).find("block-disclosure").expanded(),
+                Some(true)
+            );
             window.click("plan-copy", cx);
             assert_eq!(
                 cx.read_from_clipboard().and_then(|i| i.text()),
@@ -855,7 +858,35 @@ fn shared_palette_drives_syntax_and_native_diff_card_expansion(cx: &mut TestAppC
     );
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.click("expand", cx);
+        // Tool details are expanded unless explicitly folded.
+        let tool = controller
+            .read(cx)
+            .model
+            .root
+            .conversation
+            .history()
+            .iter()
+            .find_map(|entry| {
+                let zevria_presentation::conversation::HistoryEntry::Conversation(entry) = entry
+                else {
+                    return None;
+                };
+                entry
+                    .blocks
+                    .iter()
+                    .find(|b| b.native_tool().is_some())
+                    .map(|b| b.id)
+            })
+            .unwrap();
+        let key = format!(
+            "{:?}-{}",
+            controller.read(cx).model.root.conversation.epoch(),
+            tool.0
+        );
+        assert_eq!(
+            window.within(key).find("block-disclosure").expanded(),
+            Some(true)
+        );
     })
     .unwrap();
     cx.run_until_parked();

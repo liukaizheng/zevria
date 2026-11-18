@@ -1,13 +1,14 @@
 //! Pane-local, explicit folding intent. No fold state enters the transcript.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
-use super::conversation::{ConversationState, HistoryEntry, Selection};
-use super::interaction::SelectionScope;
-use crate::presentation::PresentationBlockId;
+use crate::{
+    blocks::{PresentationBlockId, PresentationBlockKind},
+    conversation::{ConversationState, HistoryEntry, Selection, SelectionScope},
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum FoldKey {
+pub enum FoldKey {
     Span {
         start: usize,
         end: usize,
@@ -26,7 +27,7 @@ pub(crate) enum FoldKey {
 }
 
 impl FoldKey {
-    pub(crate) fn for_selection(
+    pub fn for_selection(
         conversation: &ConversationState,
         selection: Selection,
         scope: SelectionScope,
@@ -36,33 +37,33 @@ impl FoldKey {
             history_index,
             content_index,
         } = selection;
+        let entry = conversation.entry(history_index)?;
         if scope == SelectionScope::Message {
-            return conversation
-                .entry(history_index)?
+            return entry
                 .message_fold_eligible(diagnostics_visible)
                 .then_some(Self::Message { history_index });
         }
-        if let Some(id) = conversation.selection_identity(selection) {
-            return Some(Self::Block { history_index, id });
+        if !entry.index_is_selectable(content_index, diagnostics_visible) {
+            return None;
         }
-        let entry = conversation.entry(history_index)?;
-        (!matches!(entry, HistoryEntry::Conversation(_))
-            && content_index < entry.selectable_upper_bound())
-        .then_some(Self::Item {
-            history_index,
-            content_index,
+        Some(match conversation.selection_identity(selection) {
+            Some(id) => Self::Block { history_index, id },
+            None => Self::Item {
+                history_index,
+                content_index,
+            },
         })
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SpanRole {
+pub enum SpanRole {
     Summary { end: usize },
     Hidden { start: usize },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TurnFold {
+pub enum TurnFold {
     /// `zm`: fold prompts and earlier-message spans without adding final-entry folds.
     FinalExpanded,
     /// `zM`: older turns also message-fold their final eligible entry.
@@ -71,38 +72,68 @@ pub(crate) enum TurnFold {
 
 /// Membership records user intent, even when a body currently fits one row.
 /// New items are always expanded; turn folding never changes a global default.
-#[derive(Debug, Default)]
-pub(crate) struct FoldState {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FoldState {
     folded: HashSet<FoldKey>,
+    // Non-overlapping inclusive ranges, keyed by start. Rendering and turn
+    // navigation can find a row's representative without scanning other folds.
+    spans: BTreeMap<usize, usize>,
 }
 
 impl FoldState {
-    pub(crate) fn toggle(&mut self, key: FoldKey) {
-        if !self.folded.remove(&key) {
+    pub fn contains(&self, key: FoldKey) -> bool {
+        match key {
+            FoldKey::Span { start, end } => self.spans.get(&start) == Some(&end),
+            _ => self.folded.contains(&key),
+        }
+    }
+
+    pub fn toggle(&mut self, key: FoldKey) {
+        if self.contains(key) {
+            self.unfold(key);
+        } else {
             self.fold(key);
         }
     }
 
-    pub(crate) fn fold(&mut self, key: FoldKey) {
+    pub fn fold(&mut self, key: FoldKey) {
         if let FoldKey::Span { start, end } = key {
             debug_assert!(start <= end);
-            // New range intent supersedes overlapping spans, but never inner folds.
-            self.folded.retain(|key| {
-                !matches!(key, FoldKey::Span { start: old_start, end: old_end }
-                    if *old_start <= end && start <= *old_end)
-            });
+            // Supersede only overlapping spans; no nested folds are affected.
+            let overlaps = self
+                .spans
+                .range(..=end)
+                .rev()
+                .take_while(|(_, old_end)| **old_end >= start)
+                .map(|(&old_start, _)| old_start)
+                .collect::<Vec<_>>();
+            for old_start in overlaps {
+                self.spans.remove(&old_start);
+            }
+            self.spans.insert(start, end);
+        } else {
+            self.folded.insert(key);
         }
-        self.folded.insert(key);
     }
 
-    pub(crate) fn unfold(&mut self, key: FoldKey) {
-        self.folded.remove(&key);
+    pub fn unfold(&mut self, key: FoldKey) {
+        match key {
+            FoldKey::Span { start, end } => {
+                if self.spans.get(&start) == Some(&end) {
+                    self.spans.remove(&start);
+                }
+            }
+            _ => {
+                self.folded.remove(&key);
+            }
+        }
     }
 
     /// Fold each display turn's prompt separately from its earlier-message spans.
     /// Headerless entries join the current turn; a leading headerless run is its
     /// own turn and has no prompt row. Existing Message folds are never removed.
-    pub(crate) fn fold_turns(
+    /// Both actions also fold visible thoughts in the newest turn's final eligible entry.
+    pub fn fold_turns(
         &mut self,
         history: &[HistoryEntry],
         diagnostics_visible: bool,
@@ -123,32 +154,46 @@ impl FoldState {
         }
         let latest = groups.len().saturating_sub(1);
         for (index, group) in groups.into_iter().enumerate() {
+            let Some(last) = group
+                .clone()
+                .rev()
+                .find(|&index| history[index].message_fold_eligible(diagnostics_visible))
+            else {
+                continue;
+            };
             self.fold_turn_group(
                 history,
-                group,
+                group.start,
+                last,
                 diagnostics_visible,
                 fold == TurnFold::OlderFinalFolded && index < latest,
             );
+            if index == latest
+                && let HistoryEntry::Conversation(entry) = &history[last]
+            {
+                for block in &entry.blocks {
+                    if block.visible(diagnostics_visible)
+                        && matches!(block.kind, PresentationBlockKind::Reasoning { .. })
+                    {
+                        self.fold(FoldKey::Block {
+                            history_index: last,
+                            id: block.id,
+                        });
+                    }
+                }
+            }
         }
     }
 
     fn fold_turn_group(
         &mut self,
         history: &[HistoryEntry],
-        group: std::ops::Range<usize>,
+        start: usize,
+        last: usize,
         diagnostics_visible: bool,
         fold_final: bool,
     ) {
-        let Some(last) = group
-            .clone()
-            .rev()
-            .find(|&index| history[index].message_fold_eligible(diagnostics_visible))
-        else {
-            return;
-        };
-        let prompt = history[group.start]
-            .has_prompt_header()
-            .then_some(group.start);
+        let prompt = history[start].has_prompt_header().then_some(start);
         if let Some(index) = prompt
             && index != last
             && history[index].message_fold_eligible(diagnostics_visible)
@@ -162,7 +207,7 @@ impl FoldState {
                 history_index: last,
             });
         }
-        let earlier_start = prompt.map_or(group.start, |index| index + 1);
+        let earlier_start = prompt.map_or(start, |index| index + 1);
         let mut span = None;
         for (index, entry) in history.iter().enumerate().take(last).skip(earlier_start) {
             if matches!(entry, HistoryEntry::CompactionDivider) {
@@ -179,37 +224,39 @@ impl FoldState {
         }
     }
 
-    pub(crate) fn span_containing(&self, history_index: usize) -> Option<(usize, usize)> {
-        self.folded.iter().find_map(|key| match *key {
-            FoldKey::Span { start, end } if start <= history_index && history_index <= end => {
-                Some((start, end))
-            }
-            _ => None,
-        })
+    pub fn span_containing(&self, history_index: usize) -> Option<(usize, usize)> {
+        let (&start, &end) = self.spans.range(..=history_index).next_back()?;
+        (history_index <= end).then_some((start, end))
     }
 
-    pub(crate) fn unfold_all(&mut self) {
+    pub fn unfold_all(&mut self) {
         self.clear();
     }
 
-    pub(crate) fn entry(&self, history_index: usize) -> EntryFolds<'_> {
+    pub fn entry(&self, history_index: usize) -> EntryFolds<'_> {
         EntryFolds {
             state: Some(self),
             history_index,
         }
     }
 
-    pub(crate) fn reconcile(&mut self, conversation: &ConversationState) {
+    pub fn reconcile(&mut self, conversation: &ConversationState) {
+        let history = conversation.history();
+        self.spans.retain(|&start, end| {
+            history.get(start..=*end).is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry.selectable_upper_bound() > 0)
+                    && !entries
+                        .iter()
+                        .any(|entry| matches!(entry, HistoryEntry::CompactionDivider))
+            })
+        });
         self.folded = self
             .folded
             .drain()
             .filter_map(|key| match key {
-                FoldKey::Span { start, end } => (start <= end
-                    && end < conversation.history().len()
-                    && conversation.history()[start..=end]
-                        .iter()
-                        .any(|entry| entry.selectable_upper_bound() > 0))
-                .then_some(key),
+                FoldKey::Span { .. } => unreachable!("only local folds are stored here"),
                 FoldKey::Message { history_index } => conversation
                     .entry(history_index)
                     .is_some_and(|entry| entry.selectable_upper_bound() > 0)
@@ -226,33 +273,50 @@ impl FoldState {
                     content_index,
                 } => conversation
                     .entry(history_index)
-                    .is_some_and(|entry| content_index < entry.selectable_upper_bound())
+                    .is_some_and(|entry| {
+                        !matches!(entry, HistoryEntry::Conversation(_))
+                            && content_index < entry.selectable_upper_bound()
+                    })
                     .then_some(key),
             })
             .collect();
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.folded.clear();
+        self.spans.clear();
+    }
+
+    #[cfg(test)]
+    fn keys(&self) -> HashSet<FoldKey> {
+        self.folded
+            .iter()
+            .copied()
+            .chain(
+                self.spans
+                    .iter()
+                    .map(|(&start, &end)| FoldKey::Span { start, end }),
+            )
+            .collect()
     }
 }
 
 /// An entry-scoped read-only view; the streamed tail always uses `none()`.
 #[derive(Clone, Copy)]
-pub(crate) struct EntryFolds<'a> {
+pub struct EntryFolds<'a> {
     state: Option<&'a FoldState>,
     history_index: usize,
 }
 
 impl EntryFolds<'_> {
-    pub(crate) const fn none() -> Self {
+    pub const fn none() -> Self {
         Self {
             state: None,
             history_index: 0,
         }
     }
 
-    pub(crate) fn span(self) -> Option<SpanRole> {
+    pub fn span(self) -> Option<SpanRole> {
         let (start, end) = self.state?.span_containing(self.history_index)?;
         Some(if self.history_index == start {
             SpanRole::Summary { end }
@@ -261,26 +325,26 @@ impl EntryFolds<'_> {
         })
     }
 
-    pub(crate) fn is_message_folded(self) -> bool {
+    pub fn is_message_folded(self) -> bool {
         self.state.is_some_and(|state| {
-            state.folded.contains(&FoldKey::Message {
+            state.contains(FoldKey::Message {
                 history_index: self.history_index,
             })
         })
     }
 
-    pub(crate) fn is_block_folded(self, id: PresentationBlockId) -> bool {
+    pub fn is_block_folded(self, id: PresentationBlockId) -> bool {
         self.state.is_some_and(|state| {
-            state.folded.contains(&FoldKey::Block {
+            state.contains(FoldKey::Block {
                 history_index: self.history_index,
                 id,
             })
         })
     }
 
-    pub(crate) fn is_item_folded(self, content_index: usize) -> bool {
+    pub fn is_item_folded(self, content_index: usize) -> bool {
         self.state.is_some_and(|state| {
-            state.folded.contains(&FoldKey::Item {
+            state.contains(FoldKey::Item {
                 history_index: self.history_index,
                 content_index,
             })
@@ -291,8 +355,8 @@ impl EntryFolds<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, ToolCallStatus};
-    use crate::presentation::{BlockVisibility, NativeHeader};
+    use crate::blocks::{BlockVisibility, DisplayTurn, NativeHeader};
+    use crate::conversation::{EnsembleHistory, ToolCallStatus};
     use rig_core::message::Message;
 
     fn message(text: &str) -> HistoryEntry {
@@ -362,18 +426,60 @@ mod tests {
         assert!(!EntryFolds::none().is_item_folded(0));
     }
 
+    #[test]
+    fn hidden_conversation_blocks_are_not_fold_targets() {
+        let mut conversation = ConversationState::default();
+        let HistoryEntry::Conversation(mut entry) = message("diagnostic") else {
+            unreachable!()
+        };
+        entry.blocks[0].visibility = BlockVisibility::Diagnostics;
+        conversation.push_entry(HistoryEntry::Conversation(entry));
+        for scope in [SelectionScope::Block, SelectionScope::Message] {
+            assert!(FoldKey::for_selection(&conversation, selection(0, 0), scope, false).is_none());
+            assert!(FoldKey::for_selection(&conversation, selection(0, 0), scope, true).is_some());
+        }
+    }
+
+    #[test]
+    fn local_actions_preserve_nested_intent() {
+        let span = FoldKey::Span { start: 1, end: 2 };
+        let message = FoldKey::Message { history_index: 1 };
+        let block = FoldKey::Block {
+            history_index: 1,
+            id: PresentationBlockId(3),
+        };
+        let item = FoldKey::Item {
+            history_index: 2,
+            content_index: 0,
+        };
+        let mut folds = FoldState::default();
+        for key in [block, item, message, span] {
+            folds.fold(key);
+            folds.fold(key);
+        }
+        assert_eq!(folds.entry(1).span(), Some(SpanRole::Summary { end: 2 }));
+        folds.unfold(span);
+        folds.unfold(span);
+        assert_eq!(folds.entry(2).span(), None);
+        assert!(folds.entry(1).is_message_folded());
+        folds.toggle(message);
+        assert!(!folds.entry(1).is_message_folded());
+        assert!(folds.entry(1).is_block_folded(PresentationBlockId(3)));
+        assert!(folds.entry(2).is_item_folded(0));
+        folds.unfold_all();
+        assert_eq!(folds, FoldState::default());
+    }
+
     fn prompt(text: &str, turn: usize) -> HistoryEntry {
         let HistoryEntry::Conversation(mut entry) = message(text) else {
             unreachable!()
         };
-        entry.header = Some(NativeHeader::Prompt(crate::presentation::DisplayTurn(turn)));
+        entry.header = Some(NativeHeader::Prompt(DisplayTurn(turn)));
         HistoryEntry::Conversation(entry)
     }
 
     #[test]
     fn fold_turns_group_prompt_headers_and_split_at_dividers() {
-        use crate::app::EnsembleHistory;
-        use crate::presentation::DisplayTurn;
         use zevria_workflow::{
             EnsembleRunId, EnsembleWorkflow, PlanArtifact, PlanHandoff, PlanId, PlanVersion,
         };
@@ -434,7 +540,7 @@ mod tests {
         let mut folds = FoldState::default();
         for _ in 0..2 {
             folds.fold_turns(&history, false, TurnFold::FinalExpanded);
-            assert_eq!(folds.folded, expected);
+            assert_eq!(folds.keys(), expected);
         }
         assert!(folds.entry(3).is_message_folded());
         assert_eq!(folds.entry(4).span(), Some(SpanRole::Summary { end: 6 }));
@@ -447,14 +553,92 @@ mod tests {
         expected.extend([2, 9, 11, 13].map(|history_index| FoldKey::Message { history_index }));
         for _ in 0..2 {
             folds.fold_turns(&history, false, TurnFold::OlderFinalFolded);
-            assert_eq!(folds.folded, expected);
+            assert_eq!(folds.keys(), expected);
         }
         assert!(!folds.entry(14).is_message_folded());
         folds.fold_turns(&history, false, TurnFold::FinalExpanded);
         assert_eq!(
-            folds.folded, expected,
+            folds.keys(),
+            expected,
             "zm never re-expands zM's final entries"
         );
+    }
+
+    fn with_thoughts() -> HistoryEntry {
+        let mut entry =
+            HistoryEntry::from_message(Message::assistant("answer"), ToolCallStatus::Finished)
+                .unwrap();
+        let HistoryEntry::Conversation(entry) = &mut entry else {
+            unreachable!()
+        };
+        for (id, visibility) in [
+            (1, BlockVisibility::Always),
+            (2, BlockVisibility::Always),
+            (3, BlockVisibility::Diagnostics),
+        ] {
+            let mut thought = entry.blocks[0].clone();
+            thought.id = PresentationBlockId(id);
+            thought.visibility = visibility;
+            thought.kind = PresentationBlockKind::Reasoning {
+                parts: vec![format!("thought {id}")],
+            };
+            entry.blocks.push(thought);
+        }
+        HistoryEntry::Conversation(entry.clone())
+    }
+
+    #[test]
+    fn both_bulk_actions_only_fold_visible_thoughts_in_the_latest_final_entry() {
+        for diagnostics in [false, true] {
+            for action in [TurnFold::FinalExpanded, TurnFold::OlderFinalFolded] {
+                let mut history = vec![
+                    prompt("old", 1),
+                    with_thoughts(),
+                    prompt("new", 2),
+                    with_thoughts(),
+                    with_thoughts(),
+                ];
+                let mut folds = FoldState::default();
+                folds.fold_turns(&history, diagnostics, action);
+                let mut expected = HashSet::from([
+                    FoldKey::Message { history_index: 0 },
+                    FoldKey::Message { history_index: 2 },
+                    FoldKey::Span { start: 3, end: 3 },
+                ]);
+                if action == TurnFold::OlderFinalFolded {
+                    expected.insert(FoldKey::Message { history_index: 1 });
+                }
+                for id in 1..=if diagnostics { 3 } else { 2 } {
+                    expected.insert(FoldKey::Block {
+                        history_index: 4,
+                        id: PresentationBlockId(id),
+                    });
+                }
+                assert_eq!(folds.keys(), expected);
+                folds.fold_turns(&history, diagnostics, action);
+                assert_eq!(folds.keys(), expected, "a repeated action is idempotent");
+
+                history.push(message("latest without thoughts"));
+                assert!(folds.entry(5).span().is_none());
+                assert!(!folds.entry(5).is_message_folded());
+                let mut fresh = FoldState::default();
+                fresh.fold_turns(&history, diagnostics, action);
+                expected.retain(|key| !matches!(key, FoldKey::Block { .. } | FoldKey::Span { .. }));
+                expected.insert(FoldKey::Span { start: 3, end: 4 });
+                assert_eq!(fresh.keys(), expected, "do not look backward for reasoning");
+
+                history.push(prompt("new prompt alone", 3));
+                let mut fresh = FoldState::default();
+                fresh.fold_turns(&history, diagnostics, action);
+                assert!(
+                    !fresh
+                        .keys()
+                        .iter()
+                        .any(|key| matches!(key, FoldKey::Block { .. }))
+                );
+                assert!(!fresh.entry(6).is_message_folded());
+            }
+        }
     }
 
     #[test]
@@ -476,12 +660,12 @@ mod tests {
         let mut folds = FoldState::default();
         folds.fold_turns(&history, false, TurnFold::FinalExpanded);
         assert_eq!(
-            folds.folded,
+            folds.keys(),
             HashSet::from([FoldKey::Span { start: 1, end: 1 }])
         );
         folds.fold_turns(&history, true, TurnFold::FinalExpanded);
         assert_eq!(
-            folds.folded,
+            folds.keys(),
             HashSet::from([FoldKey::Span { start: 0, end: 3 }])
         );
         history.push(message("new cycle"));
@@ -489,7 +673,7 @@ mod tests {
         assert_eq!(folds.span_containing(5), None);
         folds.fold_turns(&history, false, TurnFold::FinalExpanded);
         assert_eq!(
-            folds.folded,
+            folds.keys(),
             HashSet::from([FoldKey::Span { start: 1, end: 3 }])
         );
     }
@@ -513,7 +697,7 @@ mod tests {
             let mut folds = FoldState::default();
             folds.fold_turns(&history, false, fold);
             assert_eq!(
-                folds.folded,
+                folds.keys(),
                 HashSet::from([FoldKey::Span { start: 1, end: 2 }])
             );
             folds.fold_turns(&history, true, fold);
@@ -521,9 +705,9 @@ mod tests {
                 FoldKey::Message { history_index: 0 },
                 FoldKey::Span { start: 1, end: 2 },
             ]);
-            assert_eq!(folds.folded, expected);
+            assert_eq!(folds.keys(), expected);
             folds.fold_turns(&history, false, fold);
-            assert_eq!(folds.folded, expected, "hidden Message intent survives");
+            assert_eq!(folds.keys(), expected, "hidden Message intent survives");
         }
     }
 
@@ -543,15 +727,15 @@ mod tests {
             let mut folds = FoldState::default();
             for fold in [TurnFold::FinalExpanded, TurnFold::OlderFinalFolded] {
                 folds.fold_turns(&[], diagnostics, fold);
-                assert!(folds.folded.is_empty());
+                assert!(folds.keys().is_empty());
             }
             folds.fold_turns(&history, diagnostics, TurnFold::FinalExpanded);
-            assert!(folds.folded.is_empty());
+            assert!(folds.keys().is_empty());
             folds.fold_turns(&history, diagnostics, TurnFold::OlderFinalFolded);
             let expected = HashSet::from([FoldKey::Message { history_index: 0 }]);
-            assert_eq!(folds.folded, expected);
+            assert_eq!(folds.keys(), expected);
             folds.fold_turns(&history, diagnostics, TurnFold::FinalExpanded);
-            assert_eq!(folds.folded, expected);
+            assert_eq!(folds.keys(), expected);
         }
     }
 
@@ -566,13 +750,13 @@ mod tests {
         assert_eq!(folds.span_containing(2), Some((2, 3)));
         assert_eq!(folds.span_containing(4), Some((4, 4)));
         folds.fold(FoldKey::Span { start: 1, end: 5 });
-        assert_eq!(folds.folded.len(), 2);
+        assert_eq!(folds.keys().len(), 2);
         folds.fold(FoldKey::Span { start: 3, end: 3 });
         assert_eq!(folds.span_containing(2), None);
         assert_eq!(folds.span_containing(3), Some((3, 3)));
         assert!(folds.entry(1).is_message_folded());
         folds.unfold_all();
-        assert!(folds.folded.is_empty());
+        assert!(folds.keys().is_empty());
     }
 
     #[test]
@@ -591,7 +775,7 @@ mod tests {
             let mut folds = FoldState::default();
             folds.fold_turns(conversation.history(), false, TurnFold::FinalExpanded);
             assert_eq!(
-                folds.folded,
+                folds.keys(),
                 HashSet::from([
                     FoldKey::Message { history_index: 0 },
                     FoldKey::Message { history_index: 2 },
@@ -608,7 +792,7 @@ mod tests {
             }
             folds.reconcile(&conversation);
             assert_eq!(
-                folds.folded,
+                folds.keys(),
                 HashSet::from([
                     FoldKey::Message { history_index: 0 },
                     FoldKey::Message { history_index: 2 },
@@ -633,8 +817,26 @@ mod tests {
                 folds.reconcile(&conversation);
                 assert!(!folds.entry(index).is_message_folded());
             }
-            assert!(folds.folded.is_empty());
+            assert!(folds.keys().is_empty());
         }
+    }
+
+    #[test]
+    fn reconcile_never_hides_a_new_compaction_divider_at_a_reused_position() {
+        let mut conversation = ConversationState::default();
+        for entry in [message("first"), message("to edit"), message("last")] {
+            conversation.push_entry(entry);
+        }
+        let mut folds = FoldState::default();
+        folds.fold_turns(conversation.history(), false, TurnFold::FinalExpanded);
+        assert_eq!(folds.span_containing(1), Some((0, 1)));
+        conversation.commit_edit(1, true);
+        assert!(matches!(
+            conversation.entry(1),
+            Some(HistoryEntry::CompactionDivider)
+        ));
+        folds.reconcile(&conversation);
+        assert_eq!(folds.span_containing(1), None);
     }
 
     #[test]
@@ -652,16 +854,16 @@ mod tests {
         for history_index in 0..conversation.history().len() {
             folds.fold(FoldKey::Message { history_index });
         }
-        assert_eq!(folds.folded.len(), 4);
+        assert_eq!(folds.keys().len(), 4);
         assert!(
             folds
-                .folded
+                .keys()
                 .iter()
                 .all(|key| matches!(key, FoldKey::Message { .. }))
         );
         conversation.commit_edit(2, true);
         folds.reconcile(&conversation);
-        assert_eq!(folds.folded.len(), 2);
+        assert_eq!(folds.keys().len(), 2);
         assert!(folds.entry(0).is_message_folded());
         assert!(folds.entry(1).is_message_folded());
         // Reused positions in the new branch do not inherit removed intent.
@@ -673,7 +875,7 @@ mod tests {
         entry.blocks.clear();
         folds.reconcile(&conversation);
         assert!(!folds.entry(0).is_message_folded());
-        assert_eq!(folds.folded.len(), 1);
+        assert_eq!(folds.keys().len(), 1);
     }
 
     #[test]
@@ -718,12 +920,12 @@ mod tests {
         };
         entry.blocks.clear();
         folds.reconcile(&conversation);
-        assert_eq!(folds.folded.len(), 2);
+        assert_eq!(folds.keys().len(), 2);
         assert!(!folds.entry(0).is_block_folded(old.1));
         assert!(folds.entry(resolved.0).is_block_folded(resolved.1));
         assert!(folds.entry(1).is_item_folded(0));
         folds.reconcile(&conversation);
-        assert_eq!(folds.folded.len(), 2, "reconciliation is idempotent");
+        assert_eq!(folds.keys().len(), 2, "reconciliation is idempotent");
     }
 
     #[test]
@@ -759,34 +961,7 @@ mod tests {
             TurnFold::FinalExpanded,
         ] {
             folds.fold_turns(&history, false, fold);
-            assert_eq!(folds.folded, expected);
-        }
-    }
-
-    #[test]
-    fn restore_and_projection_replacement_clear_explicit_intent() {
-        for replacement in 0..3 {
-            let mut app = App::new();
-            app.conversation.push_entry(message("original"));
-            app.folds.fold(FoldKey::Message { history_index: 0 });
-            match replacement {
-                0 => app.restore(vec![
-                    zevria_transcript::transcript::TranscriptItem::Message(Message::user(
-                        "restored",
-                    )),
-                ]),
-                1 => {
-                    let mut projection = ConversationState::default();
-                    projection.push_entry(message("replacement with same coordinates"));
-                    let change = app.conversation.replace_projection(projection);
-                    assert!(app.apply_conversation_change(change).is_empty());
-                }
-                _ => {
-                    let change = app.conversation.clear_projection();
-                    assert!(app.apply_conversation_change(change).is_empty());
-                }
-            }
-            assert!(app.folds.folded.is_empty());
+            assert_eq!(folds.keys(), expected);
         }
     }
 }

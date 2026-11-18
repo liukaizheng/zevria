@@ -64,6 +64,19 @@ pub struct EnsembleWorkerHistory {
     review_authoritative: bool,
 }
 
+impl EnsembleWorkerHistory {
+    pub fn copy_text(&self) -> String {
+        let mut text = format!(
+            "{} ({}) · safe mode {} · {}",
+            self.descriptor.label, self.descriptor.agent, self.descriptor.safe_mode, self.status
+        );
+        if let Some(failure) = &self.failure {
+            text.push_str(&format!("\n{failure}"));
+        }
+        text
+    }
+}
+
 /// Root-pane representation of one ensemble command and its ordered worker
 /// rows. Worker descriptor, status, and failure cannot drift by index.
 #[derive(Debug, Clone)]
@@ -275,7 +288,7 @@ impl HistoryEntry {
         self.first_selectable_index(diagnostics_visible).is_some()
     }
 
-    fn index_is_selectable(&self, index: usize, diagnostics_visible: bool) -> bool {
+    pub(crate) fn index_is_selectable(&self, index: usize, diagnostics_visible: bool) -> bool {
         match self {
             Self::Conversation(entry) => entry
                 .blocks
@@ -373,17 +386,7 @@ fn selected_plain_text(entry: &HistoryEntry, content_index: usize) -> Option<Str
         HistoryEntry::Ensemble(ensemble) if content_index == 0 => Some(ensemble.command()),
         HistoryEntry::Ensemble(ensemble) => {
             let worker = ensemble.workers.get(content_index.checked_sub(1)?)?;
-            let mut text = format!(
-                "{} ({}) · safe mode {} · {}",
-                worker.descriptor.label,
-                worker.descriptor.agent,
-                worker.descriptor.safe_mode,
-                worker.status
-            );
-            if let Some(failure) = &worker.failure {
-                text.push_str(&format!("\n{failure}"));
-            }
-            Some(text)
+            Some(worker.copy_text())
         }
         HistoryEntry::JobNotice(notice, _) if content_index == 0 => Some(notice.text().to_owned()),
         HistoryEntry::Error(error) if content_index == 0 => Some(error.clone()),

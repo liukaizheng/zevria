@@ -458,6 +458,68 @@ fn zm_keeps_prompt_rows_and_collapses_earlier_calls_leaving_the_last_expanded() 
 }
 
 #[test]
+fn both_turn_chords_fold_latest_thoughts_but_not_the_answer_or_later_output() {
+    fn response() -> Message {
+        let thought = |opening: &str, detail: &str| {
+            AssistantContent::Reasoning(zevria_content::reasoning::from_blocks(
+                None,
+                vec![ReasoningContent::Summary(format!("{opening}\n\n{detail}"))],
+            ))
+        };
+        assistant_message(vec![
+            thought("Checked the logs", "First thought detail"),
+            thought("Checked the tests", "Second thought detail"),
+            AssistantContent::text("Final answer\n\nFull answer detail"),
+        ])
+    }
+
+    for suffix in ['m', 'M'] {
+        for scope in [
+            None,
+            Some(SelectionScope::Message),
+            Some(SelectionScope::Block),
+        ] {
+            let mut app = App::new();
+            span_turn(&mut app, 1, 1);
+            start_span_turn(&mut app, 2, "Latest prompt");
+            span_call(&mut app, 2, 1, response(), true);
+            select_scope(&mut app, scope, cursor(3, 2));
+            chord(&mut app, suffix);
+            assert!(folded(&app, 3, 0));
+            assert!(folded(&app, 3, 1));
+            assert!(!folded(&app, 3, 2));
+            assert!(!message_folded(&app, 3));
+            rendered_text(&mut app, 100, 50);
+            let text = laid_out_transcript_text(&app);
+            assert!(
+                text.contains("▸ reasoning") && text.contains("▸ Checked the tests"),
+                "{text}"
+            );
+            assert!(text.contains("Full answer detail"));
+            assert!(
+                !text.contains("First thought detail") && !text.contains("Second thought detail")
+            );
+
+            app.select_for_test(cursor(3, 0));
+            chord(&mut app, 'o');
+            assert!(!folded(&app, 3, 0));
+            assert!(folded(&app, 3, 1));
+            start_span_turn(&mut app, 3, "New prompt");
+            span_call(&mut app, 3, 1, response(), true);
+            assert!(!(0..3).any(|content| folded(&app, 5, content)));
+            assert!(!message_folded(&app, 5));
+            chord(&mut app, 'R');
+            assert!(fold_keys(&app).is_empty());
+            rendered_text(&mut app, 100, 50);
+            let text = laid_out_transcript_text(&app);
+            assert!(
+                text.contains("First thought detail") && text.contains("Second thought detail")
+            );
+        }
+    }
+}
+
+#[test]
 fn turn_folds_preserve_final_entry_policy_in_normal_and_both_select_scopes() {
     for suffix in ['m', 'M'] {
         for scope in [

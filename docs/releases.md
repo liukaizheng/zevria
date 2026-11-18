@@ -280,9 +280,9 @@ The dependency chain is `prepare → native build/test matrix → assemble → d
   Windows). It runs locked workspace/all-target checks, builds the real debug
   executable required by ACP process fixtures, and runs locked workspace tests.
   Caches are separated by OS, target, Rust version, and lockfile.
-- **Additional Linux gates:** formatting, the five explicit default-feature
+- **Additional Linux gates:** formatting, all six explicit default-feature
   [provider-prefix release gates](transcript-performance.md#permanent-provider-prefix-release-gates),
-  with nonempty test-filter checks, and a separate provider/app
+  with nonempty test-filter checks, and a separate provider/host
   `cache-diagnostics` regression test invocation. These checks never enable the
   diagnostic feature on the subsequent production build.
 - **Package validation:** builds only the production `zevria` executable with
@@ -304,8 +304,11 @@ The dependency chain is `prepare → native build/test matrix → assemble → d
 - **Draft:** only a matching version-tag **push** can enter the write job. It
   rechecks the four-file bundle and remote tag's resolved commit before writing.
   Creation uses the existing tag with `--verify-tag`, an explicit title,
-  generated release notes, and the source marker described below. It never
-  creates a tag or publishes the draft.
+  generated release notes, and the source marker described below. The job then
+  requires exactly four uploaded assets, downloads them by asset ID, and checks
+  each SHA-256 against that run’s bundle. It records the verified asset IDs,
+  sizes, and digests in the run summary. It never creates a tag or publishes the
+  draft.
 
 The matrix does not fail fast: a failed platform does not cancel the other
 platforms, but **any failure blocks release creation**. Per-ref concurrency uses
@@ -398,7 +401,8 @@ creation needs a separately authorized version-tag push.
 
   Preserve this marker when editing notes. Retries do **not** regenerate or
   overwrite maintainer-edited notes/title, and do not remove unrelated assets.
-  They replace only the three expected archive filenames and `SHA256SUMS`.
+  They replace only the three expected archive filenames and `SHA256SUMS`, and
+  stop before replacing anything if there are unexpected assets.
 - Published releases, missing/conflicting source markers, mismatched prerelease
   flags, moved/deleted tags, duplicate tag releases, and API/authentication failures
   stop the job. Only a successful paginated release listing with no matching

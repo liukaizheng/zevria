@@ -12,11 +12,14 @@ gpui_kit::actions!(
         Complete,
         CompletionUp,
         CompletionDown,
-        ExpandBlock,
-        CollapseBlock,
+        ToggleFold,
+        Fold,
+        Unfold,
         ExpandAllThinking,
         CollapseAllThinking,
-        ToggleFinalOutputs,
+        FoldEarlierContent,
+        FoldOlderTurns,
+        UnfoldAll,
         PreviousTurn,
         NextTurn,
         JumpToBeginning,
@@ -39,8 +42,13 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-n", NewSession, None),
         KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("ZevriaDesktop")),
         KeyBinding::new("cmd-.", Stop, None),
-        KeyBinding::new("alt-cmd-right", ExpandBlock, Some("ZevriaDesktop")),
-        KeyBinding::new("alt-cmd-left", CollapseBlock, Some("ZevriaDesktop")),
+        KeyBinding::new("alt-cmd-right", Unfold, Some("ZevriaTranscript")),
+        KeyBinding::new("alt-cmd-left", Fold, Some("ZevriaTranscript")),
+        KeyBinding::new(
+            "cmd-c",
+            gpui_kit::component::input::Copy,
+            Some("ZevriaDisclosure"),
+        ),
         KeyBinding::new(
             "alt-shift-cmd-right",
             ExpandAllThinking,
@@ -51,7 +59,9 @@ pub fn install(cx: &mut App) {
             CollapseAllThinking,
             Some("ZevriaDesktop"),
         ),
-        KeyBinding::new("shift-cmd-r", ToggleFinalOutputs, Some("ZevriaDesktop")),
+        KeyBinding::new("shift-cmd-r", FoldEarlierContent, Some("ZevriaDesktop")),
+        KeyBinding::new("alt-shift-cmd-r", FoldOlderTurns, Some("ZevriaDesktop")),
+        KeyBinding::new("alt-cmd-r", UnfoldAll, Some("ZevriaDesktop")),
         KeyBinding::new("alt-cmd-up", PreviousTurn, Some("ZevriaDesktop")),
         KeyBinding::new("alt-cmd-down", NextTurn, Some("ZevriaDesktop")),
         KeyBinding::new("alt-shift-cmd-up", JumpToBeginning, Some("ZevriaDesktop")),
@@ -92,10 +102,10 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("up", CompletionUp, Some("ZevriaCompletion > Input")),
         KeyBinding::new("down", CompletionDown, Some("ZevriaCompletion > Input")),
     ]);
-    cx.set_menus(menus(false));
+    cx.set_menus(menus());
 }
 
-pub fn menus(final_outputs: bool) -> Vec<Menu> {
+pub fn menus() -> Vec<Menu> {
     vec![
         Menu::new("Zevria").items([MenuItem::action("Quit Zevria", Quit)]),
         Menu::new("File").items([
@@ -111,12 +121,15 @@ pub fn menus(final_outputs: bool) -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Toggle sidebar", ToggleSidebar),
             MenuItem::separator(),
-            MenuItem::action("Expand block", ExpandBlock),
-            MenuItem::action("Collapse block", CollapseBlock),
+            MenuItem::action("Toggle fold", ToggleFold),
+            MenuItem::action("Fold", Fold),
+            MenuItem::action("Unfold", Unfold),
             MenuItem::action("Expand all thinking", ExpandAllThinking),
             MenuItem::action("Collapse all thinking", CollapseAllThinking),
             MenuItem::separator(),
-            MenuItem::action("Show final outputs only", ToggleFinalOutputs).checked(final_outputs),
+            MenuItem::action("Fold earlier content", FoldEarlierContent),
+            MenuItem::action("Fold older turns", FoldOlderTurns),
+            MenuItem::action("Unfold all", UnfoldAll),
             MenuItem::separator(),
             MenuItem::action("Previous turn", PreviousTurn),
             MenuItem::action("Next turn", NextTurn),

@@ -335,21 +335,24 @@ scroll by half a page.
 
 ### Fold and unfold transcript content
 
-First select the message or block you want to act on. Then press the two keys in
-each chord in sequence—for example, `z` followed by `a`:
+In the TUI, first select a message, block/item, or folded range for a local
+fold action. Press the two keys in sequence—for example, `z` followed by `a`.
+On Desktop, focus the corresponding disclosure or use the View menu.
 
-- `za`: toggle the selected message (Message scope) or block/item (Block scope).
-- `zc`: fold the selected message or block/item.
-- `zo`: unfold the selected message or block/item.
-- `zm`: fold earlier content in each conversation turn while leaving its latest
-  eligible entry open.
-- `zM`: apply `zm` and also fold the final eligible entry in each older turn;
-  the most recent turn's final eligible entry stays open.
-- `zR`: unfold all folded transcript content.
+| TUI | Desktop | What it does |
+| --- | --- | --- |
+| `za` | **Toggle fold**, or click/Enter/Space on a disclosure | Toggle the focused message, block/item, or folded range. |
+| `zc` / `zo` | **Fold** / **Unfold** (⌥⌘← / ⌥⌘→) | Set the target's fold without changing any folds inside it. |
+| `zm` | **Fold earlier content** (⇧⌘R, also in the title strip) | Fold non-final prompts and group earlier entries in each turn. |
+| `zM` | **Fold older turns** (⌥⇧⌘R) | Do the same and fold the final eligible entry in each older turn. |
+| `zR` | **Unfold all** (⌥⌘R) | Clear every fold in the active pane. |
 
-`za`, `zc`, and `zo` act on a specific selection, so use them in Select mode.
-`zm`, `zM`, and `zR` also work in Normal mode. Folding only changes your view:
-it does not edit the transcript or change what Zevria sends to the model.
+`zm`, `zM`, and `zR` also work in TUI Normal mode and from the Desktop composer.
+Both bulk fold actions collapse the thoughts of the newest turn's final eligible
+entry, without folding its answer or looking back for earlier thoughts. They do
+not undo any existing folds. New and restored content starts expanded, and
+streaming previews stay open. Folding only changes your view: it does not edit
+the transcript or change what Zevria sends to the model.
 
 ### A short practice run
 

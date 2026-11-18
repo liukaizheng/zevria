@@ -118,21 +118,16 @@ app-level **Stop the current turn?** replacement confirmation remains modal.
 
 ### Thinking is supplied text, not an invented explanation
 
-Only readable provider text creates a **Thinking** disclosure. Empty,
+Only readable provider text creates a **Thinking** section. Empty,
 encrypted-only, signature-only, redacted-only and unknown typed parts create
 neither a heading nor placeholder thoughts. Anthropic `thinking_display =
 "omitted"`, Responses `send_reasoning = false` and models without readable
 summaries can therefore show no section. The UI does not infer missing thoughts.
 
-- Live thinking starts **expanded**. Earlier thinking in the same running turn
-  stays open. At turn end, untouched sections fold to their first non-empty
-  supplied line (Markdown markers removed) and a supplied-text word count.
-- Explicit expand/collapse choices win through later deltas and tail-to-commit
-  identity transfer. Restored sessions start folded. Projection replacement
-  retires old view choices; the next turn never inherits a previous tail's fold.
-- Folding waits while you are scrolled away from the latest output, then applies
-  when tail following resumes. Interrupted and unsaved live sections stay open
-  so they explain the stop. Saved interrupted output is folded on restore.
+- New and restored thinking starts **expanded**. A fold is explicit and shows
+  the first non-empty supplied line (without Markdown styling) and a word count.
+  In-place revisions to folded history retain their folds. A separate streaming
+  preview is always open and has no disclosure until it becomes history.
 - For message-only streams such as Anthropic, a correlated Stop or failure keeps
   the readable partial **in this window only**, labeled **Stopped, not saved to
   this session**. It is not engine history, is not persisted and is absent after
@@ -148,7 +143,7 @@ beside the existing dashed thread. In the TUI, reasoning Markdown inherits its
 muted italic tone throughout, including bold titles, headings, inline/fenced
 code and underlined links; ordinary answer Markdown keeps its accents.
 
-Thinking headers are full-width, at least 28 px tall, focusable native Button
+Thinking disclosures are at least 28 px tall, focusable native Button
 roles with an expanded state, the accessible name **Thinking**, and the preview
 as their description. Enter and Space activate them. Copy and text selection
 remain available; answer code fences also have a language label and Copy action.
@@ -158,57 +153,51 @@ model**, **Thinking**, **Writing**, **Running command** (or another tool name),
 **Reconnecting** with attempt/countdown, **Compacting context**, and **Stopping**.
 Opaque-only progress cannot be called thinking, so it remains waiting.
 
-### Final outputs and turn navigation
+### Transcript folding and turn navigation
 
-**Show final outputs only** (⇧⌘R) is a window-level reading mode, available as a
-checked View-menu item and the title-strip **Final outputs** book toggle. The
-compact title strip keeps only its icon. The mode applies to the root and every
-inspected subtask, survives session replacement and pane switches, and is not
-saved across launches. Turning it off restores the ordinary transcript and its
-independent thinking/tool choices. Toggling either way retires every pane's
-per-run expand/collapse choices.
+Folds are explicit and pane-local. The title strip's **Fold earlier content**
+button is a one-shot action, not a reading mode. New and restored messages,
+thoughts, and tool blocks start expanded. Finishing a turn, scrolling, or
+switching panes never adds folds. A replacement transcript starts without
+folds; inspecting another pane leaves the original pane's folds in place.
+Folds do not edit the draft or affect what's saved or sent to the model.
 
-Each turn begins at the shared `ConversationState::turn_starts(false)` boundary:
-ordinary/skill prompts, approved Plan handoffs, job continuations and ensembles.
-Headerless ACP user groups map to their entry row; entries before the first
-boundary form a group without a prompt. Prompts stay fully readable. The last
-conversation entry with visible assistant content, including its Thinking
-header, and everything after it stay visible. Thus a trailing error, **Stopped**
-node or job/startup notice never displaces the answer. Plan artifacts, errors and
-compaction dividers also stay visible and split steps into separate runs.
-Approved Plan handoffs remain navigation stops without adding a hairline to
-their existing card border.
+| TUI | Desktop View action | Effect |
+| --- | --- | --- |
+| `za` | **Toggle fold** (or click/Enter/Space on the disclosure) | Toggle the focused message, block/item, or folded range. |
+| `zc` / `zo` | **Fold** / **Unfold** (⌥⌘← / ⌥⌘→) | Set that fold without disturbing any nested folds. |
+| `zm` | **Fold earlier content** (⇧⌘R) | Fold non-final prompts and group earlier eligible entries; don't message-fold a turn's final eligible entry. |
+| `zM` | **Fold older turns** (⌥⇧⌘R) | Also message-fold the final eligible entries of older turns. |
+| `zR` | **Unfold all** (⌥⌘R) | Clear every fold in the current pane. |
 
-A maximal eligible run before the answer becomes a full-width disclosure on the
-solid thread: **14 steps**, then muted **8 tool calls, 4 thoughts, 2 messages**,
-then **+42 −7** when changes exist. Zero parts are omitted; singular forms are
-**1 step**, **1 tool call**, **1 thought**, **1 message**. Tool, subtask and web
-blocks count as calls, reasoning as thoughts, other blocks as messages. Empty
-interior entries are absorbed. The summary inherits the first step's speaker
-label; expanding does not duplicate that label. A muted **⋮** marks compression
-on the thread, not a new card. There is no summary Copy action.
+Both bulk fold actions collapse the visible Thinking blocks in the newest
+turn's final eligible entry, without folding the answer or looking backward
+for thinking. These actions are additive: **Fold earlier content** won't undo
+an earlier **Fold older turns** or a manual fold. Use bulk actions from the
+composer as well. **Expand all thinking** and **Collapse all thinking** change
+just the individual Thinking folds in the pane, including in folded messages.
 
-Like Thinking, a summary is a focusable native Button, at least 28 px high, with
-an expanded state, **N steps** as its accessible name and the breakdown as its
-description. Click, Enter/Space and focused ⌥⌘→/← operate only that run. Live
-runs start expanded with their header visible. At turn end, untouched runs fold
-only while following the tail; scrolling away defers the fold until following
-resumes. Explicit choices survive later commits, not the next turn. Restored
-and finished runs start folded. Collapsing a run that contains the non-following
-viewport's top anchors it at the summary; focused hidden steps transfer focus
-to the summary, even if that header has not rendered yet. Disabling the mode
-with a focused summary returns focus to the window's shortcut context.
+Desktop and the TUI group folding by numbered prompt headers, including Plan
+handoffs, job continuations, and ensemble prompts. Headerless entries join the
+current turn, or form a leading turn if there's no prompt yet. The last visible,
+selectable entry determines the end of the turn's earlier content, even if that
+entry is a notice rather than an answer. Compaction dividers split ranges and
+stay visible. Hidden diagnostics aren't fold targets.
 
-This adapts TUI **zm/zR** (turn-intermediate folding/unfolding) and **zo** (one
-span), not **zM** (older final-response outlines). Desktop does not fold prompts
-or modify engine, provider or persisted state.
+The chevron in the speaker gutter controls the whole message. Chevrons in the
+content column control individual blocks and items. A folded range takes one
+line, labeled **N earlier messages**; opening it restores the rows and their
+nested folds. If a fold covers the focused target or the reader's anchor, that
+location moves to the visible representative. Previews use the available
+width, and Copy uses the original content rather than the preview.
 
 **Previous turn** (⌥⌘↑) goes to the nearest start strictly above the live viewport
 top, or the current start if the top is mid-turn/mid-prompt. **Next turn** (⌥⌘↓)
 goes to the nearest start strictly below. Exact-boundary presses skip that start;
 there is no wraparound. These actions align the row top, detach tail following,
-preserve all folds and leave composer draft, cursor and focus alone. Pending
-thinking/step folds keep waiting. **Jump to beginning** (⌥⇧⌘↑) targets row 0;
+preserve all folds and leave composer draft, cursor and focus alone. Turn stops
+covered by a folded range land on its summary, without duplicate stops.
+**Jump to beginning** (⌥⇧⌘↑) targets row 0;
 **Jump to latest** (⌥⇧⌘↓, formerly ⌥⌘↓) resumes following. The Kit Jump to latest
 button is unchanged. The stops match TUI **[/]**, at Desktop entry-row granularity.
 
@@ -315,10 +304,10 @@ scenes, thinking-live, thinking-restored, thinking-interrupted, thinking-unsaved
 code-heavy answers, docked questions and Plan review also render under Graphite
 Light. The `math` scene restores
 the shared Hölder proof fixture at 1240×3200 and 720×3200, plus a light-palette
-1240×3200 capture. The `final-outputs` scene restores three multi-step turns
-with commentary, thinking, commands, an edit, a Plan artifact and a stopped
-turn, then dispatches the native mode action. Its 1240×1600 and 720×1600 Graphite
-captures and 1240×1600 Graphite Light capture show the summary disclosures.
+1240×3200 capture. The `transcript-folds` scene restores three turns, then
+invokes **Fold earlier content**. Its 1240×1600 and 720×1600 Graphite captures
+and 1240×1600 Graphite Light capture show the message and range summaries,
+including two collapsed thoughts with the most recent answer still readable.
 The math scene contains all 15 inline and 11 display formulas, including
 large delimiters, boxes and an aligned derivation with a 2 mm row gap.
 
@@ -488,14 +477,14 @@ parser boundary separately from the fully covered proof fixture.
 - Exact primary/output copy values remain available even when display is bounded.
 
 Additional keyboard controls have discoverable View/Session menu items. View
-separates sidebar visibility, block/thinking disclosures, the checked **Show final
-outputs only** mode, and turn navigation/beginning/latest actions:
+separates sidebar visibility, transcript folds, and turn navigation:
 
 | Keys | Action |
 | --- | --- |
-| ⌥⌘→ / ⌥⌘← | Expand/collapse the focused steps, thinking or tool block; from the composer, the latest visible thinking |
-| ⌥⇧⌘→ / ⌥⇧⌘← | Expand/collapse all thinking in the visible pane |
-| ⇧⌘R | Toggle Show final outputs only |
+| ⌥⌘← / ⌥⌘→ | Fold/unfold the focused message, block/item, or range |
+| ⌥⇧⌘→ / ⌥⇧⌘← | Expand/collapse all thinking in the active pane |
+| ⇧⌘R / ⌥⇧⌘R | Fold earlier content / Fold older turns |
+| ⌥⌘R | Unfold all in the active pane |
 | ⌥⌘↑ / ⌥⌘↓ | Previous/next turn, aligned to the transcript top |
 | ⌥⇧⌘↑ | Jump to beginning (row 0) |
 | ⌥⇧⌘↓ | Jump to latest and resume tail following |
@@ -723,7 +712,7 @@ non-macOS stub compiles GPUI.
 ### Focused regression coverage
 
 Native control tests cover live/restored/interrupted thinking, retained row and
-pane identity, deferred folding, keyboard controls and question ownership.
+pane identity, nested explicit folds, keyboard controls and question ownership.
 Layout/focus regressions check the centered column and composer axis, sidebar
 and width changes, blank-click blur/refocus, and Plan Copy in overlay and docked
 panels. Compact-window tests cover completion selection, radios/Other/skip,
@@ -754,7 +743,7 @@ release:
   a generated named theme. Change macOS appearance while streaming; the default
   pair must switch live and a named theme must stay pinned.
 - [ ] Keyboard-only pass: sidebar arrows/Enter; Tab and reverse Shift-Tab;
-  Enter/Space on thinking and steps; ⌥⌘→/←; expand/collapse-all; ⇧⌘R;
+  Enter/Space on message, block, and range disclosures; ⌥⌘→/←; ⇧⌘R; ⌥⇧⌘R; ⌥⌘R;
   ⌥⌘↑/↓ from the focused composer; ⌥⇧⌘↑/↓; ⇧⌘M; ⌘↩ decisions.
   Check every visible focus ring, including virtualized and narrow-window rows.
 - [ ] Open model selection from the status control, ⌃⌘M with composer/search focus,
@@ -763,33 +752,29 @@ release:
   errors, loading/cancelling states, Tab containment and Escape/focus restoration
   in light, dark and a configured theme. Compare nonempty thinking disclosures,
   scroll, draft and telemetry before/after effort-only Apply; verify no model turn.
-- [ ] VoiceOver spot check: Thinking has its Button role, name, supplied preview
-  description and expanded state; step summaries announce N steps and their
-  breakdown with expanded state; the book toggle announces Show final outputs
-  only and its checked state. Copy and Jump to latest have meaningful names.
+- [ ] VoiceOver spot check: thinking, message, block, and range disclosures
+  announce meaningful Button names and expanded state. Thinking includes the
+  supplied preview description. The title button announces Fold earlier content.
 - [ ] Test Reduce Motion on and off: the live tip stays at ◐ and Plan opening is
   instant when enabled.
 - [ ] Open workspace (including ⌘O on the no-workspace screen), new session,
   streamed Markdown and native command/edit rows.
-- [ ] Real Anthropic session: live thinking starts expanded; manual collapse
-  survives deltas and commit; Stop mid-thinking keeps the marked **unsaved**
-  partial before a neutral Stopped node. Restore and confirm it is absent.
-- [ ] Real Responses session: live summary thinking is visible, not Waiting;
-  Stop mid-thinking retains the persisted interrupted attempt. Restore and
-  reopen its folded supplied text. Test a model/config without readable thoughts:
-  no empty Thinking header or invented content should appear.
-- [ ] Complete a turn: untouched thinking folds; explicit choices persist.
-  Scroll up before completion and verify no jump/fold until Jump to latest.
-  Enter another turn and confirm it does not inherit the previous fold.
-- [ ] Real-provider final-outputs pass: enable during streaming; live steps stay
-  expanded, explicit choices survive commits, untouched folds wait while scrolled
-  away and apply on Jump to latest. Prompts, final responses, Plan artifacts,
-  errors and Stopped stay visible. Toggle off and verify ordinary disclosures.
-- [ ] With final outputs enabled, inspect a child and replace/resume a session:
-  the mode survives, replacement retires run choices, composer navigation leaves
-  draft/cursor/focus alone, and the View menu matches the title toggle.
-- [ ] Collapse while focused within a step or reading its middle: focus/top move
-  to that run's summary rather than unrelated content.
+- [ ] Real Anthropic session: the render-only tail stays expanded through
+  deltas and commit. Stop mid-thinking keeps the marked **unsaved** partial
+  before a neutral Stopped node. Restore and confirm it is absent.
+- [ ] Real Responses session: live summary thinking is visible, not Waiting.
+  Fold a projected history thought, then verify it stays folded on revision.
+  Stop mid-thinking and restore the saved interrupted output: it starts open.
+  Test a model without readable thoughts; expect no empty Thinking header.
+- [ ] Complete a turn while scrolled up. Nothing folds or jumps; Jump to latest
+  and another turn don't create new folds. Check that both bulk actions keep the
+  newest answer readable and fold only its Thinking blocks.
+- [ ] Fold with focus or the top anchor inside an earlier range. Verify the
+  summary takes focus and the anchor, then reopen it without losing inner
+  folds or the reader's place. Check turn jumps and full copy payloads.
+- [ ] Inspect a child, use Unfold all, and return to a folded root. Replace or
+  resume the root: the new transcript opens expanded and the draft is unchanged
+  by fold actions.
 - [ ] Plan → Ready → Implement; repeat with Implement in fresh session.
 - [ ] Text/select/Other/multi-select/optional questions in the dock: transcript
   scroll stays available, ⌘↩ sends, Esc only dismisses when allowed, and the

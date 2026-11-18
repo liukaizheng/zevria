@@ -78,6 +78,7 @@ jobs:
           toolchain = output('rustc', '+stable', '--version').split()[1]
           if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', toolchain):
               raise SystemExit('Expected an exact stable Rust release')
+          print(f'Release identity: source={source} version={version} rust={toolchain}', flush=True)
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
               f.write(f'source={source}\nversion={version}\ntoolchain={toolchain}\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
@@ -319,7 +320,7 @@ jobs:
         run: cargo build --locked -p zevria --bin zevria --target "$TARGET"
       - name: Test the locked workspace with default features
         run: cargo test --locked --workspace --exclude zevria-desktop --target "$TARGET"
-      - name: Enforce the five default-feature provider-prefix release gates
+      - name: Enforce the six default-feature provider-prefix release gates
         if: runner.os == 'Linux'
         run: |
           python - <<'PY'
@@ -329,6 +330,7 @@ jobs:
           gates = [
               ('zevria-provider', 'native_output_items_survive_capture_and_full_replay_after_reconnect'),
               ('zevria-provider', 'second_prompt'),
+              ('zevria-provider', 'recovery_records_leave_prepared_full_input_and_wire_body_identical'),
               ('zevria-provider', 'engine_skill_lifecycle_is_incremental_with_both_explicit_wire_roles'),
               ('zevria-core', 'second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix'),
               ('zevria-core', 'resumed_session_reuses_the_pre_shutdown_prefix_after_tool_activation'),
@@ -492,6 +494,7 @@ jobs:
               shutil.copyfile(archive, bundle / name)
           manifest = ''.join(sums[name] for name in sorted(sums))
           (bundle / 'SHA256SUMS').write_bytes(manifest.encode('ascii'))
+          print('Verified release bundle SHA256SUMS:\n' + manifest, end='', flush=True)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
               f.write(f'## Verified release bundle\n\nSource: `{os.environ["SOURCE_SHA"]}`\n\nRust: `{os.environ["TOOLCHAIN"]}`\n\n')
               f.write('Targets: ' + ', '.join(f'`{t}`' for t in targets) + '\n\n')
@@ -545,6 +548,7 @@ jobs:
           from pathlib import Path
           import re
           import subprocess
+          import tempfile
           from urllib.parse import quote
 
           version, source = os.environ['VERSION'], os.environ['SOURCE_SHA']
@@ -562,13 +566,16 @@ jobs:
               raise SystemExit('Unexpected release bundle inventory')
           if any(p.is_symlink() or not p.is_file() for p in bundle.iterdir()):
               raise SystemExit('Expected regular bundle files')
-          sums = ''
+          hashes = {}
           for name in names:
               with (bundle / name).open('rb') as f:
-                  sums += f'{hashlib.file_digest(f, "sha256").hexdigest()}  {name}\n'
-          if (bundle / 'SHA256SUMS').read_bytes() != sums.encode('ascii'):
+                  hashes[name] = hashlib.file_digest(f, 'sha256').hexdigest()
+          sums = ''.join(f'{hashes[name]}  {name}\n' for name in names)
+          manifest = sums.encode('ascii')
+          if (bundle / 'SHA256SUMS').read_bytes() != manifest:
               raise SystemExit('Bundle checksum verification failed')
-          assets = [str(bundle / name) for name in [*names, 'SHA256SUMS']]
+          hashes['SHA256SUMS'] = hashlib.sha256(manifest).hexdigest()
+          assets = [str(bundle / name) for name in hashes]
 
           def gh(*args):
               # Argument arrays, not shell interpolation. Any CLI/API failure is fatal.
@@ -597,6 +604,10 @@ jobs:
                   raise SystemExit('Multiple releases have the same tag')
               return matches[0] if matches else None
 
+          def list_assets(release_id):
+              pages = api(f'{base}/releases/{release_id}/assets?per_page=100', '--paginate', '--slurp')
+              return [asset for page in pages for asset in page]
+
           def validate_draft(release):
               markers = re.findall(r'<!-- zevria-release-source: (.*?) -->', release.get('body') or '')
               if release['tag_name'] != tag or release['draft'] is not True or markers != [source]:
@@ -621,21 +632,39 @@ jobs:
               # delete unrelated assets. Maintainers must not publish during retries.
               release = api(f'{base}/releases/{release["id"]}')
               validate_draft(release)
+              current_names = [asset['name'] for asset in list_assets(release['id'])]
+              if len(current_names) != len(set(current_names)) or not set(current_names).issubset(hashes):
+                  raise SystemExit('Unexpected draft asset inventory; refusing to replace assets')
               verify_tag()
               gh('release', 'upload', tag, *assets, '--repo', repo, '--clobber')
 
           release = api(f'{base}/releases/{release["id"]}')
           validate_draft(release)
           verify_tag()
-          pages = api(f'{base}/releases/{release["id"]}/assets?per_page=100', '--paginate', '--slurp')
-          uploaded = [a for page in pages for a in page]
-          for path in map(Path, assets):
-              matches = [a for a in uploaded if a['name'] == path.name]
-              if len(matches) != 1 or matches[0]['state'] != 'uploaded' or matches[0]['size'] != path.stat().st_size:
-                  raise SystemExit(f'Incomplete draft upload: {path.name}')
+          uploaded = sorted(list_assets(release['id']), key=lambda asset: asset['name'])
+          if [asset['name'] for asset in uploaded] != sorted(hashes):
+              raise SystemExit('Unexpected uploaded draft asset inventory')
+          receipts = []
+          for asset in uploaded:
+              name, asset_id, size = asset['name'], asset['id'], asset['size']
+              if asset['state'] != 'uploaded' or size != (bundle / name).stat().st_size:
+                  raise SystemExit(f'Incomplete draft upload: {name}')
+              # Fetch the actual bytes by ID, not metadata or a public draft URL.
+              with tempfile.TemporaryFile() as download:
+                  subprocess.run(['gh', 'api', f'{base}/releases/assets/{asset_id}',
+                                  '-H', 'Accept: application/octet-stream'],
+                                 stdout=download, check=True, timeout=120)
+                  download.seek(0)
+                  digest = hashlib.file_digest(download, 'sha256').hexdigest()
+              if digest != hashes[name]:
+                  raise SystemExit(f'Uploaded asset SHA-256 mismatch: {name}')
+              receipts.append(f'{digest}  {name} (asset ID {asset_id}, {size} bytes)')
+          receipt = '\n'.join(receipts)
+          print('Verified uploaded GitHub release assets:\n' + receipt, flush=True)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
               f.write(f'## Draft ready for manual review\n\nSource: `{source}`\n\nRust: `{os.environ["TOOLCHAIN"]}`\n\n')
-              f.write(f'Native targets and checksums:\n\n```text\n{sums}```\n\nDraft: {release["html_url"]}\n\n')
+              f.write(f'Uploaded assets verified against this run’s bundle:\n\n```text\n{receipt}\n```\n\n')
+              f.write(f'Draft: {release["html_url"]} (ID `{release["id"]}`)\n\n')
               f.write('Not published. Review all assets and platform acceptance before publishing manually.\n')
           PY
       - name: Report an unsuccessful draft attempt

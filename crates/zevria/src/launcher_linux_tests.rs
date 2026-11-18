@@ -2,12 +2,39 @@
 use super::*;
 use std::{fs, os::unix::fs::PermissionsExt, process::Output};
 
-fn install(root: &Path, program: &str) -> std::path::PathBuf {
+fn install(root: &Path, program: impl AsRef<Path>) -> std::path::PathBuf {
     fs::create_dir_all(root.join("bin")).unwrap();
     let exe = root.join("bin/zevria");
     fs::copy(program, &exe).unwrap();
     exe
 }
+
+fn install_echo_fixture(root: &Path) -> std::path::PathBuf {
+    // A multicall /bin/echo can dispatch on argv[0] and reject the name zevria.
+    let fixture = tempfile::tempdir().unwrap();
+    fs::write(
+        fixture.path().join("echo.c"),
+        br#"#include <stdio.h>
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    return puts(argv[1]) == EOF ? 1 : 0;
+}
+"#,
+    )
+    .unwrap();
+    let build = std::process::Command::new("cc")
+        .current_dir(fixture.path())
+        .args(["echo.c", "-o", "echo"])
+        .output()
+        .expect("start cc for the Linux launcher fixture");
+    assert!(
+        build.status.success(),
+        "failed to compile the Linux launcher fixture: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    install(root, fixture.path().join("echo"))
+}
+
 fn select(home: &Path) -> Output {
     std::process::Command::new("/bin/sh")
         .args([
@@ -135,7 +162,7 @@ fn linked_metadata_directory_is_not_an_alternate_locator_source() {
 fn legacy_relative_path_entries_are_resolved_in_the_mapped_workspace() {
     let home = tempfile::tempdir().unwrap();
     let workspace = home.path().join("workspace");
-    let exe = install(&workspace.join("relative"), "/bin/echo");
+    let exe = install_echo_fixture(&workspace.join("relative"));
     let result = std::process::Command::new("/bin/sh")
         .args([
             "-c",
@@ -166,7 +193,7 @@ fn legacy_relative_path_entries_are_resolved_in_the_mapped_workspace() {
 fn actual_probe_and_handoff_keep_the_exact_selected_executable() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("custom ';&");
-    let exe = install(&root, "/bin/echo");
+    let exe = install_echo_fixture(&root);
     install(&home.path().join(".cargo"), "/bin/false");
     locator(home.path(), format!("{}\n", root.display()).as_bytes());
     let output = std::process::Command::new("/bin/sh")

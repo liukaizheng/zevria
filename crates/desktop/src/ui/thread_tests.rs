@@ -65,9 +65,7 @@ fn render(window: Window, cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn live_thinking_is_accessible_and_explicit_collapse_survives_deltas_and_commit(
-    cx: &mut TestAppContext,
-) {
+fn render_only_tail_is_unfolded_and_commits_with_the_same_text_view(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup(cx);
     let id = TurnId::new(100);
     start(&controller, id, cx);
@@ -87,18 +85,14 @@ fn live_thinking_is_accessible_and_explicit_collapse_survives_deltas_and_commit(
             .test_identity(&thought.key, cx)
             .unwrap()
     });
+    assert_eq!(thought.target, None);
     cx.update_window(window.into(), |_, window, cx| {
-        let header = window
-            .within(thought.key.clone())
-            .find("thinking-disclosure");
-        assert_eq!(header.role(), Some(gpui_kit::Role::Button));
-        assert_eq!(header.expanded(), Some(true));
-        assert_eq!(header.label(), Some("Thinking"));
-        assert_eq!(header.description(), Some("Trace the source"));
-        assert!(header.bounds().size.height >= px(28.));
-        window
-            .within(thought.key.clone())
-            .click("thinking-disclosure", cx);
+        assert!(
+            window.try_find("block-disclosure").is_some(),
+            "the committed prompt is foldable"
+        );
+        window.press("shift-cmd-r", cx);
+        window.press("alt-shift-cmd-left", cx);
     })
     .unwrap();
     stream(
@@ -107,7 +101,7 @@ fn live_thinking_is_accessible_and_explicit_collapse_survives_deltas_and_commit(
         thinking("### **Trace** the source carefully"),
         cx,
     );
-    assert!(!thoughts(&view, cx)[0].expanded);
+    assert!(thoughts(&view, cx)[0].expanded);
     event(
         &controller,
         E::TurnCompleted {
@@ -119,7 +113,8 @@ fn live_thinking_is_accessible_and_explicit_collapse_survives_deltas_and_commit(
     );
     render(window, cx);
     let committed = thoughts(&view, cx).remove(0);
-    assert!(!committed.expanded);
+    assert!(committed.expanded);
+    assert!(committed.target.is_some());
     assert_ne!(committed.key, thought.key);
     assert_eq!(
         identity,
@@ -140,7 +135,7 @@ fn live_thinking_is_accessible_and_explicit_collapse_survives_deltas_and_commit(
 }
 
 #[gpui_kit::test]
-fn untouched_thinking_folds_only_after_turn_end_and_tail_following(cx: &mut TestAppContext) {
+fn untouched_thinking_stays_open_after_turn_end_and_scroll(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup_at_size(cx, 720., 520.);
     let id = TurnId::new(102);
     start(&controller, id, cx);
@@ -172,17 +167,11 @@ fn untouched_thinking_folds_only_after_turn_end_and_tail_following(cx: &mut Test
     );
     render(window, cx);
     let after = scroller.read_with(cx, |view, cx| view.scroller().read(cx).logical_scroll_top());
-    assert_eq!(
-        before, after,
-        "deltas, commit and turn-end folding must not move the reader"
-    );
-    assert!(
-        thoughts(&view, cx)[0].expanded,
-        "fold is pending while scrolled away"
-    );
+    assert_eq!(before, after, "deltas and commit must not move the reader");
+    assert!(thoughts(&view, cx)[0].expanded);
     scroller.update(cx, |view, cx| view.jump_to_latest(cx));
     render(window, cx);
-    assert!(!thoughts(&view, cx)[0].expanded);
+    assert!(thoughts(&view, cx)[0].expanded);
     assert!(scroller.read_with(cx, |view, cx| view.scroller().read(cx).is_following_tail()));
     start(&controller, TurnId::new(103), cx);
     stream(&controller, TurnId::new(103), thinking("Untouched"), cx);
@@ -195,7 +184,7 @@ fn untouched_thinking_folds_only_after_turn_end_and_tail_following(cx: &mut Test
         },
         cx,
     );
-    assert!(!thoughts(&view, cx).last().unwrap().expanded);
+    assert!(thoughts(&view, cx).last().unwrap().expanded);
 }
 
 #[gpui_kit::test]
@@ -212,14 +201,14 @@ fn blank_click_clears_block_focus_and_keeps_window_shortcuts(cx: &mut TestAppCon
     render(window, cx);
     let thought = thoughts(&view, cx).remove(0);
     cx.update_window(window.into(), |_, window, cx| {
-        let disclosure_focus = view
-            .read(cx)
-            .transcript
-            .read(cx)
-            .test_focus(&thought.key, cx);
+        let disclosure_focus =
+            view.read(cx)
+                .transcript
+                .read(cx)
+                .test_focus(&thought.key, thought.target.unwrap(), cx);
         window
             .within(thought.key.clone())
-            .click("thinking-disclosure", cx);
+            .click("block-disclosure", cx);
         assert!(disclosure_focus.is_focused(window));
         assert!(!view.read(cx).window_focus.is_focused(window));
 
@@ -250,7 +239,7 @@ fn blank_click_clears_block_focus_and_keeps_window_shortcuts(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-fn restored_thinking_starts_folded_and_keyboard_disclosures_work(cx: &mut TestAppContext) {
+fn restored_thinking_starts_open_and_keyboard_disclosures_are_explicit(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup(cx);
     controller.update(cx, |c, cx| {
         c.model.root.conversation.restore(vec![
@@ -262,21 +251,23 @@ fn restored_thinking_starts_folded_and_keyboard_disclosures_work(cx: &mut TestAp
     render(window, cx);
     let thought = thoughts(&view, cx).remove(0);
     assert_eq!(thought.phase, Phase::Restored);
-    assert!(!thought.expanded);
+    assert!(thought.expanded);
     cx.update_window(window.into(), |_, window, cx| {
-        let focus = view
-            .read(cx)
-            .transcript
-            .read(cx)
-            .test_focus(&thought.key, cx);
+        let focus =
+            view.read(cx)
+                .transcript
+                .read(cx)
+                .test_focus(&thought.key, thought.target.unwrap(), cx);
         window.focus(&focus, cx);
         window.press("enter", cx);
     })
     .unwrap();
-    assert!(thoughts(&view, cx)[0].expanded);
+    assert!(!thoughts(&view, cx)[0].expanded);
+    render(window, cx);
     cx.update_window(window.into(), |_, window, cx| window.press("space", cx))
         .unwrap();
-    assert!(!thoughts(&view, cx)[0].expanded);
+    assert!(thoughts(&view, cx)[0].expanded);
+    render(window, cx);
     for (key, expected) in [
         ("alt-cmd-right", true),
         ("alt-cmd-left", false),
@@ -285,7 +276,7 @@ fn restored_thinking_starts_folded_and_keyboard_disclosures_work(cx: &mut TestAp
     ] {
         cx.update_window(window.into(), |_, window, cx| window.press(key, cx))
             .unwrap();
-        cx.run_until_parked();
+        render(window, cx);
         let states = thoughts(&view, cx);
         assert_eq!(states[0].expanded, expected, "{key}");
         if key.contains("shift") {
@@ -302,7 +293,10 @@ fn restored_thinking_starts_folded_and_keyboard_disclosures_work(cx: &mut TestAp
     .unwrap();
     let states = thoughts(&view, cx);
     assert!(!states[0].expanded);
-    assert!(states[1].expanded, "composer expands the latest thinking");
+    assert!(
+        !states[1].expanded,
+        "a local action without a transcript target does nothing"
+    );
 }
 
 #[gpui_kit::test]
@@ -330,7 +324,7 @@ fn opaque_only_thinking_has_no_header_and_truthful_waiting_tip(cx: &mut TestAppC
     render(window, cx);
     assert!(thoughts(&view, cx).is_empty());
     cx.update_window(window.into(), |_, window, _| {
-        assert!(window.try_find("thinking-disclosure").is_none())
+        assert!(window.try_find("block-disclosure").is_some());
     })
     .unwrap();
     assert!(data(&view, cx).iter().any(|b| matches!(&b.kind, BlockKind::Live(LiveTail::Activity(p)) if p == "Waiting for the model")));
@@ -416,6 +410,20 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
             .iter()
             .any(|b| matches!(&b.kind, BlockKind::Live(LiveTail::Activity(p)) if p == "Thinking"))
     );
+    cx.update_window(window.into(), |_, window, cx| {
+        window
+            .within(before.key.clone())
+            .click("block-disclosure", cx);
+    })
+    .unwrap();
+    render(window, cx);
+    assert!(!thoughts(&view, cx)[0].expanded);
+    let AssistantPresentationContent::Reasoning { text } = &mut attempt.presentation[0].content
+    else {
+        unreachable!()
+    };
+    text.push_str("\n\nRevised in place");
+    attempt.touch();
     attempt.close(ResponseAttemptOutcome::Interrupted);
     let saved = zevria_transcript::IncompleteResponse::from_attempt(&attempt)
         .unwrap()
@@ -433,7 +441,8 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
     let interrupted = thoughts(&view, cx).remove(0);
     assert_eq!(before.key, interrupted.key);
     assert_eq!(interrupted.phase, Phase::Interrupted);
-    assert!(interrupted.expanded);
+    assert!(!interrupted.expanded);
+    assert!(interrupted.body.contains("Revised in place"));
     assert!(controller.read_with(cx, |c, _| c.unsaved_blocks.is_empty()));
     assert!(
         data(&view, cx)
@@ -448,9 +457,9 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
         cx.notify();
     });
     let restored = thoughts(&view, cx).remove(0);
-    assert_eq!(restored.body, "Readable attempt");
+    assert_eq!(restored.body, "Readable attempt\n\nRevised in place");
     assert_eq!(restored.phase, Phase::Restored);
-    assert!(!restored.expanded);
+    assert!(restored.expanded);
 }
 
 #[gpui_kit::test]
@@ -527,43 +536,7 @@ fn reasoning_tool_reasoning_answer_order_is_identical_live_committed_and_restore
         cx.notify();
     });
     assert_eq!(order(cx), ["thinking", "tool", "thinking", "answer"]);
-    assert!(thoughts(&view, cx).iter().all(|b| !b.expanded));
-}
-
-#[gpui_kit::test]
-fn explicit_expand_survives_turn_end_but_projection_replacement_retires_choices(
-    cx: &mut TestAppContext,
-) {
-    let (window, view, controller, _) = setup(cx);
-    let id = TurnId::new(108);
-    start(&controller, id, cx);
-    stream(&controller, id, thinking("An explicit choice"), cx);
-    render(window, cx);
-    cx.update_window(window.into(), |_, window, cx| {
-        window.press("alt-cmd-left", cx);
-        window.press("alt-cmd-right", cx);
-    })
-    .unwrap();
-    event(
-        &controller,
-        E::TurnCompleted {
-            turn_id: id,
-            message: thinking("An explicit choice"),
-            attempt_id: None,
-        },
-        cx,
-    );
-    assert!(thoughts(&view, cx)[0].expanded);
-    controller.update(cx, |c, cx| {
-        c.model
-            .root
-            .conversation
-            .restore(vec![TranscriptItem::Message(thinking(
-                "An explicit choice",
-            ))]);
-        cx.notify();
-    });
-    assert!(!thoughts(&view, cx)[0].expanded);
+    assert!(thoughts(&view, cx).iter().all(|b| b.expanded));
 }
 
 #[gpui_kit::test]

@@ -1,7 +1,7 @@
 use super::{
     style,
     theme::{palette, tones},
-    transcript::TranscriptView,
+    transcript::{LocalFold, TranscriptView},
 };
 use crate::{
     actions,
@@ -9,13 +9,14 @@ use crate::{
 };
 use gpui_kit::component::{
     IconName, Sizable, TitleBar,
-    button::{Button, ButtonVariants, Toggle},
+    button::{Button, ButtonVariants},
     input::{InputEvent, TextareaState},
     text::TextViewState,
     tooltip::Tooltip,
 };
 use gpui_kit::{prelude::*, *};
 use std::path::PathBuf;
+use zevria_presentation::fold::TurnFold;
 
 pub(super) enum Replacement {
     New,
@@ -111,7 +112,9 @@ impl DesktopWindow {
             this.sync(window, cx);
             cx.notify();
         });
-        let transcript = cx.new(|cx| TranscriptView::new(controller.clone(), cx));
+        let window_focus = cx.focus_handle();
+        let transcript =
+            cx.new(|cx| TranscriptView::new(controller.clone(), window_focus.clone(), window, cx));
         let weak = controller.downgrade();
         window.on_window_should_close(cx, move |_, cx| {
             let _ = weak.update(cx, |this, cx| this.quit(cx));
@@ -137,7 +140,7 @@ impl DesktopWindow {
             plan_overlay: false,
             question_focus: cx.focus_handle(),
             model_ui: None,
-            window_focus: cx.focus_handle(),
+            window_focus,
             picker: None,
             was_live: false,
             _input: input,
@@ -153,6 +156,7 @@ impl DesktopWindow {
         let draft = controller.draft.clone();
         let mode = controller.model.root.next_mode();
         let live = controller.phase == Phase::Live;
+        let inspecting = controller.model.selected_child.is_some();
         let plan = controller
             .model
             .root
@@ -198,10 +202,12 @@ impl DesktopWindow {
                 input.set_selected_range(end..end, cx);
             });
         }
-        if live && !self.was_live {
+        if live && !self.was_live && !inspecting {
             self.composer
                 .update(cx, |input, cx| input.focus(window, cx));
-        } else if !live && (self.was_live || window.focused(cx).is_none()) {
+        } else if (!live && (self.was_live || window.focused(cx).is_none()))
+            || (inspecting && self.composer.focus_handle(cx).contains_focused(window, cx))
+        {
             window.focus(&self.window_focus, cx);
         }
         self.was_live = live;
@@ -370,27 +376,20 @@ impl DesktopWindow {
     }
 }
 impl DesktopWindow {
-    fn disclose(&mut self, expanded: bool, all: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.controller.read(cx).model.models.is_open() {
+    fn with_transcript(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut TranscriptView, &mut Context<TranscriptView>),
+    ) {
+        let model = &self.controller.read(cx).model;
+        if self.pending_replace.is_some()
+            || model.models.is_open()
+            || model.question.is_some()
+            || self.screen(cx).is_some()
+        {
             return;
         }
-        let from_composer = self.composer.focus_handle(cx).contains_focused(window, cx);
-        self.transcript.update(cx, |view, cx| {
-            view.disclose(expanded, all, from_composer, window, cx)
-        });
-    }
-    fn set_final_outputs(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.controller.read(cx).model.models.is_open() {
-            return;
-        }
-        let retired_focus = self
-            .transcript
-            .update(cx, |view, cx| view.set_final_outputs(on, window, cx));
-        if retired_focus {
-            window.focus(&self.window_focus, cx);
-        }
-        cx.set_menus(actions::menus(on));
-        cx.notify();
+        self.transcript.update(cx, f);
     }
     fn confirm_decision(&mut self, cx: &mut Context<Self>) {
         if self.pending_replace.is_some() || self.controller.read(cx).model.models.is_open() {
@@ -479,15 +478,17 @@ impl DesktopWindow {
         main = main.child(div().flex_1());
         if transcript_shown {
             main = main.child(
-                Toggle::new("final-outputs")
+                Button::new("fold-earlier-content")
+                    .ghost()
                     .small()
-                    .gap(px(4.))
                     .icon(IconName::BookOpen)
-                    .when(!self.compact, |toggle| toggle.label("Final outputs"))
-                    .tooltip("Show final outputs only ⇧⌘R")
-                    .checked(self.transcript.read(cx).final_outputs())
-                    .on_click(cx.listener(|this, on: &bool, window, cx| {
-                        this.set_final_outputs(*on, window, cx)
+                    .when(!self.compact, |button| button.label("Fold earlier content"))
+                    .accessibility_label("Fold earlier content")
+                    .tooltip("Fold earlier content ⇧⌘R")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.with_transcript(cx, |view, cx| {
+                            view.fold_turns(TurnFold::FinalExpanded, window, cx)
+                        });
                     })),
             );
         }
@@ -612,28 +613,44 @@ impl Render for DesktopWindow {
                 this.controller
                     .update(cx, |controller, cx| controller.cancel(cx));
             }))
-            .on_action(cx.listener(|this, _: &actions::ExpandBlock, window, cx| {
-                this.disclose(true, false, window, cx)
+            .on_action(cx.listener(|this, _: &actions::ToggleFold, window, cx| {
+                this.with_transcript(cx, |view, cx| {
+                    view.fold_local(LocalFold::Toggle, window, cx)
+                });
             }))
-            .on_action(cx.listener(|this, _: &actions::CollapseBlock, window, cx| {
-                this.disclose(false, false, window, cx)
+            .on_action(cx.listener(|this, _: &actions::Fold, window, cx| {
+                this.with_transcript(cx, |view, cx| view.fold_local(LocalFold::Close, window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &actions::Unfold, window, cx| {
+                this.with_transcript(cx, |view, cx| view.fold_local(LocalFold::Open, window, cx));
             }))
             .on_action(
                 cx.listener(|this, _: &actions::ExpandAllThinking, window, cx| {
-                    this.disclose(true, true, window, cx)
+                    this.with_transcript(cx, |view, cx| view.thinking(true, window, cx));
                 }),
             )
             .on_action(
                 cx.listener(|this, _: &actions::CollapseAllThinking, window, cx| {
-                    this.disclose(false, true, window, cx)
+                    this.with_transcript(cx, |view, cx| view.thinking(false, window, cx));
                 }),
             )
             .on_action(
-                cx.listener(|this, _: &actions::ToggleFinalOutputs, window, cx| {
-                    let on = !this.transcript.read(cx).final_outputs();
-                    this.set_final_outputs(on, window, cx);
+                cx.listener(|this, _: &actions::FoldEarlierContent, window, cx| {
+                    this.with_transcript(cx, |view, cx| {
+                        view.fold_turns(TurnFold::FinalExpanded, window, cx)
+                    });
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &actions::FoldOlderTurns, window, cx| {
+                    this.with_transcript(cx, |view, cx| {
+                        view.fold_turns(TurnFold::OlderFinalFolded, window, cx)
+                    });
+                }),
+            )
+            .on_action(cx.listener(|this, _: &actions::UnfoldAll, window, cx| {
+                this.with_transcript(cx, |view, cx| view.unfold_all(window, cx));
+            }))
             .on_action(cx.listener(|this, _: &actions::PreviousTurn, _, cx| {
                 if this.controller.read(cx).model.models.is_open() {
                     return;

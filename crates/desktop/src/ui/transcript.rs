@@ -1,42 +1,51 @@
 use super::{
-    blocks::{self, BlockData, BlockKind, BlockView, DisclosureChanged, Gutter, LiveTail},
+    blocks::{
+        self, BlockData, BlockKind, BlockView, DisclosureChanged, Gutter, LiveTail,
+        MessageDisclosure,
+    },
     rows::{self, RowChange},
     style,
     theme::palette,
 };
 use crate::{
     controller::SessionController,
-    disclosure::{self, DisclosureStore, Phase, TailIdentity},
-    turns::{self, StepCounts, StepRun, TurnDirection},
+    disclosure::{self, Phase, TailIdentity},
+    turns::{self, TurnDirection},
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::{prelude::*, *};
 use std::{
     collections::{HashMap, HashSet},
-    ops::Range,
     time::Instant,
 };
 use zevria_presentation::{
     ConversationTail,
     blocks::PresentationBlockId,
     conversation::{HistoryEntry, ToolCallStatus},
+    fold::{FoldKey, FoldState, SpanRole, TurnFold},
 };
 
 struct RetainedBlock {
     view: Entity<BlockView>,
     _subscriptions: Vec<Subscription>,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum RowRole {
-    #[default]
-    Plain,
-    Summary {
-        start: usize,
-        expanded: bool,
-    },
-    Hidden,
+#[derive(Clone, Copy)]
+pub(super) enum LocalFold {
+    Toggle,
+    Close,
+    Open,
 }
-/// Each pane keeps its own anchors, parsing, choices and scroll position while inspected.
+
+fn fold_row(key: FoldKey) -> usize {
+    match key {
+        FoldKey::Span { start, .. } => start,
+        FoldKey::Message { history_index }
+        | FoldKey::Block { history_index, .. }
+        | FoldKey::Item { history_index, .. } => history_index,
+    }
+}
+
+/// Each pane keeps its own rendering, fold intent, and scroll position while parked.
 struct PaneView {
     scroller: Entity<MessageScrollerState>,
     epoch: String,
@@ -44,12 +53,10 @@ struct PaneView {
     row_data: HashMap<usize, (u64, Vec<BlockData>)>,
     tail_data: Vec<BlockData>,
     blocks: HashMap<String, RetainedBlock>,
-    disclosures: DisclosureStore,
-    steps: DisclosureStore,
-    runs: Vec<StepRun>,
-    summaries: HashMap<usize, BlockData>,
-    roles: Vec<RowRole>,
-    final_outputs: bool,
+    folds: FoldState,
+    // A covered row/target can be restored when its representative reopens.
+    scroll_return: Option<(usize, usize)>,
+    focus_return: Option<(FoldKey, FoldKey)>,
     restored: HashSet<String>,
     anchors: HashMap<String, (usize, PresentationBlockId)>,
     revision: u64,
@@ -65,12 +72,9 @@ impl PaneView {
             row_data: HashMap::new(),
             tail_data: Vec::new(),
             blocks: HashMap::new(),
-            disclosures: DisclosureStore::default(),
-            steps: DisclosureStore::default(),
-            runs: Vec::new(),
-            summaries: HashMap::new(),
-            roles: Vec::new(),
-            final_outputs: false,
+            folds: FoldState::default(),
+            scroll_return: None,
+            focus_return: None,
             restored: HashSet::new(),
             anchors: HashMap::new(),
             revision: u64::MAX,
@@ -78,27 +82,70 @@ impl PaneView {
             call: None,
         }
     }
-    fn roles(&self, final_outputs: bool) -> Vec<RowRole> {
-        let mut roles = vec![RowRole::Plain; self.fingerprints.len()];
-        if final_outputs {
-            for run in &self.runs {
-                let Some(summary) = self.summaries.get(&run.start) else {
-                    continue;
-                };
-                let expanded = self.steps.expanded(&summary.key, summary.phase);
-                roles[run.start] = RowRole::Summary {
-                    start: run.start,
-                    expanded,
-                };
-                if !expanded {
-                    roles[run.start + 1..=run.end].fill(RowRole::Hidden);
-                }
-            }
-        }
-        roles
+    fn source(&self, index: usize) -> &[BlockData] {
+        self.row_data
+            .get(&index)
+            .map(|(_, data)| data.as_slice())
+            .unwrap_or(&self.tail_data)
     }
-    fn is_summary(&self, key: &str) -> bool {
-        self.summaries.values().any(|summary| summary.key == key)
+    fn range_key(&self, start: usize) -> String {
+        format!("{}-range-{start}", self.epoch)
+    }
+    fn representative(&self, target: FoldKey) -> FoldKey {
+        let row = fold_row(target);
+        if let Some((start, end)) = self.folds.span_containing(row) {
+            FoldKey::Span { start, end }
+        } else if self.folds.entry(row).is_message_folded()
+            || matches!(target, FoldKey::Span { .. })
+        {
+            FoldKey::Message { history_index: row }
+        } else {
+            target
+        }
+    }
+    /// Visibility order is range, message, then individual block/item. The
+    /// canonical row data and its retained renderers are never replaced by a preview.
+    fn data(&self, index: usize) -> Vec<BlockData> {
+        let Some((_, blocks)) = self.row_data.get(&index) else {
+            return self.tail_data.clone();
+        };
+        let folds = self.folds.entry(index);
+        match folds.span() {
+            Some(SpanRole::Hidden { .. }) => return Vec::new(),
+            Some(SpanRole::Summary { end }) => {
+                let count = (index..=end)
+                    .filter(|&row| !self.source(row).is_empty())
+                    .count();
+                return vec![BlockData::range(&self.epoch, index, end, count)];
+            }
+            None => {}
+        }
+        let folded = folds.is_message_folded();
+        let mut data = if folded {
+            blocks.first().cloned().into_iter().collect()
+        } else {
+            blocks.clone()
+        };
+        if let Some(first) = data.first_mut().filter(|first| first.target.is_some()) {
+            first.message = Some(MessageDisclosure {
+                key: FoldKey::Message {
+                    history_index: index,
+                },
+                folded,
+                show_speaker: folded
+                    || index
+                        .checked_sub(1)
+                        .is_some_and(|previous| self.folds.entry(previous).span().is_some()),
+                blocks: blocks.len(),
+                speaker: first.speaker(),
+            });
+        }
+        for block in &mut data {
+            block.expanded = !block
+                .target
+                .is_some_and(|target| self.folds.contains(target));
+        }
+        data
     }
 }
 pub struct TranscriptView {
@@ -107,20 +154,21 @@ pub struct TranscriptView {
     selected: Option<zevria_foundation::SubtaskId>,
     parked: HashMap<Option<zevria_foundation::SubtaskId>, PaneView>,
     compact: bool,
-    final_outputs: bool,
+    window_focus: FocusHandle,
     _controller: Subscription,
-    _scroll: Subscription,
 }
 impl TranscriptView {
-    pub fn new(controller: Entity<SessionController>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        controller: Entity<SessionController>,
+        window_focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let pane = PaneView::new(cx);
         let selected = controller.read(cx).model.selected_child.clone();
-        let watch = cx.observe(&controller, |this, _, cx| {
-            this.sync(cx);
+        let watch = cx.observe_in(&controller, window, |this, _, window, cx| {
+            this.sync(window, cx);
             cx.notify();
-        });
-        let scroll = cx.observe(&pane.scroller, |this, _, cx| {
-            this.flush_folds(cx);
         });
         let mut this = Self {
             controller,
@@ -128,11 +176,10 @@ impl TranscriptView {
             selected,
             parked: HashMap::new(),
             compact: false,
-            final_outputs: false,
+            window_focus,
             _controller: watch,
-            _scroll: scroll,
         };
-        this.sync(cx);
+        this.sync(window, cx);
         this
     }
     pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
@@ -146,41 +193,10 @@ impl TranscriptView {
         self.refresh_views(cx);
         cx.notify();
     }
-    pub fn final_outputs(&self) -> bool {
-        self.final_outputs
-    }
-    /// Returns whether focus belonged to a summary that has now been retired.
-    pub fn set_final_outputs(
-        &mut self,
-        on: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.final_outputs == on {
-            return false;
-        }
-        let retired_focus = !on
-            && self.pane.summaries.values().any(|summary| {
-                self.pane
-                    .blocks
-                    .get(&summary.key)
-                    .is_some_and(|block| block.view.read(cx).is_focused(window, cx))
-            });
-        self.final_outputs = on;
-        self.pane.steps = DisclosureStore::default();
-        for pane in self.parked.values_mut() {
-            pane.steps = DisclosureStore::default();
-            pane.roles = pane.roles(on);
-        }
-        self.sync_with_window(Some(window), cx);
-        cx.notify();
-        retired_focus
-    }
     fn rekey(&mut self, old: &str, new: &str) {
         if old == new {
             return;
         }
-        self.pane.disclosures.rekey(old, new);
         if self.pane.restored.remove(old) {
             self.pane.restored.insert(new.into());
         }
@@ -192,12 +208,25 @@ impl TranscriptView {
     pub(super) fn scroller(&self) -> Entity<MessageScrollerState> {
         self.pane.scroller.clone()
     }
-    fn sync(&mut self, cx: &mut Context<Self>) {
-        self.sync_with_window(None, cx);
-    }
-    fn sync_with_window(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.controller.read(cx).model.selected_child.clone();
-        if selected != self.selected {
+        let pane_changed = selected != self.selected;
+        let epoch = format!(
+            "{:?}",
+            self.controller
+                .read(cx)
+                .model
+                .visible()
+                .conversation
+                .epoch()
+        );
+        let reset_focus = (pane_changed || epoch != self.pane.epoch)
+            && self
+                .pane
+                .blocks
+                .values()
+                .any(|block| block.view.read(cx).contains_focus(window, cx));
+        if pane_changed {
             let next = self
                 .parked
                 .remove(&selected)
@@ -206,7 +235,6 @@ impl TranscriptView {
             self.parked.insert(self.selected.clone(), previous);
             self.selected = selected;
             self.pane.revision = u64::MAX;
-            self._scroll = cx.observe(&self.pane.scroller, |this, _, cx| this.flush_folds(cx));
             // Background parsing may have completed while this pane was hidden.
             self.pane.scroller.update(cx, |list, cx| list.remeasure(cx));
         }
@@ -222,17 +250,13 @@ impl TranscriptView {
         });
         let controller = self.controller.read(cx);
         let model = controller.model.visible();
-        let epoch = format!("{:?}", model.conversation.epoch());
         let history = model.conversation.history();
-        // Management is busy for admission/status, never a conversational
-        // live-tip row or a reason to alter thinking/step disclosure phases.
+        // Management is busy for admission/status, never a conversational live-tip row.
         let busy = model.session.has_turn_work();
         let call = model.session.call_header();
         let revision = controller.projection_revision;
-        let mode_changed = self.final_outputs != self.pane.final_outputs;
         // The clock and draft edits must not re-fingerprint history or clone the tail.
-        if !mode_changed
-            && epoch == self.pane.epoch
+        if epoch == self.pane.epoch
             && revision == self.pane.revision
             && busy == self.pane.busy
             && call == self.pane.call
@@ -253,19 +277,6 @@ impl TranscriptView {
             .collect::<Vec<_>>();
         fingerprints.push(0); // Stable live-tip row, even when idle.
         let history_changed = replaced || self.pane.fingerprints != fingerprints;
-        let next_runs =
-            (history_changed || busy != self.pane.busy || call != self.pane.call || mode_changed)
-                .then(|| {
-                    if self.final_outputs {
-                        turns::step_runs(
-                            history,
-                            &turns::turn_rows(&model.conversation.turn_starts(false)),
-                            busy.then_some(call).flatten().map(|h| h.turn()),
-                        )
-                    } else {
-                        Vec::new()
-                    }
-                });
         let mut previous_rows = std::mem::take(&mut self.pane.row_data);
         let mut rows = HashMap::new();
         let mut anchors = HashMap::new();
@@ -361,6 +372,7 @@ impl TranscriptView {
                     ordinal += 1;
                 }
                 block.source = None;
+                block.target = None;
                 block.header = call;
                 block.phase = if position == last {
                     Phase::Live
@@ -371,13 +383,15 @@ impl TranscriptView {
         }
         if busy {
             let phrase = super::status::working_activity(model, controller.cancelling);
-            tail.push(BlockData::new(
+            let mut tip = BlockData::new(
                 format!("{epoch}-tip"),
                 BlockKind::Live(LiveTail::Activity(phrase.clone())),
                 Gutter::Live,
                 phrase,
                 true,
-            ));
+            );
+            tip.row = history.len();
+            tail.push(tip);
         }
         // Match message-only previews to the newly committed call, never a later call's ordinal.
         let mut transfers = Vec::new();
@@ -406,19 +420,21 @@ impl TranscriptView {
                 }
             }
         }
+        let prior_folds = history_changed.then(|| self.pane.folds.clone());
         if replaced {
             self.pane.blocks.clear();
-            self.pane.disclosures = DisclosureStore::default();
-            self.pane.steps = DisclosureStore::default();
-            self.pane.roles.clear();
+            self.pane.folds.clear();
+            self.pane.scroll_return = None;
+            self.pane.focus_return = None;
             self.pane.restored = rows
                 .values()
                 .flat_map(|(_, data)| data.iter().map(|b| b.key.clone()))
                 .collect();
+        } else if history_changed {
+            self.pane.folds.reconcile(&model.conversation);
         }
         self.pane.epoch = epoch;
-        // Ambiguous fallback boundaries retire to policy instead of attaching a
-        // reader's choice (or retained parser) to the wrong repeated text.
+        // Never attach a retained parser to an ambiguous repeated tail block.
         let mut counts = HashMap::new();
         for (old, _) in &transfers {
             *counts.entry(old.clone()).or_insert(0usize) += 1;
@@ -429,90 +445,13 @@ impl TranscriptView {
         {
             self.rekey(&old, &new);
         }
-        for block in rows.values().flat_map(|(_, data)| data).chain(&tail) {
-            if matches!(block.kind, BlockKind::Reasoning) {
-                self.pane.disclosures.observe(&block.key, block.phase);
-            }
-        }
         self.pane.row_data = rows;
         self.pane.tail_data = tail;
         self.pane.anchors = anchors;
-        let mut changed_summaries = Vec::new();
-        if let Some(runs) = next_runs {
-            let mut summaries = HashMap::new();
-            for run in &runs {
-                let mut counts = StepCounts::default();
-                let data = (run.start..=run.end)
-                    .filter_map(|row| self.pane.row_data.get(&row))
-                    .flat_map(|(_, data)| data);
-                for block in data {
-                    match &block.kind {
-                        BlockKind::Tool { meta, .. } => {
-                            counts.tool_calls += 1;
-                            counts.added += meta.added;
-                            counts.removed += meta.removed;
-                        }
-                        BlockKind::Subtask { .. } | BlockKind::Web => counts.tool_calls += 1,
-                        BlockKind::Reasoning => counts.thoughts += 1,
-                        _ => counts.messages += 1,
-                    }
-                }
-                let gutter = self
-                    .pane
-                    .row_data
-                    .get(&run.start)
-                    .and_then(|(_, blocks)| blocks.first())
-                    .map_or(Gutter::None, |block| match block.gutter {
-                        Gutter::Label(_) => block.gutter,
-                        _ => Gutter::None,
-                    });
-                let summary = BlockData::steps(
-                    format!("{}-steps-{}", self.pane.epoch, run.start),
-                    counts,
-                    gutter,
-                    if run.live {
-                        Phase::Live
-                    } else {
-                        Phase::Finished
-                    },
-                );
-                self.pane.steps.observe(&summary.key, summary.phase);
-                if self.pane.summaries.get(&run.start).is_none_or(|old| {
-                    old.revision != summary.revision
-                        || old.gutter != summary.gutter
-                        || old.phase != summary.phase
-                }) {
-                    changed_summaries.push(run.start);
-                }
-                summaries.insert(run.start, summary);
-            }
-            self.pane.runs = runs;
-            self.pane.summaries = summaries;
-            self.pane.steps.retain(
-                &self
-                    .pane
-                    .summaries
-                    .values()
-                    .map(|b| b.key.clone())
-                    .collect(),
-            );
-        }
-        let valid = self
-            .pane
-            .row_data
-            .values()
-            .flat_map(|(_, data)| data.iter())
-            .chain(&self.pane.tail_data)
-            .chain(self.pane.summaries.values())
-            .map(|b| b.key.clone())
-            .collect::<HashSet<_>>();
-        self.pane.blocks.retain(|key, _| valid.contains(key));
-        self.pane.restored.retain(|key| valid.contains(key));
-        self.pane.disclosures.retain(&valid);
+        self.prune_views(cx);
         self.pane.revision = revision;
         self.pane.busy = busy;
         self.pane.call = call;
-        self.pane.final_outputs = self.final_outputs;
         if replaced {
             self.pane
                 .scroller
@@ -539,77 +478,51 @@ impl TranscriptView {
                 .update(cx, |list, cx| list.remeasure_items(last..last + 1, cx));
         }
         self.pane.fingerprints = fingerprints;
-        for row in changed_summaries {
-            self.pane
-                .scroller
-                .update(cx, |list, cx| list.remeasure_items(row..row + 1, cx));
+        if reset_focus {
+            // The previous pane's disclosures aren't in this key dispatch path anymore.
+            window.focus(&self.window_focus, cx);
         }
-        self.apply_roles(window, cx);
-        self.flush_folds(cx);
+        if let Some(before) = prior_folds.as_ref().filter(|_| !replaced) {
+            self.remeasure_folds(before, cx);
+        }
         self.refresh_views(cx);
     }
-    /// The one presentation boundary: callers never accidentally expose hidden steps.
-    fn data(&self, index: usize) -> Vec<BlockData> {
-        let role = self.pane.roles.get(index).copied().unwrap_or_default();
-        if role == RowRole::Hidden {
-            return Vec::new();
-        }
-        let mut data = self
-            .pane
+    fn prune_views(&mut self, cx: &App) {
+        let pane = &mut self.pane;
+        let valid = pane
             .row_data
-            .get(&index)
-            .map(|(_, data)| data.clone())
-            .unwrap_or_else(|| self.pane.tail_data.clone());
-        if let RowRole::Summary { start, expanded } = role {
-            if expanded {
-                if let Some(first) = data.first_mut()
-                    && matches!(first.gutter, Gutter::Label(_))
-                {
-                    first.gutter = Gutter::None;
-                }
-            } else {
-                data.clear();
-            }
-            if let Some(summary) = self.pane.summaries.get(&start) {
-                data.insert(0, summary.clone());
-            }
-        }
-        for block in &mut data {
-            block.expanded = block.collapsible
-                && if matches!(block.kind, BlockKind::Steps(_)) {
-                    self.pane.steps.expanded(&block.key, block.phase)
-                } else {
-                    self.pane.disclosures.expanded(
-                        &block.key,
-                        if matches!(block.kind, BlockKind::Reasoning) {
-                            block.phase
-                        } else {
-                            Phase::Restored
-                        },
-                    )
-                };
-        }
-        data
+            .values()
+            .flat_map(|(_, data)| data)
+            .chain(&pane.tail_data)
+            .map(|b| b.key.as_str())
+            .collect::<HashSet<_>>();
+        let range_prefix = format!("{}-range-", pane.epoch);
+        pane.blocks.retain(|key, block| {
+            valid.contains(key.as_str())
+                || (key.starts_with(&range_prefix)
+                    && matches!(
+                        pane.folds.entry(block.view.read(cx).row()).span(),
+                        Some(SpanRole::Summary { .. })
+                    ))
+        });
+        pane.restored.retain(|key| valid.contains(key.as_str()));
     }
     fn refresh_views(&mut self, cx: &mut Context<Self>) {
         for index in 0..self.pane.fingerprints.len() {
             // Do not clone long, unmaterialized history on every stream delta.
-            let source = self
+            if !self
                 .pane
-                .row_data
-                .get(&index)
-                .map(|(_, data)| data.as_slice())
-                .unwrap_or(&self.pane.tail_data);
-            if !source.iter().any(|b| self.pane.blocks.contains_key(&b.key))
-                && !self
-                    .pane
-                    .summaries
-                    .get(&index)
-                    .is_some_and(|b| self.pane.blocks.contains_key(&b.key))
+                .source(index)
+                .iter()
+                .any(|block| self.pane.blocks.contains_key(&block.key))
+                && !matches!(
+                    self.pane.folds.entry(index).span(),
+                    Some(SpanRole::Summary { .. })
+                )
             {
                 continue;
             }
-            for block in self.data(index) {
+            for block in self.pane.data(index) {
                 if let Some(retained) = self.pane.blocks.get(&block.key) {
                     retained
                         .view
@@ -618,111 +531,56 @@ impl TranscriptView {
             }
         }
     }
-    fn row_for(&self, key: &str) -> Range<usize> {
-        if let Some(run) = self.pane.runs.iter().find(|run| {
-            self.pane
-                .summaries
-                .get(&run.start)
-                .is_some_and(|b| b.key == key)
-        }) {
-            return run.start..run.end + 1;
-        }
-        let index = self
-            .pane
-            .row_data
-            .iter()
-            .find_map(|(index, (_, data))| data.iter().any(|b| b.key == key).then_some(*index))
-            .unwrap_or(self.pane.fingerprints.len().saturating_sub(1));
-        index..index + 1
-    }
-    /// Role changes invalidate only affected rows; the list retains its live item anchor.
-    fn apply_roles(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
-        let roles = self.pane.roles(self.final_outputs);
-        let top = self.pane.scroller.read(cx).logical_scroll_top();
-        let following = self.pane.scroller.read(cx).is_following_tail();
-        let rescue_top = if !following {
-            self.pane
-                .runs
-                .iter()
-                .find(|run| {
-                    roles.get(run.start)
-                        == Some(&RowRole::Summary {
-                            start: run.start,
-                            expanded: false,
-                        })
-                        && top.item_ix >= run.start
-                        && top.item_ix <= run.end
-                        && (top.item_ix > run.start || top.offset_in_item > px(0.))
-                        && self.pane.roles.get(top.item_ix) != roles.get(top.item_ix)
-                })
-                .map(|run| run.start)
-        } else {
-            None
-        };
-        let rescue_focus = window.as_ref().and_then(|window| {
-            self.pane
-                .runs
-                .iter()
-                .find(|run| {
-                    roles.get(run.start)
-                        == Some(&RowRole::Summary {
-                            start: run.start,
-                            expanded: false,
-                        })
-                        && (run.start..=run.end).any(|row| {
-                            self.pane.row_data.get(&row).is_some_and(|(_, blocks)| {
-                                blocks.iter().any(|block| {
-                                    self.pane.blocks.get(&block.key).is_some_and(|retained| {
-                                        retained.view.read(cx).is_focused(window, cx)
-                                    })
-                                })
-                            })
-                        })
-                })
-                .map(|run| run.start)
-        });
-        for (row, role) in roles.iter().enumerate() {
-            if self.pane.roles.get(row) != Some(role) {
-                self.pane
-                    .scroller
-                    .update(cx, |list, cx| list.remeasure_items(row..row + 1, cx));
-            }
-        }
-        self.pane.roles = roles;
-        if let Some(row) = rescue_top {
-            self.pane
-                .scroller
-                .update(cx, |list, cx| list.scroll_to_item(row, cx));
-        }
-        if let (Some(row), Some(window)) = (rescue_focus, window)
-            && let Some(summary) = self.data(row).into_iter().next()
-        {
-            let view = self.retained(summary, window, cx);
-            window.focus(&view.read(cx).disclosure_focus(), cx);
-        }
-    }
-    fn flush_folds(&mut self, cx: &mut Context<Self>) {
-        let following = self.pane.scroller.read(cx).is_following_tail();
-        let changed = self.pane.disclosures.follow_tail(following);
-        let steps = self.pane.steps.follow_tail(following);
-        if changed.is_empty() && steps.is_empty() {
+    fn remeasure_folds(&mut self, before: &FoldState, cx: &mut Context<Self>) {
+        if before == &self.pane.folds {
             return;
         }
-        self.apply_roles(None, cx);
-        self.refresh_views(cx);
-        for key in changed.into_iter().chain(steps) {
-            let range = self.row_for(&key);
-            self.pane
-                .scroller
-                .update(cx, |list, cx| list.remeasure_items(range, cx));
-        }
-        cx.notify();
+        let pane = &mut self.pane;
+        pane.scroller.update(cx, |list, cx| {
+            let top = list.logical_scroll_top();
+            // The list preserves a live item anchor when remeasuring. Only
+            // redirect the top when its representative changes, never unpin the tail.
+            if !list.is_following_tail() {
+                let origin = pane
+                    .scroll_return
+                    .filter(|&(row, _)| row == top.item_ix)
+                    .map_or(top.item_ix, |(_, origin)| origin);
+                let visible = pane
+                    .folds
+                    .span_containing(origin)
+                    .map_or(origin, |(start, _)| start);
+                pane.scroll_return = (visible != origin).then_some((visible, origin));
+                if visible != top.item_ix
+                    || (top.offset_in_item > px(0.)
+                        && (before.entry(visible).span() != pane.folds.entry(visible).span()
+                            || (!before.entry(visible).is_message_folded()
+                                && pane.folds.entry(visible).is_message_folded())))
+                {
+                    list.scroll_to_item(visible, cx);
+                }
+            } else {
+                pane.scroll_return = None;
+            }
+            for (&row, (_, blocks)) in &pane.row_data {
+                let old = before.entry(row);
+                let new = pane.folds.entry(row);
+                if old.span() != new.span()
+                    || (new.span().is_none()
+                        && (old.is_message_folded() != new.is_message_folded()
+                            || (!new.is_message_folded()
+                                && blocks.iter().filter_map(|b| b.target).any(|target| {
+                                    before.contains(target) != pane.folds.contains(target)
+                                }))))
+                {
+                    list.remeasure_items(row..row + 1, cx);
+                }
+            }
+        });
     }
     pub fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
         self.pane.scroller.update(cx, |list, cx| {
             list.scroll_to_end(cx);
         });
-        self.flush_folds(cx);
         cx.notify();
     }
     pub fn jump_turn(&mut self, direction: TurnDirection, cx: &mut Context<Self>) -> bool {
@@ -734,6 +592,7 @@ impl TranscriptView {
                 .visible()
                 .conversation
                 .turn_starts(false),
+            &self.pane.folds,
         );
         let top = self.pane.scroller.read(cx).logical_scroll_top();
         let Some(row) =
@@ -750,70 +609,116 @@ impl TranscriptView {
             .scroller
             .update(cx, |list, cx| list.scroll_to_item(0, cx));
     }
-    pub fn disclose(
+    fn focused_target(&self, window: &Window, cx: &App) -> Option<FoldKey> {
+        self.pane
+            .blocks
+            .values()
+            .find_map(|b| b.view.read(cx).focused_target(window, cx))
+            .filter(|&target| self.pane.representative(target) == target)
+    }
+    fn focus_target(&mut self, target: FoldKey, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(data) = self.pane.data(fold_row(target)).into_iter().find(|b| {
+            b.target == Some(target) || b.message.is_some_and(|message| message.key == target)
+        }) {
+            let view = self.retained(data, window, cx);
+            window.focus(&view.read(cx).fold_focus(target), cx);
+        }
+    }
+    pub(super) fn fold_local(
         &mut self,
-        expanded: bool,
-        all: bool,
-        from_composer: bool,
+        action: LocalFold,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let focused = self.pane.blocks.iter().find_map(|(key, b)| {
-            b.view
-                .read(cx)
-                .is_focused(window, cx)
-                .then_some(key.clone())
-        });
-        let mut keys = Vec::new();
-        for index in 0..self.pane.fingerprints.len() {
-            let data = if all {
-                self.pane
-                    .row_data
-                    .get(&index)
-                    .map(|(_, data)| data.clone())
-                    .unwrap_or_else(|| self.pane.tail_data.clone())
-            } else {
-                self.data(index)
-            };
-            keys.extend(
-                data.into_iter()
-                    .filter(|b| {
-                        if all || from_composer {
-                            matches!(b.kind, BlockKind::Reasoning)
-                        } else {
-                            b.collapsible && focused.as_deref() == Some(&b.key)
-                        }
-                    })
-                    .map(|b| b.key),
-            );
+        if let Some(target) = self.focused_target(window, cx) {
+            self.apply_folds(window, cx, |folds| match action {
+                LocalFold::Toggle => folds.toggle(target),
+                LocalFold::Close => folds.fold(target),
+                LocalFold::Open => folds.unfold(target),
+            });
         }
-        if !all && from_composer {
-            keys = keys.into_iter().rev().take(1).collect();
-        }
-        for key in keys {
-            self.choose(&key, expanded, window, cx);
-        }
-        self.refresh_views(cx);
-        cx.notify();
     }
-    fn choose(&mut self, key: &str, expanded: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pane.is_summary(key) {
-            self.pane.steps.choose(key, expanded);
-            self.apply_roles(Some(window), cx);
-        } else {
-            self.pane.disclosures.choose(key, expanded);
+    pub(super) fn fold_turns(
+        &mut self,
+        action: TurnFold,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let controller = self.controller.clone();
+        self.update_folds(window, cx, |folds, cx| {
+            folds.fold_turns(
+                controller.read(cx).model.visible().conversation.history(),
+                false,
+                action,
+            );
+        });
+    }
+    pub(super) fn unfold_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_folds(window, cx, FoldState::unfold_all);
+    }
+    pub(super) fn thinking(&mut self, expanded: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let keys = self
+            .pane
+            .row_data
+            .values()
+            .flat_map(|(_, blocks)| blocks)
+            .filter(|b| matches!(b.kind, BlockKind::Reasoning))
+            .filter_map(|b| b.target)
+            .collect::<Vec<_>>();
+        self.apply_folds(window, cx, |folds| {
+            for target in keys {
+                if expanded {
+                    folds.unfold(target);
+                } else {
+                    folds.fold(target);
+                }
+            }
+        });
+    }
+    fn apply_folds(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut FoldState),
+    ) {
+        self.update_folds(window, cx, |folds, _| change(folds));
+    }
+    fn update_folds(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut FoldState, &App),
+    ) {
+        let focused = self.focused_target(window, cx);
+        let before = self.pane.folds.clone();
+        change(&mut self.pane.folds, cx);
+        if before == self.pane.folds {
+            return;
         }
-        let range = self.row_for(key);
-        self.pane
-            .scroller
-            .update(cx, |list, cx| list.remeasure_items(range, cx));
+        self.remeasure_folds(&before, cx);
+        if let Some(current) = focused {
+            let preferred = self
+                .pane
+                .focus_return
+                .take()
+                .filter(|&(representative, _)| representative == current)
+                .map_or(current, |(_, original)| original);
+            let next = self.pane.representative(preferred);
+            if next != preferred && !matches!(preferred, FoldKey::Span { .. }) {
+                self.pane.focus_return = Some((next, preferred));
+            }
+            if next != current || (!before.contains(next) && self.pane.folds.contains(next)) {
+                self.focus_target(next, window, cx);
+            }
+        }
+        self.prune_views(cx);
         self.refresh_views(cx);
         cx.notify();
     }
     #[cfg(test)]
     pub(super) fn test_data(&self) -> Vec<BlockData> {
         (0..self.pane.fingerprints.len())
-            .flat_map(|index| self.data(index))
+            .flat_map(|index| self.pane.data(index))
             .collect()
     }
     #[cfg(test)]
@@ -824,14 +729,24 @@ impl TranscriptView {
             .map(|block| (block.view.entity_id(), block.view.read(cx).text_id()))
     }
     #[cfg(test)]
-    pub(super) fn test_focus(&self, key: &str, cx: &App) -> FocusHandle {
+    pub(super) fn test_focus(&self, key: &str, target: FoldKey, cx: &App) -> FocusHandle {
         self.pane
             .blocks
             .get(key)
             .unwrap()
             .view
             .read(cx)
-            .disclosure_focus()
+            .fold_focus(target)
+    }
+    #[cfg(test)]
+    pub(super) fn test_clamped(&self, key: &str, cx: &App) -> bool {
+        self.pane
+            .blocks
+            .get(key)
+            .unwrap()
+            .view
+            .read(cx)
+            .text_is_clamped(cx)
     }
     /// Materialize independently of row rendering so a newly-created summary can rescue focus.
     fn retained(
@@ -848,35 +763,46 @@ impl TranscriptView {
         }
         let entity = cx.new(|cx| BlockView::new(data, self.controller.clone(), self.compact, cx));
         let observe = cx.observe(&entity, |this, entity, cx| {
-            if !this.pane.blocks.contains_key(entity.read(cx).key()) {
+            let view = entity.read(cx);
+            if !this
+                .pane
+                .blocks
+                .get(view.key())
+                .is_some_and(|block| block.view == entity)
+            {
                 return;
             }
-            let range = this.row_for(entity.read(cx).key());
+            let row = view.row();
+            if this.pane.folds.entry(row).span().is_some() && view.key() != this.pane.range_key(row)
+            {
+                return;
+            }
             this.pane
                 .scroller
-                .update(cx, |list, cx| list.remeasure_items(range, cx));
+                .update(cx, |list, cx| list.remeasure_items(row..row + 1, cx));
             cx.notify();
         });
         let change = cx.subscribe_in(
             &entity,
             window,
-            |this, _, event: &DisclosureChanged, window, cx| {
-                if !this.pane.blocks.contains_key(&event.key) {
-                    if let Some(pane) = this
-                        .parked
-                        .values_mut()
-                        .find(|pane| pane.blocks.contains_key(&event.key))
-                    {
-                        if pane.is_summary(&event.key) {
-                            pane.steps.choose(&event.key, event.expanded);
-                            pane.roles = pane.roles(this.final_outputs);
-                        } else {
-                            pane.disclosures.choose(&event.key, event.expanded);
-                        }
-                    }
+            |this, entity, event: &DisclosureChanged, window, cx| {
+                if !this
+                    .pane
+                    .blocks
+                    .get(entity.read(cx).key())
+                    .is_some_and(|block| block.view == *entity)
+                {
                     return;
                 }
-                this.choose(&event.key, event.expanded, window, cx);
+                if this.pane.representative(event.target) == event.target {
+                    this.apply_folds(window, cx, |folds| {
+                        if event.expanded {
+                            folds.unfold(event.target);
+                        } else {
+                            folds.fold(event.target);
+                        }
+                    });
+                }
             },
         );
         self.pane.blocks.insert(
@@ -889,10 +815,10 @@ impl TranscriptView {
         entity
     }
     fn row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.pane.roles.get(index) == Some(&RowRole::Hidden) {
+        let data = self.pane.data(index);
+        if data.is_empty() {
             return div().w_full().h_0().into_any_element();
         }
-        let data = self.data(index);
         let mut row = div()
             .w_full()
             .flex()
@@ -933,6 +859,7 @@ impl Render for TranscriptView {
                 .into_any_element();
         }
         div()
+            .key_context("ZevriaTranscript")
             .size_full()
             .bg(palette(cx).surfaces.canvas)
             .child(
