@@ -92,7 +92,17 @@ impl ResponsesProviderConfig {
         crate::connection::redacted_url_for_logging(&self.base_url)
     }
 
-    fn resolved_endpoint(&self) -> ProviderEndpoint {
+    fn resolved_endpoint(&self, service_tier: ModelServiceTier) -> ProviderEndpoint {
+        let mut additional_params = self.additional_params.clone();
+        match service_tier {
+            ModelServiceTier::Inherit => {}
+            ModelServiceTier::Omit => {
+                additional_params.remove("service_tier");
+            }
+            ModelServiceTier::Set(tier) => {
+                additional_params.insert("service_tier".into(), tier.as_str().into());
+            }
+        }
         ProviderEndpoint {
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
@@ -100,7 +110,7 @@ impl ResponsesProviderConfig {
             network: self.network.clone(),
             session_id_header: self.session_id_header.clone(),
             compatibility: self.compatibility.clone(),
-            additional_params: self.additional_params.clone(),
+            additional_params,
             compaction: self.compaction.clone(),
             input_token_count: self.input_token_count.clone(),
             web_search: self.web_search.clone(),
@@ -218,7 +228,7 @@ impl ProviderConfig {
                 .map(|(key, model)| ResolvedModelProfile {
                     profile: ModelProfileRef::new(provider, key),
                     protocol: ProfileProtocol::Responses {
-                        endpoint: config.resolved_endpoint(),
+                        endpoint: config.resolved_endpoint(model.service_tier),
                         reasoning_summary_level: model.reasoning_summary_level,
                     },
                     context_window_tokens: model.context_window_tokens,
@@ -387,7 +397,89 @@ impl NetworkConfig {
     }
 }
 
-/// Model-owned context and reasoning settings.
+/// A service tier for Responses creation. The spelling is kept on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+    Fast,
+    Ultrafast,
+}
+
+impl ServiceTier {
+    const ALL: [Self; 7] = [
+        Self::Auto,
+        Self::Default,
+        Self::Flex,
+        Self::Scale,
+        Self::Priority,
+        Self::Fast,
+        Self::Ultrafast,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Scale => "scale",
+            Self::Priority => "priority",
+            Self::Fast => "fast",
+            Self::Ultrafast => "ultrafast",
+        }
+    }
+}
+
+/// Omission inherits the provider setting; an explicit null suppresses it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModelServiceTier {
+    #[default]
+    Inherit,
+    Omit,
+    Set(ServiceTier),
+}
+
+impl ModelServiceTier {
+    fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
+impl Serialize for ModelServiceTier {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Set(tier) => serializer.serialize_str(tier.as_str()),
+            Self::Inherit | Self::Omit => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelServiceTier {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        let invalid = || {
+            let choices = ServiceTier::ALL.map(ServiceTier::as_str).join(", ");
+            D::Error::custom(format_args!(
+                "service_tier must be null or one of: {choices}"
+            ))
+        };
+        let Some(value) = Option::<String>::deserialize(deserializer).map_err(|_| invalid())?
+        else {
+            return Ok(Self::Omit);
+        };
+        ServiceTier::ALL
+            .into_iter()
+            .find(|tier| tier.as_str() == value)
+            .map(Self::Set)
+            .ok_or_else(invalid)
+    }
+}
+
+/// Model-owned context, reasoning, and generation settings for Responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
@@ -399,6 +491,8 @@ pub struct ModelConfig {
     pub retained_user_tokens: u64,
     pub reasoning_levels: Vec<ReasoningLevel>,
     pub reasoning_summary_level: ReasoningSummaryLevel,
+    #[serde(default, skip_serializing_if = "ModelServiceTier::is_inherit")]
+    pub service_tier: ModelServiceTier,
 }
 
 fn automatic_image_accounting() -> zevria_foundation::image_accounting::ImageAccountingPolicy {
@@ -956,6 +1050,7 @@ mod tests {
                 ReasoningLevel::High,
             ],
             reasoning_summary_level: ReasoningSummaryLevel::Detailed,
+            service_tier: ModelServiceTier::Inherit,
         }
     }
 

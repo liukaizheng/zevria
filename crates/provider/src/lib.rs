@@ -45,9 +45,9 @@ pub use cache_diagnostics::CacheDiagnosticContext;
 pub use config::{
     AnthropicAuth, AnthropicEndpoint, AnthropicModelConfig, AnthropicProviderConfig,
     InputTokenCountConfig, ModeAssignments, ModelAssignment, ModelConfig, ModelRouting,
-    NetworkConfig, ProfileProtocol, ProviderConfig, ProviderEndpoint, RemoteCompactionConfig,
-    ResolvedModelProfile, ResponsesCompatibilityConfig, ResponsesProviderConfig,
-    deserialize_provider_catalog,
+    ModelServiceTier, NetworkConfig, ProfileProtocol, ProviderConfig, ProviderEndpoint,
+    RemoteCompactionConfig, ResolvedModelProfile, ResponsesCompatibilityConfig,
+    ResponsesProviderConfig, ServiceTier, deserialize_provider_catalog,
 };
 pub use connection::OpenAiProvider;
 pub use credential::{ApiKeyCommand, ApiKeySource, LiteralApiKey};

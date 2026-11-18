@@ -521,6 +521,7 @@ mod tests {
                     retained_user_tokens: 20_000,
                     reasoning_levels: zevria_foundation::ReasoningLevel::ALL.to_vec(),
                     reasoning_summary_level: ReasoningSummaryLevel::Detailed,
+                    service_tier: Default::default(),
                 },
             )]),
             compatibility: ResponsesCompatibilityConfig::default(),

@@ -30,6 +30,8 @@ mod prompt_cache_options;
 mod resume_wire;
 #[path = "search_tests.rs"]
 mod search_tests;
+#[path = "service_tier_tests.rs"]
+mod service_tiers;
 #[path = "session_header_tests.rs"]
 mod session_headers;
 #[path = "subtask_batch_tests.rs"]

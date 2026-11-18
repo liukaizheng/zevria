@@ -87,6 +87,7 @@ impl AnthropicModelConfig {
             retained_user_tokens: self.retained_user_tokens,
             reasoning_levels: self.reasoning_levels.clone(),
             reasoning_summary_level: ReasoningSummaryLevel::Auto,
+            service_tier: ModelServiceTier::Inherit,
         }
         .validate(provider, key, percent)
     }

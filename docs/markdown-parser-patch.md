@@ -4,9 +4,14 @@
 
 Zevria uses `markdown` **1.0.0** from the `liukaizheng/markdown-rs` GitHub fork,
 commit **`e629e7e4370cac5cc6dac39971c77feba3e3aaf9`**. The commit was pushed to
-that fork's `main` branch. The dependency is pinned to the complete commit, not
-to a moving branch, through root `[patch.crates-io]`; `Cargo.lock` records the
-same Git source/revision. There is no vendored parser or local-path override.
+that fork's `main` branch. The workspace root uses Cargo's exact-version
+`[replace]` entry for `markdown:1.0.0`. `Cargo.lock` records the crates.io package
+identity and its replacement with the full Git revision. There is no vendored
+parser or local-path override.
+
+The exact-version replacement is intentional:
+`cargo install --path crates/zevria --locked` resolves the CLI without the
+desktop parser, so the former workspace-wide `[patch]` warned that it was unused.
 
 The fork starts at upstream markdown-rs commit
 `1506572f9b406431402928f3a8b3df0b4ae2d8f5`, the 1.0.0 release. The equivalent
@@ -104,15 +109,18 @@ remain).
 2. Run the fork's fmt, locked all-features workspace tests and Clippy with debug
    assertions enabled. Keep generic public tests independent from Zevria data.
 3. Commit and push the fork changes before updating Zevria. Verify the published
-   commit, then set root `patch.crates-io.markdown.rev` to its full SHA and refresh
-   the root lockfile (for example, `rtk cargo update -p markdown`).
+   commit, then set the `rev` on `markdown:1.0.0` under root `[replace]` to its full
+   SHA. Refresh the lockfile with `rtk cargo check --release -p zevria-desktop --tests`
+   (without `--locked`). Cargo requires the replacement to keep the exact package
+   name and version.
 4. Run the portable proof test, native desktop tests/gallery, workspace gates,
    and provider-prefix/cache-diagnostics gates. Confirm the lockfile source and
    build metadata select the intended Git revision, with no path fallback or
    unexpected dependency/version changes.
 5. Verify CLI and non-macOS desktop production trees still contain no GPUI or
-   RaTeX. Preserve existing session/replay bytes; never discard newer records
-   from a live session just to recover an earlier whole-file hash.
+   RaTeX, and the locked CLI install emits no unused-patch warning. Preserve
+   existing session/replay bytes; never discard newer records from a live
+   session just to recover an earlier whole-file hash.
 6. Remove the Git override when an upstream release provides equivalent syntax,
    source spans, currency policy and streaming behavior. Do not remove it solely
    because a newer parser version exists.

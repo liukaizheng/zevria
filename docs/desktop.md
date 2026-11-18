@@ -435,7 +435,8 @@ Formula contents are never logged by this module.
 ### Parser maintenance
 
 Markdown-rs 1.0.0 comes from `liukaizheng/markdown-rs`, pinned to Git commit
-`e629e7e4370cac5cc6dac39971c77feba3e3aaf9` through root `[patch.crates-io]`.
+`e629e7e4370cac5cc6dac39971c77feba3e3aaf9` by the root `[replace]` entry for
+`markdown:1.0.0`.
 There is no vendored source or local-path override. Two isolated constructs add
 source-faithful TeX math, and the existing raw-text tokenizer handles dollar
 policy and failed-scan memos. The original `math_text`/`math_flow` switches gate

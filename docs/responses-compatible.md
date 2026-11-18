@@ -254,6 +254,60 @@ existing restricted policy permits only configurable Explore delegation, never
 builders. Native ensemble worker Plan/Review policies are unchanged. Selecting a
 mode is a session-local frontend control, not a model tool or a new model selection.
 
+### Service tiers
+
+To request Fast mode for just one model, add `"service_tier": "fast"` to that
+model's existing `providers.<provider>.models.<model>` object in `models.jsonc`.
+This setting is optional and only valid for `openai.responses` models. It doesn't
+change sibling models, mode assignments, or reasoning levels.
+
+You can also set a provider-wide tier in `additional_params.service_tier`. This
+excerpt shows what to add to existing provider and model objects:
+
+```jsonc
+{
+  "providers": {
+    "openai": {
+      // Keep the existing provider settings and any other additional_params.
+      "additional_params": { "service_tier": "fast" },
+      "models": {
+        "model-a": {
+          // Keep existing model settings. No service_tier key: sends "fast".
+        },
+        "model-b": {
+          // Keep existing model settings.
+          "service_tier": null // Sends no service_tier key at all.
+        },
+        "model-c": {
+          // Keep existing model settings.
+          "service_tier": "default" // Explicitly requests standard processing.
+        }
+      }
+    }
+  }
+}
+```
+
+A missing model key inherits the provider's value as-is. If neither level sets a
+value, the request leaves the key out. A model-level `null` is a local opt-out,
+not a value sent to the API. On OpenAI, leaving the key out lets the project
+setting apply. An explicit `"auto"` also uses the project setting, but Zevria
+sends it as a string, just as it sends `"default"` for standard processing.
+
+Model-level strings are case-sensitive: `auto`, `default`, `flex`, `scale`,
+`priority`, `fast`, or `ultrafast`. Zevria sends the configured spelling unchanged.
+OpenAI accepts both `fast` and `priority` for Fast mode on supported models, and
+the [Responses API](https://platform.openai.com/docs/api-reference/responses/create)
+can report `priority` even when the request sent `fast`. A valid spelling doesn't
+guarantee model or account eligibility, and Fast mode can cost more. Zevria
+surfaces upstream tier errors rather than switching tiers.
+
+Tiers are sent only for generation: HTTP Responses creation and WebSocket
+`response.create`. Even a legacy provider-wide tier is no longer forwarded to
+`/responses/input_tokens` or `/responses/compact`. Changing the tier leaves the
+prompt prefix and cache key unchanged; it doesn't guarantee cache reuse across
+tiers.
+
 ### Multiple providers
 
 ```jsonc

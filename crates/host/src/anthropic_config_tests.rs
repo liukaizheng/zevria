@@ -70,6 +70,17 @@ fn protocol_specific_strict_schemas_and_missing_max_output() {
     assert!(parse_value(&models).is_err());
 }
 #[test]
+fn anthropic_models_reject_service_tiers() {
+    for tier in [json!("fast"), Value::Null] {
+        let mut models = native_models();
+        models["providers"]["claude"]["models"]["opus"]["service_tier"] = tier;
+        let error = format!("{:#}", parse_value(&models).unwrap_err());
+        assert!(error.contains("providers.claude"), "{error}");
+        assert!(error.contains("unknown field `service_tier`"), "{error}");
+    }
+}
+
+#[test]
 fn anthropic_limits_reasoning_betas_and_reserved_params() {
     for levels in [
         json!([]),

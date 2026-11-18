@@ -23,9 +23,9 @@ pub(crate) const DEFAULT_CONFIG: &str = r#"# zevria configuration.
 # ZEVRIA_CONFIG selects this file and its sibling models.jsonc.
 
 [modes]
-plan = { provider = "openai", model = "gpt-6-astra", reasoning_level = "max" }
-build = { provider = "openai", model = "gpt-6-astra", reasoning_level = "max" }
-review = { provider = "openai", model = "gpt-6-sol", reasoning_level = "max" }
+plan = { provider = "openai", model = "gpt-6.2-astra", reasoning_level = "max" }
+build = { provider = "openai", model = "gpt-6.2-astra", reasoning_level = "max" }
+review = { provider = "openai", model = "gpt-6.2-sol", reasoning_level = "max" }
 explore = { provider = "openai", model = "gpt-6-luna", reasoning_level = "max" }
 builder = { provider = "openai", model = "gpt-6-luna", reasoning_level = "max" }
 # Native Claude alternative (configure the anthropic catalog in models.jsonc):
@@ -165,20 +165,21 @@ pub(crate) const DEFAULT_MODELS: &str = r#"// Zevria model configuration. JSON w
   //     "models": {
   //       // Exact model ID sent on the wire.
   //       "gpt-6-luna": {
+  //         // "service_tier": "fast", // generation only; omit to inherit, null to suppress
   //         "context_window_tokens": 272000,
   //         "input_token_limit": 272000, // omit to use the physical context window
   //         "retained_user_tokens": 20000,
   //         "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
   //         "reasoning_summary_level": "detailed"
   //       },
-  //       "gpt-6-sol": {
+  //       "gpt-6.2-sol": {
   //         "context_window_tokens": 272000,
   //         "input_token_limit": 272000, // omit to use the physical context window
   //         "retained_user_tokens": 20000,
   //         "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
   //         "reasoning_summary_level": "detailed"
   //       },
-  //       "gpt-6-astra": {
+  //       "gpt-6.2-astra": {
   //         "context_window_tokens": 272000,
   //         "input_token_limit": 272000, // omit to use the physical context window
   //         "retained_user_tokens": 20000,

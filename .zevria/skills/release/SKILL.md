@@ -15,6 +15,14 @@ Applying this skill does not authorize commits, pushes, workflow dispatches,
 remote draft edits, or publication. Perform only the stages the user authorized;
 if asked only for release notes, do not bump versions or start a release.
 
+**CI-only execution:** do not build or validate on the local machine, even when
+reference documentation includes local command examples. Do not run local Cargo
+commands, tests, format/lint checks, CLI or installer smoke tests, or archive
+inventory/checksum scripts, and do not reproduce CI failures locally. Local work
+is inspection, editing, Git operations, and reading/recording GitHub status,
+logs, and receipts. Push the reviewed source and watch GitHub Actions; all
+executable release gates run there.
+
 ## 1. Establish the release scope
 
 - Read `AGENTS.md`, `docs/releases.md`, `.github/workflows/release.yml`, the root
@@ -46,6 +54,11 @@ impact, not merely commit subjects or implementation details. Consolidate relate
 commits, omit reverted or unreleased work, and substantiate claims from the diff,
 PRs, tests, and documentation. Never invent features, issue numbers, performance
 measurements, security fixes, compatibility, or platform acceptance.
+
+**Every changelog item must be concise.** This applies to both GitHub release
+notes and any committed changelog. Use one short sentence per bullet whenever
+possible: state what changed and include only essential context or required
+user action. Cut implementation details and repetition before finalizing.
 
 Use these headings in this order, omitting empty sections rather than adding
 "None" entries:
@@ -124,53 +137,55 @@ changelog convention without being asked. The source marker belongs in the
 GitHub notes, not a committed changelog: finalize it after the release commit
 exists so the commit never needs to contain its own SHA.
 
-## 3. Align the package version and validate
+## 3. Align the package version and delegate validation to GitHub CI
 
 - The `zevria` package currently inherits `[workspace.package].version` from the
-  root `Cargo.toml`. Inspect before editing. Keep workspace-inherited package
-  versions in `Cargo.lock` consistent, without an unrelated dependency upgrade.
-  Never hand-edit dependency checksums or use `cargo update` indiscriminately.
-- Verify the final identity with locked Cargo metadata. The tag must be exactly
-  `v` plus the `zevria` package version, including any prerelease/build suffix.
-  Never reuse a published version or move/delete an existing release tag.
-- Prefix shell commands with `rtk`. Run Cargo commands with `--release` whenever
-  supported; profile-free commands such as `cargo metadata` and `cargo fmt` are
-  exempt. Use `--locked` for validation after any intentional lockfile refresh.
-- Derive checks from the current workflow and documentation. Local starting
-  points, using the workflow's current desktop exclusion, are:
-
-  ```sh
-  rtk proxy cargo metadata --locked --no-deps --format-version 1
-  rtk cargo fmt --all -- --check
-  rtk cargo check --release --locked --workspace --exclude zevria-desktop --all-targets
-  rtk cargo test --release --locked --workspace --exclude zevria-desktop
-  rtk cargo build --release --locked -p zevria --bin zevria
-  ```
-
-- Preserve the provider's cacheable prompt prefix. Run the current explicit
-  provider-prefix gates as well as the ordinary suite. Confirm each filtered gate
-  selects at least one test before running it; a successful zero-test invocation
-  is not evidence. When raw libtest listings are needed, use `rtk proxy` to avoid
-  output filtering. Add `--release --locked` to local Cargo test invocations.
-- Run the separate provider/host `cache-diagnostics` regressions required by the
-  workflow. Never enable `cache-diagnostics` or `--all-features` on the production
-  build; diagnostic tests and production packaging are separate invocations.
-- Follow the documented help, exact-version, offline skill-listing, extracted
-  package, installer, inventory, and checksum checks. Use disposable homes and
-  workspaces for smoke tests so real credentials/configuration remain untouched.
-- Do not claim local tests establish all native targets or real Windows/WSL
-  acceptance. Report failures, unavailable tools, skipped checks, and missing
-  platform evidence. Do not weaken gates or rewrite unrelated code to release.
+  root `Cargo.toml`. Inspect before editing. Make targeted version-only changes
+  to the manifests and corresponding local package entries in `Cargo.lock`;
+  do not upgrade dependencies or hand-edit their checksums. Let CI's locked
+  Cargo commands report any inconsistency; do not run Cargo locally to check it.
+- Read the final package identity from CI's locked metadata evidence. The tag
+  must be exactly `v` plus the `zevria` package version, including any
+  prerelease/build suffix. Never reuse a published version or move/delete an
+  existing release tag.
+- Prefix shell commands with `rtk`. Inspect the current workflow and docs for
+  required CI gates, targets, desktop exclusions, toolchain, profiles, and
+  locking policy. Required coverage includes formatting, locked workspace and
+  all-target checks/tests, and the default-feature production release build.
+  Do not provide or execute a local validation/build recipe.
+- Preserve the provider's cacheable prompt prefix. CI must run the current
+  explicit provider-prefix gates as well as the ordinary suite, checking raw
+  libtest listings so every filtered gate selects at least one test. A green
+  zero-test invocation is not evidence.
+- CI must run the separate provider/host `cache-diagnostics` regressions required
+  by the workflow. Never enable `cache-diagnostics` or `--all-features` on the
+  production build; diagnostic tests and production packaging remain separate.
+- CI must perform the help, exact-version, offline skill-listing, extracted
+  package, installer, inventory, checksum, and uploaded-asset checks. Hosted
+  smoke tests use disposable homes/workspaces, not real credentials/config.
+  Inspect CI receipts rather than running these checks locally.
+- Inspect hosted coverage before tagging. If a required check is missing, add or
+  repair it in CI within the authorized source-change scope, or report a blocker.
+  Never substitute local checks, skip a gate, or weaken an assertion to release.
+  CI does not establish real Windows/WSL or interactive acceptance; collect
+  maintainer evidence and report remaining manual checks without running them
+  on the local machine.
 
 ## 4. Use the existing draft-release workflow
 
-1. Review the version, notes, diff, and validation with the user. If committing is
+1. Review the version, notes, diff, and CI plan with the user. If committing is
    authorized, stage only intended release changes and commit them. Do not tag a
-   dirty worktree or silently exclude intended files. Resolve the final committed
-   source SHA and ensure the notes/marker identify that exact source.
-2. Prefer an authorized build-only dispatch of `release.yml` at the exact source
-   ref before tagging. A dispatch is always build-only, even for a version tag;
-   it cannot create or repair a GitHub Release. Record the tested source and run ID.
+   dirty worktree or silently exclude intended files. Resolve the committed
+   source SHA after every amendment and keep pending notes/checkpoints aligned.
+2. With push/dispatch authorization, push the source branch to the confirmed
+   `origin` and watch its CI. Run the existing `release.yml` build-only dispatch
+   at that source ref before tagging; all required source gates must pass at the
+   final source SHA. Use the repair loop below for source failures. A dispatch
+   is always build-only, even for a version tag; it cannot create or repair a
+   GitHub Release. Verify the run's event, ref, and immutable source rather than
+   assuming a selected branch stayed unchanged. Record its run ID and attempt.
+   After an amendment, watch newly triggered CI and dispatch the new source;
+   rerunning an old run cannot test the amended commit.
 3. After explicit version-tag push authorization, create an annotated `v<VERSION>`
    tag at the reviewed commit and push only that tag to the confirmed remote.
    Check both local and remote tag/release state first. Stop on conflicts; never
@@ -179,18 +194,44 @@ exists so the commit never needs to contain its own SHA.
    draft upload verification to succeed. An independent green `test.yml` run is
    not a substitute. Let the workflow create its draft; do not bypass it with a
    hand-created release or manually substituted artifacts.
-5. Inspect the draft identity, prerelease flag, source SHA, exact Rust version,
-   assets, and checksums. The current bundle contains the three platform archives
-   and `SHA256SUMS`; derive exact names/targets from the current workflow. These
-   packages are unsigned and unnotarized, not package-manager publications.
+5. Inspect the draft's numeric release ID, tag, prerelease flag, source SHA, exact
+   Rust version, assets, and checksums. Derive exact asset names/targets from the
+   current workflow; its current bundle has three platform archives and
+   `SHA256SUMS`. These packages are unsigned and unnotarized, not package-manager
+   publications.
+   - Read the exact Rust version from that run's recorded prepare outputs or
+     summary. If reading rustup logs, select the installed/updated/unchanged
+     toolchain result, not a parenthetical previous version. A broad search for
+     every `rustc` version can include both old and selected compilers; stop if
+     the selected version cannot be established unambiguously.
+   - Read hosted bundle/upload verification receipts for the explicit successful
+     run ID and attempt. CI must verify the expected inventory, archive members,
+     and `SHA256SUMS` against archive bytes, and compare uploaded GitHub assets
+     with the successful tag run's bundle. Names, sizes, and API digest metadata
+     alone do not replace a required hosted gate. Missing CI evidence is a
+     blocker, not a reason to run local archive/checksum helpers. Stop on
+     unexpected inventory; do not delete unrelated assets to make it pass.
+   - Inspect the GitHub asset metadata and CI-confirmed hashes against the tag
+     run, not the build-only run. Independent builds can produce different
+     archive hashes at the same source; do not require dry-run/tag-run hash
+     equality or substitute dry-run artifacts.
 6. Once no run/retry is active, replace generated commit-list notes with the
    reviewed categorized notes only if remote draft editing is authorized. First
    read the existing body and preserve exactly one matching
    `<!-- zevria-release-source: FULL_40_CHARACTER_SOURCE_SHA -->` marker. Preserve
    useful attribution/compare links without leaving a second uncategorized change
    list. Keep the release a draft and preserve its tag, title, and prerelease flag.
-   Inspect the installed `gh release edit --help` before using `--notes-file`, and
-   verify the resulting draft body/status after editing.
+   - Immediately before editing, re-read the release by numeric ID and check
+     that its body, identity, assets, and latest workflow attempt still match the
+     reviewed evidence. Reconcile unreviewed maintainer changes rather than
+     overwriting them, and reverify evidence invalidated by a retry.
+   - Inspect the installed `gh release edit --help` before using `--notes-file`.
+     After editing, re-read by release ID and verify the reviewed body, exactly
+     one matching source marker, draft/tag/title/prerelease identity, and
+     unchanged verified asset IDs, upload states, sizes, and digests.
+   - Capture the fresh `html_url` after the edit. A draft URL can change while its
+     release ID and tag remain the same; do not use an old URL as identity or
+     report it without refreshing.
 7. Hand the reviewed draft to the maintainer for separate manual publication.
    Never publish automatically as a side effect of preparing notes or tagging.
    Require complete assets, a successful final workflow, appropriate platform
@@ -198,16 +239,99 @@ exists so the commit never needs to contain its own SHA.
 
 ## 5. Recover safely and report evidence
 
-On failure, follow `docs/releases.md`. A failed create/upload can leave an
-incomplete draft: never recommend publishing it. Retry the original run for
-transient failures; reruns retain the original source and do not pick up fixes
-committed later. Source/workflow fixes need a new reviewed, aligned version/tag,
-not a moved tag. Preserve the source marker and maintainer edits so draft retries
-remain valid. Stop on published, unmarked, or conflicting releases rather than
-claiming or overwriting them.
+### Monitor hosted workflows and handle CLI differences
+
+- Inspect installed `gh` subcommand help before assuming flags can be combined.
+  If `--slurp` is rejected with `--jq` or `--template`, obtain complete paginated
+  JSON with `--paginate --slurp` and parse it locally. Preserve every page and
+  propagate API errors; never turn a failed lookup into an empty release list.
+- Monitor the recorded run ID with structured status/job data. Check the source,
+  trigger/ref, latest attempt, `status`, and `conclusion`; only a completed run
+  with a successful conclusion establishes workflow success. A nonzero
+  `gh run watch` exit can instead be an EOF, timeout, or API transport failure.
+  Retry transient read-only requests with bounded backoff, without redispatching
+  the workflow, rerunning jobs, or changing tags merely to repair monitoring.
+- Logs may be unavailable through `gh run view --log` while a run is in progress.
+  Poll structured status/jobs until logs are available, then inspect them;
+  unavailable logs alone are not a failed job. Persistent API/authentication
+  failures leave state unverified and block release mutations; they do not
+  justify bypassing a gate.
+
+### Repair source failures before tagging
+
+Within an authorized release/CI-repair scope, use this loop for actual source or
+workflow failures. Do not run local builds, tests, linters, smoke tests, or other
+validation to reproduce or check a fix.
+
+1. Read the failing GitHub job/step logs and make the necessary scoped local
+   source/workflow edits. Preserve provider-prefix behavior and existing gates;
+   do not rewrite unrelated code or weaken tests to obtain green CI.
+2. Inspect the branch tip, worktree, staged diff, and remote refs. Amend only the
+   agent-owned last commit for this ongoing release, before any release tag
+   references it. Preserve unrelated user work and record the confirmed remote
+   source-branch SHA before rewriting. If the tip is unrelated or already tagged,
+   stop rather than amending it.
+3. Stage only the intended fix files and amend that commit, normally with
+   `rtk git commit --amend --no-edit`. If unrelated changes are already staged,
+   stop and resolve scope instead of including or unstaging them. Update a stale
+   commit message if needed; do not attach old validation claims to changed source.
+4. Push the amended source branch to `origin` with an explicit lease, never an
+   unconditional `--force`. Substitute the previously confirmed, nonempty
+   source-branch name and remote SHA in this form:
+
+   ```sh
+   rtk git push --force-with-lease="refs/heads/$branch:$expected_remote_sha" \
+     origin "HEAD:refs/heads/$branch"
+   ```
+
+   Rewrite only that untagged source-branch tip, not all refs or any release tag.
+   If the lease fails or branch protection rejects the push, stop and report the
+   conflict; do not refresh the expected SHA blindly, discard someone else's
+   commits, bypass protection, or escalate to an unconditional force push.
+5. Record the new full source SHA and invalidate prior-source CI receipts and
+   pending source markers. Watch the newly triggered branch CI and start a new
+   build-only release run at the amended source. Check its actual source/run ID;
+   do not rerun an older workflow expecting it to pick up the fix. Repeat the
+   local fix -> amend -> force-with-lease -> GitHub CI loop until required gates
+   pass, then finalize the reviewed notes/source marker and tag that exact SHA.
+
+### Recover from transient or tagged-workflow failures
+
+For a confirmed transient infrastructure failure with no source change, follow
+`docs/releases.md` and retry the original run within the authorized scope rather
+than manufacturing an amendment. A rerun retains its original source. After a
+release tag exists, a source/workflow fix needs a new reviewed, aligned
+version/tag; never amend a tagged release commit or move an existing release tag
+to repair it. All builds and verification of any fix still run in GitHub CI.
+
+A failed create/upload can leave an incomplete draft: never recommend publishing
+it. Preserve the source marker and maintainer edits so draft retries remain
+valid. Stop on published, unmarked, or conflicting releases rather than claiming
+or overwriting them.
+
+### Checkpoint and resume without duplicating actions
+
+- Keep concise receipts in an ignored per-release directory, such as
+  `target/release-prep/v<VERSION>/`. Record the version/tag, baseline and full
+  source SHA, confirmed remote, notes path, workflow run IDs/attempts and exact
+  toolchains, numeric release ID, verified asset inventory/hashes, completed
+  stages, and next action. Do not store credentials or copy release-specific
+  values and incident logs into this permanent skill.
+- On continuation, inspect the current worktree, remote refs, release identity
+  and body, latest run attempts, and artifacts against those receipts. Reuse
+  completed-stage evidence only while its relevant source and verification
+  context still match. Re-establish changed validation evidence through GitHub
+  CI, not local commands. An intentional repair amendment changes the source
+  and needs fresh CI receipts; mere continuation must not duplicate commits,
+  pushes, dispatches, tag creation, or note edits.
+- Checkpoints are evidence, not authorization or a replacement for required
+  gates. Stay within the user's authorized stages, preserve maintainer edits,
+  and retain the manual-publication boundary. Conflicting source/tag/release
+  state requires review and the recovery procedure, never a moved release tag.
 
 Finish with the version/tag, baseline and source SHA, notes file or draft location,
-files changed, validation results, workflow run IDs, remaining blockers, and the
-exact next authorized/manual action. Clearly distinguish prepared, tagged,
-built, draft-ready, and published; never claim a release was published merely
-because a tag was pushed or a draft exists.
+files changed, GitHub CI results, workflow run IDs/attempts, release ID and fresh
+URL, remaining blockers, and the exact next authorized/manual action. State that
+no local builds/validation were run. Clearly distinguish prepared, tagged, built,
+draft-ready, and published; never claim a release was published merely because a
+tag was pushed or a draft exists.

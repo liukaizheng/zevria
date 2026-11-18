@@ -334,15 +334,21 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
 async fn configured_session_headers_cover_completion_count_and_remote_compaction() {
     // Serialize against log-capturing tests: callsite interest is process-wide.
     let _log_guard = CAPTURED_LOG_TEST_LOCK.lock().await;
+    // Exercise both tier sources against the existing counting and compaction mocks.
     for header in [None, Some("X-Conversation-ID")] {
-        for derive_count_url in [true, false] {
+        for (derive_count_url, provider_tier, model_tier) in [
+            (true, Some("fast"), ModelServiceTier::Inherit),
+            (false, None, ModelServiceTier::Set(ServiceTier::Fast)),
+        ] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let auxiliary = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut profile = session_profile(
+            let mut profile = super::service_tiers::tier_profile(
                 format!("http://{}/v1/responses", listener.local_addr().unwrap()),
-                header,
                 false,
+                provider_tier,
+                model_tier,
             );
+            profile.responses_endpoint_mut().session_id_header = header.map(ToOwned::to_owned);
             let auxiliary_url = format!("http://{}", auxiliary.local_addr().unwrap());
             profile.responses_endpoint_mut().compaction.url =
                 Some(format!("{auxiliary_url}/custom/compact?route=1"));
@@ -433,14 +439,14 @@ async fn configured_session_headers_cover_completion_count_and_remote_compaction
                 provider.count_input_tokens(parts.request()).await.unwrap(),
                 InputTokenCount::Exact(123)
             );
-            provider
-                .complete(parts.request(), discard_updates())
-                .await
-                .unwrap();
             assert!(matches!(
                 provider.compact(parts.compaction_request()).await.unwrap(),
                 CompactResult::Replacement(_)
             ));
+            provider
+                .complete(parts.request(), discard_updates())
+                .await
+                .unwrap();
             let mut requests = responses.await.unwrap();
             requests.extend(auxiliary_requests.await.unwrap());
             assert_eq!(requests.len(), 3);
@@ -450,6 +456,17 @@ async fn configured_session_headers_cover_completion_count_and_remote_compaction
                 assert!(request.body.get("session_id_header").is_none());
                 assert!(request.body.get("prompt_cache_key").is_none());
                 assert_eq!(request.body["gateway_routing"], "unchanged");
+                if request.headers.starts_with("POST /v1/responses HTTP/1.1") {
+                    assert_eq!(request.body["service_tier"], "fast");
+                } else {
+                    assert!(
+                        !request
+                            .body
+                            .as_object()
+                            .unwrap()
+                            .contains_key("service_tier")
+                    );
+                }
                 if request.headers.contains("/count?") || request.headers.contains("/input_tokens ")
                 {
                     for field in [

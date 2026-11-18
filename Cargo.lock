@@ -2675,7 +2675,7 @@ dependencies = [
  "instant",
  "itertools 0.13.0",
  "lsp-types",
- "markdown",
+ "markdown 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "markup5ever_rcdom",
  "num-traits",
  "objc2 0.6.4",
@@ -2717,7 +2717,7 @@ dependencies = [
  "itertools 0.13.0",
  "log",
  "lsp-types",
- "markdown",
+ "markdown 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "notify",
  "num-traits",
  "objc2 0.6.4",
@@ -4787,6 +4787,13 @@ checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "markdown"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5cab8f2cadc416a82d2e783a1946388b31654d391d1c7d92cc1f03e295b1deb"
+replace = "markdown 1.0.0 (git+https://github.com/liukaizheng/markdown-rs?rev=e629e7e4370cac5cc6dac39971c77feba3e3aaf9)"
 
 [[package]]
 name = "markdown"
@@ -11097,7 +11104,7 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "image",
- "markdown",
+ "markdown 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ratex-font",
  "ratex-katex-fonts",
  "ratex-layout",

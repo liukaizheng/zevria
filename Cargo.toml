@@ -45,7 +45,7 @@ eventsource-stream = "0.2.3"
 futures-util = "0.3.32"
 # Apache-2.0; native desktop UI kit, a macOS-only dependency of zevria-desktop.
 gpui-kit = "=0.9.0"
-# MIT; portable parser regression tests; GPUI uses the same pinned fork below.
+# MIT; portable parser regression tests; GPUI uses the same exact-version replacement below.
 markdown = "=1.0.0"
 # MIT; in-process KaTeX-compatible math parsing and em-based layout (desktop only).
 ratex-parser = "=0.1.15"
@@ -98,6 +98,8 @@ url = "2.5"
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
 which = "8.0.5"
 
-[patch.crates-io]
-# MIT; source-faithful TeX math; provenance and maintenance in docs/markdown-parser-patch.md.
-markdown = { git = "https://github.com/liukaizheng/markdown-rs", rev = "e629e7e4370cac5cc6dac39971c77feba3e3aaf9" }
+# An exact replacement keeps the fork on desktop without an unused-patch warning
+# when `cargo install --path crates/zevria --locked` resolves only the CLI.
+# See docs/markdown-parser-patch.md for provenance and maintenance.
+[replace]
+"markdown:1.0.0" = { git = "https://github.com/liukaizheng/markdown-rs", rev = "e629e7e4370cac5cc6dac39971c77feba3e3aaf9" }

@@ -166,6 +166,116 @@ fn required_provider_catalog_and_independent_modes_resolve() {
 }
 
 #[test]
+fn responses_model_service_tiers_are_strict_and_resolve_verbatim() {
+    let parse_tier = |tier: &str| {
+        Config::parse(
+            REQUIRED_CONFIG,
+            &REQUIRED_MODELS.replace(
+                "\"reasoning_summary_level\": \"concise\"",
+                &format!(
+                    "\"reasoning_summary_level\": \"concise\",\n        \"service_tier\": {tier},"
+                ),
+            ),
+        )
+    };
+    let choices = [
+        "auto",
+        "default",
+        "flex",
+        "scale",
+        "priority",
+        "fast",
+        "ultrafast",
+    ];
+    for tier in choices {
+        let config = parse_tier(&format!("\"{tier}\"")).unwrap();
+        let endpoint = config
+            .routing()
+            .for_role(zevria_foundation::ModelRole::Plan)
+            .responses_endpoint()
+            .unwrap();
+        assert_eq!(endpoint.additional_params["service_tier"], tier);
+    }
+    for invalid in [
+        r#""unknown""#,
+        r#""Fast""#,
+        "42",
+        "true",
+        "[]",
+        r#"{"fast":null}"#,
+    ] {
+        let error = format!("{:#}", parse_tier(invalid).unwrap_err());
+        assert!(error.contains("providers.gateway"), "{error}");
+        assert!(error.contains("service_tier"), "{error}");
+        assert!(error.contains(&choices.join(", ")), "{error}");
+    }
+}
+
+#[test]
+fn responses_model_service_tier_round_trip_preserves_sibling_precedence() {
+    use serde_json::{Value, json};
+
+    let mut source = models_value();
+    let gateway = &mut source["providers"]["gateway"];
+    gateway["additional_params"]["service_tier"] = json!("fast");
+    let mut opt_out = gateway["models"]["vendor.model.v2"].clone();
+    opt_out["service_tier"] = Value::Null;
+    let mut standard = opt_out.clone();
+    standard["service_tier"] = json!("default");
+    gateway["models"]["a-opt-out"] = opt_out;
+    gateway["models"]["z-standard"] = standard;
+
+    let catalog = parse_models(&source.to_string(), Path::new("models.jsonc")).unwrap();
+    let encoded = serde_json::to_value(&catalog).unwrap();
+    let models = &encoded["providers"]["gateway"]["models"];
+    assert!(
+        !models["vendor.model.v2"]
+            .as_object()
+            .unwrap()
+            .contains_key("service_tier")
+    );
+    assert_eq!(models["a-opt-out"].get("service_tier"), Some(&Value::Null));
+    assert_eq!(
+        models["z-standard"].get("service_tier"),
+        Some(&json!("default"))
+    );
+    assert_eq!(
+        encoded["providers"]["gateway"]["additional_params"],
+        source["providers"]["gateway"]["additional_params"]
+    );
+
+    for config in [
+        Config::from_files(toml::from_str(REQUIRED_CONFIG).unwrap(), catalog).unwrap(),
+        parse_value(&encoded).unwrap(),
+    ] {
+        for (id, tier) in [
+            ("vendor.model.v2", Some("fast")),
+            ("a-opt-out", None),
+            ("z-standard", Some("default")),
+        ] {
+            let profile = config
+                .routing()
+                .catalog()
+                .find(|p| p.profile.provider == "gateway" && p.profile.model == id)
+                .unwrap();
+            let mut expected = BTreeMap::from([("gateway_routing".into(), json!("pool-a"))]);
+            if let Some(tier) = tier {
+                expected.insert("service_tier".into(), json!(tier));
+            }
+            assert_eq!(
+                profile.responses_endpoint().unwrap().additional_params,
+                expected,
+                "{id}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(config.providers()).unwrap(),
+            encoded["providers"]
+        );
+    }
+}
+
+#[test]
 fn session_id_header_is_optional_provider_scoped_and_strict() {
     assert!(
         parse("")
@@ -448,9 +558,9 @@ fn environment_api_key_override_is_removed() {
 fn default_templates_use_requested_modes_models_and_search_setting() {
     let config: ConfigFile = toml::from_str(DEFAULT_CONFIG).unwrap();
     for (assignment, expected_model) in [
-        (&config.modes.plan, "gpt-6-astra"),
-        (&config.modes.build, "gpt-6-astra"),
-        (&config.modes.review, "gpt-6-sol"),
+        (&config.modes.plan, "gpt-6.2-astra"),
+        (&config.modes.build, "gpt-6.2-astra"),
+        (&config.modes.review, "gpt-6.2-sol"),
         (&config.modes.explore, "gpt-6-luna"),
         (&config.modes.builder, "gpt-6-luna"),
     ] {
@@ -465,7 +575,7 @@ fn default_templates_use_requested_modes_models_and_search_setting() {
     assert!(DEFAULT_MODELS.contains(r#""enabled": true, "external_web_access": true"#));
     let reasoning_levels = r#""reasoning_levels": ["low", "medium", "high", "xhigh", "max"]"#;
     assert_eq!(DEFAULT_MODELS.matches(reasoning_levels).count(), 4);
-    for model in ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"] {
+    for model in ["gpt-6-luna", "gpt-6.2-sol", "gpt-6.2-astra"] {
         assert!(
             DEFAULT_MODELS.contains(&format!(r#"//       "{model}": {{"#)),
             "missing model example {model}"

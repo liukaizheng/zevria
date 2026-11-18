@@ -32,6 +32,7 @@ pub(super) async fn count_full_input_tokens(
     properties.remove("previous_response_id");
     properties.remove("background");
     properties.remove("include");
+    properties.remove("service_tier");
     properties.remove("store");
     properties.remove("prompt_cache_key");
     // Completion policy is not part of exact input measurement; compatible
@@ -119,6 +120,7 @@ pub(super) async fn run_remote_compaction(
     properties.remove("stream");
     properties.remove("previous_response_id");
     properties.remove("include");
+    properties.remove("service_tier");
     properties
         .entry("parallel_tool_calls".to_string())
         .or_insert(serde_json::Value::Bool(true));
