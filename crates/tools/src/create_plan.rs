@@ -7,7 +7,7 @@ use zevria_workflow::{MAX_PLAN_ARTIFACT_BYTES, PlanValidationError, validate_dra
 
 use crate::plan_authoring;
 
-const DESCRIPTION: &str = "Save the initial Plan draft in engine storage; it persists across turns, restarts and context compaction and is not submitted. `markdown` must begin with exactly `# <title>` (one line, 3–8 words); other sections may be incomplete; limit {max} bytes. Fails when a draft or a submitted plan under revision already exists unless `replace` is true; prefer update_plan for changes.";
+const DESCRIPTION: &str = "Save the initial Plan draft in engine storage; it persists across turns, restarts and context compaction and is not submitted. `markdown` must begin with exactly `# <title>` (one line; nonblank title with no leading or trailing whitespace). Other sections may be incomplete; limit {max} bytes. Prefer 3–8 words for the title. Fails when a draft or a submitted plan under revision already exists unless `replace` is true; prefer update_plan for changes.";
 
 #[derive(Debug, Clone, Copy)]
 pub struct CreatePlanTool {

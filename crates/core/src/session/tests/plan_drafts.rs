@@ -45,7 +45,10 @@ fn batch(messages: Vec<Message>) -> Message {
 }
 #[tokio::test]
 async fn drafts_survive_turns_restart_and_submit_only_at_finalization() {
-    let text = valid_plan_markdown("Iterative stored plan draft", "First goal.");
+    let title = "Draft";
+    let revised_title = "A longer Plan title  with more than eight words";
+    let text = valid_plan_markdown(title, "First goal.");
+    let updated = valid_plan_markdown(revised_title, "First goal.");
     let provider = ScriptedProvider::new([
         Ok(create_plan_call(&text)),
         Ok(Message::assistant("Still investigating.")),
@@ -69,7 +72,8 @@ async fn drafts_survive_turns_restart_and_submit_only_at_finalization() {
         state => panic!("not a draft: {state:?}"),
     };
     assert_eq!(draft.sequence, 1);
-    let items = engine.conversation().items().to_vec();
+    assert_eq!(draft.markdown, text);
+    let items = zevria_transcript::transcript::load(&transcript_path).unwrap();
     let saved = items
         .iter()
         .position(|item| matches!(item, TranscriptItem::Plan(PlanRecord::DraftSaved { .. })))
@@ -98,7 +102,7 @@ async fn drafts_survive_turns_restart_and_submit_only_at_finalization() {
     drop(engine);
     let provider = ScriptedProvider::new([
         Ok(batch(vec![
-            update_plan_call("First goal.", "Final goal."),
+            update_plan_call(&format!("# {title}"), &format!("# {revised_title}")),
             submit_plan_call(),
         ])),
         Ok(Message::assistant("Submitted.")),
@@ -113,19 +117,34 @@ async fn drafts_survive_turns_restart_and_submit_only_at_finalization() {
     .unwrap()
     .with_transcript_items(items)
     .unwrap();
+    let restored = engine.plan_state().unwrap().working_copy().unwrap();
+    assert_eq!(restored.markdown(), text);
+    assert_eq!(derived_title(restored.markdown()).unwrap(), title);
+
     prompt(&mut engine, &events, "finish the plan").await;
-    assert!(
-        matches!(engine.plan_state().unwrap(), PlanWorkflowState::Ready { artifact } if artifact.markdown == text.replace("First goal.", "Final goal."))
-    );
+    let state = engine.plan_state().unwrap();
+    let PlanWorkflowState::Ready { artifact } = state else {
+        panic!("not ready: {state:?}");
+    };
+    assert_eq!(artifact.title, revised_title);
+    assert_eq!(artifact.markdown, updated);
+
     let loaded = zevria_transcript::transcript::load(&transcript_path).unwrap();
-    assert_eq!(
-        replay_plan_state(loaded.iter().filter_map(|item| match item {
-            TranscriptItem::Plan(record) => Some(record),
-            _ => None,
-        }))
-        .unwrap(),
-        *engine.plan_state().unwrap()
-    );
+    let records = loaded.iter().filter_map(|item| match item {
+        TranscriptItem::Plan(record) => Some(record),
+        _ => None,
+    });
+    let before_submit = replay_plan_state(
+        records
+            .clone()
+            .take_while(|record| !matches!(record, PlanRecord::Ready { .. })),
+    )
+    .unwrap();
+    let copy = before_submit.working_copy().unwrap();
+    let revised_markdown = copy.markdown();
+    assert_eq!(revised_markdown, updated);
+    assert_eq!(derived_title(revised_markdown).unwrap(), revised_title);
+    assert_eq!(replay_plan_state(records).unwrap(), *state);
     drop(directory);
 }
 #[tokio::test]

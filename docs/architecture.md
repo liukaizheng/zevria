@@ -2227,6 +2227,11 @@ disagreement question cannot contend with a live worker form. Each terminal
 path publishes an ID-matched `QuestionClosed`; the TUI ignores stale closes
 that target an older modal.
 
+Native `question` option labels must be nonblank after trimming and unique
+within the question (case-insensitive). Prefer 1–5 words for readability; the
+range is advisory. The full trimmed label is preserved, and option counts are
+unrestricted.
+
 The question popup measures prompts, answer labels/descriptions, editors, and
 validation with the exact width and wrapping configuration used to render.
 When space permits, the wrapped prompt and validation remain pinned around an
@@ -3387,7 +3392,7 @@ reduction failure is terminal. Successful replacement invalidates provider
 continuation and prepared counts, refreshes skill policies and live queries,
 re-estimates context usage, and recomputes automatic-compaction arming.
 
-The first accepted Plan prompt appends `PlanRecord::Started` and enters `Planning { id, previous, draft }`. The working copy is the saved draft, otherwise the retained submitted artifact after Revise, otherwise absent. `create_plan { markdown, replace }` saves an initial draft early; an existing working copy requires explicit replacement. `update_plan { edits }` applies 1–32 ordered, atomic literal replacements or fence-aware exact ATX section-body edits. A failed edit changes nothing and points to `read_plan {}`, which returns a one-line label/byte count followed by the exact stored text. Only reading returns the body; save acknowledgements are deterministic and contain no mirror path. Titles derive from the first `# <title>` line (3–8 words). Draft sections may be incomplete; submission reports every missing or empty canonical section together.
+The first accepted Plan prompt appends `PlanRecord::Started` and enters `Planning { id, previous, draft }`. The working copy is the saved draft, otherwise the retained submitted artifact after Revise, otherwise absent. `create_plan { markdown, replace }` saves an initial draft early; an existing working copy requires explicit replacement. `update_plan { edits }` applies 1–32 ordered, atomic literal replacements or fence-aware exact ATX section-body edits. A failed edit changes nothing and points to `read_plan {}`, which returns a one-line label/byte count followed by the exact stored text. Only reading returns the body; save acknowledgements are deterministic and contain no mirror path. The first line must be exactly `# <title>`, with a nonblank title and no leading or trailing whitespace in the title. Prefer 3–8 words for the title; the range is advisory. Draft sections may be incomplete; submission reports every missing or empty canonical section together.
 
 Each successful save stores a full `PlanRecord::DraftSaved { draft }` snapshot: target `PlanVersion`, cycle-local sequence starting at 1, exact Markdown and source turn. `[ToolResults, DraftSaved…, directive updates…]` is one atomic transcript rewrite. Saves survive turns, restart, compaction and feedback but neither open approval nor anchor compaction. The engine emits `ToolResults`, then a draft-changing `PlanStateChanged`, and writes the latest draft once per batch. RevisionRequested clears the draft and retains the artifact as the working copy for the next revision. Ready, Published, resolution and abandonment discard draft state.
 

@@ -6,7 +6,7 @@ use zevria_workflow::{
 };
 
 fn markdown() -> String {
-    "# Durable plan authoring workflow\n\n## Goal\nShip.\n\n## Decisions\nRust.\n\n## Implementation\nBuild.\n\n## Validation\nTest.\n\n## Risks\nNone.".into()
+    "# Draft\n\n## Goal\nShip.\n\n## Decisions\nRust.\n\n## Implementation\nBuild.\n\n## Validation\nTest.\n\n## Risks\nNone.".into()
 }
 fn scoped(state: &PlanWorkflowState) -> ToolContext {
     let mut context = ToolContext::new();
@@ -29,12 +29,22 @@ async fn lifecycle_and_scope_contract() {
         markdown: markdown(),
         replace: false,
     };
+    let body_edit = PlanEdit::Replace {
+        old_string: "Ship.".into(),
+        new_string: "Ship drafts.".into(),
+        replace_all: false,
+    };
+    let updated_title = "This Plan keeps the full title  after an edit";
+    let new_heading = format!("# {updated_title}");
     let edits = UpdatePlanArgs {
-        edits: vec![PlanEdit::Replace {
-            old_string: "Ship.".into(),
-            new_string: "Ship drafts.".into(),
-            replace_all: false,
-        }],
+        edits: vec![
+            body_edit.clone(),
+            PlanEdit::Replace {
+                old_string: "# Draft".into(),
+                new_string: new_heading.clone(),
+                replace_all: false,
+            },
+        ],
     };
     let mut unscoped = ToolContext::new();
     assert!(create.call(&mut unscoped, args.clone()).await.is_err());
@@ -83,6 +93,25 @@ async fn lifecycle_and_scope_contract() {
             .is_ok()
     );
     let mut context = scoped(&state);
+    let error = update
+        .call(
+            &mut context,
+            UpdatePlanArgs {
+                edits: vec![
+                    body_edit,
+                    PlanEdit::Replace {
+                        old_string: "# Draft".into(),
+                        new_string: "# \t ".into(),
+                        replace_all: false,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect_err("a blank title must reject the entire edit batch");
+    assert!(error.to_string().contains("title must not be blank"));
+    assert!(context.result::<PlanDraft>().unwrap().is_none());
+    assert!(context.result::<ToolResultDetail>().unwrap().is_none());
     assert_eq!(
         ReadPlanTool
             .call(&mut context, ReadPlanArgs {})
@@ -99,27 +128,22 @@ async fn lifecycle_and_scope_contract() {
     let detail = context.result::<ToolResultDetail>().unwrap().unwrap();
     let detail = detail.plan_draft().unwrap();
     assert_eq!(detail.sequence, Some(2));
+    assert_eq!(detail.title, updated_title);
     assert!(
         matches!(&detail.change, Some(zevria_foundation::FileChange::Update { unified_diff, .. }) if unified_diff.contains("+Ship drafts."))
     );
     let draft = context.result::<PlanDraft>().unwrap().unwrap();
-    let state = apply_plan_record(
-        state,
-        &PlanRecord::DraftSaved {
-            draft: draft.clone(),
-        },
-    )
-    .unwrap();
+    let expected =
+        markdown()
+            .replacen("# Draft", &new_heading, 1)
+            .replacen("Ship.", "Ship drafts.", 1);
+    assert_eq!(draft.markdown, expected);
+    let state = apply_plan_record(state, &PlanRecord::DraftSaved { draft }).unwrap();
     let mut context = scoped(&state);
     submit.call(&mut context, SubmitPlanArgs {}).await.unwrap();
-    assert_eq!(
-        context
-            .result::<PlanCandidate>()
-            .unwrap()
-            .unwrap()
-            .markdown(),
-        draft.markdown
-    );
+    let candidate = context.result::<PlanCandidate>().unwrap().unwrap();
+    assert_eq!(candidate.title(), updated_title);
+    assert_eq!(candidate.markdown(), expected);
 }
 #[tokio::test]
 async fn incomplete_drafts_and_submission_checks() {
@@ -211,22 +235,25 @@ fn strict_schemas_and_static_descriptions() {
     }
     assert_eq!(
         create.description(),
-        "Save the initial Plan draft in engine storage; it persists across turns, restarts and context compaction and is not submitted. `markdown` must begin with exactly `# <title>` (one line, 3–8 words); other sections may be incomplete; limit 1234 bytes. Fails when a draft or a submitted plan under revision already exists unless `replace` is true; prefer update_plan for changes."
+        "Save the initial Plan draft in engine storage; it persists across turns, restarts and context compaction and is not submitted. `markdown` must begin with exactly `# <title>` (one line; nonblank title with no leading or trailing whitespace). Other sections may be incomplete; limit 1234 bytes. Prefer 3–8 words for the title. Fails when a draft or a submitted plan under revision already exists unless `replace` is true; prefer update_plan for changes."
     );
     assert_eq!(
         update.description(),
-        "Revise the stored Plan working copy with 1–32 atomic, ordered edits. `replace` uses literal old_string/new_string matching: exactly one match unless replace_all is true; old_string must not be empty. `replace_section` replaces the body under one exact ATX heading line of level 2 or deeper, outside fenced code, up to the next heading of the same or higher level; the heading line is kept. Any failure changes nothing; identical results are errors. The result must begin with exactly `# <title>` (one line, 3–8 words) and fit 1234 bytes; other sections may be incomplete. Call read_plan after a match failure to get the exact stored text."
+        "Revise the stored Plan working copy with 1–32 atomic, ordered edits. `replace` uses literal old_string/new_string matching: exactly one match unless replace_all is true; old_string must not be empty. `replace_section` replaces the body under one exact ATX heading line of level 2 or deeper, outside fenced code, up to the next heading of the same or higher level; the heading line is kept. Any failure changes nothing; identical results are errors. The result must begin with exactly `# <title>` (one line; nonblank title with no leading or trailing whitespace) and fit 1234 bytes; other sections may be incomplete. Prefer 3–8 words for the title. Call read_plan after a match failure to get the exact stored text."
     );
     assert_eq!(
         read.description(),
         "Return the exact stored Plan draft (or the submitted plan under revision) with its draft number."
     );
+    let description = submit.description();
+    assert!(description.starts_with("Submit the stored Plan draft unchanged; takes no arguments."));
+    assert!(description.contains("1234 bytes"));
     assert!(
-        submit
-            .description()
-            .starts_with("Submit the stored Plan draft unchanged; takes no arguments.")
+        description.contains(
+            "`# <title>` (one line; nonblank title with no leading or trailing whitespace)"
+        )
     );
-    assert!(submit.description().contains("1234 bytes"));
+    assert!(description.contains("Prefer 3–8 words for the title."));
     let schema = update.parameters();
     let variants = schema["$defs"]["PlanEdit"]["oneOf"].as_array().unwrap();
     assert_eq!(variants.len(), 2);

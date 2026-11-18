@@ -319,15 +319,13 @@ pub enum PlanPublicationProvenance {
 }
 
 fn validate_title(title: &str) -> Result<(), PlanValidationError> {
-    if title.trim() != title || title.lines().count() != 1 {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(PlanValidationError("title must not be blank".into()));
+    }
+    if trimmed != title || title.lines().count() != 1 {
         return Err(PlanValidationError(
             "title must be one line with no leading or trailing whitespace".to_string(),
-        ));
-    }
-    let words = title.split_whitespace().count();
-    if !(3..=8).contains(&words) {
-        return Err(PlanValidationError(
-            "title must contain 3–8 words".to_string(),
         ));
     }
     Ok(())
@@ -625,32 +623,58 @@ mod tests {
     }
 
     #[test]
+    fn candidate_titles_have_advisory_word_counts() {
+        for title in ["Draft", "A longer Plan title  with more than eight words"] {
+            let markdown = valid_markdown(title);
+            let candidate =
+                PlanCandidate::validate(title.into(), markdown.clone(), MAX_PLAN_ARTIFACT_BYTES)
+                    .unwrap();
+            assert_eq!(candidate.title(), title);
+            assert_eq!(candidate.markdown(), markdown);
+        }
+    }
+
+    #[test]
     fn candidate_validation_pins_the_contract() {
         let title = "Durable plan workflow";
-        PlanCandidate::validate(
-            title.to_string(),
-            valid_markdown(title),
-            MAX_PLAN_ARTIFACT_BYTES,
-        )
-        .expect("valid candidate");
+        let markdown = valid_markdown(title);
+        PlanCandidate::validate(title.into(), markdown.clone(), MAX_PLAN_ARTIFACT_BYTES)
+            .expect("valid candidate");
 
-        for markdown in [
-            valid_markdown(title).replacen("# Durable", " # Durable", 1),
-            valid_markdown(title).replace("## Risks\nNone.", "## Risks\n"),
-            valid_markdown(title).replace("## Goal", "## Objective"),
+        for (invalid, diagnostic) in [
+            (valid_markdown(""), "title must not be blank"),
+            (valid_markdown(" \t\u{2003}"), "title must not be blank"),
+            (
+                valid_markdown(" Padded title"),
+                "no leading or trailing whitespace",
+            ),
+            (
+                valid_markdown("Padded title "),
+                "no leading or trailing whitespace",
+            ),
+            (
+                markdown.replacen("# Durable", " # Durable", 1),
+                "exactly `# <title>`",
+            ),
+            (
+                markdown.replacen("# Durable", "## Durable", 1),
+                "exactly `# <title>`",
+            ),
+            (
+                markdown.replace("## Risks\nNone.", "## Risks\n"),
+                "`## Risks` section must not be empty",
+            ),
+            (
+                markdown.replace("## Goal", "## Objective"),
+                "missing the required `## Goal` section",
+            ),
         ] {
-            assert!(
-                PlanCandidate::validate(title.to_string(), markdown, MAX_PLAN_ARTIFACT_BYTES)
-                    .is_err()
-            );
+            let error = PlanCandidate::from_markdown(invalid, MAX_PLAN_ARTIFACT_BYTES).unwrap_err();
+            assert!(error.to_string().contains(diagnostic), "{error}");
         }
         assert!(
-            PlanCandidate::validate(
-                "Too short".to_string(),
-                valid_markdown("Too short"),
-                MAX_PLAN_ARTIFACT_BYTES
-            )
-            .is_err()
+            PlanCandidate::validate("Different title".into(), markdown, MAX_PLAN_ARTIFACT_BYTES)
+                .is_err()
         );
 
         let oversized = valid_markdown(title);

@@ -183,7 +183,7 @@ async fn ensemble_drafting_is_allowed_before_inspection_without_changing_gate_or
         Some("complete at least one terminal `command` inspection attempt before submit_plan")
     );
     let invalid = assistant_tool_calls(&batch(vec![
-        create_plan_call("# Invalid"),
+        create_plan_call("## Invalid"),
         submit_plan_call(),
     ]));
     let result = execute_tool_calls(&scope, &invalid, ActiveSkills::default(), &gate).await;

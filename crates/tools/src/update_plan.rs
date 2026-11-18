@@ -10,7 +10,7 @@ use crate::{
     shared::{MAX_EDIT_FILE_CHANGE_BYTES, update_file_change},
 };
 
-const DESCRIPTION: &str = "Revise the stored Plan working copy with 1–32 atomic, ordered edits. `replace` uses literal old_string/new_string matching: exactly one match unless replace_all is true; old_string must not be empty. `replace_section` replaces the body under one exact ATX heading line of level 2 or deeper, outside fenced code, up to the next heading of the same or higher level; the heading line is kept. Any failure changes nothing; identical results are errors. The result must begin with exactly `# <title>` (one line, 3–8 words) and fit {max} bytes; other sections may be incomplete. Call read_plan after a match failure to get the exact stored text.";
+const DESCRIPTION: &str = "Revise the stored Plan working copy with 1–32 atomic, ordered edits. `replace` uses literal old_string/new_string matching: exactly one match unless replace_all is true; old_string must not be empty. `replace_section` replaces the body under one exact ATX heading line of level 2 or deeper, outside fenced code, up to the next heading of the same or higher level; the heading line is kept. Any failure changes nothing; identical results are errors. The result must begin with exactly `# <title>` (one line; nonblank title with no leading or trailing whitespace) and fit {max} bytes; other sections may be incomplete. Prefer 3–8 words for the title. Call read_plan after a match failure to get the exact stored text.";
 
 #[derive(Debug, Clone, Copy)]
 pub struct UpdatePlanTool {

@@ -49,7 +49,7 @@ pub struct QuestionSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QuestionOptionArgs {
-    /// Concise 1-5 word answer label.
+    /// Answer label must be nonblank after trimming and unique within the question (case-insensitive). Prefer 1–5 words for brevity.
     pub label: String,
     /// One short sentence explaining the impact or tradeoff.
     pub description: String,
@@ -233,10 +233,9 @@ fn validate_questions(args: QuestionArgs) -> Result<Vec<QuestionPrompt>, Questio
                 .enumerate()
                 .map(|(option_index, option)| {
                     let label = option.label.trim().to_string();
-                    let words = label.split_whitespace().count();
-                    if !(1..=5).contains(&words) {
+                    if label.is_empty() {
                         return Err(QuestionError::InvalidArguments(format!(
-                            "questions[{index}].options[{option_index}].label must contain 1-5 words, got {words}"
+                            "questions[{index}].options[{option_index}].label must not be blank"
                         )));
                     }
                     if !labels.insert(label.to_lowercase()) {
@@ -338,6 +337,9 @@ mod tests {
     use zevria_session_api::question_channels;
     use zevria_session_api::session_event_channel;
 
+    const LONG_RECOMMENDED_LABEL: &str =
+        "Change only this workflow and leave everything else alone (Recommended)";
+
     fn args() -> QuestionArgs {
         QuestionArgs {
             questions: vec![QuestionSpec {
@@ -398,6 +400,28 @@ mod tests {
     }
 
     #[test]
+    fn validation_rejects_blank_and_duplicate_option_labels() {
+        for label in ["", " \t\u{2003}"] {
+            let mut blank = args();
+            blank.questions[0].options[0].label = label.into();
+            let error = validate_questions(blank).expect_err("blank option label must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("options[0].label must not be blank")
+            );
+        }
+
+        let mut duplicate = args();
+        duplicate.questions[0].options[0].label = LONG_RECOMMENDED_LABEL.into();
+        duplicate.questions[0].options[1].label =
+            format!("  {}\t", LONG_RECOMMENDED_LABEL.to_uppercase());
+        let error =
+            validate_questions(duplicate).expect_err("case-insensitive duplicate must fail");
+        assert!(error.to_string().contains("duplicate option label"));
+    }
+
+    #[test]
     fn validation_accepts_unbounded_headers_and_option_counts() {
         let mut zero_options = args();
         zero_options.questions[0].header =
@@ -427,14 +451,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn answered_and_dismissed_batches_return_structured_json() {
+    async fn answered_and_dismissed_batches_preserve_long_option_labels() {
         for response in [
             QuestionResponse::Answered {
                 answers: vec![QuestionAnswer {
                     id: "scope_choice".to_string(),
-                    answer: Some(QuestionAnswerValue::String(
-                        "Focused (Recommended)".to_string(),
-                    )),
+                    answer: Some(QuestionAnswerValue::String(LONG_RECOMMENDED_LABEL.into())),
                 }],
             },
             QuestionResponse::Dismissed,
@@ -443,14 +465,20 @@ mod tests {
             let channels = question_channels(events_tx);
             let tool = QuestionTool::new(channels.requester);
             let expected = response.clone();
+            let mut args = args();
+            args.questions[0].options[0].label = format!(" \t{LONG_RECOMMENDED_LABEL}  ");
             let call =
                 tokio::spawn(
-                    async move { tool.execute(args(), turn(CancellationToken::new())).await },
+                    async move { tool.execute(args, turn(CancellationToken::new())).await },
                 );
             let request = match events_rx.recv().await.expect("question event") {
                 SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
                 update => panic!("unexpected update: {update:?}"),
             };
+            assert_eq!(
+                request.questions[0].options[0].label,
+                LONG_RECOMMENDED_LABEL
+            );
             assert!(channels.responder.respond(&request.id, response));
             let output = call.await.expect("join").expect("tool output");
             assert_eq!(
@@ -459,8 +487,11 @@ mod tests {
             );
             if matches!(expected, QuestionResponse::Answered { .. }) {
                 assert_eq!(
-                    output,
-                    r#"{"status":"answered","answers":[{"id":"scope_choice","answer":"Focused (Recommended)"}]}"#
+                    serde_json::from_str::<serde_json::Value>(&output).unwrap(),
+                    serde_json::json!({
+                        "status": "answered",
+                        "answers": [{"id": "scope_choice", "answer": LONG_RECOMMENDED_LABEL}]
+                    })
                 );
             }
         }

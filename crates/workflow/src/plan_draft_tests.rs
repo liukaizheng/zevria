@@ -91,7 +91,7 @@ fn reducer_rejects_invalid_drafts_and_mismatched_artifacts() {
             ..valid.clone()
         },
         PlanDraft {
-            markdown: "# Too short".into(),
+            markdown: "# \t ".into(),
             ..valid.clone()
         },
         PlanDraft {
@@ -211,13 +211,14 @@ fn literal_edits_are_atomic_and_validate_the_final_text() {
         )
         .is_err()
     );
-    assert!(
+    assert_eq!(
         apply_plan_edits(
             &source,
             &[replace("Durable draft based plans", "Short", false)],
             usize::MAX
         )
-        .is_err()
+        .unwrap(),
+        source.replacen("# Durable draft based plans", "# Short", 1)
     );
     assert!(
         apply_plan_edits(

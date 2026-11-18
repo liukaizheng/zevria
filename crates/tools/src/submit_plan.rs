@@ -8,7 +8,7 @@ use zevria_workflow::{MAX_PLAN_ARTIFACT_BYTES, PlanCandidate, PlanValidationErro
 
 const DESCRIPTION: &str = r#"Submit the stored Plan draft unchanged; takes no arguments.
 
-Use this only when planning is complete. The title must contain 3–8 words. Markdown must begin with exactly `# <title>` and contain nonempty `## Goal`, `## Decisions`, `## Implementation`, `## Validation`, and `## Risks` sections. The configured Markdown limit is {max_artifact_bytes} bytes. Fix the stored draft with update_plan first if validation fails. After this tool accepts the artifact, make no more tool calls and provide only a short final confirmation."#;
+Use this only when planning is complete. Markdown must begin with exactly `# <title>` (one line; nonblank title with no leading or trailing whitespace) and contain nonempty `## Goal`, `## Decisions`, `## Implementation`, `## Validation`, and `## Risks` sections. The configured Markdown limit is {max_artifact_bytes} bytes. Prefer 3–8 words for the title. Fix the stored draft with update_plan first if validation fails. After this tool accepts the artifact, make no more tool calls and provide only a short final confirmation."#;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SubmitPlanTool {
