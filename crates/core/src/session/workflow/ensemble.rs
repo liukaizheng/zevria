@@ -253,7 +253,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         )?;
         let mut input = self.conversation.model_input();
         input.push(ModelRequestItem::Message(message));
-        let boundary = self.standard_request_boundary();
+        let boundary = self.standard_request_boundary(&policy);
         input.extend(
             boundary
                 .as_ref()
@@ -644,7 +644,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             synthesis_input: synthesis,
             agents: summaries.clone(),
         })];
-        records.extend(self.standard_request_boundary());
+        records.extend(self.standard_request_boundary(&self.ensemble_policy(start.workflow)));
         if let Err(error) = self.commit(records) {
             self.persistence_failed(&error, events).await?;
             return Err(error.context("failed to persist ensemble reports").into());

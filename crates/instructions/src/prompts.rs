@@ -16,16 +16,23 @@ pub const INSPECTION_POLICY_INSTRUCTIONS: &str =
 pub const SKILL_SELECTION_INSTRUCTIONS: &str =
     include_str!("../../../docs/instructions/skill-selection.md");
 pub const SKILL_SELECTION_UNAVAILABLE: &str = "Skill selection is unavailable.";
-/// Parent implementation workflow.
-pub const BUILD_MODE_INSTRUCTIONS: &str = include_str!("../../../docs/instructions/build-mode.md");
+/// Parent implementation workflow followed by shared implementation style.
+pub const BUILD_MODE_INSTRUCTIONS: &str = concat!(
+    include_str!("../../../docs/instructions/build-mode.md"),
+    "\n",
+    include_str!("../../../docs/instructions/implementation-style.md")
+);
 /// Approval-ready planning workflow.
 pub const PLAN_MODE_INSTRUCTIONS: &str = include_str!("../../../docs/instructions/plan-mode.md");
 /// Independent investigation role.
 pub const EXPLORE_AGENT_INSTRUCTIONS: &str =
     include_str!("../../../docs/instructions/explore-agent.md");
-/// Isolated Build-child role.
-pub const BUILD_SUBTASK_INSTRUCTIONS: &str =
-    include_str!("../../../docs/instructions/build-subtask.md");
+/// Isolated Build-child role followed by shared implementation style.
+pub const BUILD_SUBTASK_INSTRUCTIONS: &str = concat!(
+    include_str!("../../../docs/instructions/build-subtask.md"),
+    "\n",
+    include_str!("../../../docs/instructions/implementation-style.md")
+);
 /// Independent Plan worker; shared role fragment followed by publication semantics.
 pub const ENSEMBLE_WORKER_PLAN_INSTRUCTIONS: &str = concat!(
     include_str!("../../../docs/instructions/ensemble-worker.md"),

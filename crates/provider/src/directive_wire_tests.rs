@@ -16,7 +16,7 @@ use zevria_session_api::TurnCommand;
 
 #[tokio::test]
 async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_and_reconnect() {
-    use zevria_foundation::{RequestBehavior, RequestMetadata};
+    use zevria_foundation::{FileMutationScope, RequestBehavior, RequestMetadata};
     use zevria_instructions::RequestDirective;
     for developer_messages in [true, false] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -70,13 +70,14 @@ async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_a
                 input.push(OwnedModelRequestItem::message(Message::user(format!(
                     "prompt {index}"
                 ))));
-                input.push(OwnedModelRequestItem::RequestInstruction(
-                    RequestDirective::boundary(if index == 1 {
-                        orchestrated.clone()
-                    } else {
-                        RequestMetadata::new(RequestBehavior::Standard)
-                    }),
-                ));
+                input.push(OwnedModelRequestItem::RequestInstruction(if index == 1 {
+                    RequestDirective::boundary_with_file_mutation_scope(
+                        orchestrated.clone(),
+                        FileMutationScope::ProcessFilesystem,
+                    )
+                } else {
+                    RequestDirective::boundary(RequestMetadata::new(RequestBehavior::Standard))
+                }));
             }
             let request = ModelRequest {
                 input_identity: None,
@@ -118,14 +119,15 @@ async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_a
                     "user"
                 }
             );
-            assert!(
-                directive["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("Request directive:")
-            );
+            let text = directive["content"][0]["text"].as_str().unwrap();
+            assert!(text.starts_with("Request directive:"));
+            assert_eq!(text.contains("Root Build file tools:"), index == 1);
             if index > 0 {
-                assert!(full[index].starts_with(&full[index - 1]));
+                // Newly scoped boundaries never rewrite earlier wire input on reconnect.
+                assert_eq!(
+                    serde_json::to_vec(&full[index][..full[index - 1].len()]).unwrap(),
+                    serde_json::to_vec(&full[index - 1]).unwrap()
+                );
             }
         }
         assert!(

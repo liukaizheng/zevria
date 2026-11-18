@@ -153,7 +153,7 @@ async fn scratch_prompt_skill_compact_quit_resume_and_submit_retains_pins_and_di
         let mut engine = SessionEngine::new(
             Provider::new(native, "OLD_APPLICATION_SENTINEL"),
             test_skill_tools(),
-            test_policies(),
+            test_policies_with_external_mutation(),
             writer,
             test_skills(),
         )
@@ -177,6 +177,16 @@ async fn scratch_prompt_skill_compact_quit_resume_and_submit_retains_pins_and_di
         )
         .await;
         inspect(&engine, true);
+        let request = engine
+            .provider
+            .normal
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert!(has_external_mutation_notice(&request.input));
         run(&mut engine, compact()).await;
         inspect(&engine, true);
         let path = engine.conversation.path().to_path_buf();

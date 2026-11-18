@@ -1,63 +1,177 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, Metadata},
+    io::ErrorKind,
+    path::{Component, Path, PathBuf},
+};
 
-use zevria_foundation::FileChange;
-use zevria_foundation::FileChangeOperation;
+use zevria_foundation::{FileChange, FileChangeOperation, FileMutationScope};
 
 use crate::FileToolError;
 
 pub(crate) const MAX_EDIT_FILE_CHANGE_BYTES: usize = 512 * 1024;
 
+#[derive(Debug)]
+pub(crate) struct MutationPath {
+    /// Absolute path with a canonical parent, but the original final entry.
+    pub path: PathBuf,
+    /// Existing file or symlink referent metadata. A dangling symlink is an error, not missing.
+    pub metadata: Option<Metadata>,
+}
+
+impl MutationPath {
+    pub(crate) fn regular_file(&self) -> Result<Option<&Metadata>, FileToolError> {
+        match &self.metadata {
+            Some(metadata) if !metadata.is_file() => {
+                let kind = if metadata.is_dir() {
+                    "a directory"
+                } else {
+                    "not a regular file"
+                };
+                Err(FileToolError::invalid_arguments(format!(
+                    "{} is {kind}",
+                    self.path.display()
+                )))
+            }
+            metadata => Ok(metadata.as_ref()),
+        }
+    }
+
+    pub(crate) fn require_regular_file(&self) -> Result<&Metadata, FileToolError> {
+        self.regular_file()?.ok_or_else(|| {
+            FileToolError::io(format!("file {} does not exist", self.path.display()))
+        })
+    }
+}
+
 pub(crate) fn resolve_path_for_write(
     workspace: &Path,
     path: &str,
-) -> Result<PathBuf, FileToolError> {
+    scope: FileMutationScope,
+) -> Result<MutationPath, FileToolError> {
     if path.is_empty() {
         return Err(FileToolError::invalid_arguments(
             "file_path must not be empty",
         ));
     }
-    let canonical_workspace = workspace.canonicalize().map_err(|error| {
-        FileToolError::path_resolution(format!(
-            "failed to resolve {}: {error}",
-            workspace.display()
-        ))
-    })?;
-    let joined = workspace.join(path);
-    let parent = joined.parent().ok_or_else(|| {
-        FileToolError::path_resolution(format!("path {} has no parent directory", joined.display()))
-    })?;
-    let canonical_parent = parent.canonicalize().map_err(|error| {
-        FileToolError::path_resolution(format!("failed to resolve {}: {error}", parent.display()))
-    })?;
-    if !canonical_parent.starts_with(&canonical_workspace) {
-        return Err(FileToolError::path_resolution(format!(
-            "path {} escapes the workspace",
-            joined.display()
+    let input = Path::new(path);
+    // Path::file_name may discard a trailing separator or `.`. Do not turn a
+    // directory-form argument into a mutation of the file before that suffix.
+    if path.contains('\0')
+        || matches!(
+            path.rsplit(std::path::is_separator).next(),
+            Some("" | "." | "..")
+        )
+    {
+        return Err(FileToolError::invalid_arguments(format!(
+            "expected a file path, got {path:?}"
         )));
     }
-    let file_name = joined.file_name().ok_or_else(|| {
-        FileToolError::path_resolution(format!("path {} has no file name", joined.display()))
-    })?;
-    let resolved_path = canonical_parent.join(file_name);
-
-    if let Ok(metadata) = resolved_path.symlink_metadata()
-        && metadata.file_type().is_symlink()
+    // On Windows, drive-relative and rooted-but-not-absolute paths would
+    // override part of the workspace instead of resolving relative to it.
+    if !input.is_absolute()
+        && (input.has_root() || matches!(input.components().next(), Some(Component::Prefix(_))))
     {
-        let canonical_path = resolved_path.canonicalize().map_err(|error| {
-            FileToolError::path_resolution(format!(
-                "failed to resolve {}: {error}",
-                resolved_path.display()
-            ))
-        })?;
-        if !canonical_path.starts_with(&canonical_workspace) {
-            return Err(FileToolError::path_resolution(format!(
-                "path {} escapes the workspace",
-                resolved_path.display()
-            )));
-        }
+        return Err(FileToolError::invalid_arguments(format!(
+            "expected an absolute or workspace-relative path, got {path:?}"
+        )));
     }
+    // Don't reinterpret an NTFS stream, a drive-like filename, or a slash
+    // in a verbatim component when joining it to a canonical Windows path.
+    #[cfg(windows)]
+    if input.components().any(|part| {
+        matches!(part, Component::Normal(name) if name.as_encoded_bytes().iter().any(|b| matches!(b, b':' | b'/')))
+    }) {
+        return Err(FileToolError::invalid_arguments(format!(
+            "unsupported Windows file path component in {path:?}"
+        )));
+    }
+    let parent = input.parent().ok_or_else(|| {
+        FileToolError::path_resolution(format!("path {path:?} has no parent directory"))
+    })?;
+    let file_name = input
+        .file_name()
+        .ok_or_else(|| FileToolError::path_resolution(format!("path {path:?} has no file name")))?;
+    let canonical_parent = resolve_parent(workspace, parent)?;
+    let boundary = match scope {
+        FileMutationScope::WorkspaceOnly => Some(canonicalize(workspace)?),
+        FileMutationScope::ProcessFilesystem => None,
+    };
+    check_scope(boundary.as_deref(), &canonical_parent, input)?;
 
-    Ok(resolved_path)
+    let path = canonical_parent.join(file_name);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_symlink() => {
+            let referent = canonicalize(&path)?;
+            check_scope(boundary.as_deref(), &referent, &path)?;
+            Some(fs::metadata(referent).map_err(|error| inspection_error(&path, error))?)
+        }
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(inspection_error(&path, error)),
+    };
+    Ok(MutationPath { path, metadata })
+}
+
+fn resolve_parent(workspace: &Path, parent: &Path) -> Result<PathBuf, FileToolError> {
+    // Windows path joining (for a verbatim workspace) and DOS path resolution
+    // can cancel `link/..` lexically. Resolve the directory at each `..` first.
+    #[cfg(windows)]
+    if parent.components().any(|part| part == Component::ParentDir) {
+        let mut resolved = if parent.is_absolute() {
+            PathBuf::new()
+        } else {
+            workspace.to_path_buf()
+        };
+        for part in parent.components() {
+            if part == Component::ParentDir {
+                resolved = canonicalize_directory(&resolved)?;
+                resolved.pop();
+            } else {
+                resolved.push(part.as_os_str());
+            }
+        }
+        return canonicalize_directory(&resolved);
+    }
+    // On Unix the filesystem resolves `..` after following symlinks.
+    canonicalize_directory(&workspace.join(parent))
+}
+
+fn canonicalize_directory(path: &Path) -> Result<PathBuf, FileToolError> {
+    let resolved = canonicalize(path)?;
+    if !fs::metadata(&resolved)
+        .map_err(|error| inspection_error(&resolved, error))?
+        .is_dir()
+    {
+        return Err(FileToolError::path_resolution(format!(
+            "parent {} is not a directory",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+fn canonicalize(path: &Path) -> Result<PathBuf, FileToolError> {
+    path.canonicalize().map_err(|error| {
+        FileToolError::path_resolution(format!("failed to resolve {}: {error}", path.display()))
+    })
+}
+
+fn check_scope(
+    workspace: Option<&Path>,
+    resolved: &Path,
+    requested: &Path,
+) -> Result<(), FileToolError> {
+    if workspace.is_some_and(|workspace| !resolved.starts_with(workspace)) {
+        return Err(FileToolError::path_resolution(format!(
+            "path {} escapes the workspace",
+            requested.display()
+        )));
+    }
+    Ok(())
+}
+
+fn inspection_error(path: &Path, error: std::io::Error) -> FileToolError {
+    FileToolError::io(format!("failed to inspect {}: {error}", path.display()))
 }
 
 pub(crate) fn diff_line_counts(unified_diff: &str) -> (usize, usize) {
@@ -136,12 +250,23 @@ mod tests {
             .expect("canonical workspace");
 
         assert_eq!(
-            resolve_path_for_write(workspace.path(), "sub/file.txt").expect("relative path"),
+            resolve_path_for_write(
+                workspace.path(),
+                "sub/file.txt",
+                FileMutationScope::WorkspaceOnly
+            )
+            .expect("relative path")
+            .path,
             root.join("sub/file.txt")
         );
         assert_eq!(
-            resolve_path_for_write(workspace.path(), &root.join("file.txt").to_string_lossy())
-                .expect("absolute path"),
+            resolve_path_for_write(
+                workspace.path(),
+                &root.join("file.txt").to_string_lossy(),
+                FileMutationScope::WorkspaceOnly,
+            )
+            .expect("absolute path")
+            .path,
             root.join("file.txt")
         );
     }
@@ -155,12 +280,17 @@ mod tests {
         let error = resolve_path_for_write(
             workspace.path(),
             outside_path.to_str().expect("utf-8 temp path"),
+            FileMutationScope::WorkspaceOnly,
         )
         .expect_err("outside path should fail");
         assert!(error.to_string().contains("escapes the workspace"));
 
-        let error = resolve_path_for_write(workspace.path(), "missing/file.txt")
-            .expect_err("missing parent should fail");
+        let error = resolve_path_for_write(
+            workspace.path(),
+            "missing/file.txt",
+            FileMutationScope::ProcessFilesystem,
+        )
+        .expect_err("missing parent should fail");
         assert!(error.to_string().contains("failed to resolve"));
     }
 
@@ -175,8 +305,12 @@ mod tests {
         std::fs::write(&outside_file, "hello").expect("outside file");
         symlink(&outside_file, workspace.path().join("link.txt")).expect("symlink");
 
-        let error = resolve_path_for_write(workspace.path(), "link.txt")
-            .expect_err("symlink escape should fail");
+        let error = resolve_path_for_write(
+            workspace.path(),
+            "link.txt",
+            FileMutationScope::WorkspaceOnly,
+        )
+        .expect_err("symlink escape should fail");
         assert!(error.to_string().contains("escapes the workspace"));
     }
 }

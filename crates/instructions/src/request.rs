@@ -1,6 +1,8 @@
 //! Request directives are engine input, never skill pins or summary authority.
 use serde::{Deserialize, Serialize};
-use zevria_foundation::{RequestBehavior, RequestMetadata};
+use zevria_foundation::{FileMutationScope, RequestBehavior, RequestMetadata};
+
+const PROCESS_FILESYSTEM_NOTICE: &str = "Root Build file tools: where permitted, edit (including move_to), write, and delete can use absolute or workspace-relative paths outside the startup workspace, including parent-relative paths. The workspace-only wording in the cached tool descriptions does not apply to this request. Stay within the user’s task and the process’s OS permissions.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,14 +17,24 @@ pub struct RequestDirective {
     pub version: u32,
     pub request: RequestMetadata,
     pub kind: RequestDirectiveKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_mutation_scope: Option<FileMutationScope>,
 }
 
 impl RequestDirective {
     pub fn boundary(request: RequestMetadata) -> Self {
+        Self::boundary_with_file_mutation_scope(request, FileMutationScope::WorkspaceOnly)
+    }
+
+    pub fn boundary_with_file_mutation_scope(
+        request: RequestMetadata,
+        scope: FileMutationScope,
+    ) -> Self {
         Self {
             version: 1,
             request,
             kind: RequestDirectiveKind::Boundary,
+            file_mutation_scope: (scope == FileMutationScope::ProcessFilesystem).then_some(scope),
         }
     }
 
@@ -31,6 +43,7 @@ impl RequestDirective {
             version: 1,
             request,
             kind: RequestDirectiveKind::Correction,
+            file_mutation_scope: None,
         }
     }
 
@@ -40,6 +53,10 @@ impl RequestDirective {
             "unsupported request directive version; expected 1"
         );
         self.request.validate()?;
+        anyhow::ensure!(
+            self.file_mutation_scope.is_none() || self.kind == RequestDirectiveKind::Boundary,
+            "file mutation scope belongs to a request boundary"
+        );
         anyhow::ensure!(
             self.kind != RequestDirectiveKind::Correction
                 || self.request.behavior == RequestBehavior::Orchestrate,
@@ -60,6 +77,11 @@ impl RequestDirective {
                 "Concurrent delegation is still unfulfilled. This is the one engine correction for this request. Use launch_subtasks with at least two meaningful independent entries in one batch; at least two distinct accepted child identities in one result are required. Integrate and validate their work. Do not fabricate tasks or claim launches in prose. If decomposition is unsafe, explain the blocker. Another premature final response fails the turn."
             }
         };
-        format!("Request directive:\n{body}")
+        match (self.kind, self.file_mutation_scope) {
+            (RequestDirectiveKind::Boundary, Some(FileMutationScope::ProcessFilesystem)) => {
+                format!("Request directive:\n{body}\n{PROCESS_FILESYSTEM_NOTICE}")
+            }
+            _ => format!("Request directive:\n{body}"),
+        }
     }
 }

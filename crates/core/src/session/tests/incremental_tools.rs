@@ -94,10 +94,13 @@ async fn mode_changes_append_once_in_registry_order_and_forbidden_declared_calls
         Ok(Message::assistant("plan complete")),
     ]);
     let (_directory, transcript) = test_transcript();
+    let mut policies = policies();
+    policies.policy_mut(SessionMode::Build).file_mutation_scope =
+        zevria_foundation::FileMutationScope::ProcessFilesystem;
     let mut engine = SessionEngine::new(
         provider,
         registry("command v1", writes.clone()),
-        policies(),
+        policies,
         transcript,
         Arc::new(SkillCatalog::default()),
     )
@@ -140,6 +143,22 @@ async fn mode_changes_append_once_in_registry_order_and_forbidden_declared_calls
             .all(|request| request.input[position] == requests[2].input[position])
     );
     assert!(format!("{:?}", requests.last().unwrap().input).contains("unavailable in Plan mode"));
+    for (index, request) in requests.iter().enumerate().skip(2) {
+        let boundary = request
+            .input
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                OwnedModelRequestItem::RequestInstruction(boundary) => Some(boundary),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            boundary.file_mutation_scope,
+            (index < 4).then_some(zevria_foundation::FileMutationScope::ProcessFilesystem)
+        );
+        assert!(!request.instructions.contains("Root Build file tools:"));
+    }
     assert_eq!(
         zevria_transcript::transcript::load(engine.conversation.path()).unwrap(),
         engine.conversation.items()

@@ -1,4 +1,4 @@
-use std::{fs, io::ErrorKind, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use rig_agent::tool::{Tool, ToolContext};
 use rig_core::tool::ToolExecutionError;
@@ -6,7 +6,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use zevria_foundation::FileChange;
 use zevria_foundation::FileChangeOutput;
-use zevria_foundation::ToolResultDetail;
+use zevria_foundation::{FileMutationScope, ToolResultDetail};
 
 use crate::{
     FileToolError,
@@ -24,23 +24,33 @@ Usage:
 #[derive(Debug, Clone)]
 pub struct WriteTool {
     workspace: PathBuf,
+    scope: FileMutationScope,
 }
 
 impl WriteTool {
     pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            scope: FileMutationScope::WorkspaceOnly,
+        }
+    }
+
+    pub fn with_file_mutation_scope(mut self, scope: FileMutationScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     fn execute(&self, args: WriteArgs) -> Result<(String, Vec<FileChangeOutput>), FileToolError> {
-        let path = resolve_path_for_write(&self.workspace, &args.file_path)?;
-        let previous_content = match fs::metadata(&path) {
-            Ok(_) => match fs::read_to_string(&path) {
+        let target = resolve_path_for_write(&self.workspace, &args.file_path, self.scope)?;
+        let previous_content = if target.regular_file()?.is_some() {
+            match fs::read_to_string(&target.path) {
                 Ok(content) => PreviousContent::Utf8(content),
                 Err(error) => PreviousContent::Unreadable(error.to_string()),
-            },
-            Err(error) if error.kind() == ErrorKind::NotFound => PreviousContent::Missing,
-            Err(error) => PreviousContent::Unreadable(error.to_string()),
+            }
+        } else {
+            PreviousContent::Missing
         };
+        let path = target.path;
         let bytes = args.content.len();
         zevria_foundation::atomic_file::replace(&path, args.content.as_bytes()).map_err(
             |error| {

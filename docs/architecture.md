@@ -2292,8 +2292,28 @@ text, and preserves explicit interrupted (`◼`) or unknown (`?`) state rather t
 inferring success from a terminal turn event. Confirmed updates use `•`; item rows use
 `○`/`◐`/`✓`. Raw `y`/`yy` payloads remain distinct from Block-scope `Y` readable lists.
 
+The root Build registry binds `edit`, `write`, and `delete` to the process
+filesystem under ordinary OS permissions. Absolute paths and paths relative to
+the startup workspace (including `..`) can reach outside it. Isolated Build
+children keep a separate, workspace-confined registry that checks canonical
+parents and final symlink referents. Plan, Explore, workers, and synthesis
+retain their existing read-only rules; an earlier advertised tool does not
+override the active policy. The shell still starts in the same directory and
+is not sandboxed. See [file path rules](edit-tool.md#file_path) for symlinks and
+rename behavior.
+
+New root Build request boundaries record an optional file-mutation scope and
+render its notice as ordered input, including for skill invocations, approved
+Plan handoffs, and Build job continuations. This reconciles the older workspace
+wording in the stable file-tool descriptions without rewriting those definitions,
+the fixed instructions, or prior request boundaries. The host registry and
+active tool allowlist enforce access; the notice grants no authority. The notice
+replays from its typed boundary, including when compaction reprojects the active
+request contract.
+
 Structured file-tool metadata remains separate from the ordinary model-facing
-result. `edit` keeps default-context unified patches, a 512 KiB metadata bound,
+result. File changes keep their absolute paths (including external sources and
+move destinations), with a resolved parent and the original final entry. `edit` keeps default-context unified patches, a 512 KiB metadata bound,
 and a 1,000 wrapped-row TUI bound with one truncation notice. Readable UTF-8
 `write` and `delete` changes instead preserve complete content: additions and
 deletions store the exact file text, while an overwrite stores one full-context

@@ -267,7 +267,8 @@ impl<P: ModelProvider> SessionEngine<P> {
             jobs.running_model_jobs(),
         );
         let mut records = vec![TranscriptItem::CommandJobNotice(notice.clone())];
-        let boundary = self.standard_request_boundary();
+        let policy = self.policies.policy(mode);
+        let boundary = self.standard_request_boundary(policy);
         let request = boundary.as_ref().and_then(|record| match record {
             TranscriptItem::RequestDirective(directive) => Some(directive.request.clone()),
             _ => None,
@@ -275,7 +276,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         records.extend(boundary);
         records.extend(self.instruction_updates(
             self.conversation.items(),
-            self.policies.policy(mode),
+            policy,
             self.active_skills()?,
         )?);
         if let Err(error) = self.commit(RecordChange::anchored(TurnAnchor::Append, records, mode)) {

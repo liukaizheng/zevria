@@ -1,4 +1,4 @@
-use std::{fs, io::ErrorKind, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use rig_agent::tool::{Tool, ToolContext};
 use rig_core::tool::ToolExecutionError;
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use zevria_foundation::FileChange;
 use zevria_foundation::FileChangeOperation;
 use zevria_foundation::FileChangeOutput;
-use zevria_foundation::ToolResultDetail;
+use zevria_foundation::{FileMutationScope, ToolResultDetail};
 
 use crate::{FileToolError, shared::resolve_path_for_write};
 
@@ -21,34 +21,30 @@ Usage:
 #[derive(Debug, Clone)]
 pub struct DeleteTool {
     workspace: PathBuf,
+    scope: FileMutationScope,
 }
 
 impl DeleteTool {
     pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            scope: FileMutationScope::WorkspaceOnly,
+        }
+    }
+
+    pub fn with_file_mutation_scope(mut self, scope: FileMutationScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     fn execute(&self, args: DeleteArgs) -> Result<(String, Vec<FileChangeOutput>), FileToolError> {
-        let path = resolve_path_for_write(&self.workspace, &args.file_path)?;
-        let metadata = fs::metadata(&path).map_err(|error| {
-            if error.kind() == ErrorKind::NotFound {
-                FileToolError::io(format!("file {} does not exist", path.display()))
-            } else {
-                FileToolError::io(format!("failed to inspect {}: {error}", path.display()))
-            }
-        })?;
-        if metadata.is_dir() {
-            return Err(FileToolError::invalid_arguments(format!(
-                "{} is a directory; delete only removes files",
-                path.display()
-            )));
-        }
-
+        let target = resolve_path_for_write(&self.workspace, &args.file_path, self.scope)?;
+        let bytes = target.require_regular_file()?.len() as usize;
+        let path = target.path;
         let previous_content = match fs::read_to_string(&path) {
             Ok(content) => PreviousContent::Utf8(content),
             Err(error) => PreviousContent::Unreadable(error.to_string()),
         };
-        let bytes = metadata.len() as usize;
         fs::remove_file(&path).map_err(|error| {
             FileToolError::io(format!("failed to delete {}: {error}", path.display()))
         })?;

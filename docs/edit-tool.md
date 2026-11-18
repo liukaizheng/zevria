@@ -1,14 +1,13 @@
 # The `edit` Tool
 
-The `edit` tool applies precise changes to one existing UTF-8 text file in the
-workspace. It is the preferred tool for modifying source code, configuration,
-and documentation when the intended change can be described as replacing
-known text. It can also rename or move the edited file.
+The `edit` tool applies precise changes to one existing UTF-8 text file. It is
+the preferred tool for modifying source code, configuration, and documentation
+when the intended change can be described as replacing known text. It can also
+rename or move the edited file.
 
 Unlike a shell-based editing command, `edit` receives structured arguments and
-returns structured file-change metadata. Literal replacements are validated
-before the file is changed, and the workspace boundary is checked for both the
-source and destination paths.
+returns structured file-change metadata. Literal replacements and both paths
+are validated before the file is changed.
 
 ## When to use `edit`
 
@@ -51,14 +50,29 @@ The top-level object has three fields:
 
 ### `file_path`
 
-`file_path` is required. It may be an absolute path or a path relative to the
-startup workspace. The resolved path must remain inside the workspace and must
-refer to an existing file, not a directory.
+`file_path` is required. It may be a native absolute path or a path relative to
+this session's workspace. It must refer to an existing regular file, and its
+parent directory must already exist. Leading or trailing whitespace in an `edit`
+path is invalid. Structured paths do not expand `~` or environment variables.
 
-Parent directories must already exist. The tool resolves the workspace and the
-path's parent directory, so paths that escape through `..`, an outside absolute
-path, or a symlink that points outside the workspace are rejected. Leading or
-trailing whitespace in the path is also invalid.
+In a root Build session, `edit`, `write`, and `delete` can operate outside the
+startup workspace by default, subject to the process's OS permissions. For
+example, a Unix root Build can edit `/home/you/config/settings.toml` or
+`../shared/settings.toml`. On native Windows, pass paths such as
+`C:\\projects\\shared\\settings.toml` in JSON. The workspace is still the base for
+relative paths; it is not a sandbox or a list of approved directories. Only
+operate on files relevant to the user's request.
+
+In an isolated Build child, relative paths start at the child's assigned
+workspace. Both the canonical parent and the referent of any final symlink
+must be inside that workspace. Plan and other inspection sessions cannot call
+structured mutation tools.
+
+Symlinked parent directories are resolved as directories. When the final path
+component is a symlink, the tools can inspect its referent, but writing,
+renaming, or deleting that path changes the **link entry**, not the referent.
+To change the referent itself, pass its resolved path directly. Dangling links,
+directories, and special files are rejected as file targets.
 
 ### `replacements`
 
@@ -80,10 +94,12 @@ make a change.
 
 ### `move_to`
 
-`move_to` is optional. When supplied, it is resolved using the same workspace
-rules as `file_path`. The destination must not already exist, and its parent
-directory must already exist. A different destination performs a rename after
-any content replacement has been written.
+`move_to` is optional. It follows the same path scope as `file_path`, and a
+relative destination starts at the workspace, not the source file's directory.
+The destination must not already exist, and its parent directory must already
+exist. Renames between filesystems may fail; the tool does not fall back to
+copying and deleting. Editing and moving in one call stages the new contents
+beside the destination and installs them after the rename.
 
 To rename without changing content, provide an empty `replacements` array and a
 different `move_to` value:
@@ -317,7 +333,8 @@ Before calling `edit`:
 4. Use `write` instead if creating a file or replacing the whole file is clearer.
 5. After a rename, update references to the old path separately if needed.
 
-The tool rejects directories, non-UTF-8 or binary files, missing parent
-directories, paths outside the workspace, existing move destinations, empty or
-whitespace-padded paths, and no-op edits. All successful changes remain within
-the workspace and produce a change record for review.
+The tool rejects directories and special files, invalid UTF-8 inputs, missing
+parent directories, existing move destinations, malformed or whitespace-padded
+paths, and no-op edits. A Build child also rejects paths outside its workspace.
+Successful changes produce a change record for review, including absolute
+external paths when applicable.

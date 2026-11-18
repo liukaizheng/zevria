@@ -124,6 +124,18 @@ pub enum WorkspaceContract {
     SourceReadOnlyScratch,
 }
 
+/// Filesystem reach of structured mutation tools, selected by the host.
+/// This is not a sandbox for shell commands.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FileMutationScope {
+    #[default]
+    WorkspaceOnly,
+    ProcessFilesystem,
+}
+
 /// Absolute roots supplied to an independent Build child.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +166,8 @@ pub struct TurnPolicy {
     pub orchestration: bool,
     pub contract: WorkspaceContract,
     pub workspace: Option<WorkspaceBinding>,
+    /// For new request boundaries, not part of the fixed workflow declaration.
+    pub file_mutation_scope: FileMutationScope,
 }
 
 impl TurnPolicy {
@@ -172,6 +186,7 @@ impl TurnPolicy {
             orchestration: false,
             contract: WorkspaceContract::Mutable,
             workspace: None,
+            file_mutation_scope: FileMutationScope::WorkspaceOnly,
         }
     }
 
@@ -192,6 +207,11 @@ impl TurnPolicy {
 
     pub fn with_workspace(mut self, workspace: WorkspaceBinding) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    pub fn with_file_mutation_scope(mut self, scope: FileMutationScope) -> Self {
+        self.file_mutation_scope = scope;
         self
     }
 

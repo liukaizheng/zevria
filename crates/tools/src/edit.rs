@@ -8,8 +8,8 @@ use rig_agent::tool::{Tool, ToolContext};
 use rig_core::tool::ToolExecutionError;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
-use zevria_foundation::FileChangeOutput;
 use zevria_foundation::ToolResultDetail;
+use zevria_foundation::{FileChangeOutput, FileMutationScope};
 
 use crate::{
     FileToolError,
@@ -36,6 +36,7 @@ Usage:
 #[derive(Debug, Clone)]
 pub struct EditTool {
     workspace: PathBuf,
+    scope: FileMutationScope,
     max_file_change_bytes: usize,
 }
 
@@ -43,8 +44,14 @@ impl EditTool {
     pub fn new(workspace: PathBuf) -> Self {
         Self {
             workspace,
+            scope: FileMutationScope::WorkspaceOnly,
             max_file_change_bytes: MAX_EDIT_FILE_CHANGE_BYTES,
         }
+    }
+
+    pub fn with_file_mutation_scope(mut self, scope: FileMutationScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     #[cfg(test)]
@@ -102,7 +109,7 @@ impl Tool for EditTool {
         context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        let prepared = prepare_edit(&self.workspace, args)?;
+        let prepared = prepare_edit(&self.workspace, self.scope, args)?;
         let changes =
             ToolResultDetail::FileChanges(vec![prepared.file_change(self.max_file_change_bytes)]);
         match prepared.apply() {
@@ -275,6 +282,7 @@ impl PreparedChange {
 
 fn prepare_edit(
     workspace: &std::path::Path,
+    scope: FileMutationScope,
     args: EditArgs,
 ) -> Result<PreparedChange, FileToolError> {
     validate_path_arg(&args.file_path, "file_path")?;
@@ -282,8 +290,9 @@ fn prepare_edit(
         validate_path_arg(move_to, "move_to")?;
     }
 
-    let path = resolve_path_for_write(workspace, &args.file_path)?;
-    validate_existing_file(&path)?;
+    let source = resolve_path_for_write(workspace, &args.file_path, scope)?;
+    source.require_regular_file()?;
+    let path = source.path;
     let original_content = read_utf8_file(&path)?;
     let mut new_content = original_content.clone();
     for (index, replacement) in args.replacements.iter().enumerate() {
@@ -293,7 +302,7 @@ fn prepare_edit(
     let move_to = args
         .move_to
         .as_deref()
-        .map(|move_to| resolve_move_target(workspace, &path, move_to))
+        .map(|move_to| resolve_move_target(workspace, scope, &path, move_to))
         .transpose()?
         .filter(|move_to| move_to != &path);
 
@@ -331,23 +340,6 @@ fn validate_path_arg(path: &str, label: &str) -> Result<(), FileToolError> {
     Ok(())
 }
 
-fn validate_existing_file(path: &std::path::Path) -> Result<(), FileToolError> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        if error.kind() == ErrorKind::NotFound {
-            FileToolError::io(format!("file {} does not exist", path.display()))
-        } else {
-            FileToolError::io(format!("failed to inspect {}: {error}", path.display()))
-        }
-    })?;
-    if metadata.is_dir() {
-        return Err(FileToolError::invalid_arguments(format!(
-            "{} is a directory; cannot edit",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
 fn read_utf8_file(path: &std::path::Path) -> Result<String, FileToolError> {
     fs::read_to_string(path).map_err(|error| {
         if error.kind() == ErrorKind::InvalidData {
@@ -363,28 +355,18 @@ fn read_utf8_file(path: &std::path::Path) -> Result<String, FileToolError> {
 
 fn resolve_move_target(
     workspace: &std::path::Path,
+    scope: FileMutationScope,
     source: &std::path::Path,
     move_to: &str,
 ) -> Result<PathBuf, FileToolError> {
-    let target = resolve_path_for_write(workspace, move_to)?;
-    if target != source {
-        match fs::metadata(&target) {
-            Ok(_) => {
-                return Err(FileToolError::invalid_arguments(format!(
-                    "move target {} already exists",
-                    target.display()
-                )));
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(FileToolError::io(format!(
-                    "failed to inspect {}: {error}",
-                    target.display()
-                )));
-            }
-        }
+    let target = resolve_path_for_write(workspace, move_to, scope)?;
+    if target.path != source && target.metadata.is_some() {
+        return Err(FileToolError::invalid_arguments(format!(
+            "move target {} already exists",
+            target.path.display()
+        )));
     }
-    Ok(target)
+    Ok(target.path)
 }
 
 fn apply_replacement(
@@ -713,6 +695,7 @@ mod tests {
         fs::write(&source, "before\n").expect("source");
         let prepared = prepare_edit(
             workspace.path(),
+            FileMutationScope::WorkspaceOnly,
             args(
                 "old.txt",
                 vec![replacement("before", "after")],
@@ -747,6 +730,7 @@ mod tests {
         fs::write(&source, "before\n").expect("source");
         let prepared = prepare_edit(
             workspace.path(),
+            FileMutationScope::WorkspaceOnly,
             args(
                 "old.txt",
                 vec![replacement("before", "after")],

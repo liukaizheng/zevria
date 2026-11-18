@@ -18,6 +18,7 @@ use rig_core::message::Message;
 use std::sync::Arc;
 use zevria_foundation::config::ModelContextPolicy;
 use zevria_foundation::policy::{SessionMode, TurnPolicy};
+use zevria_instructions::RequestDirective;
 use zevria_instructions::skill::{ActiveSkills, SkillApplication, SkillInvocation, SkillName};
 use zevria_model::compaction::CompactionCheckpoint;
 use zevria_model::request::{InputTokenCount, ModelRequest, ModelRequestItem};
@@ -283,12 +284,12 @@ impl<P: ModelProvider> SessionEngine<P> {
         let context = PromptContext {
             mode,
             irreducible_tokens: instructions.irreducible_tokens,
+            // Use the committed session's capability/history, even if an edit
+            // will discard the last historical typed boundary.
+            request_boundaries: self.request_boundaries_enabled(&policy),
             policy,
             instructions,
             limits,
-            // Use the committed session's capability/history, even if an edit
-            // will discard the last historical typed boundary.
-            request_boundaries: self.request_boundaries_enabled(),
         };
         let captured = self.prompt_anchor_state(anchor)?;
         let plan_transition = if let PromptTurnInput::RevisionMessage { expected, .. }
@@ -351,7 +352,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                         request: request.clone(),
                     });
                     records.push(TranscriptItem::RequestDirective(
-                        zevria_instructions::RequestDirective::boundary(request.clone()),
+                        RequestDirective::boundary_with_file_mutation_scope(
+                            request.clone(),
+                            context.policy.file_mutation_scope,
+                        ),
                     ));
                 } else {
                     records.push(TranscriptItem::Message(message));
@@ -401,7 +405,12 @@ impl<P: ModelProvider> SessionEngine<P> {
                 records.extend(
                     request
                         .clone()
-                        .map(zevria_instructions::RequestDirective::boundary)
+                        .map(|request| {
+                            RequestDirective::boundary_with_file_mutation_scope(
+                                request,
+                                context.policy.file_mutation_scope,
+                            )
+                        })
                         .map(TranscriptItem::RequestDirective),
                 );
                 // Reuse the post-invocation update that passed the skill capacity

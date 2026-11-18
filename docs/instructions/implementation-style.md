@@ -1,0 +1,1 @@
+Write well-structured code with clear responsibilities and straightforward control flow. Prefer the simplest correct implementation. Validate inputs at trust boundaries and handle real failure modes; avoid redundant checks, speculative fallbacks, and branches for states already ruled out by the code's invariants.

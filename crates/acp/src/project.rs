@@ -930,6 +930,40 @@ mod tests {
     }
 
     #[test]
+    fn external_file_paths_and_move_destinations_are_preserved_in_acp_content() {
+        let root = std::env::current_dir().unwrap();
+        let workspace = root.join("workspace");
+        let external = root.join("sibling").join("external.txt");
+        let changes = [
+            zevria_foundation::FileChangeOutput {
+                path: external.clone(),
+                change: FileChange::Add {
+                    content: "text".into(),
+                },
+            },
+            zevria_foundation::FileChangeOutput {
+                path: workspace.join("source.txt"),
+                change: FileChange::Update {
+                    unified_diff: String::new(),
+                    move_path: Some(external.clone()),
+                },
+            },
+        ];
+        let content = file_change_content(&changes, &workspace);
+        let expected = vec![
+            ToolCallContent::from(Diff::new(external.clone(), "text")),
+            ToolCallContent::from(ContentBlock::Text(TextContent::new(format!(
+                "```diff\n\n```\nMoved to: {}",
+                external.display()
+            )))),
+        ];
+        assert_eq!(
+            serde_json::to_value(content).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
     fn image_reads_project_as_read_with_payload_free_output() {
         let arguments = serde_json::json!({"file_path": "capture.png"});
         assert_eq!(tool_kind("read_image", &arguments), ToolKind::Read);

@@ -32,6 +32,10 @@ pub fn module_docs() -> Vec<(&'static str, &'static str)> {
             include_str!("../../../docs/instructions/build-mode.md"),
         ),
         (
+            "implementation-style",
+            include_str!("../../../docs/instructions/implementation-style.md"),
+        ),
+        (
             "plan-mode",
             include_str!("../../../docs/instructions/plan-mode.md"),
         ),

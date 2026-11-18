@@ -1,6 +1,6 @@
 use crate::*;
 use rig_core::message::Message;
-use zevria_foundation::{RequestBehavior, RequestMetadata};
+use zevria_foundation::{FileMutationScope, RequestBehavior, RequestMetadata};
 use zevria_instructions::{RequestDirective, RequestDirectiveKind};
 
 fn request(behavior: RequestBehavior) -> Vec<TranscriptItem> {
@@ -70,12 +70,77 @@ fn request_ownership_placement_and_single_correction_are_validated() {
 }
 
 #[test]
+fn scope_survives_resume_without_updating_legacy_request_bytes() {
+    fn wire(input: Vec<ModelRequestItem<'_>>) -> Vec<u8> {
+        let input = input
+            .into_iter()
+            .map(ModelRequestItem::to_owned_item)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .unwrap();
+        serde_json::to_vec(&input).unwrap()
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut old = Conversation::new(TranscriptWriter::create(directory.path()).unwrap());
+    let legacy = request(RequestBehavior::Standard);
+    let TranscriptItem::RequestDirective(boundary) = &legacy[1] else {
+        unreachable!()
+    };
+    assert_eq!(
+        boundary.render(),
+        "Request directive:\nStandard request. Any earlier orchestration authorization and delegation obligation have ended. Use only this workflow's ordinary permissions; Builder delegation is not authorized."
+    );
+    assert!(
+        !serde_json::to_string(&legacy[1])
+            .unwrap()
+            .contains("file_mutation_scope")
+    );
+    old.push_required_batch(legacy.clone()).unwrap();
+    let path = old.path().to_path_buf();
+    let original_records = std::fs::read(&path).unwrap();
+    let original_input = wire(old.model_input());
+    drop(old);
+
+    let request = RequestMetadata::new(RequestBehavior::Standard);
+    let scoped = vec![
+        TranscriptItem::RequestPrompt {
+            message: Message::user("edit a sibling file"),
+            request: request.clone(),
+        },
+        TranscriptItem::RequestDirective(RequestDirective::boundary_with_file_mutation_scope(
+            request,
+            FileMutationScope::ProcessFilesystem,
+        )),
+    ];
+    let mut writer = TranscriptWriter::append_to(path.clone()).unwrap();
+    for item in &scoped {
+        writer.append(item).unwrap();
+    }
+    drop(writer);
+    let restored = load(&path).unwrap();
+    assert_eq!(&restored[..legacy.len()], legacy);
+    assert_eq!(&restored[legacy.len()..], scoped);
+    assert!(std::fs::read(path).unwrap().starts_with(&original_records));
+    let mut input = model_input(&restored);
+    assert!(
+        matches!(input.pop(), Some(ModelRequestItem::RequestInstruction(d)) if d.render().contains("Root Build file tools:"))
+    );
+    input.pop().unwrap();
+    assert_eq!(wire(input), original_input);
+}
+
+#[test]
 fn compaction_reprojects_typed_contract_not_summary_claims_or_skills() {
     let mut items = request(RequestBehavior::Orchestrate);
     let TranscriptItem::RequestPrompt { request, .. } = &items[0] else {
         unreachable!()
     };
     let request = request.clone();
+    items[1] =
+        TranscriptItem::RequestDirective(RequestDirective::boundary_with_file_mutation_scope(
+            request.clone(),
+            FileMutationScope::ProcessFilesystem,
+        ));
     items.push(TranscriptItem::Message(Message::assistant("premature")));
     items.push(TranscriptItem::RequestDirective(
         RequestDirective::correction(request),
@@ -101,12 +166,15 @@ fn compaction_reprojects_typed_contract_not_summary_claims_or_skills() {
         2
     );
     assert!(
-        matches!(input.last(), Some(ModelRequestItem::RequestInstruction(d)) if d.kind == RequestDirectiveKind::Correction)
+        matches!(input[input.len()-2], ModelRequestItem::RequestInstruction(d) if d.file_mutation_scope == Some(FileMutationScope::ProcessFilesystem))
+    );
+    assert!(
+        matches!(input.last(), Some(ModelRequestItem::RequestInstruction(d)) if d.kind == RequestDirectiveKind::Correction && d.file_mutation_scope.is_none())
     );
     items.extend(self::request(RequestBehavior::Standard));
     assert!(InstructionReplayState::replay(&items).is_ok());
     assert!(
-        matches!(model_input(&items).last(), Some(ModelRequestItem::RequestInstruction(d)) if d.request.behavior == RequestBehavior::Standard)
+        matches!(model_input(&items).last(), Some(ModelRequestItem::RequestInstruction(d)) if d.request.behavior == RequestBehavior::Standard && d.file_mutation_scope.is_none())
     );
 }
 

@@ -190,7 +190,11 @@ async fn idle_completion_advertises_then_continues_as_a_standard_append_only_req
     let jobs = jobs();
     let job = job(&jobs, 1, b"idle-output").await;
     let (provider, mut calls) = GatedProvider::new();
-    let engine = job_engine(provider, transcript, &jobs, 3);
+    let mut engine = job_engine(provider, transcript, &jobs, 3);
+    engine
+        .policies
+        .policy_mut(SessionMode::Build)
+        .file_mutation_scope = zevria_foundation::FileMutationScope::ProcessFilesystem;
     let (events, receiver) = session_event_channel(64);
     let mut run = RunningSession::start(engine, [submit("start")], events, receiver);
     let first = run.call(&mut calls).await;
@@ -214,6 +218,7 @@ async fn idle_completion_advertises_then_continues_as_a_standard_append_only_req
     run.send(continue_jobs(SessionMode::Build));
     let resumed = run.call(&mut calls).await;
     assert!(!resumed.turn.build_subtasks);
+    assert!(has_external_mutation_notice(&resumed.request.input));
     assert!(resumed.request.input.starts_with(&previous.input));
     assert_eq!(resumed.request.instructions, previous.instructions);
     assert_eq!(

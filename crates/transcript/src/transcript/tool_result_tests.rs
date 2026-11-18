@@ -133,6 +133,33 @@ fn mixed_details_round_trip_in_the_existing_sidecar_without_entering_model_input
 }
 
 #[test]
+fn file_change_replay_preserves_absolute_external_move_endpoints() {
+    let mut item = mixed_results();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let source = root.join("sibling").join("PRIVATE_PATH");
+    let destination = root.join("workspace").join("PRIVATE_DESTINATION");
+    let change = FileChangeOutput {
+        path: source,
+        change: FileChange::Update {
+            unified_diff: String::new(),
+            move_path: Some(destination),
+        },
+    };
+    let TranscriptItem::ToolResults { metadata, .. } = &mut item else {
+        unreachable!()
+    };
+    metadata[1].detail = Some(ToolResultDetail::FileChanges(vec![change.clone()]));
+    let restored: TranscriptItem =
+        serde_json::from_slice(&serde_json::to_vec(&item).unwrap()).unwrap();
+    let TranscriptItem::ToolResults { metadata, .. } = &restored else {
+        unreachable!()
+    };
+    assert_eq!(metadata[1].file_changes(), &[change]);
+    assert_eq!(restored.model_request_item(), item.model_request_item());
+}
+
+#[test]
 fn invalid_details_and_retired_fields_reject_the_sidecar_instead_of_falling_back_to_messages() {
     let base = serde_json::to_value(mixed_results()).unwrap();
     for (key, value) in [

@@ -21,7 +21,7 @@ use zevria_foundation::{
     CREATE_PLAN_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
     UPDATE_PLAN_TOOL_NAME,
 };
-use zevria_foundation::{TurnPolicy, WorkspaceContract};
+use zevria_foundation::{FileMutationScope, TurnPolicy, WorkspaceContract};
 use zevria_instructions::FixedSkillRoots;
 #[cfg(test)]
 use zevria_instructions::SkillCatalog;
@@ -102,6 +102,8 @@ pub enum SessionStart {
     },
 }
 
+const ROOT_BUILD_FILE_MUTATION_SCOPE: FileMutationScope = FileMutationScope::ProcessFilesystem;
+
 /// Build the root production registry in its stable advertised order.
 pub(crate) fn build_tools(
     workspace: &Path,
@@ -123,9 +125,18 @@ pub(crate) fn build_tools(
     let server = server
         .tool(TaskTool)
         .tool(LaunchSubtasksTool::new(launcher, workspace.clone()))
-        .tool(EditTool::new(workspace.clone()))
-        .tool(WriteTool::new(workspace.clone()))
-        .tool(DeleteTool::new(workspace.clone()))
+        .tool(
+            EditTool::new(workspace.clone())
+                .with_file_mutation_scope(ROOT_BUILD_FILE_MUTATION_SCOPE),
+        )
+        .tool(
+            WriteTool::new(workspace.clone())
+                .with_file_mutation_scope(ROOT_BUILD_FILE_MUTATION_SCOPE),
+        )
+        .tool(
+            DeleteTool::new(workspace.clone())
+                .with_file_mutation_scope(ROOT_BUILD_FILE_MUTATION_SCOPE),
+        )
         .tool(SkillTool)
         .tool(SkillReadTool);
     Ok(server
@@ -251,7 +262,8 @@ pub(crate) fn build_session_policies(
             ModelRole::Build,
             true,
         )
-        .with_orchestration(),
+        .with_orchestration()
+        .with_file_mutation_scope(ROOT_BUILD_FILE_MUTATION_SCOPE),
         TurnPolicy::new(
             PLAN_MODE_INSTRUCTIONS,
             Some(plan_tools),

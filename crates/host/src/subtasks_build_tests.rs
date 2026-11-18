@@ -13,8 +13,8 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
-use zevria_foundation::ToolResultDetail;
 use zevria_foundation::TurnId;
+use zevria_foundation::{FileChange, FileChangeOutput, FileMutationScope, ToolResultDetail};
 use zevria_provider::ProviderRouter;
 use zevria_session_api::TurnContext;
 
@@ -32,6 +32,252 @@ async fn execute(
         )),
     };
     (result, context)
+}
+
+async fn mutate(tools: &ToolServerHandle, name: &str, args: Value) -> FileChangeOutput {
+    let (result, context) = execute(tools, name, args).await;
+    assert!(result.is_success(), "{name}: {}", result.output().render());
+    let detail = context.result::<ToolResultDetail>().unwrap().unwrap();
+    let [change] = detail.file_changes() else {
+        panic!("expected one change: {detail:?}")
+    };
+    assert!(change.path.is_absolute());
+    change.clone()
+}
+
+fn root_tools(workspace: &Path) -> ToolServerHandle {
+    let (events, _receiver) = session_event_channel(32);
+    let subtasks = zevria_session_api::subtask_channels("test-root", events.clone());
+    let questions = zevria_session_api::question_channels(events);
+    build_tools(
+        workspace,
+        subtasks.launcher,
+        questions.requester,
+        CommandConfig::default(),
+        131_072,
+        None,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn root_registry_mutates_external_files_and_records_absolute_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let sibling = temp.path().join("sibling");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let sibling = sibling.canonicalize().unwrap();
+    let tools = root_tools(&workspace);
+
+    let external = sibling.join("external.txt");
+    std::fs::write(&external, "original\n").unwrap();
+    let change = mutate(&tools, "edit", json!({"file_path":external,"replacements":[{"old_string":"original","new_string":"edited"}]})).await;
+    assert_eq!(change.path, external);
+    assert!(
+        matches!(change.change, FileChange::Update { unified_diff, move_path: None } if unified_diff.contains("+edited"))
+    );
+    assert_eq!(std::fs::read_to_string(&external).unwrap(), "edited\n");
+
+    // PathBuf serializes with native separators, including `..\\sibling` on Windows.
+    let relative = Path::new("..").join("sibling").join("new.txt");
+    let created = sibling.join("new.txt");
+    let change = mutate(
+        &tools,
+        "write",
+        json!({"file_path":relative,"content":"new\n"}),
+    )
+    .await;
+    assert_eq!(change.path, created);
+    assert_eq!(
+        change.change,
+        FileChange::Add {
+            content: "new\n".into()
+        }
+    );
+    let change = mutate(
+        &tools,
+        "write",
+        json!({"file_path":relative,"content":"overwritten\n"}),
+    )
+    .await;
+    assert_eq!(change.path, created);
+    assert!(
+        matches!(change.change, FileChange::Update { unified_diff, move_path: None } if unified_diff.contains("+overwritten"))
+    );
+    assert_eq!(std::fs::read_to_string(&created).unwrap(), "overwritten\n");
+
+    let inner = workspace.join("inner.txt");
+    let change = mutate(
+        &tools,
+        "edit",
+        json!({"file_path":external,"move_to":"inner.txt"}),
+    )
+    .await;
+    assert_eq!(change.path, external);
+    assert!(
+        matches!(change.change, FileChange::Update { unified_diff, move_path: Some(path) } if unified_diff.is_empty() && path == inner)
+    );
+    assert!(!external.exists());
+    assert_eq!(std::fs::read_to_string(&inner).unwrap(), "edited\n");
+    let change = mutate(&tools, "edit", json!({"file_path":"inner.txt","move_to":external,"replacements":[{"old_string":"edited","new_string":"moved"}]})).await;
+    assert_eq!(change.path, inner);
+    assert!(
+        matches!(change.change, FileChange::Update { unified_diff, move_path: Some(path) } if unified_diff.contains("+moved") && path == external)
+    );
+    assert!(!inner.exists());
+    assert_eq!(std::fs::read_to_string(&external).unwrap(), "moved\n");
+
+    let change = mutate(&tools, "delete", json!({"file_path":relative})).await;
+    assert_eq!(change.path, created);
+    assert_eq!(
+        change.change,
+        FileChange::Delete {
+            content: "overwritten\n".into()
+        }
+    );
+    assert!(!created.exists());
+    assert_eq!(
+        mutate(
+            &tools,
+            "write",
+            json!({"file_path":"local.txt","content":"local"})
+        )
+        .await
+        .path,
+        workspace.join("local.txt")
+    );
+}
+
+#[tokio::test]
+async fn root_registry_rejects_invalid_external_targets_without_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(workspace.join("source.txt"), "before").unwrap();
+    std::fs::write(outside.join("occupied.txt"), "preserve").unwrap();
+    std::fs::write(outside.join("binary"), [0xff]).unwrap();
+    let tools = root_tools(&workspace);
+    let mut invalid = vec![
+        ("../outside", "a directory"),
+        ("../outside/occupied.txt/.", "expected a file path"),
+        ("../outside/occupied.txt/", "expected a file path"),
+        ("../outside/occupied.txt/below-file", "not a directory"),
+        ("../outside/missing/target", "failed to resolve"),
+        ("../outside/inva\0lid", "expected a file path"),
+    ];
+    #[cfg(unix)]
+    let _socket = {
+        let socket = std::os::unix::net::UnixListener::bind(outside.join("sock")).unwrap();
+        std::os::unix::fs::symlink(outside.join("missing.txt"), outside.join("dangling")).unwrap();
+        invalid.extend([
+            ("../outside/sock", "not a regular file"),
+            ("../outside/dangling", "failed to resolve"),
+        ]);
+        socket
+    };
+    #[cfg(windows)]
+    invalid.extend([
+        (r"C:relative", "absolute or workspace-relative"),
+        (r"\rooted", "absolute or workspace-relative"),
+        (
+            r"..\outside\a:stream",
+            "unsupported Windows file path component",
+        ),
+    ]);
+    let changes = json!([{"old_string":"before","new_string":"after"}]);
+    for (path, expected) in invalid {
+        for (name, args) in [
+            ("write", json!({"file_path":path,"content":"after"})),
+            ("edit", json!({"file_path":path,"replacements":changes})),
+            ("delete", json!({"file_path":path})),
+        ] {
+            let (result, context) = execute(&tools, name, args).await;
+            let output = result.output().render();
+            assert!(
+                !result.is_success() && output.contains(expected),
+                "{name} {path:?}: {output}"
+            );
+            assert!(context.result::<ToolResultDetail>().unwrap().is_none());
+        }
+    }
+    for (args, expected) in [
+        (
+            json!({"file_path":"../outside/binary","replacements":changes}),
+            "not valid UTF-8",
+        ),
+        (
+            json!({"file_path":"source.txt","move_to":"../outside/occupied.txt","replacements":changes}),
+            "already exists",
+        ),
+    ] {
+        let (result, context) = execute(&tools, "edit", args).await;
+        assert!(!result.is_success() && result.output().render().contains(expected));
+        assert!(context.result::<ToolResultDetail>().unwrap().is_none());
+    }
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("source.txt")).unwrap(),
+        "before"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("occupied.txt")).unwrap(),
+        "preserve"
+    );
+    assert_eq!(std::fs::read(outside.join("binary")).unwrap(), [0xff]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn root_registry_follows_symlinked_parents_but_mutates_final_entries() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    let nested = outside.join("nested");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    symlink(&nested, workspace.join("linked-parent")).unwrap();
+    let tools = root_tools(&workspace);
+    let referent = outside.join("real.txt");
+    let change = mutate(
+        &tools,
+        "write",
+        json!({"file_path":"linked-parent/../real.txt","content":"referent"}),
+    )
+    .await;
+    assert_eq!(
+        change.path,
+        outside.canonicalize().unwrap().join("real.txt")
+    );
+    assert!(!workspace.join("real.txt").exists());
+
+    let final_link = workspace.join("link.txt");
+    symlink(&referent, &final_link).unwrap();
+    let change = mutate(
+        &tools,
+        "edit",
+        json!({"file_path":"link.txt","move_to":"moved-link.txt"}),
+    )
+    .await;
+    assert_eq!(
+        change.path,
+        workspace.canonicalize().unwrap().join("link.txt")
+    );
+    assert_eq!(
+        std::fs::read_link(workspace.join("moved-link.txt")).unwrap(),
+        referent
+    );
+    mutate(&tools, "delete", json!({"file_path":"moved-link.txt"})).await;
+    assert!(!workspace.join("moved-link.txt").is_symlink());
+    symlink(&referent, &final_link).unwrap();
+    mutate(&tools, "edit", json!({"file_path":"link.txt","replacements":[{"old_string":"referent","new_string":"replacement"}]})).await;
+    assert!(!final_link.is_symlink());
+    assert_eq!(std::fs::read_to_string(final_link).unwrap(), "replacement");
+    assert_eq!(std::fs::read_to_string(referent).unwrap(), "referent");
 }
 
 #[tokio::test]
@@ -119,6 +365,16 @@ async fn private_registries_have_exact_tools_and_independent_structured_roots() 
                 !execute(
                     &tools,
                     "edit",
+                    json!({"file_path":outside,"move_to":"from-outside.txt"})
+                )
+                .await
+                .0
+                .is_success()
+            );
+            assert!(
+                !execute(
+                    &tools,
+                    "edit",
                     json!({"file_path":"moved.txt","replacements":[],"move_to":outside})
                 )
                 .await
@@ -175,6 +431,29 @@ async fn private_registries_have_exact_tools_and_independent_structured_roots() 
             .is_success()
         );
         assert!(!b.join("denied").exists());
+        std::os::unix::fs::symlink(root.path().join("input.txt"), a.join("final-link")).unwrap();
+        for (name, args) in [
+            ("write", json!({"file_path":"final-link","content":"bad"})),
+            ("delete", json!({"file_path":"final-link"})),
+            (
+                "edit",
+                json!({"file_path":"final-link","move_to":"moved-link"}),
+            ),
+            (
+                "edit",
+                json!({"file_path":".root-marker","move_to":"final-link"}),
+            ),
+            (
+                "edit",
+                json!({"file_path":".root-marker","move_to":"escape/../escaped"}),
+            ),
+        ] {
+            let (result, context) = execute(&tools, name, args).await;
+            assert!(result.output().render().contains("escapes the workspace"));
+            assert!(context.result::<ToolResultDetail>().unwrap().is_none());
+        }
+        assert!(a.join("final-link").is_symlink());
+        assert!(!root.path().join("escaped").exists());
     }
 }
 
@@ -184,6 +463,7 @@ fn builder_directive_and_permissions_are_fixed_in_all_modes() {
     for mode in [SessionMode::Build, SessionMode::Build, SessionMode::Plan] {
         let policy = policies.policy(mode);
         assert_eq!(policy.model_role, ModelRole::Builder);
+        assert_eq!(policy.file_mutation_scope, FileMutationScope::WorkspaceOnly);
         assert!(!policy.skills_enabled);
         assert_eq!(
             policy.allowed_tool_names.as_ref().unwrap(),

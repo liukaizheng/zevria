@@ -2,33 +2,39 @@
 use crate::session::SessionEngine;
 use crate::session::kernel::accounting::TurnInputCountState;
 use crate::session::kernel::request_plan::{HistoryView, RequestPlan};
-use zevria_foundation::SKILL_TOOL_NAME;
 use zevria_foundation::config::ModelContextPolicy;
 use zevria_foundation::policy::TurnPolicy;
+use zevria_foundation::{FileMutationScope, SKILL_TOOL_NAME};
 use zevria_instructions::skill::ActiveSkills;
 use zevria_session_api::provider::ModelProvider;
 use zevria_transcript::SessionReplayError;
 use zevria_transcript::transcript::TranscriptItem;
 
-use zevria_instructions::{DirectiveContent, DirectiveState};
+use zevria_instructions::{DirectiveContent, DirectiveState, RequestDirective};
 
 impl<P: ModelProvider> SessionEngine<P> {
-    pub(in crate::session) fn request_boundaries_enabled(&self) -> bool {
-        // Root composition captures scheduler capacity. Unsupported children and
-        // maintenance engines have no request contract to reset. Typed resumed
-        // history still requires a reset even if the current capability is absent.
-        self.capabilities.subtask_concurrency.is_some()
+    pub(in crate::session) fn request_boundaries_enabled(&self, policy: &TurnPolicy) -> bool {
+        // Root composition captures scheduler capacity and file-mutation scope.
+        // Unsupported children and maintenance engines have no request contract
+        // to reset. Typed resumed history still requires a reset even when the
+        // current capability is absent.
+        policy.file_mutation_scope == FileMutationScope::ProcessFilesystem
+            || self.capabilities.subtask_concurrency.is_some()
             || self
                 .instruction_replay()
                 .is_ok_and(|state| state.has_request_boundaries())
     }
 
-    pub(in crate::session) fn standard_request_boundary(&self) -> Option<TranscriptItem> {
-        self.request_boundaries_enabled().then(|| {
-            TranscriptItem::RequestDirective(zevria_instructions::RequestDirective::boundary(
+    pub(in crate::session) fn standard_request_boundary(
+        &self,
+        policy: &TurnPolicy,
+    ) -> Option<TranscriptItem> {
+        self.request_boundaries_enabled(policy).then(|| {
+            TranscriptItem::RequestDirective(RequestDirective::boundary_with_file_mutation_scope(
                 zevria_foundation::RequestMetadata::new(
                     zevria_foundation::RequestBehavior::Standard,
                 ),
+                policy.file_mutation_scope,
             ))
         })
     }

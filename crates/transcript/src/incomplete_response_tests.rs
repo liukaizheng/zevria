@@ -201,18 +201,14 @@ fn current_torn_tail_is_recoverable_but_duplicate_ids_and_retired_keys_are_not()
 #[test]
 fn request_replay_is_inert_but_recovery_cannot_split_prompt_and_boundary() {
     use crate::request_replay::RequestReplayState;
-    use zevria_instructions::{RequestDirective, RequestDirectiveKind};
+    use zevria_instructions::RequestDirective;
     let request =
         zevria_foundation::RequestMetadata::new(zevria_foundation::RequestBehavior::Orchestrate);
     let prompt = TranscriptItem::RequestPrompt {
         message: Message::user("prompt"),
         request: request.clone(),
     };
-    let boundary = TranscriptItem::RequestDirective(RequestDirective {
-        version: 1,
-        request: request.clone(),
-        kind: RequestDirectiveKind::Boundary,
-    });
+    let boundary = TranscriptItem::RequestDirective(RequestDirective::boundary(request.clone()));
     let mut state = RequestReplayState::default();
     state.apply(&prompt, true).unwrap();
     assert!(state.apply(&item(), true).is_err());
@@ -228,11 +224,7 @@ fn request_replay_is_inert_but_recovery_cannot_split_prompt_and_boundary() {
     assert_eq!(state, before);
     state
         .apply(
-            &TranscriptItem::RequestDirective(RequestDirective {
-                version: 1,
-                request,
-                kind: RequestDirectiveKind::Correction,
-            }),
+            &TranscriptItem::RequestDirective(RequestDirective::correction(request)),
             true,
         )
         .unwrap();

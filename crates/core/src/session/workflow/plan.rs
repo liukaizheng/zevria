@@ -587,10 +587,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             ),
         };
         if decision == PlanDecision::ImplementCurrent {
-            records.extend(self.standard_request_boundary());
+            let policy = self.policies.policy(SessionMode::Build);
+            records.extend(self.standard_request_boundary(policy));
             records.extend(self.instruction_updates(
                 self.conversation.items(),
-                self.policies.policy(SessionMode::Build),
+                policy,
                 self.active_skills()?,
             )?);
         }
@@ -678,10 +679,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         let mut records = vec![TranscriptItem::Plan(PlanRecord::Handoff {
             handoff: handoff.clone(),
         })];
-        records.extend(self.standard_request_boundary());
+        let policy = self.policies.policy(SessionMode::Build);
+        records.extend(self.standard_request_boundary(policy));
         records.extend(self.instruction_updates(
             self.conversation.items(),
-            self.policies.policy(SessionMode::Build),
+            policy,
             self.active_skills()?,
         )?);
         if let Err(error) = self.commit(RecordChange::anchored(

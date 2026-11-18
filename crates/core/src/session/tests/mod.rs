@@ -1037,6 +1037,27 @@ fn test_policies() -> SessionPolicies {
     )
 }
 
+fn test_policies_with_external_mutation() -> SessionPolicies {
+    let mut policies = test_policies();
+    policies.policy_mut(SessionMode::Build).file_mutation_scope =
+        zevria_foundation::FileMutationScope::ProcessFilesystem;
+    policies
+}
+
+fn has_external_mutation_notice(input: &[OwnedModelRequestItem]) -> bool {
+    input
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            OwnedModelRequestItem::RequestInstruction(boundary) => {
+                Some(boundary.file_mutation_scope)
+            }
+            _ => None,
+        })
+        .flatten()
+        == Some(zevria_foundation::FileMutationScope::ProcessFilesystem)
+}
+
 // Tiny-budget fixtures advertise only their mock tools, not unregistered
 // command/search capabilities and their substantial real instruction modules.
 fn test_policies_for_tools(tools: &[&str]) -> SessionPolicies {

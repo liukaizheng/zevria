@@ -1226,7 +1226,7 @@ async fn current_resolution_persists_semantic_handoff_then_runs_build() {
     let mut engine = SessionEngine::new(
         provider,
         tools,
-        test_policies(),
+        test_policies_with_external_mutation(),
         transcript,
         Arc::new(SkillCatalog::default()),
     )
@@ -1268,9 +1268,10 @@ async fn current_resolution_persists_semantic_handoff_then_runs_build() {
         _ => None,
     });
     assert_eq!(handoff.map(|handoff| &handoff.artifact), Some(&artifact));
-    let request_prompt = requests.lock().expect("requests")[0].prompt.clone();
+    let request = requests.lock().expect("requests")[0].clone();
+    assert!(has_external_mutation_notice(&request.input));
     assert_eq!(
-        &request_prompt,
+        &request.prompt,
         &handoff.expect("semantic handoff event").prompt
     );
     assert!(engine.conversation.items().iter().any(|item| matches!(
@@ -1439,7 +1440,7 @@ async fn fresh_session_starts_only_from_a_canonical_typed_handoff() {
     let mut engine = SessionEngine::new(
         provider,
         tools,
-        test_policies(),
+        test_policies_with_external_mutation(),
         transcript,
         Arc::new(SkillCatalog::default()),
     )
@@ -1455,7 +1456,9 @@ async fn fresh_session_starts_only_from_a_canonical_typed_handoff() {
         .await
         .unwrap();
     assert_eq!(engine.plan_state().unwrap(), &PlanWorkflowState::Idle);
-    assert_eq!(requests.lock().expect("requests")[0].prompt, handoff.prompt);
+    let request = requests.lock().expect("requests")[0].clone();
+    assert_eq!(request.prompt, handoff.prompt);
+    assert!(has_external_mutation_notice(&request.input));
     assert!(matches!(
         engine.conversation.items().iter().find(|item| !zevria_transcript::transcript::is_leading_metadata(item)),
         Some(TranscriptItem::Plan(PlanRecord::Handoff { handoff: stored }))
