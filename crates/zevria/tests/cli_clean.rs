@@ -5,8 +5,6 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-use zevria_foundation::runtime_paths::workspace_state_root as state_root;
-
 const DIRECTORIES: [&str; 5] = [
     "agent-runs",
     "plans",
@@ -54,9 +52,10 @@ fn populate_root(root: &Path) -> Vec<PathBuf> {
 }
 
 fn populate(workspace: &Path) -> Vec<PathBuf> {
+    let storage = workspace.join(".zevria");
     DIRECTORIES
         .iter()
-        .flat_map(|name| populate_root(&state_root(workspace).join(name)))
+        .flat_map(|name| populate_root(&storage.join(name)))
         .collect()
 }
 
@@ -123,6 +122,10 @@ fn clean_purges_exactly_the_five_invocation_workspace_directories() {
     populate(&workspace);
     let mut preserved = populate(home.path());
     preserved.extend(populate(ancestor.path()));
+    let legacy = workspace.join(".zevria/windows");
+    for name in DIRECTORIES {
+        preserved.extend(populate_root(&legacy.join(name)));
+    }
     for path in [
         ".zevria/.gitignore",
         ".zevria/skills/demo.md",
@@ -131,6 +134,7 @@ fn clean_purges_exactly_the_five_invocation_workspace_directories() {
         ".zevria/unknown/deep/keep",
         ".zevria/notes.txt",
         ".cazean/sessions/legacy.jsonl",
+        "AGENTS.md",
         "ordinary.txt",
     ] {
         preserved.push(write_fixture(workspace.join(path)));
@@ -149,11 +153,13 @@ fn clean_purges_exactly_the_five_invocation_workspace_directories() {
     let stdout = success(&output);
     let canonical = workspace.canonicalize().unwrap();
     let expected = std::iter::once(format!("Workspace: {canonical:?}"))
-        .chain(DIRECTORIES.map(|name| format!("Removed: {:?}", state_root(&canonical).join(name))))
+        .chain(
+            DIRECTORIES.map(|name| format!("Removed: {:?}", canonical.join(".zevria").join(name))),
+        )
         .collect::<Vec<_>>();
     assert_eq!(stdout.lines().collect::<Vec<_>>(), expected);
     for name in DIRECTORIES {
-        assert_absent(&state_root(&workspace).join(name));
+        assert_absent(&workspace.join(".zevria").join(name));
     }
     assert_kept(&preserved);
     let mut siblings = fs::read_dir(workspace.join(".zevria"))
@@ -161,18 +167,18 @@ fn clean_purges_exactly_the_five_invocation_workspace_directories() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<Vec<_>>();
     siblings.sort();
-    let mut expected = vec![
-        ".gitignore",
-        "config.toml",
-        "notes.txt",
-        "skills",
-        "themes",
-        "unknown",
-    ];
-    if cfg!(windows) {
-        expected.push("windows");
-    }
-    assert_eq!(siblings, expected);
+    assert_eq!(
+        siblings,
+        [
+            ".gitignore",
+            "config.toml",
+            "notes.txt",
+            "skills",
+            "themes",
+            "unknown",
+            "windows",
+        ]
+    );
 }
 
 #[test]
@@ -186,7 +192,7 @@ fn absent_empty_and_partial_storage_are_repeatable_no_ops_without_creation() {
     ] {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let storage = state_root(workspace.path());
+        let storage = workspace.path().join(".zevria");
         if storage_exists {
             fs::create_dir_all(&storage).unwrap();
         }
@@ -247,10 +253,10 @@ fn clean_ignores_missing_malformed_and_provider_free_configuration() {
                 DIRECTORIES.len()
             );
             for name in DIRECTORIES {
-                assert_absent(&state_root(workspace.path()).join(name));
+                assert_absent(&workspace.path().join(".zevria").join(name));
             }
             assert!(
-                fs::read_dir(state_root(workspace.path()))
+                fs::read_dir(workspace.path().join(".zevria"))
                     .unwrap()
                     .next()
                     .is_none()
@@ -288,7 +294,7 @@ fn clean_does_not_even_require_a_home_environment_variable() {
         DIRECTORIES.len()
     );
     assert!(
-        fs::read_dir(state_root(workspace.path()))
+        fs::read_dir(workspace.path().join(".zevria"))
             .unwrap()
             .next()
             .is_none()
@@ -333,7 +339,9 @@ fn invalid_arguments_and_mixed_modes_fail_before_cleanup_or_configuration() {
             "{args:?}"
         );
         assert_eq!(
-            fs::read_dir(state_root(workspace.path())).unwrap().count(),
+            fs::read_dir(workspace.path().join(".zevria"))
+                .unwrap()
+                .count(),
             DIRECTORIES.len()
         );
     }
@@ -341,22 +349,16 @@ fn invalid_arguments_and_mixed_modes_fail_before_cleanup_or_configuration() {
 
 #[test]
 fn non_directory_storage_and_deletion_roots_fail_closed() {
-    let state = if cfg!(windows) {
-        ".zevria/windows"
-    } else {
-        ".zevria"
-    };
     for invalid in std::iter::once(".zevria".to_string())
-        .chain(cfg!(windows).then(|| state.to_string()))
-        .chain(DIRECTORIES.map(|name| format!("{state}/{name}")))
+        .chain(DIRECTORIES.map(|name| format!(".zevria/{name}")))
     {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let path = workspace.path().join(&invalid);
         let mut preserved = vec![write_fixture(path.clone())];
-        if invalid != ".zevria" && invalid != state {
+        if invalid != ".zevria" {
             for name in DIRECTORIES {
-                let root = state_root(workspace.path()).join(name);
+                let root = workspace.path().join(".zevria").join(name);
                 if root != path {
                     preserved.extend(populate_root(&root));
                 }
@@ -400,7 +402,7 @@ fn symlinked_storage_and_all_deletion_roots_including_dangling_links_fail_closed
             symlink(&referent, &path).unwrap();
             if invalid != ".zevria" {
                 for name in DIRECTORIES {
-                    let root = state_root(workspace.path()).join(name);
+                    let root = workspace.path().join(".zevria").join(name);
                     if root != path {
                         preserved.extend(populate_root(&root));
                     }
@@ -435,7 +437,7 @@ fn nested_symlinks_are_removed_without_touching_any_referents() {
         write_fixture(workspace.path().join(".zevria/skills/keep.md")),
     ];
     for name in DIRECTORIES {
-        let root = state_root(workspace.path()).join(name);
+        let root = workspace.path().join(".zevria").join(name);
         for kind in ["directory", "file", "missing"] {
             symlink(outside.path().join(kind), root.join(format!("{kind}-link"))).unwrap();
         }
@@ -449,12 +451,14 @@ fn nested_symlinks_are_removed_without_touching_any_referents() {
         DIRECTORIES.len()
     );
     for name in DIRECTORIES {
-        assert_absent(&state_root(workspace.path()).join(name));
+        assert_absent(&workspace.path().join(".zevria").join(name));
     }
     assert_kept(&preserved);
     assert_absent(&outside.path().join("missing"));
     assert_eq!(
-        fs::read_dir(state_root(workspace.path())).unwrap().count(),
+        fs::read_dir(workspace.path().join(".zevria"))
+            .unwrap()
+            .count(),
         1
     );
     assert!(fs::read_dir(home.path()).unwrap().next().is_none());
@@ -621,7 +625,7 @@ fn final_worker_removal_permission_errors_report_four_completed_removals() {
         .chain(
             earlier
                 .iter()
-                .map(|name| format!("Removed: {:?}", state_root(&canonical).join(name))),
+                .map(|name| format!("Removed: {:?}", canonical.join(".zevria").join(name))),
         )
         .collect::<Vec<_>>();
     assert_eq!(stdout.lines().collect::<Vec<_>>(), expected);

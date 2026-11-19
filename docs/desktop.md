@@ -37,8 +37,7 @@ extra console window. Its File, Session and View menus are inside the window.
 
 [Git for Windows Bash and native RTK](windows.md) are prerequisites for **command
 tools**, not for opening the GUI. Command-based credentials still need their
-commands available in the launch environment. Workspace state uses the same
-`.zevria/windows/` location as the native CLI.
+commands available in the launch environment.
 
 ### macOS
 
@@ -68,6 +67,18 @@ and logs use the same home resolution as the CLI (`HOME` or, on Windows,
 desktop log is `~/.zevria/logs/zevria-desktop.log`, unless overridden. The
 configuration schema, provider setup, policies and transcript formats are shared
 with the CLI. The old `zevria-app.log` is left alone.
+
+### Workspace state
+
+Desktop shares the CLI's `<workspace>/.zevria/` layout on Windows and macOS,
+with `sessions/`, `subsessions/`, `plans/`, `agent-runs/`, and `ensemble-sessions/`
+directly beneath it. Continue and resume do not look under the legacy
+`.zevria/windows/` location. To reuse state there, follow the
+[optional offline transfer](windows.md#optional-offline-transfer-of-legacy-windows-state).
+The CLI's [`zevria clean`](architecture.md#offline-workspace-cleanup) purges the
+five unified directories without removing the legacy subtree or project skills.
+Stop all sessions and workers and back up any state you want to keep before
+running it.
 
 ### Unsigned Windows development ZIP
 

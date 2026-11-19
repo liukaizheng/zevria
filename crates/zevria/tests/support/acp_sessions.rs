@@ -3,12 +3,12 @@
 use super::acp_skills::Rpc;
 use serde_json::json;
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 use zevria_foundation::ModelProfileRef;
 use zevria_foundation::SessionMode;
-use zevria_model::models::SessionModels;
+use zevria_model::models::{ModelSelection, SessionModels};
 use zevria_transcript::transcript;
 use zevria_transcript::transcript::TranscriptItem;
 use zevria_transcript::transcript::TranscriptWriter;
@@ -132,23 +132,65 @@ fn real_acp_pending_mode_only_selection_stays_unsaved_and_historical_modes_resum
     assert_eq!(std::fs::read(config_path).unwrap(), config_before);
 }
 
+fn session_directory(workspace: &Path, worker: bool) -> PathBuf {
+    workspace.join(if worker {
+        ".zevria/ensemble-sessions"
+    } else {
+        ".zevria/sessions"
+    })
+}
+
+fn start_initialized(home: &Path, workspace: &Path, worker: bool) -> Rpc {
+    let mut rpc = if worker {
+        Rpc::start_worker(home, workspace, &home.join(".zevria/config.toml"))
+    } else {
+        Rpc::start(home, workspace)
+    };
+    let initialized = rpc.request(
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    );
+    assert!(initialized.get("error").is_none(), "{initialized}");
+    rpc
+}
+
+fn list_session_ids(rpc: &mut Rpc, workspace: &Path) -> Vec<String> {
+    let listed = rpc.request("session/list", json!({"cwd":workspace}));
+    assert!(listed.get("error").is_none(), "{listed}");
+    listed["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["sessionId"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn write_saved_session(directory: &Path, id: &str, prompt: &str) -> PathBuf {
+    let selection = ModelSelection::new(
+        ModelProfileRef::new("test", "test-model"),
+        zevria_foundation::ReasoningLevel::Medium,
+    );
+    let mut writer = TranscriptWriter::create_with_id(directory, id).unwrap();
+    writer
+        .rewrite(&[
+            TranscriptItem::SessionModels(
+                SessionModels::new(selection.clone(), selection).unwrap(),
+            ),
+            TranscriptItem::Message(rig_core::message::Message::user(prompt)),
+            TranscriptItem::Message(rig_core::message::Message::assistant("durable reply")),
+        ])
+        .unwrap();
+    writer.path().to_path_buf()
+}
+
 #[test]
 fn real_acp_unused_root_and_worker_sessions_stay_unsaved_through_eof() {
     for worker in [false, true] {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         super::write_test_config(home.path());
-        let config = home.path().join(".zevria/config.toml");
-        let mut rpc = if worker {
-            Rpc::start_worker(home.path(), workspace.path(), &config)
-        } else {
-            Rpc::start(home.path(), workspace.path())
-        };
-        let initialized = rpc.request(
-            "initialize",
-            json!({"protocolVersion":1,"clientCapabilities":{}}),
-        );
-        assert!(initialized.get("error").is_none(), "{initialized}");
+        let directory = session_directory(workspace.path(), worker);
+        let mut rpc = start_initialized(home.path(), workspace.path(), worker);
         let mut paths = Vec::new();
         for _ in 0..3 {
             let created = rpc.request(
@@ -157,24 +199,19 @@ fn real_acp_unused_root_and_worker_sessions_stay_unsaved_through_eof() {
             );
             assert!(created.get("error").is_none(), "{created}");
             let id = created["result"]["sessionId"].as_str().unwrap();
-            let directory = if worker {
-                zevria_foundation::runtime_paths::workspace_state_root(workspace.path())
-                    .join("ensemble-sessions")
-            } else {
-                transcript::sessions_dir(workspace.path())
-            };
             let path = directory.join(format!("{id}.jsonl"));
             assert!(!path.exists());
-            assert!(path.with_extension("jsonl.lock").exists());
-            assert!(transcript::list_sessions(&directory).unwrap().is_empty());
+            assert!(path.with_extension("jsonl.lock").is_file());
+            assert!(list_session_ids(&mut rpc, workspace.path()).is_empty());
             paths.push(path);
         }
         rpc.eof_and_reap();
         for path in paths {
             assert!(!path.exists());
             assert!(!path.with_extension("jsonl.lock").exists());
-            assert!(path.parent().unwrap().join(".leases.lock").exists());
         }
+        assert!(directory.join(".leases.lock").is_file());
+        assert!(!workspace.path().join(".zevria/windows").exists());
     }
 }
 
@@ -184,50 +221,11 @@ fn real_acp_crash_sidecars_are_reclaimed_on_next_startup_and_history_resumes() {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         super::write_test_config(home.path());
-        let config = home.path().join(".zevria/config.toml");
-        let directory = if worker {
-            zevria_foundation::runtime_paths::workspace_state_root(workspace.path())
-                .join("ensemble-sessions")
-        } else {
-            transcript::sessions_dir(workspace.path())
-        };
-        let mut writer = TranscriptWriter::create_with_id(&directory, "crashed").unwrap();
-        writer
-            .rewrite(&[
-                TranscriptItem::SessionModels(
-                    SessionModels::new(
-                        zevria_model::models::ModelSelection::new(
-                            ModelProfileRef::new("test", "test-model"),
-                            zevria_foundation::ReasoningLevel::Medium,
-                        ),
-                        zevria_model::models::ModelSelection::new(
-                            ModelProfileRef::new("test", "test-model"),
-                            zevria_foundation::ReasoningLevel::Medium,
-                        ),
-                    )
-                    .unwrap(),
-                ),
-                TranscriptItem::Message(rig_core::message::Message::user("saved before crash")),
-                TranscriptItem::Message(rig_core::message::Message::assistant("durable reply")),
-            ])
-            .unwrap();
-        let path = writer.path().to_path_buf();
-        drop(writer);
+        let directory = session_directory(workspace.path(), worker);
+        let path = write_saved_session(&directory, "crashed", "saved before crash");
         let original = std::fs::read(&path).unwrap();
         let sidecar = path.with_extension("jsonl.lock");
-        let start = || {
-            let mut rpc = if worker {
-                Rpc::start_worker(home.path(), workspace.path(), &config)
-            } else {
-                Rpc::start(home.path(), workspace.path())
-            };
-            let initialized = rpc.request(
-                "initialize",
-                json!({"protocolVersion":1,"clientCapabilities":{}}),
-            );
-            assert!(initialized.get("error").is_none(), "{initialized}");
-            rpc
-        };
+        let start = || start_initialized(home.path(), workspace.path(), worker);
         let params = || json!({"sessionId":"crashed", "cwd":workspace.path(), "mcpServers":[]});
         let mut owner = start();
         let loaded = owner.request("session/load", params());
@@ -260,6 +258,10 @@ fn real_acp_crash_sidecars_are_reclaimed_on_next_startup_and_history_resumes() {
             "another session's startup sweeps the crashed owner"
         );
         assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(
+            list_session_ids(&mut successor, workspace.path()),
+            ["crashed"]
+        );
         let resumed = successor.request("session/resume", params());
         assert!(resumed.get("error").is_none(), "{resumed}");
         assert!(sidecar.exists());
@@ -291,6 +293,54 @@ fn real_acp_crash_sidecars_are_reclaimed_on_next_startup_and_history_resumes() {
         }
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert!(directory.join(".leases.lock").is_file());
+        successor.eof_and_reap();
+        assert!(!workspace.path().join(".zevria/windows").exists());
+    }
+}
+
+#[test]
+fn real_acp_never_falls_back_to_legacy_windows_history() {
+    for worker in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        super::write_test_config(home.path());
+        let directory = session_directory(workspace.path(), worker);
+        let legacy = workspace
+            .path()
+            .join(".zevria/windows")
+            .join(directory.file_name().unwrap());
+        let path = write_saved_session(&legacy, "windows-only", "saved under the old layout");
+        let original = std::fs::read(&path).unwrap();
+        let sidecar = path.with_extension("jsonl.lock");
+        std::fs::write(&sidecar, b"").unwrap();
+
+        let mut rpc = start_initialized(home.path(), workspace.path(), worker);
+        // There is no unified history to mask a fallback to the old location.
+        assert!(list_session_ids(&mut rpc, workspace.path()).is_empty());
+        for method in ["session/load", "session/resume"] {
+            let missing = rpc.request(
+                method,
+                json!({"sessionId":"windows-only","cwd":workspace.path(),"mcpServers":[]}),
+            );
+            assert!(
+                missing["error"]
+                    .to_string()
+                    .contains("no persisted session matches ID"),
+                "{missing}"
+            );
+        }
+        assert!(!directory.exists());
+
+        let created = rpc.request(
+            "session/new",
+            json!({"cwd":workspace.path(),"mcpServers":[]}),
+        );
+        assert!(created.get("error").is_none(), "{created}");
+        rpc.eof_and_reap();
+        assert!(directory.join(".leases.lock").is_file());
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert_eq!(std::fs::read(sidecar).unwrap(), b"");
+        assert!(!legacy.join(".leases.lock").exists());
     }
 }
 

@@ -50,9 +50,12 @@ The startup workspace is not a Git ancestor or a later shell working directory.
 Offline skill commands need neither providers nor the model file, but reject
 stale `[providers]`/`[modes]` TOML tables with a pointer to `models.jsonc`. Missing directories are empty. An unavailable runtime home produces a bounded
 diagnostic and project-only discovery. On Windows, a valid absolute `HOME` takes
-precedence over the user profile. Project skills stay in `.zevria/skills`, not
-under the Windows `.zevria/windows` state root. Roots cannot be configured: ancestor,
-extra/shared, `.agents`, `.codex` and `.claude` roots are unsupported.
+precedence over the user profile. Project skills stay in `<workspace>/.zevria/skills/`
+on every platform. They are a shared input, not one of the five workspace state
+directories removed by [`zevria clean`](architecture.md#offline-workspace-cleanup).
+The [optional offline transfer of legacy Windows state](windows.md#optional-offline-transfer-of-legacy-windows-state)
+does not move skills. Roots cannot be configured: ancestor, extra/shared,
+`.agents`, `.codex` and `.claude` roots are unsupported.
 
 Both layouts work:
 

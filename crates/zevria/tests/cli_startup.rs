@@ -178,7 +178,7 @@ fn invalid_explicit_git_bash_is_diagnosed_before_config_or_acp_stdout() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let state = workspace.path().join(".zevria").join("windows");
+    let state = workspace.path().join(".zevria");
     assert!(
         stderr.contains(&format!(
             "zevria: runtime windows; configuration {}; state {}",
@@ -193,39 +193,6 @@ fn invalid_explicit_git_bash_is_diagnosed_before_config_or_acp_stdout() {
     );
     assert_empty(home.path());
     assert_empty(workspace.path());
-}
-
-#[cfg(windows)]
-#[test]
-fn native_clean_leaves_linux_history_and_shared_project_inputs_untouched() {
-    let home = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
-    let preserved = [
-        ".zevria/sessions/linux.jsonl",
-        ".zevria/skills/shared.md",
-        "AGENTS.md",
-    ];
-    for path in preserved
-        .into_iter()
-        .chain([".zevria/windows/sessions/native.jsonl"])
-    {
-        let path = workspace.path().join(path);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, "keep-or-remove").unwrap();
-    }
-    let output = without_dependencies(home.path(), workspace.path())
-        .arg("clean")
-        .output()
-        .unwrap();
-    plain_success(&output);
-    assert!(!workspace.path().join(".zevria/windows/sessions").exists());
-    for path in preserved {
-        assert_eq!(
-            std::fs::read(workspace.path().join(path)).unwrap(),
-            b"keep-or-remove"
-        );
-    }
-    assert_empty(home.path());
 }
 
 #[cfg(windows)]

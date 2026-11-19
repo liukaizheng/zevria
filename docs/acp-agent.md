@@ -18,13 +18,10 @@ run in Git for Windows Bash even when the editor or launching terminal uses
 PowerShell. Startup checks Git Bash and native RTK, and reports platform,
 configuration, and state diagnostics only on stderr so stdout remains JSON-RPC.
 
-Windows history and leases are under `.zevria/windows/`, including
-`ensemble-sessions` and `agent-runs`; Linux and macOS use the `.zevria/` paths
-shown below. Listing, resume, and cleanup use only the local state root. Built-in
-ensemble workers launch the current executable with `--acp --ensemble-worker`.
-On Windows, configured ACP agents use a private Job Object helper so SDK
-direct-child shutdown also stops descendants, including Node/npm launchers
-resolved under Git Bash. See [Windows setup](windows.md) for configuration,
+Built-in ensemble workers launch the current executable with
+`--acp --ensemble-worker`. On Windows, configured ACP agents use a private
+Job Object helper so SDK direct-child shutdown also stops descendants,
+including Node/npm launchers resolved under Git Bash. See [Windows setup](windows.md) for configuration,
 filesystem boundaries, and the acceptance checklist.
 
 ## Explicit ensemble worker profile
@@ -396,9 +393,18 @@ An ACP `SessionId` is allocated immediately as the intended filename stem under:
 <workspace>/.zevria/sessions/<session-id>.jsonl
 ```
 
-ACP and TUI sessions use the same persistence. A new session creates no `.jsonl`
-file while idle, browsing commands, changing mode/model, refreshing guidance, or
-rejecting blank/invalid input. The first accepted text/image/orchestrated prompt,
+ACP and TUI sessions use the same persistence on Windows, Linux, and macOS.
+Each session uses the selected workspace's `<workspace>/.zevria/` state root;
+root sessions and ensemble workers keep separate transcript and lease directories.
+Listing, load, resume, and recovery never look under the old `.zevria/windows/`
+location. For existing Windows history there, see the
+[optional offline transfer](windows.md#optional-offline-transfer-of-legacy-windows-state).
+The CLI's [offline cleanup](architecture.md#offline-workspace-cleanup) removes
+only the five unified state directories and preserves the legacy subtree.
+
+A new session creates no `.jsonl` file while idle, browsing commands, changing
+mode/model, refreshing guidance, or rejecting blank/invalid input. The first
+accepted text/image/orchestrated prompt,
 direct skill invocation, typed Plan handoff, or ensemble start publishes complete
 ordered history before acceptance effects, generation or tools. Failure or
 cancellation after acceptance keeps that resumable history. Before publication,

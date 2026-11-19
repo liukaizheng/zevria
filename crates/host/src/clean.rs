@@ -78,7 +78,6 @@ fn run_with_output(workspace: &Path, output: &mut impl Write) -> anyhow::Result<
 /// Validate every deletion root before the first removal. Do not canonicalize
 /// these paths: that would hide symlinked roots and redirect the deletion scope.
 fn preflight(workspace: &Path) -> anyhow::Result<Vec<(PathBuf, bool)>> {
-    directory_exists(&workspace.join(".zevria"))?;
     let storage = zevria_foundation::runtime_paths::workspace_state_root(workspace);
     directory_exists(&storage)?;
     DIRECTORIES
@@ -259,22 +258,16 @@ mod tests {
 
     #[test]
     fn non_directory_roots_fail_preflight_without_deleting_any_target() {
-        let state = if cfg!(windows) {
-            ".zevria/windows"
-        } else {
-            ".zevria"
-        };
         for invalid in std::iter::once(".zevria".to_string())
-            .chain(cfg!(windows).then(|| state.to_string()))
-            .chain(DIRECTORIES.map(|name| format!("{state}/{name}")))
+            .chain(DIRECTORIES.map(|name| format!(".zevria/{name}")))
         {
             let workspace = tempfile::tempdir().unwrap();
             let invalid_path = workspace.path().join(&invalid);
             write(&invalid_path, b"not a directory");
             let mut preserved = Vec::new();
-            if invalid != ".zevria" && invalid != state {
+            if invalid != ".zevria" {
                 for name in DIRECTORIES {
-                    let root = storage(workspace.path()).join(name);
+                    let root = workspace.path().join(".zevria").join(name);
                     if root != invalid_path {
                         let path = root.join("keep");
                         write(&path, b"keep");

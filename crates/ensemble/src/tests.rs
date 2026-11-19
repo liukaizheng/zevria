@@ -606,9 +606,7 @@ fn agent_run_ignore_guard_is_created_once_and_never_overwritten() {
     let workspace = directory.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     ensure_agent_run_ignore_guard(&workspace).expect("create ignore guard");
-    let guard = zevria_foundation::runtime_paths::workspace_state_root(&workspace)
-        .join("agent-runs")
-        .join(".gitignore");
+    let guard = workspace.join(".zevria/agent-runs/.gitignore");
     assert_eq!(std::fs::read_to_string(&guard).expect("read guard"), "*\n");
 
     std::fs::write(&guard, "custom policy\n").expect("replace fixture guard");

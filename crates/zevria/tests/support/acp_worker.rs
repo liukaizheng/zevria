@@ -857,8 +857,7 @@ fn actual_worker_routes_models_questions_and_proof_and_recovers_without_mutating
             .unwrap()
             .is_none()
     );
-    let worker_dir = zevria_foundation::runtime_paths::workspace_state_root(workspace.path())
-        .join("ensemble-sessions");
+    let worker_dir = workspace.path().join(".zevria/ensemble-sessions");
     assert_eq!(transcript::list_sessions(&worker_dir).unwrap().len(), 2);
     let records =
         transcript::load(&worker_dir.join(format!("{}.jsonl", plan_id.as_str().unwrap()))).unwrap();

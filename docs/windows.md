@@ -84,19 +84,47 @@ Configure providers in the Windows home. `ZEVRIA_CONFIG` can select a different
 configuration file and its sibling `models.jsonc`. Embedded executable paths,
 log directories, and provider addresses must be usable from Windows.
 
-| Input or state | Windows | Linux/macOS |
-| --- | --- | --- |
-| Project guidance | `<workspace>/AGENTS.md` | Same shared input |
-| Project skills | `<workspace>/.zevria/skills` | Same shared input |
-| State root | `<workspace>/.zevria/windows/` | `<workspace>/.zevria/` |
-| State directories | `sessions`, `subsessions`, `plans`, `agent-runs`, `ensemble-sessions` | Same layout under its root |
+| Input or state | Location on Windows, Linux, and macOS |
+| --- | --- |
+| Project guidance | `<workspace>/AGENTS.md` |
+| Project skills | `<workspace>/.zevria/skills/` |
+| State root | `<workspace>/.zevria/` |
+| State directories | `sessions/`, `subsessions/`, `plans/`, `agent-runs/`, `ensemble-sessions/` directly under the state root |
 
-Continue, resume, ACP listing, leases, recovery, and `clean` use only the local
-platform's workspace state. Windows `zevria clean` leaves prior Linux history
-and shared project inputs untouched. No previous configuration or history is
-imported or migrated. Stop active sessions and workers before cleanup. Startup
-reports the platform and effective configuration and state paths on stderr,
-not in ACP stdout or the provider's stable application prefix.
+Continue, resume, ACP listing, leases, and crash recovery use the unified paths,
+including history already present there. Sharing a directory layout does not
+make simultaneous access across platforms or filesystems safe; it requires
+compatible filesystem locking. Startup reports the platform and effective
+configuration and state paths on stderr, not in ACP stdout or the provider's
+stable application prefix.
+
+`zevria clean` deletes the five directories above without confirmation, including
+any data Linux/WSL or macOS stored in them. It leaves `.zevria/windows/`, project
+skills and guidance, and other unlisted files alone. Stop all sessions and
+workers using the workspace and back up any state you want to keep before
+cleaning. See [offline workspace cleanup](architecture.md#offline-workspace-cleanup).
+
+### Optional offline transfer of legacy Windows state
+
+Earlier native Windows versions used `<workspace>/.zevria/windows/`. Zevria
+no longer looks there for history or recovery, and does not migrate, merge, or
+delete it. To use that state in the unified layout, transfer it manually:
+
+1. Stop all sessions and workers using the workspace, including those in other
+   frontends or running from another OS. Back up both layouts: the old
+   `.zevria/windows/` subtree and any state directories already directly under
+   `.zevria/`.
+2. Check all five destinations before moving anything. Only if they are all
+   absent, move whichever of `sessions/`, `subsessions/`, `plans/`, `agent-runs/`,
+   and `ensemble-sessions/` exist under `.zevria/windows/` as one set to the same
+   names directly under `.zevria/`. Leave other files and directories in place.
+3. If any destination exists, keep both copies and choose which set to use. If
+   you choose the legacy set, set the existing top-level state directories
+   aside intact before transferring. Do not overwrite or merge directories.
+
+Moving these directories does not convert old transcript formats or rewrite
+OS-specific paths embedded in saved state. It does not change home configuration
+or logs.
 
 ### Protected-read boundaries
 
@@ -147,10 +175,12 @@ remain unchanged.
 - **Skills or guidance unavailable:** move protected inputs to a supported local
   NTFS/ReFS path without junctions or other reparse points. Do not relax containment.
 - **Missing history or settings:** check the effective paths printed at startup.
-  Windows does not search or copy earlier Linux state or configuration.
+  Older Windows history may still be under `.zevria/windows/`; see the
+  [optional offline transfer](#optional-offline-transfer-of-legacy-windows-state).
+  Home configuration is not imported or copied.
 
 Windows CI covers noninteractive regressions for Git Bash validation, native
-home and state isolation, protected inputs, and ACP/process cleanup. Automated
+home resolution, unified workspace paths, protected inputs, and ACP/process cleanup. Automated
 checks do not exercise a live terminal or clipboard. On an actual Windows
 machine, record these end-to-end checks before claiming interactive acceptance:
 
@@ -162,5 +192,6 @@ machine, record these end-to-end checks before claiming interactive acceptance:
 - [ ] Open an ACP session using native paths; verify clean protocol stdout,
   built-in and external worker shutdown, and Node/npm descendant cleanup after
   exit, timeout, or cancellation.
-- [ ] Verify Windows continue/resume/list/clean isolation, protected reads and
-  reparse/hard-link rejection, resource pagination, atomic settings, and leases.
+- [ ] Verify continue/resume/list use unified workspace paths, and `clean`
+  leaves legacy Windows data and other siblings untouched. Check protected reads
+  and reparse/hard-link rejection, resource pagination, atomic settings, and leases.

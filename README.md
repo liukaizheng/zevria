@@ -128,10 +128,12 @@ Windows and native RTK before interactive or ACP use. Help, version, and the
 
 Remove the retired `--runtime` (including `--runtime native`) and `--wsl-distro`
 flags from existing scripts and ACP configurations. Use `zevria` or
-`zevria --acp` directly. ACP uses native Windows paths, and workspace history is
-stored under `.zevria/windows/`. Configure providers in your Windows home; no
-existing Linux configuration or history is copied or deleted. Linux and macOS
-builds run directly with their existing shell behavior.
+`zevria --acp` directly. ACP uses native Windows paths. Configure providers in
+your Windows home; configuration and logs are unchanged. Windows now uses the
+same `<workspace>/.zevria/` state layout as Linux and macOS. If your Windows
+history is still under `.zevria/windows/`, see the
+[optional offline transfer](docs/windows.md#optional-offline-transfer-of-legacy-windows-state).
+Linux and macOS builds run directly with their existing shell behavior.
 
 See the [Windows setup and acceptance checklist](docs/windows.md) for Git Bash
 and RTK setup, supported filesystems, and ACP and terminal checks.
@@ -618,17 +620,22 @@ and delegated workspace ownership are not security isolation. The ACP frontend
 does not request client permission before running tools. Use an appropriately
 restricted OS account, container, VM, or sandbox for untrusted work.
 
-Workspace history and generated artifacts live under `.zevria/`, including
-`sessions/`, `subsessions/`, `ensemble-sessions/`, `agent-runs/`, and `plans/`.
+On Windows, Linux, and macOS, workspace history and generated artifacts live
+in `sessions/`, `subsessions/`, `ensemble-sessions/`, `agent-runs/`, and `plans/`
+directly under `<workspace>/.zevria/`. Continue, resume, and ACP listing do not
+look in the old `.zevria/windows/` directory.
 Logs default to `~/.zevria/logs/`. Conversations, tool output, and submitted images
 can contain sensitive source material; images persist as embedded base64 in
 plaintext history. Protect these files, keep credentials out of version control,
 and remember that prompts and relevant tool output go to the configured provider.
 
-`zevria clean` **deletes all five workspace storage directories listed above
-without confirmation**. Stop every session and worker using that workspace first.
-It leaves skills and other unlisted files alone; it is not a complete erasure of
-global logs or provider-held data.
+`zevria clean` **deletes the five directories above without confirmation**,
+including data created there by another platform (such as Linux/WSL or macOS).
+Stop every session and worker using that workspace and back up any state you want
+to keep before cleaning. It preserves `.zevria/windows/`, project skills, and
+other unlisted files. It does not erase global logs or provider-held data.
+A shared layout does not guarantee safe simultaneous access across platforms
+or filesystems; the processes must have compatible filesystem locking.
 
 ## Development
 

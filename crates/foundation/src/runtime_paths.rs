@@ -1,17 +1,13 @@
-//! Runtime-local storage. Project instructions and `.zevria/skills` are shared
+//! Runtime storage paths. Project instructions and `.zevria/skills` are shared
 //! inputs and must never be resolved through this state helper.
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
 
+/// The runtime state directory within the workspace chosen by the frontend.
 pub fn workspace_state_root(workspace: &Path) -> PathBuf {
-    state_root_for(workspace, cfg!(windows))
-}
-
-fn state_root_for(workspace: &Path, windows: bool) -> PathBuf {
-    let root = workspace.join(".zevria");
-    if windows { root.join("windows") } else { root }
+    workspace.join(".zevria")
 }
 
 /// A valid explicit HOME wins, including in native Windows tests/portable setups.
@@ -46,10 +42,11 @@ fn resolve_home(windows: bool, env: impl Fn(&str) -> Option<OsString>) -> anyhow
 mod tests {
     use super::*;
     #[test]
-    fn histories_are_separate_but_unix_layout_is_unchanged() {
-        let root = Path::new("workspace");
-        assert_eq!(state_root_for(root, false), root.join(".zevria"));
-        assert_eq!(state_root_for(root, true), root.join(".zevria/windows"));
+    fn workspace_state_root_is_dot_zevria() {
+        assert_eq!(
+            workspace_state_root(Path::new("workspace")),
+            Path::new("workspace/.zevria")
+        );
     }
     #[test]
     fn home_resolution_is_injected_not_process_global() {

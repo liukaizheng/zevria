@@ -1632,17 +1632,21 @@ shutdown and abandoned-transcript cleanup, removes eligible regular, zero-byte
 sidecars best-effort. Dropping a frontend or timing out an observer does not
 release an engine's ownership. File presence alone does not mean a lock is held.
 
-Windows uses `workspace_state_root` (`.zevria/windows`) for every run-state
-namespace; Linux and macOS use `.zevria`. Project guidance and `.zevria/skills`
-remain shared inputs. All listing, continue/resume, worker recovery and cleanup
-paths use that same helper. There is no migration or scan outside the local
-state root.
+`workspace_state_root` resolves `<workspace>/.zevria/` on Windows, Linux, and
+macOS. It only joins a path; each frontend still chooses its own workspace.
+Root transcripts, child transcripts, plan projections, worker logs, and ensemble
+transcripts use separate directories under that root. Project guidance and
+`.zevria/skills` remain shared inputs, discovered independently of runtime state;
+home configuration and logs are unchanged. Listing, continue/resume, lease
+recovery, and cleanup use the unified locations. They do not scan, migrate, or
+merge legacy state under `.zevria/windows/`. See the
+[optional offline transfer](windows.md#optional-offline-transfer-of-legacy-windows-state).
 
-Each namespace (`.zevria/sessions` and `.zevria/ensemble-sessions` on Unix, with
-the additional `windows/` component on Windows) retains exactly
-one permanent `.leases.lock` coordinator. Updated writers hold it for short
-sidecar open/lock and close-before-delete operations, never for the session's
-lifetime, transcript IO, or directory enumeration. This prevents contenders from
+The root and native-worker transcript namespaces (`.zevria/sessions` and
+`.zevria/ensemble-sessions`) each retain one permanent `.leases.lock`
+coordinator. Updated writers hold it for short sidecar open/lock and
+close-before-delete operations, never for the session's lifetime, transcript IO,
+or directory enumeration. This prevents contenders from
 retaining an old locking identity across deletion. Startup scans only its own
 namespace on a blocking worker and reclaims inactive sidecars, including existing
 retained files and crash leftovers, with or without matching transcripts. Every
@@ -1660,10 +1664,12 @@ or replaces the permanent coordinator, and it is not session-history retention.
 workspace before starting the updated binary.** Older writers ignore the
 coordinator, so mixed-version deletion cannot be made safe. Do not manually delete
 lock files (especially `.leases.lock`) during use. Locks require working
-cross-process filesystem advisory-lock semantics; arbitrary external replacement
-and filesystems with broken locking are unsupported. Explicit offline
-`zevria clean` remains a destructive whole-directory purge, not this automatic
-cleanup mechanism, and still requires all workspace sessions and workers to stop.
+cross-process filesystem advisory-lock semantics. The shared layout is not a
+guarantee of simultaneous access across platforms or filesystems with incompatible
+locking. Arbitrary external replacement and filesystems with broken locking are
+unsupported. Explicit offline `zevria clean` remains a destructive
+whole-directory purge, not this automatic cleanup mechanism, and still requires
+all workspace sessions and workers to stop.
 Neither kind of lease makes a concurrent purge safe. Configuration `.skills.lock`
 files are unrelated and unchanged.
 
@@ -1676,8 +1682,7 @@ remains a legitimate interruption rather than an unsupported format.
 ## Offline workspace cleanup
 
 Run `zevria clean` from the workspace to irreversibly remove these five directories
-and everything inside them, in this order (native Windows inserts `windows/`
-after `.zevria/`; the other runtime's history is untouched):
+and everything inside them, in this order, on Windows, Linux, and macOS:
 
 - `.zevria/agent-runs`
 - `.zevria/plans`
@@ -1685,11 +1690,13 @@ after `.zevria/`; the other runtime's history is untouched):
 - `.zevria/subsessions`
 - `.zevria/ensemble-sessions`
 
-**Stop every session and agent worker using the workspace before invoking this
-command.** Deletion starts immediately without a confirmation prompt. The command
-does not acquire workspace locks, detect active sessions, or terminate processes.
-Concurrent cleanup is unsupported: running sessions can lose persistence or
-recreate files, and per-session leases do not protect a whole-directory purge.
+**Stop every session and agent worker using the workspace and back up any state
+you want to keep before invoking this command.** Deletion starts immediately
+without a confirmation prompt and includes state already in these directories
+from another platform, such as Linux/WSL. The command does not acquire workspace
+locks, detect active sessions, or terminate processes. Concurrent cleanup is
+unsupported: running sessions can lose persistence or recreate files, and
+per-session leases do not protect a whole-directory purge.
 
 The workspace is the process's startup current working directory, resolved to its
 existing canonical directory—not a discovered Git root, ancestor workspace, or
@@ -1702,18 +1709,18 @@ This is a whole-directory purge, not transcript-aware recovery or archival. It
 includes hidden files, stale or malformed histories, plan projections, nested
 artifacts, `.jsonl.lock` leases, `.leases.lock` coordinators, customized files, and
 `.gitignore` guards. It keeps `.zevria` itself and all other siblings, including
-`skills`, `themes`, configuration files, and unknown user files. It does not
-separately clean home directory state, ancestor workspaces, or legacy `.cazean`
-storage.
+`skills`, `themes`, configuration files, the legacy `.zevria/windows/` subtree,
+and unknown user files. It does not separately clean home directory state,
+ancestor workspaces, or legacy `.cazean` storage.
 
 Missing directories are successful no-ops; repeated invocations succeed without
 creating configuration, logs, storage directories, or replacement ignore guards.
 Normal session startup can recreate the storage it needs later. Before deleting
-anything, cleanup uses `symlink_metadata` to validate `.zevria` and all five roots.
-Symlinks (including dangling links), non-directory roots, and inspection failures
-other than `NotFound` reject the operation without deleting any target. Recursive
-removal of valid directories removes nested symlinks without following them or
-modifying their referents. These static checks do not claim protection against
+anything, cleanup uses `symlink_metadata` to validate the resolved `.zevria` root
+and all five targets. Symlinks (including dangling links), Windows reparse points,
+non-directory roots, and inspection failures other than `NotFound` reject the
+operation without deleting any target. Recursive removal of valid directories
+removes nested symlinks without following them or modifying their referents. These static checks do not claim protection against
 hostile concurrent filesystem replacement or arbitrary external writers.
 
 Output identifies the canonical workspace and each removed or already-absent

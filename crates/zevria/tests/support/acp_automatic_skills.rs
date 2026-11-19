@@ -129,7 +129,9 @@ fn actual_plain_acp_requests_disclose_activate_reapply_and_respect_disable_and_e
     assert_eq!(effective_catalog(&requests[7]), json!([]));
     for session in [&id, &explicit] {
         let items = transcript::load(
-            &transcript::sessions_dir(workspace.path())
+            &workspace
+                .path()
+                .join(".zevria/sessions")
                 .join(format!("{}.jsonl", session.as_str().unwrap())),
         )
         .unwrap();

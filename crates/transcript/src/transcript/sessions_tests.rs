@@ -22,9 +22,15 @@ fn skill_invocations_preview_as_their_compact_form() {
 #[test]
 fn workspace_directories_live_inside_dot_zevria() {
     let workspace = Path::new("workspace");
-    let state = zevria_foundation::runtime_paths::workspace_state_root(workspace);
-    assert_eq!(sessions_dir(workspace), state.join("sessions"));
-    assert_eq!(plans_dir(workspace), state.join("plans"));
+    assert_eq!(
+        sessions_dir(workspace),
+        Path::new("workspace/.zevria/sessions")
+    );
+    assert_eq!(
+        subsessions_dir(workspace, "root-id"),
+        Path::new("workspace/.zevria/subsessions/root-id")
+    );
+    assert_eq!(plans_dir(workspace), Path::new("workspace/.zevria/plans"));
 }
 
 #[test]

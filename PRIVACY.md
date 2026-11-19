@@ -150,15 +150,16 @@ resume, recovery, and troubleshooting. Common locations are:
 | --- | --- |
 | `~/.zevria/config.toml` and `~/.zevria/models.jsonc` | Settings, provider endpoints, and literal API credentials or local credential-helper commands/arguments (not generated keys). `ZEVRIA_CONFIG` selects another configuration file and its sibling `models.jsonc`. |
 | `<workspace>/.zevria/sessions/` | Root conversation history, submitted images, skill activation records, tool calls and results, model settings, and provider replay data. |
-| `<workspace>/.zevria/subsessions/` and `ensemble-sessions/` | Histories of delegated subtasks and native ensemble workers. |
-| `<workspace>/.zevria/agent-runs/` and `plans/` | Ensemble evidence, worker journals and diagnostics, and generated plans. |
+| `<workspace>/.zevria/subsessions/` and `<workspace>/.zevria/ensemble-sessions/` | Histories of delegated subtasks and native ensemble workers. |
+| `<workspace>/.zevria/agent-runs/` and `<workspace>/.zevria/plans/` | Ensemble evidence, worker journals and diagnostics, and generated plans. |
 | `~/.zevria/logs/zevria.log` | Operational logs, errors, paths, request or response identifiers, usage information, and other diagnostic details. The directory and log level are configurable under `[log]`; `RUST_LOG` overrides the configured level. |
 
-Here `~` means the local home directory resolved by Zevria. `zevria.exe` runs
-natively on Windows and uses Git for Windows Bash for command tools. Its
-workspace state directories are under `<workspace>/.zevria/windows/`. It does
-not import or delete earlier Linux settings or history. External agents can
-create additional files elsewhere.
+Here `~` means the local home directory resolved by Zevria. Windows, Linux, and
+macOS use the same five workspace state directories directly under
+`<workspace>/.zevria/`. Older Windows state under `<workspace>/.zevria/windows/`
+remains on disk but is not read or migrated automatically. See the
+[optional offline transfer](docs/windows.md#optional-offline-transfer-of-legacy-windows-state).
+External agents can create additional files elsewhere.
 Builds with the optional cache-diagnostics feature can also write local
 fingerprints and request/cache metadata beside session history.
 
@@ -189,14 +190,14 @@ them. Summarizing model context or starting a new conversation does not erase
 previously saved history.
 
 To delete Zevria's workspace history and generated artifacts, first stop **all
-sessions and workers using that workspace**, then run `zevria clean` from that
-workspace. **It deletes the five workspace state directories `sessions/`,
-`subsessions/`, `ensemble-sessions/`, `agent-runs/`, and `plans/` without
-confirmation**, using the current runtime's storage root.
+sessions and workers using that workspace** and back up any state you want to
+keep. Run `zevria clean` from the workspace. **It deletes `sessions/`,
+`subsessions/`, `ensemble-sessions/`, `agent-runs/`, and `plans/` directly under
+`<workspace>/.zevria/` without confirmation**, even if another OS created them.
 
-This cleanup does not remove global configuration or logs, skills, unlisted
-files, external agents' separately stored records, or backups. Remove those
-separately if needed. It is ordinary filesystem deletion, not a secure-wiping
+This cleanup does not remove legacy `.zevria/windows/` data, global configuration
+or logs, skills, other unlisted files, external agents' separately stored
+records, or backups. Remove those separately if needed. It is ordinary filesystem deletion, not a secure-wiping
 facility. Deleting local data does not delete copies already received by
 providers, gateways, clients, or other services; use those services' deletion
 processes separately.
