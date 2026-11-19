@@ -21,10 +21,23 @@ pub struct CommandStatusArgs {
 #[derive(Debug, Clone)]
 pub struct CommandStatusTool {
     jobs: CommandJobs,
+    wait_timeout_override: Option<Duration>,
 }
 impl CommandStatusTool {
     pub fn new(jobs: CommandJobs) -> Self {
-        Self { jobs }
+        Self {
+            jobs,
+            wait_timeout_override: None,
+        }
+    }
+    /// Override the status wait cap; `None` inherits the foreground timeout.
+    pub fn with_wait_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.wait_timeout_override = timeout;
+        self
+    }
+    fn effective_wait_timeout(&self) -> Duration {
+        self.wait_timeout_override
+            .unwrap_or_else(|| self.jobs.limits().foreground_timeout)
     }
     async fn execute(
         &self,
@@ -57,8 +70,10 @@ impl CommandStatusTool {
                 .scope::<TurnContext>()
                 .map(|t| t.cancellation().clone())
                 .unwrap_or_default();
-            let timeout = Duration::from_secs(seconds).min(self.jobs.limits().foreground_timeout);
-            job.wait_terminal(timeout, &cancellation).await;
+            if seconds > 0 {
+                let timeout = Duration::from_secs(seconds).min(self.effective_wait_timeout());
+                job.wait_terminal(timeout, &cancellation).await;
+            }
             if cancellation.is_cancelled() {
                 context
                     .insert_result(ToolCancelled)
@@ -87,17 +102,27 @@ impl Tool for CommandStatusTool {
     fn description(&self) -> String {
         format!(
             "List this session's model-visible command jobs, or inspect one job and read stdout/stderr produced since the last model read. With an id, optionally wait up to {} seconds for completion; waiting never stops the job and turn cancellation only cancels the wait. Finished jobs are reported automatically before your next model request; use this tool to read running output, wait, or list jobs. Jobs do not survive restarts. Frontend inspection does not consume model output.",
-            self.jobs.limits().foreground_timeout.as_secs()
+            self.effective_wait_timeout().as_secs()
         )
     }
     fn parameters(&self) -> serde_json::Value {
         let mut schema = schema_for!(CommandStatusArgs).to_value();
         schema["required"] = serde_json::json!([]);
-        // The portable schema needs only integer/null, not Rust's uint64 format.
-        schema["properties"]["wait_seconds"]
+        let wait_seconds = schema["properties"]["wait_seconds"]
             .as_object_mut()
-            .unwrap()
-            .remove("format");
+            .unwrap();
+        // The portable schema needs only integer/null, not Rust's uint64 format.
+        wait_seconds.remove("format");
+        if self.wait_timeout_override.is_some() {
+            wait_seconds.insert(
+                "description".into(),
+                format!(
+                    "Optionally wait for this job to finish, capped at {} seconds.",
+                    self.effective_wait_timeout().as_secs()
+                )
+                .into(),
+            );
+        }
         schema
     }
     fn map_error(&self, error: Self::Error) -> ToolExecutionError {

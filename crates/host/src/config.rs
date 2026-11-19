@@ -57,6 +57,8 @@ auto_trigger_percent = 90
 # Unix: capture login exports once; "login" restores a login shell for every call.
 shell_environment = "captured"
 timeout_seconds = 300
+# Optional command_status wait cap in seconds; omit to use timeout_seconds.
+# status_wait_timeout_seconds = 240
 capture_bytes = 1048576
 # Running background job cap. Set 0 for the foreground-only command surface.
 max_background_jobs = 8
@@ -466,6 +468,7 @@ builder = { provider = "test", model = "test-model", reasoning_level = "medium" 
 pub struct CommandConfig {
     pub shell_environment: zevria_foundation::shell::ShellEnvironment,
     pub timeout_seconds: u64,
+    pub status_wait_timeout_seconds: Option<u64>,
     pub capture_bytes: usize,
     pub max_background_jobs: usize,
     pub max_automatic_continuations: u32,
@@ -477,6 +480,7 @@ impl Default for CommandConfig {
         Self {
             shell_environment: zevria_foundation::shell::ShellEnvironment::Captured,
             timeout_seconds: 300,
+            status_wait_timeout_seconds: None,
             capture_bytes: 1024 * 1024,
             max_background_jobs: 8,
             max_automatic_continuations: 3,
@@ -489,6 +493,9 @@ impl CommandConfig {
     fn validate(self) -> anyhow::Result<()> {
         if self.timeout_seconds == 0 {
             anyhow::bail!("command.timeout_seconds must be greater than zero");
+        }
+        if self.status_wait_timeout_seconds == Some(0) {
+            anyhow::bail!("command.status_wait_timeout_seconds must be greater than zero");
         }
         if self
             .background_timeout_seconds

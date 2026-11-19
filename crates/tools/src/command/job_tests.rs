@@ -344,6 +344,78 @@ async fn interrupted_error_keeps_its_variant_and_does_not_consume_completions() 
     assert!(!next.contains("job updates:"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn command_status_wait_is_capped_without_stopping_the_job() {
+    let jobs = CommandJobs::new(
+        CommandJobLimits {
+            foreground_timeout: Duration::from_secs(360),
+            ..jobs().limits()
+        },
+        None,
+    );
+    let job = jobs
+        .register("true".into(), None, CommandJobMode::Background, None)
+        .await
+        .unwrap();
+    let id = job.snapshot().id;
+
+    // The registered job stays running, so Tokio can advance straight to each
+    // status wait's deadline without involving a real process or wall-clock time.
+    for (wait_limit, wait_seconds, expected_seconds) in [
+        (None, Some(900), 360),
+        (Some(240), Some(60), 60),
+        (Some(240), Some(900), 240),
+        (Some(600), Some(450), 450),
+        (Some(600), Some(900), 600),
+        (Some(600), None, 0),
+        (Some(600), Some(0), 0),
+    ] {
+        let tool = CommandStatusTool::new(jobs.clone())
+            .with_wait_timeout(wait_limit.map(Duration::from_secs));
+        let start = tokio::time::Instant::now();
+        let report = tokio::time::timeout(
+            Duration::from_secs(expected_seconds + 1),
+            tool.call(
+                &mut ToolContext::new(),
+                CommandStatusArgs {
+                    id: Some(id.to_string()),
+                    wait_seconds,
+                },
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "wait {wait_seconds:?} with override {wait_limit:?} exceeded {expected_seconds}s"
+            )
+        })
+        .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(
+            elapsed.as_secs(),
+            expected_seconds,
+            "wait {wait_seconds:?} with override {wait_limit:?}"
+        );
+        if expected_seconds == 0 {
+            assert!(elapsed.is_zero(), "an immediate query must not wait");
+        }
+        assert!(report.starts_with(&format!("id: {id}\nstatus: running\n")));
+        assert!(job.termination_requested().borrow().is_none());
+    }
+
+    job.finish(CommandJobStatus::Exited {
+        code: Some(0),
+        success: true,
+        signal: None,
+    })
+    .await;
+    assert!(
+        status(&jobs, &id, None)
+            .await
+            .starts_with(&format!("id: {id}\nstatus: exited 0\n"))
+    );
+}
+
 #[tokio::test]
 async fn cancelling_status_wait_leaves_job_running_and_background_survives_turn() {
     let jobs = jobs();

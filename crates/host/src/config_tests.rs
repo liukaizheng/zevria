@@ -704,6 +704,53 @@ fn invalid_session_acp_command_and_ensemble_limits_fail_loading() {
 }
 
 #[test]
+fn command_status_wait_is_unset_in_existing_and_generated_configs() {
+    assert_eq!(parse("").unwrap().command.status_wait_timeout_seconds, None);
+    let existing = parse("[command]\ntimeout_seconds = 360\nbackground_timeout_seconds = 480")
+        .unwrap()
+        .command;
+    assert_eq!(existing.timeout_seconds, 360);
+    assert_eq!(existing.background_timeout_seconds, Some(480));
+    assert_eq!(existing.status_wait_timeout_seconds, None);
+
+    let generated: ConfigFile = toml::from_str(DEFAULT_CONFIG).unwrap();
+    assert_eq!(generated.command.status_wait_timeout_seconds, None);
+}
+
+#[test]
+fn command_status_wait_accepts_positive_limits_independently() {
+    for seconds in [1, 240, 600] {
+        let command = parse(&format!(
+            "[command]\ntimeout_seconds = 300\nbackground_timeout_seconds = 480\nstatus_wait_timeout_seconds = {seconds}"
+        ))
+        .unwrap()
+        .command;
+        assert_eq!(command.status_wait_timeout_seconds, Some(seconds));
+        assert_eq!(command.timeout_seconds, 300);
+        assert_eq!(command.background_timeout_seconds, Some(480));
+    }
+}
+
+#[test]
+fn command_status_wait_rejects_zero_negative_and_non_integer_limits() {
+    let error = parse("[command]\nstatus_wait_timeout_seconds = 0").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "command.status_wait_timeout_seconds must be greater than zero"
+    );
+    for invalid in ["-1", "1.5", "240.0", "'240'"] {
+        let error = parse(&format!(
+            "[command]\nstatus_wait_timeout_seconds = {invalid}"
+        ))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("status_wait_timeout_seconds"),
+            "{error:#}"
+        );
+    }
+}
+
+#[test]
 fn command_background_defaults_and_opt_out_are_valid() {
     let default = parse("").unwrap().command;
     assert_eq!(default.max_background_jobs, 8);

@@ -117,7 +117,13 @@ pub(crate) fn build_tools(
     let server = if let Some(jobs) = jobs {
         ToolServer::new()
             .tool(CommandTool::with_jobs(workspace.clone(), jobs.clone()))
-            .tool(CommandStatusTool::new(jobs.clone()))
+            .tool(
+                CommandStatusTool::new(jobs.clone()).with_wait_timeout(
+                    command_config
+                        .status_wait_timeout_seconds
+                        .map(std::time::Duration::from_secs),
+                ),
+            )
             .tool(CommandTerminateTool::new(jobs))
     } else {
         ToolServer::new().tool(command_tool(workspace.clone(), command_config)?)

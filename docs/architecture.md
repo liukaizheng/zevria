@@ -2412,6 +2412,14 @@ output. A finished job with unread stdout/stderr remains pending (or keeps its
 promised-unread pin after a status-only notice), so listing cannot suppress its
 later automatic output delivery.
 
+The optional `[command].status_wait_timeout_seconds` is a positive integer
+loaded at application startup. If omitted, the wait cap inherits
+`[command].timeout_seconds` (300 seconds by default); an explicit cap can be
+shorter or longer. When querying a job by ID, the tool waits at most the smaller
+of `wait_seconds` and the cap. An omitted, `null`, or zero wait queries
+immediately. Expiring or cancelling the wait does not stop the job, and the cap
+does not change foreground execution timeouts or background job deadlines.
+
 When the leader exits, the supervisor kills the remaining owned process group or
 Job. Processes that left it, for example via `setsid`, cannot be killed reliably.
 Their inherited stdout/stderr readers get a two-second drain grace, then capture

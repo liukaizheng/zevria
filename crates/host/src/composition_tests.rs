@@ -49,6 +49,72 @@ fn test_question_requester() -> QuestionRequester {
 }
 
 #[tokio::test]
+async fn command_status_wait_registry_inherits_or_overrides_only_status_wait() {
+    let workspace = tempfile::tempdir().unwrap();
+    let definitions = |config| {
+        let limits = crate::runtime::command_job_limits(config);
+        build_tools(
+            workspace.path(),
+            test_launcher(),
+            test_question_requester(),
+            config,
+            131_072,
+            Some(zevria_session_api::CommandJobs::new(limits, None)),
+        )
+        .unwrap()
+        .snapshot()
+        .take_definitions()
+    };
+
+    let default = definitions(CommandConfig::default());
+    assert_eq!(default[1].name, "command_status");
+    assert!(default[1].description.contains("wait up to 300 seconds"));
+
+    let config = CommandConfig {
+        timeout_seconds: 360,
+        background_timeout_seconds: Some(480),
+        ..CommandConfig::default()
+    };
+    let inherited = definitions(config);
+    assert!(inherited[1].description.contains("wait up to 360 seconds"));
+    assert_eq!(inherited[1].parameters, default[1].parameters);
+    assert!(
+        inherited[0]
+            .description
+            .contains("Foreground commands time out after 360 seconds")
+    );
+    assert!(
+        inherited[0]
+            .description
+            .contains("the background wall-clock limit is 480 seconds")
+    );
+
+    let overridden = definitions(CommandConfig {
+        status_wait_timeout_seconds: Some(600),
+        ..config
+    });
+    assert_eq!(overridden.len(), inherited.len());
+    for (before, after) in inherited.iter().zip(&overridden) {
+        assert_eq!(after.name, before.name);
+        if after.name == "command_status" {
+            assert_eq!(
+                after.description,
+                before
+                    .description
+                    .replace("wait up to 360 seconds", "wait up to 600 seconds")
+            );
+            let mut parameters = before.parameters.clone();
+            parameters["properties"]["wait_seconds"]["description"] =
+                serde_json::json!("Optionally wait for this job to finish, capped at 600 seconds.");
+            assert_eq!(after.parameters, parameters);
+        } else {
+            assert_eq!(after.description, before.description, "{}", after.name);
+            assert_eq!(after.parameters, before.parameters, "{}", after.name);
+        }
+    }
+}
+
+#[tokio::test]
 async fn production_registry_pins_names_order_and_schemas() {
     let workspace = tempfile::tempdir().expect("workspace");
     let definitions = build_tools(
