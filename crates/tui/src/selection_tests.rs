@@ -838,6 +838,134 @@ fn oversized_entry_stays_put_across_redraws_copy_ignored_keys_and_native_stream_
     }
 }
 
+fn fresh_plan_handoff_app() -> App {
+    let mut artifact = test_plan_artifact();
+    artifact.markdown = (1..=30)
+        .map(|step| format!("Implementation step {step}.\n\n"))
+        .collect();
+    let mut app = App::new();
+    app.reduce_without_effects(SessionEvent::PlanHandoffStarted {
+        turn_id: TEST_TURN_ID,
+        handoff: PlanHandoff::new(artifact, "source-session"),
+    });
+    assert!(matches!(app.history(), [HistoryEntry::PlanHandoff(..)]));
+    app
+}
+
+fn assert_selection_paint(buffer: &ratatui::buffer::Buffer, window: RowRange, selection: RowRange) {
+    let content = conversation_content_area(buffer, false);
+    assert!(selection.intersects(window));
+    for (row, y) in (content.y..content.bottom()).enumerate() {
+        assert_eq!(
+            buffer[(content.x, y)].bg == SELECTION_BG,
+            (selection.start()..selection.end()).contains(&(window.start() + row)),
+            "selection highlight at screen row {y}"
+        );
+    }
+}
+
+#[test]
+fn upward_boundary_keeps_the_oversized_fresh_plan_handoff_in_place() {
+    for enter_selection in SELECTION_SHORTCUTS {
+        for scope in [SelectionScope::Message, SelectionScope::Block] {
+            let mut app = fresh_plan_handoff_app();
+            assert_eq!(app.handle_event(key(KeyCode::Home)), None);
+            rendered_text(&mut app, 80, 10);
+            assert_eq!(app.handle_event(key(KeyCode::PageDown)), None);
+            let unselected = rendered_buffer(&mut app, 80, 10);
+            let content = conversation_content_area(&unselected, false);
+            let window = app.rendered_selection_window().unwrap();
+            let handoff = app.view_cache().entries()[0].items[0].1;
+            assert!(handoff.len() > usize::from(content.height));
+            assert!(handoff.start() < window.start() && window.end() < handoff.end());
+
+            enter_selection(&mut app);
+            if scope == SelectionScope::Block {
+                assert_eq!(app.handle_event(key(KeyCode::Enter)), None);
+            }
+            assert_eq!(app.selection(), cursor(0, 0));
+            assert_eq!(app.selection_scope(), Some(scope));
+            let selection = app.interaction().active_selection();
+            let before = rendered_buffer(&mut app, 80, 10);
+            assert_eq!(app.rendered_selection_window(), Some(window));
+            assert!(!app.interaction().selection_reveal());
+            assert!(!app.view_follow());
+            assert_selection_paint(&before, window, handoff);
+
+            for navigation in [
+                KeyCode::Up,
+                KeyCode::Up,
+                KeyCode::Char('k'),
+                KeyCode::Char('k'),
+            ] {
+                assert_eq!(app.handle_event(key(navigation)), None);
+                for _ in 0..3 {
+                    let after = rendered_buffer(&mut app, 80, 10);
+                    assert_selection_paint(&after, window, handoff);
+                    for y in content.y..content.bottom() {
+                        assert_eq!(
+                            buffer_row_text(&after, y),
+                            buffer_row_text(&before, y),
+                            "{navigation:?} in {scope:?} scope must not change the visible selected rows"
+                        );
+                    }
+                    assert_eq!(app.interaction().active_selection(), selection);
+                    assert!(!app.interaction().selection_reveal());
+                    assert!(!app.view_follow());
+                    assert_eq!(app.view_scroll(), window.start());
+                    assert_eq!(app.rendered_selection_window(), Some(window));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn navigation_reveals_the_fitting_reply_and_oversized_handoff_without_redraw_drift() {
+    let mut app = fresh_plan_handoff_app();
+    assert_eq!(app.handle_event(key(KeyCode::Home)), None);
+    rendered_text(&mut app, 80, 10);
+    press_v(&mut app);
+    assert_eq!(app.selection(), cursor(0, 0));
+    app.reduce_without_effects(SessionEvent::TurnCompleted {
+        turn_id: TEST_TURN_ID,
+        message: Message::assistant("Implemented the plan."),
+        attempt_id: None,
+    });
+    let buffer = rendered_buffer(&mut app, 80, 10);
+    let height = usize::from(conversation_content_area(&buffer, false).height);
+    let entries = app.view_cache().entries();
+    let handoff = entries[0].items[0].1;
+    let reply = entries[1].items[0].1.shifted(entries[0].extent());
+    assert!(handoff.len() > height && reply.len() <= height);
+    assert!(app.rendered_selection_window().unwrap().end() <= reply.start());
+
+    let handoff_window = RowRange::from_start_len(handoff.start(), height);
+    let reply_window = RowRange::new(reply.end() - height, reply.end());
+    for (navigation, entry, range, window) in [
+        (KeyCode::Down, 1, reply, reply_window),
+        (KeyCode::Up, 0, handoff, handoff_window),
+        // No previous item: the existing reveal must stay armed.
+        (KeyCode::Up, 0, handoff, handoff_window),
+        (KeyCode::Down, 1, reply, reply_window),
+    ] {
+        assert_eq!(app.handle_event(key(navigation)), None);
+        assert_eq!(app.selection(), cursor(entry, 0));
+        for frame in 0..3 {
+            let buffer = rendered_buffer(&mut app, 80, 10);
+            assert_eq!(
+                app.view_scroll(),
+                window.start(),
+                "{navigation:?} on frame {frame}"
+            );
+            assert_eq!(app.rendered_selection_window(), Some(window));
+            assert!(app.interaction().selection_reveal());
+            assert!(!app.view_follow());
+            assert_selection_paint(&buffer, window, range);
+        }
+    }
+}
+
 #[test]
 fn v_while_selecting_does_not_reset_the_cursor_scope_or_reveal_intent() {
     for block_scope in [false, true] {
@@ -880,14 +1008,9 @@ fn v_while_selecting_does_not_reset_the_cursor_scope_or_reveal_intent() {
 }
 
 #[test]
-fn clamped_navigation_requests_revelation_in_both_directions() {
-    for navigation in [
-        KeyCode::Char('j'),
-        KeyCode::Down,
-        KeyCode::Char('k'),
-        KeyCode::Up,
-    ] {
-        for top in [0, 10] {
+fn clamped_down_and_j_reveal_the_last_item_stably() {
+    for navigation in [KeyCode::Down, KeyCode::Char('j')] {
+        for (top, expected_top) in [(0, 25), (10, 1)] {
             let mut app = App::new();
             app.seed_history_entry(history_message(Message::user(numbered_lines(30))));
             app.set_view_for_test(top, false);
@@ -896,14 +1019,16 @@ fn clamped_navigation_requests_revelation_in_both_directions() {
             assert!(!app.interaction().selection_reveal());
             app.handle_event(key(navigation));
             assert_eq!(app.selection(), cursor(0, 0), "navigation clamps");
-            assert!(app.interaction().selection_reveal());
-            rendered_text(&mut app, 80, 10);
-            assert_eq!(
-                app.view_scroll(),
-                if top == 0 { 25 } else { 1 },
-                "retain the oversized-item reveal algorithm for {navigation:?}"
-            );
-            assert!(!app.view_follow());
+            for frame in 0..3 {
+                rendered_text(&mut app, 80, 10);
+                assert_eq!(
+                    app.view_scroll(),
+                    expected_top,
+                    "{navigation:?} on frame {frame}"
+                );
+                assert!(app.interaction().selection_reveal());
+                assert!(!app.view_follow());
+            }
         }
     }
     // A fitting last item clipped by the bottom also reveals on clamped j.
@@ -919,7 +1044,11 @@ fn clamped_navigation_requests_revelation_in_both_directions() {
     double_escape(&mut app);
     assert_eq!(app.selection(), cursor(0, 1));
     app.handle_event(key(KeyCode::Enter));
+    assert_eq!(app.selection_scope(), Some(SelectionScope::Block));
+    assert!(!app.interaction().selection_reveal());
     app.handle_event(key(KeyCode::Char('j')));
+    assert_eq!(app.selection(), cursor(0, 1), "navigation clamps");
+    assert!(app.interaction().selection_reveal());
     rendered_text(&mut app, 80, 11);
     assert_eq!(app.view_scroll(), 3);
 }

@@ -341,13 +341,16 @@ impl ViewState {
         if let Some(selection) = selection {
             if selection.len() <= visible_rows {
                 self.conversation_viewport.reveal(selection);
-            } else if selection.start() < self.conversation_viewport.top() {
-                // Preserve the established transcript directionality for an
-                // item taller than the pane: moving upward reveals its start.
-                self.conversation_viewport.reveal_start(selection);
             } else {
-                // Moving downward reveals the oversized item's trailing rows.
-                self.conversation_viewport.reveal_end(selection);
+                let window = self.conversation_viewport.visible_range();
+                // Either aligned edge is already revealed. Keep it stable on redraws.
+                if selection.start() != window.start() && selection.end() != window.end() {
+                    if selection.start() < window.start() {
+                        self.conversation_viewport.reveal_start(selection);
+                    } else {
+                        self.conversation_viewport.reveal_end(selection);
+                    }
+                }
             }
         }
         debug_assert!(self.conversation_viewport.top() <= self.conversation_viewport.max_top());
@@ -862,13 +865,20 @@ mod tests {
 
     #[test]
     fn oversized_selection_preserves_navigation_direction() {
-        let mut view = ViewState::default();
-        view.set_scroll_for_test(15, false);
-        view.reconcile_conversation_viewport(30, 5, Some(RowRange::new(5, 15)), true);
-        assert_eq!(view.scroll(), 5, "upward movement reveals the start");
-
-        view.set_scroll_for_test(0, false);
-        view.reconcile_conversation_viewport(30, 5, Some(RowRange::new(10, 20)), true);
-        assert_eq!(view.scroll(), 15, "downward movement reveals the end");
+        for (top, selection, expected_window, edge) in [
+            (15, RowRange::new(5, 15), RowRange::new(5, 10), "start"),
+            (0, RowRange::new(10, 20), RowRange::new(15, 20), "end"),
+        ] {
+            let mut view = ViewState::default();
+            view.set_scroll_for_test(top, false);
+            for frame in 0..3 {
+                view.reconcile_conversation_viewport(30, 5, Some(selection), true);
+                assert_eq!(
+                    view.conversation_viewport.visible_range(),
+                    expected_window,
+                    "selection {edge} must be revealed on frame {frame}"
+                );
+            }
+        }
     }
 }

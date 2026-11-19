@@ -465,6 +465,10 @@ impl App {
                         .conversation
                         .previous_block_selection(selection, diagnostics),
                 };
+                // Boundary Up preserves reveal intent; Down can reveal a clipped last item.
+                if !next && target == selection {
+                    return None;
+                }
                 if let Some(state) = self.interaction.selection_state_mut() {
                     state.set_selection(target);
                     state.request_reveal();
