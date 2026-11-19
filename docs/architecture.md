@@ -1692,11 +1692,11 @@ and everything inside them, in this order, on Windows, Linux, and macOS:
 
 **Stop every session and agent worker using the workspace and back up any state
 you want to keep before invoking this command.** Deletion starts immediately
-without a confirmation prompt and includes state already in these directories
-from another platform, such as Linux/WSL. The command does not acquire workspace
-locks, detect active sessions, or terminate processes. Concurrent cleanup is
-unsupported: running sessions can lose persistence or recreate files, and
-per-session leases do not protect a whole-directory purge.
+without a confirmation prompt and includes any state in these directories,
+regardless of which operating system wrote it. The command does not acquire
+workspace locks, detect active sessions, or terminate processes. Concurrent
+cleanup is unsupported: running sessions can lose persistence or recreate files,
+and per-session leases do not protect a whole-directory purge.
 
 The workspace is the process's startup current working directory, resolved to its
 existing canonical directory—not a discovered Git root, ancestor workspace, or

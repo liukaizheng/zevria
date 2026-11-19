@@ -2,14 +2,11 @@
 
 `zevria.exe` always runs as a native Windows process. **Git for Windows Bash** is
 its only command-tool backend, whether you launch from PowerShell, cmd, Git Bash,
-or an ACP client. Zevria does not start WSL or translate paths into Linux paths.
-The packaged Windows target is **x86_64 MSVC**. Linux and macOS builds still run
-directly with their existing shell behavior.
+or an ACP client. The packaged Windows target is **x86_64 MSVC**.
 
-Remove `--runtime` (including `--runtime native`) and `--wsl-distro` from older
-scripts and ACP configurations. Run `zevria` for the terminal UI or `zevria --acp`
-for ACP. Help, version, and offline operations like `skills list --json`,
-`theme`, and `clean` do not require Git Bash, RTK, or a configured model.
+Run `zevria` for the terminal UI or `zevria --acp` for ACP. Help, version, and
+offline operations like `skills list --json`, `theme`, and `clean` do not require
+Git Bash, RTK, or a configured model.
 
 ## Install Zevria
 
@@ -30,8 +27,8 @@ with the printed absolute path and resolve the conflicting entry yourself.
 
 ## Install Git Bash and RTK
 
-Install **Git for Windows**, not Windows System32 Bash. Install native RTK with
-its Windows package or binary:
+Install **Git for Windows**. Install native RTK with its Windows package or
+binary:
 
 ```powershell
 winget install rtk-ai.rtk
@@ -98,8 +95,8 @@ compatible filesystem locking. Startup reports the platform and effective
 configuration and state paths on stderr, not in ACP stdout or the provider's
 stable application prefix.
 
-`zevria clean` deletes the five directories above without confirmation, including
-any data Linux/WSL or macOS stored in them. It leaves `.zevria/windows/`, project
+`zevria clean` deletes the five directories above without confirmation, regardless
+of which operating system wrote the data. It leaves `.zevria/windows/`, project
 skills and guidance, and other unlisted files alone. Stop all sessions and
 workers using the workspace and back up any state you want to keep before
 cleaning. See [offline workspace cleanup](architecture.md#offline-workspace-cleanup).
@@ -164,8 +161,8 @@ remain unchanged.
 
 ## Troubleshooting and acceptance
 
-- **Git Bash missing or invalid:** install Git for Windows or correct
-  `ZEVRIA_GIT_BASH`. Do not use `Windows\System32\bash.exe`.
+- **Git Bash missing or invalid:** install Git for Windows or point
+  `ZEVRIA_GIT_BASH` at the installation's `bin\bash.exe`.
 - **RTK missing:** verify `rtk --version` from Git Bash and restart the launcher
   after changing user PATH. Offline commands remain usable.
 - **Install or PATH issue:** close a running Zevria if the executable is locked.

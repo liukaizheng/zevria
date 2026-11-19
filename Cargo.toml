@@ -43,7 +43,7 @@ crossterm = "0.29.0"
 diffy = "0.5.2"
 eventsource-stream = "0.2.3"
 futures-util = "0.3.32"
-# Apache-2.0; native desktop UI kit, a macOS-only dependency of zevria-desktop.
+# Apache-2.0; native desktop UI kit for the macOS and Windows builds of zevria-desktop.
 gpui-kit = "=0.9.0"
 # MIT; portable parser regression tests; GPUI uses the same exact-version replacement below.
 markdown = "=1.0.0"
@@ -103,3 +103,6 @@ which = "8.0.5"
 # See docs/markdown-parser-patch.md for provenance and maintenance.
 [replace]
 "markdown:1.0.0" = { git = "https://github.com/liukaizheng/markdown-rs", rev = "e629e7e4370cac5cc6dac39971c77feba3e3aaf9" }
+# Cargo locks GPUI's optional Linux/FreeBSD backend even though Zevria never
+# builds it. Keep only the native opener commands called by that backend.
+"open:5.4.4" = { path = "vendor/open" }

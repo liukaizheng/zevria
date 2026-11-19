@@ -31,9 +31,9 @@ The Unix suite runs actual installer helpers, tar/checksum verification,
 transaction/rollback logic, and profile editing in disposable homes. It substitutes
 fixture transport and target selection; target detection is independently tested
 with uname/libc/Rosetta fixtures. Linux scenarios cover default and custom roots,
-unchanged legacy locators, executable replacement rollback, and retained backups
-after failed recovery. Actual zsh/fish profile execution runs when those shells are
-available; CI installs fish explicitly. The macOS lane uses system Bash 3.2.
+executable replacement rollback, and retained backups after failed recovery.
+Actual zsh/fish profile execution runs when those shells are available; CI installs
+fish explicitly. The macOS lane uses system Bash 3.2.
 
 `transport.sh` and `transport.ps1` assert exact GitHub tag-specific download URLs,
 then serve local fixtures. Production installers have no fixture URL, insecure

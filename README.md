@@ -126,10 +126,8 @@ noninteractive **Git for Windows Bash**, not the parent shell. Install Git for
 Windows and native RTK before interactive or ACP use. Help, version, and the
 `skills`, `theme`, and `clean` commands can run without Bash, RTK, or model setup.
 
-Remove the retired `--runtime` (including `--runtime native`) and `--wsl-distro`
-flags from existing scripts and ACP configurations. Use `zevria` or
-`zevria --acp` directly. ACP uses native Windows paths. Configure providers in
-your Windows home; configuration and logs are unchanged. Windows now uses the
+Run `zevria` for the terminal UI or `zevria --acp` for an ACP client. ACP uses
+native Windows paths. Configure providers in your Windows home. Windows uses the
 same `<workspace>/.zevria/` state layout as Linux and macOS. If your Windows
 history is still under `.zevria/windows/`, see the
 [optional offline transfer](docs/windows.md#optional-offline-transfer-of-legacy-windows-state).
@@ -630,7 +628,7 @@ plaintext history. Protect these files, keep credentials out of version control,
 and remember that prompts and relevant tool output go to the configured provider.
 
 `zevria clean` **deletes the five directories above without confirmation**,
-including data created there by another platform (such as Linux/WSL or macOS).
+regardless of which operating system wrote the data.
 Stop every session and worker using that workspace and back up any state you want
 to keep before cleaning. It preserves `.zevria/windows/`, project skills, and
 other unlisted files. It does not erase global logs or provider-held data.

@@ -144,10 +144,6 @@ that process; `powershell -File` / `pwsh -File` cannot refresh their parent. Res
 terminals from a refreshed environment (sign out/in if necessary). Opt-out skips
 all profiles and persistent/process PATH changes, not binary installation.
 
-The Linux installer no longer writes `~/.zevria/install-root`. Any existing
-record is left untouched. Older Windows binaries relying on a newly written
-Linux locator are not supported by this installer.
-
 Reruns deliberately replace the **selected root**, including downgrades and
 same-version repairs; installations in other roots remain unchanged. Verification
 failures leave the old executable untouched. Replacement stages on the destination
@@ -225,11 +221,10 @@ your user `PATH`. Unix tar archives preserve executable permission.
 PATH reads/writes. Production installers have no alternate mirror/checksum-bypass
 flags. `test.yml` runs system Bash fixtures on Linux/macOS (including Bash 3.2),
 ShellCheck and fish profile checks, plus Windows PowerShell 5.1 and PowerShell 7.
-Unix fixtures verify default and custom roots, preservation of legacy locator
-files without writing new ones, and executable replacement and recovery. Native
-Windows CI covers noninteractive startup and process cleanup. See the
-[Windows checklist](windows.md#troubleshooting-and-acceptance) for checks that
-require a real terminal or clipboard.
+Unix fixtures verify default and custom roots, executable replacement, and
+recovery. Native Windows CI covers noninteractive startup and process cleanup.
+See the [Windows checklist](windows.md#troubleshooting-and-acceptance) for checks
+that require a real terminal or clipboard.
 
 ## Maintainer prerequisites and release preparation
 

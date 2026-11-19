@@ -15,7 +15,7 @@ Build provider test instructions
 ## Command conventions
 RTK is installed. Always prefix shell commands with `rtk` so it can filter and compress command output before that output enters the model context. A command that already starts with `rtk` is already routed and must not be double-prefixed.
 
-Commands run in the runtime selected at startup. Native Windows uses noninteractive Git Bash, never PowerShell, regardless of the parent terminal. Prefer Bash-relative paths; use explicit `rtk proxy cygpath -u 'C:\path with spaces'` conversion when a shell command needs an absolute Bash path. Structured file-tool arguments remain native Windows paths. WSL runs the entire application with Linux paths. Command strings are not automatically rewritten or sent across runtimes.
+Commands use the shell resolved at startup. Windows uses noninteractive Git Bash, never PowerShell, regardless of the parent terminal. Prefer Bash-relative paths; use explicit `rtk proxy cygpath -u 'C:\path with spaces'` conversion when a shell command needs an absolute Bash path. Structured file-tool arguments use native Windows paths. Zevria does not rewrite command strings.
 
 For example:
 

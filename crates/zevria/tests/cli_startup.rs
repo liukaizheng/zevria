@@ -54,8 +54,6 @@ fn help_version_and_offline_commands_need_no_shell_or_model_configuration() {
         let output = run(&[flag]);
         let help = plain_success(&output);
         assert!(help.starts_with("usage: zevria"));
-        assert!(!help.contains("--runtime"));
-        assert!(!help.contains("--wsl-distro"));
     }
     for flag in ["--version", "-V"] {
         assert_eq!(
@@ -70,9 +68,14 @@ fn help_version_and_offline_commands_need_no_shell_or_model_configuration() {
         Path::new(view["global_location"].as_str().unwrap()),
         home.path().join(".zevria/skills")
     );
+    let workspace_path = workspace.path();
+    // A Unix working directory is reported by its physical path, even when the
+    // temporary directory was created through an alias such as macOS /var.
+    #[cfg(unix)]
+    let workspace_path = workspace_path.canonicalize().unwrap();
     assert_eq!(
         Path::new(view["project_location"].as_str().unwrap()),
-        workspace.path().join(".zevria/skills")
+        workspace_path.join(".zevria/skills")
     );
     assert!(plain_success(&run(&["theme", "reset"])).starts_with("Theme selection reset"));
     assert!(plain_success(&run(&["clean"])).contains("Already absent:"));
@@ -81,18 +84,14 @@ fn help_version_and_offline_commands_need_no_shell_or_model_configuration() {
 }
 
 #[test]
-fn removed_options_and_probes_are_cli_errors_before_shell_or_config() {
+fn unknown_options_are_cli_errors_before_shell_or_config() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    for (flag, args) in [
-        ("--runtime", &["--runtime", "native", "--acp"][..]),
-        ("--runtime", &["--runtime", "auto", "skills", "list"]),
-        ("--runtime=wsl", &["--runtime=wsl", "--help"]),
-        ("--runtime=native", &["skills", "list", "--runtime=native"]),
-        ("--wsl-distro", &["--wsl-distro", "Ubuntu", "clean"]),
-        ("--wsl-distro=Ubuntu", &["--acp", "--wsl-distro=Ubuntu"]),
-        ("--__launcher-probe", &["--__launcher-probe"]),
-        ("--__launcher-probe-tools", &["--__launcher-probe-tools"]),
+    for args in [
+        &["--unknown-option"][..],
+        &["--unknown-option", "--help"],
+        &["--acp", "--unknown-option"],
+        &["skills", "list", "--unknown-option"],
     ] {
         let output = without_dependencies(home.path(), workspace.path())
             .args(args)
@@ -102,7 +101,7 @@ fn removed_options_and_probes_are_cli_errors_before_shell_or_config() {
         assert!(output.stdout.is_empty(), "{args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("unknown") && stderr.contains(flag),
+            stderr.contains("unknown") && stderr.contains("--unknown-option"),
             "{stderr}"
         );
         assert!(stderr.contains("usage: zevria"), "{stderr}");

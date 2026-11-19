@@ -77,7 +77,7 @@ zevria
 
 `zevria.exe` 始终作为原生 Windows 进程运行。你可以从 PowerShell、cmd、Git Bash 或 ACP 客户端启动它；命令工具始终使用非交互式 **Git for Windows Bash**，不使用启动它的 shell。使用交互界面或 ACP 之前，请安装 Git for Windows 和 Windows 版 RTK。帮助、版本信息以及 `skills`、`theme` 和 `clean` 命令不需要 Bash、RTK 或模型配置。
 
-请从现有脚本和 ACP 客户端配置中移除已废弃的 `--runtime`（包括 `--runtime native`）和 `--wsl-distro`，直接使用 `zevria` 或 `zevria --acp`。ACP 使用原生 Windows 路径。请继续在 Windows 用户主目录中设置 provider；配置和日志的位置不变。Windows 现在与 Linux 和 macOS 一样，将工作区状态保存在 `<workspace>/.zevria/`。如果旧版 Windows 的历史记录仍在 `.zevria/windows/` 下，可参阅[可选的离线迁移步骤（英文）](docs/windows.md#optional-offline-transfer-of-legacy-windows-state)。Linux 和 macOS 版仍直接运行，shell 行为不变。
+运行 `zevria` 启动终端界面，或运行 `zevria --acp` 供 ACP 客户端使用。ACP 使用原生 Windows 路径。请在 Windows 用户主目录中设置 provider。Windows 与 Linux 和 macOS 一样，将工作区状态保存在 `<workspace>/.zevria/`。如果旧版 Windows 的历史记录仍在 `.zevria/windows/` 下，可参阅[可选的离线迁移步骤（英文）](docs/windows.md#optional-offline-transfer-of-legacy-windows-state)。Linux 和 macOS 版仍直接运行，shell 行为不变。
 
 请参阅 [Windows 设置与验收清单](docs/windows.md)，了解 Git Bash 和 RTK 的设置、受支持的文件系统，以及 ACP 和终端检查。
 
@@ -379,7 +379,7 @@ Zevria 使用当前用户的文件系统和进程权限执行工具。**它不�
 
 在 Windows、Linux 和 macOS 上，工作区历史和生成的产物都保存在 `<workspace>/.zevria/` 下的 `sessions/`、`subsessions/`、`ensemble-sessions/`、`agent-runs/` 和 `plans/` 中。继续或恢复会话以及 ACP 会话列表均不会查找旧的 `.zevria/windows/`。日志默认保存在 `~/.zevria/logs/`。对话、工具输出和提交的图片可能包含敏感源材料；图片会以 Base64 形式嵌入纯文本历史记录并长期保存。请保护这些文件，勿将凭据提交到版本控制，并注意提示和相关工具输出会发送给配置的 provider。
 
-`zevria clean` 会**不经确认就删除上面列出的五个目录**，包括其他平台（如 Linux/WSL 或 macOS）在同一工作区写入的状态。执行前请先停止所有使用该工作区的会话和工作智能体，并备份需要保留的状态。该命令会保留 `.zevria/windows/`、项目技能和其他未列出的文件，不会删除全局日志或 provider 保存的数据。统一目录布局不保证跨平台或跨文件系统的并发访问安全；进程之间必须使用兼容的文件锁。
+`zevria clean` 会**不经确认就删除上面列出的五个目录**，无论其中的数据由哪个操作系统写入。执行前请先停止所有使用该工作区的会话和工作智能体，并备份需要保留的状态。该命令会保留 `.zevria/windows/`、项目技能和其他未列出的文件，不会删除全局日志或 provider 保存的数据。统一目录布局不保证跨平台或跨文件系统的并发访问安全；进程之间必须使用兼容的文件锁。
 
 ## 开发
 

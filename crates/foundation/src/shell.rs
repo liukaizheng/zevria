@@ -1,5 +1,5 @@
-//! Frozen command environment. Windows uses Git for Windows Bash, never SHELL,
-//! PowerShell, cmd.exe, or Windows System32 Bash.
+//! Frozen command environment. Windows always uses Git for Windows Bash,
+//! regardless of the parent terminal or `SHELL`.
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
@@ -156,7 +156,7 @@ mod windows {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Registry::*;
 
-    const SETUP: &str = "Install Git for Windows, or set ZEVRIA_GIT_BASH to its bin\\bash.exe (not Windows\\System32\\bash.exe). PowerShell may launch Zevria but is not an agent command backend.";
+    const SETUP: &str = "Install Git for Windows, or set ZEVRIA_GIT_BASH to its bin\\bash.exe. The parent terminal does not determine the agent command backend.";
     fn registry_root(hive: HKEY, view: u32) -> Option<PathBuf> {
         let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
         let key = wide("SOFTWARE\\GitForWindows");
@@ -313,16 +313,16 @@ mod windows {
                 spec.args,
                 ["--noprofile", "--norc", "-c"].map(OsString::from)
             );
+            let other_bash = temp.path().join("Other Bash/bin/bash.exe");
+            std::fs::create_dir_all(other_bash.parent().unwrap()).unwrap();
+            std::fs::write(&other_bash, b"not part of a Git installation").unwrap();
+            assert!(installation(&other_bash).is_none());
             let invalid = discover_with(
-                |key| {
-                    (key == "ZEVRIA_GIT_BASH")
-                        .then(|| OsString::from(r"C:\Windows\System32\bash.exe"))
-                },
+                |key| (key == "ZEVRIA_GIT_BASH").then(|| other_bash.clone().into_os_string()),
                 || vec![root],
                 temp.path().into(),
             );
             assert!(format!("{:#}", invalid.unwrap_err()).contains("ZEVRIA_GIT_BASH"));
-            assert!(installation(Path::new(r"C:\Windows\System32\bash.exe")).is_none());
         }
     }
 }

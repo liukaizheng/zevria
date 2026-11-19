@@ -172,7 +172,7 @@ exists so the commit never needs to contain its own SHA.
 - Inspect hosted coverage before tagging. If a required check is missing, add or
   repair it in CI within the authorized source-change scope, or report a blocker.
   Never substitute local checks, skip a gate, or weaken an assertion to release.
-  CI does not establish real Windows/WSL or interactive acceptance; collect
+  CI does not establish native Windows or interactive acceptance; collect
   maintainer evidence and report remaining manual checks without running them
   on the local machine.
 

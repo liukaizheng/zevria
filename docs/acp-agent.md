@@ -10,13 +10,12 @@ An editor or other ACP client should launch that command with the desired worksp
 
 ## Windows setup
 
-On Windows, launch `zevria.exe --acp` directly. Remove `--runtime` (including
-`--runtime native`) and `--wsl-distro` from existing ACP client configurations.
-Use native Windows paths for the working directory, ACP file operations, and
-any `ZEVRIA_CONFIG` override. Zevria does not rewrite ACP paths. Model commands
-run in Git for Windows Bash even when the editor or launching terminal uses
-PowerShell. Startup checks Git Bash and native RTK, and reports platform,
-configuration, and state diagnostics only on stderr so stdout remains JSON-RPC.
+On Windows, launch `zevria.exe --acp` with native Windows paths for the working
+directory, ACP file operations, and any `ZEVRIA_CONFIG` override. Zevria does not
+rewrite ACP paths. Model commands run in Git for Windows Bash even when the
+editor or launching terminal uses PowerShell. Startup checks Git Bash and native
+RTK, and reports platform, configuration, and state diagnostics only on stderr
+so stdout remains JSON-RPC.
 
 Built-in ensemble workers launch the current executable with
 `--acp --ensemble-worker`. On Windows, configured ACP agents use a private

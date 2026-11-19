@@ -210,29 +210,6 @@ zevria_target''', expected=1)
         self.assertTrue((self.home / ".zevria/bin/zevria").is_file())
         self.assertEqual([path.name for path in (self.home / ".zevria").iterdir()], ["bin"])
 
-    def test_default_and_custom_linux_roots_ignore_existing_locator(self):
-        locator = self.home / ".zevria/install-root"
-        locator.parent.mkdir()
-        contents = b"untouched legacy data\x00\n"
-        for kind in ("file", "directory"):
-            if kind == "file":
-                sentinel = locator
-            else:
-                # A nonregular locator should not even be checked by the installer.
-                locator.mkdir()
-                sentinel = locator / "keep"
-            sentinel.write_bytes(contents)
-            for root in (self.root, None):
-                with self.subTest(kind=kind, root=root):
-                    if root is None:
-                        self.env.pop("ZEVRIA_INSTALL")
-                    else:
-                        self.env["ZEVRIA_INSTALL"] = str(root)
-                    self.install(("--no-path-update",))
-                    self.assertEqual(sentinel.read_bytes(), contents)
-            if kind == "file":
-                locator.unlink()
-
     def test_macos_custom_root_leaves_default_root_absent(self):
         self.env["FIXTURE_ASSET"] = "zevria-v1.2.3-aarch64-apple-darwin.tar.gz"
         self.manifest()
