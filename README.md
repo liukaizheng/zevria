@@ -648,7 +648,7 @@ The main areas of the workspace are:
 | Area | Responsibility |
 | --- | --- |
 | `crates/zevria` | CLI entry point and terminal startup. |
-| `crates/desktop` (`zevria-desktop`) | macOS GPUI frontend, with GPUI-free routing/tests and an unsupported-platform stub elsewhere. |
+| `crates/desktop` (`zevria-desktop`) | Native GPUI frontend for macOS and x64 Windows; GPUI-free routing/tests and a CLI referral stub on Linux. |
 | `crates/host` (`zevria-host`) | Frontend-neutral configuration, session lifecycle, restoration, discovery, and host services. |
 | `crates/presentation` | Shared session reducer, lifecycle/Plan state, semantic blocks and command/completion grammar for native frontends. |
 | `crates/core`, `crates/session-api` | Session engine and frontend/provider contracts. |
@@ -658,7 +658,24 @@ The main areas of the workspace are:
 | `crates/theme` | Ratatui-free semantic sRGB tokens, persisted themes, generation and validation. |
 | Other workspace crates | Shared values, instructions, models, workflows, tools, and transcripts. |
 
-The native GPUI desktop is the `crates/desktop` workspace member, sharing one lockfile, dependency versions, host and presentation model. GPUI is target-gated to macOS and never enters the CLI's `cargo build -p zevria` dependency graph. Use `-p zevria` or `-p zevria-desktop` with `cargo run`. See [desktop notes](docs/desktop.md).
+The desktop shares the CLI's host, session model and lockfile. GPUI and RaTeX
+are enabled only for the native desktop build and are not CLI dependencies.
+
+On **x64 Windows**, use the Rust MSVC toolchain, C++ build tools and a Windows
+SDK. From PowerShell, for example:
+
+```powershell
+cargo run --locked --release -p zevria-desktop -- 'C:\Projects\My workspace'
+```
+
+Launch without a path to choose a workspace, pass `.` to open the current
+folder, or use `--continue` to resume its latest session. Git for Windows Bash
+and RTK are needed for command tools, not to open the GUI. See the [desktop
+setup](docs/desktop.md#build-and-run) and [Fn-free Windows keyboard shortcuts](docs/desktop.md#keyboard-shortcuts).
+
+`python tools/package-windows-desktop.py` builds and smoke-tests an **unsigned
+Windows development ZIP**. CI uploads it only as an Actions artifact from an
+opt-in manual build. It is not a published release or part of the CLI installer.
 
 See [architecture](docs/architecture.md) for crate boundaries and data flow.
 Follow [AGENTS.md](AGENTS.md) when contributing; changes must preserve the

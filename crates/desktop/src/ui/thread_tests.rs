@@ -91,8 +91,8 @@ fn render_only_tail_is_unfolded_and_commits_with_the_same_text_view(cx: &mut Tes
             window.try_find("block-disclosure").is_some(),
             "the committed prompt is foldable"
         );
-        window.press("shift-cmd-r", cx);
-        window.press("alt-shift-cmd-left", cx);
+        window.press(Shortcut::FOLD_EARLIER.0, cx);
+        window.press(Shortcut::COLLAPSE_THINKING.0, cx);
     })
     .unwrap();
     stream(
@@ -217,7 +217,7 @@ fn blank_click_clears_block_focus_and_keeps_window_shortcuts(cx: &mut TestAppCon
         window.click_at("zevria-desktop", blank, cx);
         assert!(!disclosure_focus.is_focused(window));
         assert!(view.read(cx).window_focus.is_focused(window));
-        window.press("shift-cmd-m", cx);
+        window.press(Shortcut::TOGGLE_MODE.0, cx);
 
         window.click_at("composer-panel", gpui_kit::point(px(4.), px(4.)), cx);
         assert_eq!(window.find("composer-panel").focused(), Some(true));
@@ -268,18 +268,18 @@ fn restored_thinking_starts_open_and_keyboard_disclosures_are_explicit(cx: &mut 
         .unwrap();
     assert!(thoughts(&view, cx)[0].expanded);
     render(window, cx);
-    for (key, expected) in [
-        ("alt-cmd-right", true),
-        ("alt-cmd-left", false),
-        ("alt-shift-cmd-right", true),
-        ("alt-shift-cmd-left", false),
+    for (Shortcut(key), expected, global) in [
+        (Shortcut::UNFOLD, true, false),
+        (Shortcut::FOLD, false, false),
+        (Shortcut::EXPAND_THINKING, true, true),
+        (Shortcut::COLLAPSE_THINKING, false, true),
     ] {
         cx.update_window(window.into(), |_, window, cx| window.press(key, cx))
             .unwrap();
         render(window, cx);
         let states = thoughts(&view, cx);
         assert_eq!(states[0].expanded, expected, "{key}");
-        if key.contains("shift") {
+        if global {
             assert!(states.iter().all(|b| b.expanded == expected));
         }
     }
@@ -288,7 +288,7 @@ fn restored_thinking_starts_open_and_keyboard_disclosures_are_explicit(cx: &mut 
             view.composer
                 .update(cx, |input, cx| input.focus(window, cx))
         });
-        window.press("alt-cmd-right", cx);
+        window.press(Shortcut::UNFOLD.0, cx);
     })
     .unwrap();
     let states = thoughts(&view, cx);
@@ -623,12 +623,24 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
     .unwrap();
     assert!(!controller.read_with(cx, |c, _| c.model.question.as_ref().unwrap().pending));
     assert!(receiver.try_recv().is_err());
+    #[cfg(windows)]
+    cx.update_window(window.into(), |_, window, cx| {
+        use gpui_kit::Focusable as _;
+        let input = view.read(cx).question_inputs[0].clone();
+        input.update(cx, |input, cx| input.focus(window, cx));
+        window.input("Answer", cx);
+        assert!(input.focus_handle(cx).is_focused(window));
+    })
+    .unwrap();
+    #[cfg(not(windows))]
     controller.update(cx, |c, cx| {
         c.model.question.as_mut().unwrap().answers[0].text = "Answer".into();
         cx.notify();
     });
-    cx.update_window(window.into(), |_, window, cx| window.press("cmd-enter", cx))
-        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.press(Shortcut::CONFIRM.0, cx)
+    })
+    .unwrap();
     assert!(matches!(
         receiver.try_recv().unwrap(),
         SessionCommand::Control(ControlCommand::AnswerQuestion { .. })
@@ -679,7 +691,7 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
         assert!(
             panel.origin.x >= px(0.) && panel.right() <= px(720.) && panel.bottom() <= px(520.)
         );
-        window.press("cmd-enter", cx);
+        window.press(Shortcut::CONFIRM.0, cx);
     })
     .unwrap();
     assert_eq!(
@@ -721,7 +733,7 @@ fn sidebar_arrow_navigation_and_enter_inspect_the_pinned_session_children(cx: &m
             .unwrap()
     });
     cx.update_window(window.into(), |_, window, cx| {
-        window.press("alt-cmd-right", cx);
+        window.press(Shortcut::UNFOLD.0, cx);
         let focus = view.read(cx).sidebar_focus[0].clone();
         window.focus(&focus, cx);
         window.press("down", cx);
@@ -805,7 +817,7 @@ fn root_question_dock_keeps_ownership_while_a_child_is_inspected(cx: &mut TestAp
     render(window, cx);
     cx.update_window(window.into(), |_, window, cx| {
         assert!(window.find("question-dialog").visible());
-        window.press("cmd-enter", cx);
+        window.press(Shortcut::CONFIRM.0, cx);
     })
     .unwrap();
     assert!(
@@ -818,7 +830,7 @@ fn root_question_dock_keeps_ownership_while_a_child_is_inspected(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
-fn command_period_can_stop_a_turn_even_with_a_non_dismissible_question(cx: &mut TestAppContext) {
+fn stop_shortcut_works_even_with_a_non_dismissible_question(cx: &mut TestAppContext) {
     let (window, _, controller, mut receiver) = setup(cx);
     let id = TurnId::new(111);
     start(&controller, id, cx);
@@ -850,8 +862,10 @@ fn command_period_can_stop_a_turn_even_with_a_non_dismissible_question(cx: &mut 
     cx.update_window(window.into(), |_, window, cx| window.press("escape", cx))
         .unwrap();
     assert!(receiver.try_recv().is_err());
-    cx.update_window(window.into(), |_, window, cx| window.press("cmd-.", cx))
-        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.press(Shortcut::STOP.0, cx)
+    })
+    .unwrap();
     assert_eq!(
         receiver.try_recv().unwrap(),
         SessionCommand::Control(ControlCommand::CancelTurn { turn_id: Some(id) })

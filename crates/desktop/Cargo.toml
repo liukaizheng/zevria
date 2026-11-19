@@ -30,8 +30,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
-# GPUI is validated only on macOS; other targets build the GPUI-free model and a stub binary.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Linux and other unsupported targets build the GPUI-free model and a stub binary.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 gpui-kit = { workspace = true, features = ["syntect"] }
 tracing-appender = { workspace = true }
 ratex-parser = { workspace = true }
@@ -43,11 +43,16 @@ tiny-skia = { workspace = true }
 ttf-parser = { workspace = true }
 image = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Use Kit's locked backend directly for its fallible startup constructor.
+gpui-windows = { package = "gpui-pre-windows", version = "=0.3.11" }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 image = { workspace = true }
 markdown = { workspace = true }
 zevria-host = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
-[target.'cfg(target_os = "macos")'.dev-dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

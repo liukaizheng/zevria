@@ -1,5 +1,5 @@
 use super::{style, theme::palette, window::DesktopWindow};
-use crate::controller::Phase;
+use crate::{actions::Shortcut, controller::Phase};
 use gpui_kit::base::text::TextView;
 use gpui_kit::component::{
     Icon, IconName,
@@ -92,7 +92,11 @@ impl DesktopWindow {
                 .child(
                     Button::new("reveal-config")
                         .primary()
-                        .label("Show config in Finder")
+                        .label(if cfg!(windows) {
+                            "Show config in File Explorer"
+                        } else {
+                            "Show config in Finder"
+                        })
                         .on_click(|_, _, cx| {
                             if let Ok(path) = zevria_foundation::config::config_path() {
                                 cx.reveal_path(&path);
@@ -111,7 +115,7 @@ impl DesktopWindow {
                 Button::new("choose-workspace")
                     .primary()
                     .label("Open workspace…")
-                    .child(style::kbd_hint("⌘O", cx))
+                    .child(style::kbd_hint(Shortcut::OPEN_WORKSPACE.label(), cx))
                     .on_click(cx.listener(|this, _, _, cx| this.open_workspace(cx))),
             );
         } else {

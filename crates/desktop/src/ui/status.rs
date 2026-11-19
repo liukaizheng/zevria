@@ -4,6 +4,7 @@ use super::{
     theme::{palette, tones},
     window::DesktopWindow,
 };
+use crate::actions::Shortcut;
 use gpui_kit::component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
@@ -341,7 +342,8 @@ impl DesktopWindow {
         if controller.model.selected_child.is_none() {
             let unavailable = controller.model_selection_available().err();
             let tooltip = format!(
-                "{label}\nChange model and thinking effort for this session only (⌃⌘M).{}",
+                "{label}\nChange model and thinking effort for this session only ({}).{}",
+                Shortcut::OPEN_MODELS.label(),
                 unavailable.map_or_else(String::new, |reason| format!("\n{reason}"))
             );
             row = row.child(

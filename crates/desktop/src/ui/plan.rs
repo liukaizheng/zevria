@@ -3,6 +3,7 @@ use super::{
     theme::{palette, tones},
     window::DesktopWindow,
 };
+use crate::actions::Shortcut;
 use gpui_kit::base::text::TextView;
 use gpui_kit::component::{
     Disableable, IconName, Sizable, Theme,
@@ -133,7 +134,7 @@ impl DesktopWindow {
                         Button::new("plan-implement")
                             .custom(style::mode_button(zevria_foundation::SessionMode::Plan, cx))
                             .label("Implement")
-                            .tooltip("Implement ⌘↩")
+                            .tooltip(format!("Implement {}", Shortcut::CONFIRM.label()))
                             .disabled(busy)
                             .when(busy, |b| b.tooltip("Wait for the current turn to finish"))
                             .on_click(cx.listener(|this, _, _, cx| {

@@ -271,10 +271,10 @@ pub fn apply(tokens: ZevriaTheme, cx: &mut App) {
         c.chart_3 = t.workflow.review;
         c.chart_4 = t.workflow.explore;
         c.chart_5 = t.roles.tools;
-        theme.font_family = ".SystemUIFont".into();
+        theme.font_family = super::style::UI_FONT.into();
         // Kit Root uses this as the window's rem base, not the reading size.
         theme.font_size = px(14.);
-        theme.mono_font_family = "Menlo".into();
+        theme.mono_font_family = super::style::MONO_FONT.into();
         theme.mono_font_size = px(super::style::CODE.size);
         theme.radius = px(6.);
         theme.radius_lg = px(10.);
@@ -448,7 +448,7 @@ mod tests {
             }
             assert_eq!(theme.font_size, px(14.));
             // GPUI's fake test text system only offers .SystemUIFont; Kit
-            // legitimately resolves Menlo to that fallback in unit tests.
+            // legitimately resolves the platform's mono family to that fallback in unit tests.
             assert_eq!(theme.mono_font_size, px(12.));
             assert_eq!(theme.mode, ThemeMode::Dark);
         });

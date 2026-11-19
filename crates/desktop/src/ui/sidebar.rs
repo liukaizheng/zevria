@@ -3,6 +3,7 @@ use super::{
     theme::{palette, tones},
     window::{DesktopWindow, Replacement},
 };
+use crate::actions::Shortcut;
 use gpui_kit::component::{
     Disableable, IconName, Sizable,
     button::{Button, ButtonVariants},
@@ -91,7 +92,7 @@ impl DesktopWindow {
                         style::icon_button(
                             "open-workspace",
                             IconName::FolderOpen,
-                            "Open workspace… ⌘O",
+                            format!("Open workspace… {}", Shortcut::OPEN_WORKSPACE.label()),
                         )
                         .disabled(transitioning)
                         .on_click(cx.listener(|this, _, _, cx| this.open_workspace(cx))),
@@ -107,7 +108,7 @@ impl DesktopWindow {
                     .icon(IconName::Plus)
                     .label("New session")
                     .child(div().flex_1())
-                    .child(style::key_hint("cmd-n", "", cx))
+                    .child(style::key_hint(Shortcut::NEW_SESSION, "", cx))
                     .on_click(
                         cx.listener(|this, _, _, cx| this.request_replace(Replacement::New, cx)),
                     ),

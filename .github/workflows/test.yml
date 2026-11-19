@@ -3,9 +3,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      desktop_dev_zip:
+        description: Build and smoke-test the Windows Desktop dev ZIP instead of running the test matrices
+        type: boolean
+        default: false
 
 jobs:
   installers:
+    if: github.event_name != 'workflow_dispatch' || !inputs.desktop_dev_zip
     name: Offline installers (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -52,6 +58,7 @@ jobs:
           ./tests/install/test_windows.ps1
 
   workspace:
+    if: github.event_name != 'workflow_dispatch' || !inputs.desktop_dev_zip
     strategy:
       fail-fast: false
       matrix:
@@ -72,7 +79,7 @@ jobs:
           components: rustfmt
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -118,17 +125,56 @@ jobs:
           if (-not (Test-Path $bash)) { throw 'Git for Windows is required by native tests' }
           "ZEVRIA_GIT_BASH=$bash" >> $env:GITHUB_ENV
       - run: cargo fmt --all -- --check
-      - run: cargo check --locked --workspace --all-targets
+      - run: cargo check --locked --workspace --all-targets --exclude zevria-desktop
+      - name: Check and test Desktop (release profile)
+        run: |
+          cargo check --locked --release -p zevria-desktop --all-targets --features fixtures
+          cargo test --locked --release -p zevria-desktop
+      - name: Keep GPUI and RaTeX out of the CLI and Linux Desktop stub
+        run: |
+          packages=(-p zevria)
+          if [[ "$RUNNER_OS" == Linux ]]; then packages+=(-p zevria-desktop); fi
+          tree=$(cargo tree --locked --edges normal --prefix none "${packages[@]}")
+          if grep -Eq '^(gpui|ratex)' <<< "$tree"; then
+            printf '%s\n' "$tree"
+            exit 1
+          fi
       - name: Build the real executable used by ACP process fixtures
         run: cargo build --locked -p zevria
       - name: Test the locked workspace
         if: runner.os != 'Windows'
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --exclude zevria-desktop
       - name: Test remaining workspace packages on Windows
         if: runner.os == 'Windows'
-        run: cargo test --locked --workspace --exclude zevria-ensemble
+        run: cargo test --locked --workspace --exclude zevria-ensemble --exclude zevria-desktop
       - name: Test ensemble subprocess fixtures serially on Windows
         if: runner.os == 'Windows'
         run: cargo test --locked -p zevria-ensemble -- --test-threads=1
       - name: Provider continuation and cache-prefix feature regressions
         run: cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics
+
+  windows-desktop-dev-zip:
+    name: Windows x64 Desktop development ZIP (build only)
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop_dev_zip
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and smoke-test the extracted ZIP
+        run: python tools/package-windows-desktop.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zevria-desktop-dev-x86_64-pc-windows-msvc-${{ github.sha }}
+          path: target/desktop-dev/zevria-desktop-dev-x86_64-pc-windows-msvc-${{ github.sha }}.zip
+          if-no-files-found: error
+          retention-days: 7

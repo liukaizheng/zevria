@@ -160,12 +160,12 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
         window.input("A draft to keep", cx)
     })
     .unwrap();
-    press(window, "alt-cmd-left", cx);
+    press(window, Shortcut::FOLD.0, cx);
     assert!(
         blocks(&view, cx).iter().all(|b| b.expanded),
         "no local target in the composer"
     );
-    press(window, "shift-cmd-r", cx);
+    press(window, Shortcut::FOLD_EARLIER.0, cx);
     let runs = summaries(&view, cx);
     assert_eq!(
         runs.iter().map(|b| b.body.as_str()).collect::<Vec<_>>(),
@@ -226,7 +226,7 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
         );
     })
     .unwrap();
-    press(window, "alt-shift-cmd-r", cx);
+    press(window, Shortcut::FOLD_OLDER.0, cx);
     assert!(
         blocks(&view, cx)
             .iter()
@@ -239,7 +239,7 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
             .any(|b| b.row == 4 && b.message.is_some_and(|m| m.folded)),
         "earlier-content must not undo older-turn folds"
     );
-    press(window, "alt-cmd-r", cx);
+    press(window, Shortcut::UNFOLD_ALL.0, cx);
     assert!(summaries(&view, cx).is_empty());
     assert_eq!(
         blocks(&view, cx)
@@ -311,7 +311,7 @@ fn row_controls_keep_scopes_distinct_and_copy_the_original_payload(cx: &mut Test
     })
     .unwrap();
     focus(window, &view, last, message_key, cx);
-    dispatch(window, gpui_kit::component::input::Copy, cx);
+    press(window, Shortcut::COPY_DISCLOSURE.0, cx);
     cx.update_window(window.into(), |_, _, cx| {
         assert_eq!(
             cx.read_from_clipboard()
@@ -321,7 +321,7 @@ fn row_controls_keep_scopes_distinct_and_copy_the_original_payload(cx: &mut Test
         );
     })
     .unwrap();
-    press(window, "alt-cmd-right", cx);
+    press(window, Shortcut::UNFOLD.0, cx);
     assert_eq!(blocks(&view, cx).iter().filter(|b| b.row == 4).count(), 3);
     assert!(
         !blocks(&view, cx)
@@ -339,8 +339,8 @@ fn row_controls_keep_scopes_distinct_and_copy_the_original_payload(cx: &mut Test
             .unwrap()
             .expanded
     );
-    press(window, "alt-cmd-left", cx);
-    dispatch(window, gpui_kit::component::input::Copy, cx);
+    press(window, Shortcut::FOLD.0, cx);
+    press(window, Shortcut::COPY_DISCLOSURE.0, cx);
     cx.update_window(window.into(), |_, _, cx| {
         assert_eq!(
             cx.read_from_clipboard()
@@ -372,9 +372,9 @@ fn range_restores_the_covered_anchor_and_focus_and_keeps_nested_folds(cx: &mut T
     let identity =
         transcript(&view, cx).read_with(cx, |view, cx| view.test_identity(&prior.key, cx));
     focus(window, &view, &prior, block_key, cx);
-    press(window, "alt-cmd-left", cx);
+    press(window, Shortcut::FOLD.0, cx);
     assert_eq!(top(&view, cx), (2, px(0.)));
-    press(window, "shift-cmd-r", cx);
+    press(window, Shortcut::FOLD_EARLIER.0, cx);
     assert_eq!(top(&view, cx), (1, px(0.)));
     let range = summaries(&view, cx).remove(0);
     cx.update_window(window.into(), |_, window, cx| {
@@ -391,7 +391,7 @@ fn range_restores_the_covered_anchor_and_focus_and_keeps_nested_folds(cx: &mut T
         assert!(window.try_find(prior.key.clone()).is_none());
     })
     .unwrap();
-    dispatch(window, gpui_kit::component::input::Copy, cx);
+    press(window, Shortcut::COPY_DISCLOSURE.0, cx);
     cx.update_window(window.into(), |_, _, cx| {
         let text = cx
             .read_from_clipboard()
@@ -419,7 +419,7 @@ fn range_restores_the_covered_anchor_and_focus_and_keeps_nested_folds(cx: &mut T
         );
     })
     .unwrap();
-    press(window, "alt-cmd-r", cx);
+    press(window, Shortcut::UNFOLD_ALL.0, cx);
     assert!(blocks(&view, cx).iter().all(|b| b.expanded));
 }
 
@@ -448,7 +448,7 @@ fn folded_prose_uses_actual_wrapping_and_retains_the_text_view_on_resize(cx: &mu
     };
     let before = height(cx);
     focus(window, &view, prompt, prompt.message.unwrap().key, cx);
-    press(window, "alt-cmd-left", cx);
+    press(window, Shortcut::FOLD.0, cx);
     assert_eq!(
         height(cx),
         before,
@@ -464,7 +464,7 @@ fn folded_prose_uses_actual_wrapping_and_retains_the_text_view_on_resize(cx: &mu
     };
     let wide_expanded = bounds(cx);
     focus(window, &view, answer, answer.target.unwrap(), cx);
-    press(window, "alt-cmd-left", cx);
+    press(window, Shortcut::FOLD.0, cx);
     let clamped =
         |cx: &TestAppContext| transcript.read_with(cx, |v, cx| v.test_clamped(&answer.key, cx));
     assert!(
@@ -475,7 +475,7 @@ fn folded_prose_uses_actual_wrapping_and_retains_the_text_view_on_resize(cx: &mu
     );
     cx.simulate_window_resize(window.into(), size(px(720.), px(860.)));
     render(window, cx);
-    press(window, "ctrl-cmd-s", cx); // The sidebar further narrows the compact transcript.
+    press(window, Shortcut::TOGGLE_SIDEBAR.0, cx); // The sidebar further narrows the compact transcript.
     assert!(clamped(cx));
     cx.simulate_window_resize(window.into(), size(px(1240.), px(860.)));
     render(window, cx);
@@ -548,9 +548,9 @@ fn tool_diff_totals_survive_fold_and_unfold(cx: &mut TestAppContext) {
     };
     let tool = check_totals(cx);
     focus(window, &view, &tool, tool.target.unwrap(), cx);
-    press(window, "alt-cmd-left", cx);
+    press(window, Shortcut::FOLD.0, cx);
     assert!(!check_totals(cx).expanded);
-    press(window, "alt-cmd-right", cx);
+    press(window, Shortcut::UNFOLD.0, cx);
     assert!(check_totals(cx).expanded);
 }
 
@@ -573,32 +573,34 @@ fn turn_shortcuts_from_composer_chain_strict_boundaries_without_changing_draft_o
     render(window, cx);
     focus_composer(window, &view, cx);
     cx.update_window(window.into(), |_, window, cx| {
-        window.input("untouched draft", cx)
+        window.input("untouched draft", cx);
+        window.press("left", cx);
+        assert_eq!(view.read(cx).composer.read(cx).cursor(), 14);
     })
     .unwrap();
     render(window, cx);
     assert!(top(&view, cx).0 >= 6);
-    press(window, "alt-cmd-up", cx);
+    press(window, Shortcut::PREVIOUS_TURN.0, cx);
     assert_eq!(top(&view, cx), (6, px(0.)));
     // A second exact-boundary press skips the current turn start.
-    press(window, "alt-cmd-up", cx);
+    press(window, Shortcut::PREVIOUS_TURN.0, cx);
     assert_eq!(top(&view, cx), (3, px(0.)));
-    press(window, "alt-cmd-down", cx);
+    press(window, Shortcut::NEXT_TURN.0, cx);
     assert_eq!(top(&view, cx), (6, px(0.)));
-    press(window, "alt-cmd-down", cx);
+    press(window, Shortcut::NEXT_TURN.0, cx);
     assert_eq!(top(&view, cx), (6, px(0.)), "no wrap at the last turn");
     scroll_row(&view, 5, cx);
     render(window, cx);
-    press(window, "alt-cmd-up", cx);
+    press(window, Shortcut::PREVIOUS_TURN.0, cx);
     assert_eq!(top(&view, cx), (3, px(0.)));
-    press(window, "alt-shift-cmd-up", cx);
+    press(window, Shortcut::JUMP_TO_BEGINNING.0, cx);
     assert_eq!(top(&view, cx), (0, px(0.)));
-    press(window, "alt-cmd-up", cx);
+    press(window, Shortcut::PREVIOUS_TURN.0, cx);
     assert_eq!(top(&view, cx), (0, px(0.)));
     // Both presses happen before layout: logical top updates immediately.
     cx.update_window(window.into(), |_, window, cx| {
-        window.press("alt-cmd-down", cx);
-        window.press("alt-cmd-down", cx);
+        window.press(Shortcut::NEXT_TURN.0, cx);
+        window.press(Shortcut::NEXT_TURN.0, cx);
     })
     .unwrap();
     render(window, cx);
@@ -606,12 +608,12 @@ fn turn_shortcuts_from_composer_chain_strict_boundaries_without_changing_draft_o
     assert!(
         !transcript(&view, cx).read_with(cx, |v, cx| v.scroller().read(cx).is_following_tail())
     );
-    press(window, "shift-cmd-r", cx);
-    press(window, "alt-cmd-up", cx);
+    press(window, Shortcut::FOLD_EARLIER.0, cx);
+    press(window, Shortcut::PREVIOUS_TURN.0, cx);
     assert_eq!(top(&view, cx), (3, px(0.)));
-    press(window, "alt-cmd-down", cx);
+    press(window, Shortcut::NEXT_TURN.0, cx);
     assert_eq!(top(&view, cx), (6, px(0.)));
-    press(window, "alt-shift-cmd-down", cx);
+    press(window, Shortcut::JUMP_TO_LATEST.0, cx);
     assert!(transcript(&view, cx).read_with(cx, |v, cx| v.scroller().read(cx).is_following_tail()));
     cx.update_window(window.into(), |_, window, cx| {
         assert!(view.read(cx).composer.focus_handle(cx).is_focused(window));
@@ -619,6 +621,7 @@ fn turn_shortcuts_from_composer_chain_strict_boundaries_without_changing_draft_o
             view.read(cx).composer.read(cx).value().as_str(),
             "untouched draft"
         );
+        assert_eq!(view.read(cx).composer.read(cx).cursor(), 14);
     })
     .unwrap();
 }
@@ -677,7 +680,7 @@ fn acp_history_uses_stable_block_folds_and_no_native_header_is_required(cx: &mut
             .any(|b| b.target == thought.target && !b.expanded)
     );
     focus(window, &view, thought, thought.target.unwrap(), cx);
-    press(window, "alt-cmd-right", cx);
+    press(window, Shortcut::UNFOLD.0, cx);
     assert!(blocks(&view, cx).iter().all(|b| b.expanded));
 }
 
@@ -731,12 +734,12 @@ fn ensemble_prompt_and_worker_are_separate_item_targets(cx: &mut TestAppContext)
         );
     }
     focus(window, &view, &data[1], data[1].target.unwrap(), cx);
-    press(window, "alt-cmd-left", cx);
+    press(window, Shortcut::FOLD.0, cx);
     let visible = blocks(&view, cx);
     assert!(visible[0].expanded && !visible[1].expanded);
     let transcript = transcript(&view, cx);
     assert!(transcript.read_with(cx, |v, cx| v.test_clamped(&visible[1].key, cx)));
-    press(window, "cmd-c", cx);
+    press(window, Shortcut::COPY_DISCLOSURE.0, cx);
     cx.update_window(window.into(), |_, _, cx| {
         assert_eq!(
             cx.read_from_clipboard()

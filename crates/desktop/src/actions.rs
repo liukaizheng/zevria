@@ -1,4 +1,4 @@
-use gpui_kit::{App, KeyBinding, Menu, MenuItem};
+use gpui_kit::{Action, App, KeyBinding, Keystroke, Menu, MenuItem, component::kbd::Kbd};
 gpui_kit::actions!(
     zevria_desktop,
     [
@@ -35,55 +35,94 @@ gpui_kit::actions!(
         ModelFocusPrevious
     ]
 );
-pub fn install(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-o", OpenWorkspace, None),
-        KeyBinding::new("cmd-n", NewSession, None),
-        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("ZevriaDesktop")),
-        KeyBinding::new("cmd-.", Stop, None),
-        KeyBinding::new("alt-cmd-right", Unfold, Some("ZevriaTranscript")),
-        KeyBinding::new("alt-cmd-left", Fold, Some("ZevriaTranscript")),
-        KeyBinding::new(
-            "cmd-c",
-            gpui_kit::component::input::Copy,
-            Some("ZevriaDisclosure"),
-        ),
-        KeyBinding::new(
-            "alt-shift-cmd-right",
-            ExpandAllThinking,
-            Some("ZevriaDesktop"),
-        ),
-        KeyBinding::new(
-            "alt-shift-cmd-left",
-            CollapseAllThinking,
-            Some("ZevriaDesktop"),
-        ),
-        KeyBinding::new("shift-cmd-r", FoldEarlierContent, Some("ZevriaDesktop")),
-        KeyBinding::new("alt-shift-cmd-r", FoldOlderTurns, Some("ZevriaDesktop")),
-        KeyBinding::new("alt-cmd-r", UnfoldAll, Some("ZevriaDesktop")),
-        KeyBinding::new("alt-cmd-up", PreviousTurn, Some("ZevriaDesktop")),
-        KeyBinding::new("alt-cmd-down", NextTurn, Some("ZevriaDesktop")),
-        KeyBinding::new("alt-shift-cmd-up", JumpToBeginning, Some("ZevriaDesktop")),
-        KeyBinding::new("alt-shift-cmd-down", JumpToLatest, Some("ZevriaDesktop")),
-        // Kit's deeper Input context otherwise wins with add-cursor-above/below.
-        // Register after Kit, as for the completion bindings below, to win ties.
-        KeyBinding::new("alt-cmd-up", PreviousTurn, Some("ZevriaDesktop > Input")),
-        KeyBinding::new("alt-cmd-down", NextTurn, Some("ZevriaDesktop > Input")),
-        KeyBinding::new(
-            "alt-shift-cmd-up",
-            JumpToBeginning,
-            Some("ZevriaDesktop > Input"),
-        ),
-        KeyBinding::new(
-            "alt-shift-cmd-down",
-            JumpToLatest,
-            Some("ZevriaDesktop > Input"),
-        ),
-        KeyBinding::new("cmd-enter", ConfirmDecision, Some("ZevriaDesktop")),
-        KeyBinding::new("shift-cmd-m", ToggleMode, Some("ZevriaDesktop")),
-        KeyBinding::new("ctrl-cmd-m", OpenModels, Some("ZevriaDesktop")),
-        KeyBinding::new("ctrl-cmd-m", OpenModels, Some("ZevriaDesktop > Input")),
+/// The same keys drive GPUI registration and rendered shortcut hints.
+#[derive(Clone, Copy)]
+pub(crate) struct Shortcut(pub(crate) &'static str);
+
+impl Shortcut {
+    const fn platform(macos: &'static str, windows: &'static str) -> Self {
+        Self(if cfg!(target_os = "macos") {
+            macos
+        } else {
+            windows
+        })
+    }
+
+    pub const OPEN_WORKSPACE: Self = Self::platform("cmd-o", "ctrl-o");
+    pub const NEW_SESSION: Self = Self::platform("cmd-n", "ctrl-n");
+    pub const QUIT: Self = Self::platform("cmd-q", "ctrl-q");
+    pub const TOGGLE_SIDEBAR: Self = Self::platform("ctrl-cmd-s", "ctrl-shift-s");
+    pub const TOGGLE_MODE: Self = Self::platform("shift-cmd-m", "ctrl-shift-m");
+    pub const OPEN_MODELS: Self = Self::platform("ctrl-cmd-m", "ctrl-shift-p");
+    pub const STOP: Self = Self::platform("cmd-.", "ctrl-.");
+    pub const CONFIRM: Self = Self::platform("cmd-enter", "ctrl-enter");
+    pub const COPY_DISCLOSURE: Self = Self::platform("cmd-c", "ctrl-c");
+    pub const PREVIOUS_TURN: Self = Self::platform("alt-cmd-up", "ctrl-k");
+    pub const NEXT_TURN: Self = Self::platform("alt-cmd-down", "ctrl-j");
+    pub const JUMP_TO_BEGINNING: Self = Self::platform("alt-shift-cmd-up", "ctrl-shift-k");
+    pub const JUMP_TO_LATEST: Self = Self::platform("alt-shift-cmd-down", "ctrl-shift-j");
+    pub const FOLD: Self = Self::platform("alt-cmd-left", "ctrl-shift-f");
+    pub const UNFOLD: Self = Self::platform("alt-cmd-right", "ctrl-shift-u");
+    pub const COLLAPSE_THINKING: Self = Self::platform("alt-shift-cmd-left", "ctrl-shift-h");
+    pub const EXPAND_THINKING: Self = Self::platform("alt-shift-cmd-right", "ctrl-shift-e");
+    pub const FOLD_EARLIER: Self = Self::platform("shift-cmd-r", "ctrl-shift-r");
+    pub const FOLD_OLDER: Self = Self::platform("alt-shift-cmd-r", "ctrl-shift-b");
+    pub const UNFOLD_ALL: Self = Self::platform("alt-cmd-r", "ctrl-shift-a");
+
+    // Display Kit's existing textarea bindings without re-registering them.
+    pub const ENTER: Self = Self("enter");
+    pub const SHIFT_ENTER: Self = Self("shift-enter");
+
+    pub fn keystroke(self) -> Keystroke {
+        Keystroke::parse(self.0).expect("static desktop shortcut")
+    }
+
+    pub fn label(self) -> String {
+        Kbd::format(&self.keystroke())
+    }
+
+    fn bind(self, action: impl Action, context: Option<&str>) -> KeyBinding {
+        KeyBinding::new(self.0, action, context)
+    }
+}
+
+fn bindings() -> impl IntoIterator<Item = KeyBinding> {
+    let desktop = Some("ZevriaDesktop");
+    let input = Some("ZevriaDesktop > Input");
+    let transcript = Some("ZevriaTranscript");
+    [
+        Shortcut::QUIT.bind(Quit, None),
+        Shortcut::OPEN_WORKSPACE.bind(OpenWorkspace, None),
+        Shortcut::NEW_SESSION.bind(NewSession, None),
+        Shortcut::TOGGLE_SIDEBAR.bind(ToggleSidebar, desktop),
+        Shortcut::STOP.bind(Stop, None),
+        Shortcut::UNFOLD.bind(Unfold, transcript),
+        Shortcut::FOLD.bind(Fold, transcript),
+        Shortcut::COPY_DISCLOSURE.bind(gpui_kit::component::input::Copy, Some("ZevriaDisclosure")),
+        Shortcut::EXPAND_THINKING.bind(ExpandAllThinking, desktop),
+        Shortcut::COLLAPSE_THINKING.bind(CollapseAllThinking, desktop),
+        Shortcut::FOLD_EARLIER.bind(FoldEarlierContent, desktop),
+        Shortcut::FOLD_OLDER.bind(FoldOlderTurns, desktop),
+        Shortcut::UNFOLD_ALL.bind(UnfoldAll, desktop),
+        Shortcut::PREVIOUS_TURN.bind(PreviousTurn, desktop),
+        Shortcut::NEXT_TURN.bind(NextTurn, desktop),
+        Shortcut::JUMP_TO_BEGINNING.bind(JumpToBeginning, desktop),
+        Shortcut::JUMP_TO_LATEST.bind(JumpToLatest, desktop),
+        // Kit's deeper Input context otherwise wins with add-cursor-above/below
+        // on macOS. Register after Kit, as with the completion bindings below.
+        Shortcut::PREVIOUS_TURN.bind(PreviousTurn, input),
+        Shortcut::NEXT_TURN.bind(NextTurn, input),
+        Shortcut::JUMP_TO_BEGINNING.bind(JumpToBeginning, input),
+        Shortcut::JUMP_TO_LATEST.bind(JumpToLatest, input),
+        Shortcut::CONFIRM.bind(ConfirmDecision, desktop),
+        // On Windows, Kit binds Ctrl+Enter to secondary Enter in Input. Dispatch
+        // the decision action instead, even with a question editor focused. The
+        // handler only confirms a visible decision and never submits a draft.
+        #[cfg(windows)]
+        Shortcut::CONFIRM.bind(ConfirmDecision, input),
+        Shortcut::TOGGLE_MODE.bind(ToggleMode, desktop),
+        Shortcut::OPEN_MODELS.bind(OpenModels, desktop),
+        Shortcut::OPEN_MODELS.bind(OpenModels, input),
         KeyBinding::new("alt-left", ModelBack, Some("ZevriaModels")),
         KeyBinding::new("up", ModelPrevious, Some("ZevriaModels > Input")),
         KeyBinding::new("down", ModelNext, Some("ZevriaModels > Input")),
@@ -101,8 +140,78 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("tab", Complete, Some("ZevriaCompletion > Input")),
         KeyBinding::new("up", CompletionUp, Some("ZevriaCompletion > Input")),
         KeyBinding::new("down", CompletionDown, Some("ZevriaCompletion > Input")),
-    ]);
+    ]
+}
+
+pub fn install(cx: &mut App) {
+    cx.bind_keys(bindings());
+    #[cfg(target_os = "macos")]
     cx.set_menus(menus());
+    // GPUI stores app menus on Windows but there is no system menu bar. Kit
+    // renders these same actions in the window, dispatching to the prior focus.
+    #[cfg(windows)]
+    gpui_kit::base::GlobalState::global_mut(cx)
+        .set_app_menus(menus().into_iter().map(Menu::owned).collect());
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use gpui_kit::AsKeystroke as _;
+
+    #[test]
+    fn registered_windows_shortcuts_avoid_fn_and_reserved_modifiers() {
+        for binding in bindings() {
+            for stroke in binding.keystrokes() {
+                let key = stroke.as_keystroke();
+                let function_key = key
+                    .key
+                    .strip_prefix('f')
+                    .is_some_and(|n| n.parse::<u8>().is_ok());
+                assert!(!function_key, "{binding:?}");
+                assert!(
+                    !matches!(key.key.as_str(), "pageup" | "pagedown" | "home" | "end"),
+                    "{binding:?}"
+                );
+                assert!(!key.modifiers.platform, "{binding:?}");
+                assert!(!(key.modifiers.control && key.modifiers.alt), "{binding:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn windows_labels_match_the_registered_keys() {
+        for (shortcut, label) in [
+            (Shortcut::QUIT, "Ctrl+Q"),
+            (Shortcut::OPEN_WORKSPACE, "Ctrl+O"),
+            (Shortcut::NEW_SESSION, "Ctrl+N"),
+            (Shortcut::TOGGLE_SIDEBAR, "Ctrl+Shift+S"),
+            (Shortcut::TOGGLE_MODE, "Ctrl+Shift+M"),
+            (Shortcut::OPEN_MODELS, "Ctrl+Shift+P"),
+            (Shortcut::STOP, "Ctrl+."),
+            (Shortcut::CONFIRM, "Ctrl+Enter"),
+            (Shortcut::COPY_DISCLOSURE, "Ctrl+C"),
+            (Shortcut::PREVIOUS_TURN, "Ctrl+K"),
+            (Shortcut::NEXT_TURN, "Ctrl+J"),
+            (Shortcut::JUMP_TO_BEGINNING, "Ctrl+Shift+K"),
+            (Shortcut::JUMP_TO_LATEST, "Ctrl+Shift+J"),
+            (Shortcut::FOLD, "Ctrl+Shift+F"),
+            (Shortcut::UNFOLD, "Ctrl+Shift+U"),
+            (Shortcut::COLLAPSE_THINKING, "Ctrl+Shift+H"),
+            (Shortcut::EXPAND_THINKING, "Ctrl+Shift+E"),
+            (Shortcut::FOLD_EARLIER, "Ctrl+Shift+R"),
+            (Shortcut::FOLD_OLDER, "Ctrl+Shift+B"),
+            (Shortcut::UNFOLD_ALL, "Ctrl+Shift+A"),
+        ] {
+            assert_eq!(shortcut.label(), label);
+            assert!(
+                bindings().into_iter().any(|binding| {
+                    binding.keystrokes()[0].as_keystroke() == &shortcut.keystroke()
+                }),
+                "{label} was not bound"
+            );
+        }
+    }
 }
 
 pub fn menus() -> Vec<Menu> {

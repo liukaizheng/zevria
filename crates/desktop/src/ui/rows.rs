@@ -131,7 +131,7 @@ mod tests {
         let b = fingerprint(&entry, true);
         assert_ne!(a, b);
         assert_eq!(compare(&[a], &[b]), RowChange::Remeasure(vec![0]));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let first = crate::ui::blocks::entry("epoch", 0, &entry, a, false, false);
             let next = crate::ui::blocks::entry("epoch", 0, &entry, b, true, false);
@@ -169,7 +169,7 @@ mod tests {
             fingerprint(&HistoryEntry::PlanArtifact(next), false)
         );
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn ordinary_transcript_text_is_not_subject_to_tool_preview_bounds() {
         let text = "x".repeat(32_000);

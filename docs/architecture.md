@@ -129,7 +129,7 @@ request snapshots, frontend messages and continuation ledgers remain real costs.
 
 ## Dependency direction
 
-The workspace has twenty-two packages, including the macOS-only native desktop.
+The workspace has twenty-two packages, including the native desktop for macOS and x64 Windows.
 Arrows below mean production dependencies;
 “lower values” means only the foundation/content/instructions/model/workflow
 owners a package actually uses. All consumers import the owner directly: core
@@ -159,7 +159,7 @@ ensemble      -> acp + session-api + transcript + workflow + lower values
 host          -> core + provider + tools + acp + ensemble + theme + lower owners
 zevria        -> host + selected frontends + directly used public domain APIs
 desktop       -> host + presentation + theme + session-api + transcript + lower values
-                 + GPUI Kit (macOS target dependency)
+                 + GPUI Kit (macOS and Windows target dependency)
 ```
 
 - **Foundation/content:** identities and policy values, generic filesystem/config
@@ -183,7 +183,7 @@ desktop       -> host + presentation + theme + session-api + transcript + lower 
   CLI dispatch, terminal setup and frontend selection.
 - **Desktop:** leaf native frontend using host composition and the shared presentation
   reducer; GPUI-free root/child/question routing on every platform, with GPUI views,
-  controller, runtime and launch code enabled only on macOS.
+  controller, runtime and launch code enabled on macOS and Windows.
 
 Only host depends directly on core in production. Adapters have no transitive
 engine dependency. Session API has no storage dependency, neither codec has a
@@ -200,22 +200,27 @@ without invoking Cargo.
 `crates/desktop` is the `zevria-desktop` workspace member and binary. It inherits
 workspace dependency versions and the root `Cargo.lock`, and depends on
 `zevria-host`, `zevria-presentation`, `zevria-theme`, session API, transcripts and
-lower values. Its direct GPUI Kit and tracing-appender dependencies are macOS-only;
-actions, controller, engine, launch and UI modules are gated with them. Other
-platforms compile the GPUI-free CLI/session model and tests plus an executable
-that reports macOS-only support; `--help` works everywhere. Native builds on those
-platforms do not need GPUI, and GPUI never enters the CLI's `cargo build -p zevria`
-graph. Broad metadata/fetch commands or cross-target acquisition from a macOS host
-can still fetch platform archives without compiling them. Neither the host nor
-the desktop has a ratatui/crossterm dependency path. No app-server, RPC, SDK or
-serialization layer was added, and the unmerged
-out-of-process branch is unrelated.
+lower values. GPUI Kit, the math renderer, the desktop log appender and the
+native modules are target-gated to macOS and Windows. The Linux stub and the
+CLI's normal `-p zevria` build graph contain neither GPUI nor RaTeX.
+`--help` works everywhere, and noninteractive argument handling is complete
+before provider config or GPUI initialization. Neither the host nor the
+desktop depends on Ratatui/Crossterm. There is no app-server, RPC or serialization
+layer between the window and host.
 
-Shared workspace CI tests the native frontend on macOS and the GPUI-free model
-on Linux/Windows. macOS workspace builds unify additive desktop dependency
-features; release check/test steps exclude `zevria-desktop`, keeping the shipping
-CLI's feature set and provider-prefix gates isolated. The production binary is
-still built with `-p zevria`.
+Windows uses the locked GPUI Windows backend in a GUI-subsystem executable.
+With no workspace argument it opens the selection screen instead of treating
+its cwd as a workspace; `--continue` still supports cwd-based resume. Kit's
+caption controls and in-window menu bar dispatch to the same desktop actions
+as the platform shortcut table. macOS keeps the system menu and its launch
+behavior. See [Desktop setup and keyboard shortcuts](desktop.md#build-and-run).
+
+Workspace CI runs release-profile desktop tests on Windows and macOS with GPUI's
+simulated platform, and the GPUI-free model and stub on Linux. The pixel gallery
+is macOS-only. The only CI Desktop package is a manually dispatched unsigned
+Windows development ZIP, uploaded as a workflow artifact. CLI release jobs
+still exclude `zevria-desktop`, keeping the shipping CLI's feature set and
+provider-prefix gates isolated.
 
 One process-wide Tokio runtime owns the engine and supervisors. GPUI foreground
 tasks await its handles and the sole `SessionEventReceiver` directly. Each wake
@@ -233,7 +238,7 @@ Live ACP worker review/abandonment routing remains in TUI `SessionViews`; extrac
 that routing into presentation is a prerequisite to desktop worker controls, not
 permission to create a second copy. Root ensemble rows remain visible.
 
-Window close and Cmd-Q are intercepted before quitting. The controller drops
+Window close, the Quit menu item and Cmd+Q/Ctrl+Q use ordered shutdown. The controller drops
 its event pump/receiver, cloned senders, exit observer and tick, awaits the host's
 ordered shutdown, then flushes the named `zevria-desktop.log` logging guard and quits.
 Startup/replacement/shutdown transitions are serialized, including a replacement

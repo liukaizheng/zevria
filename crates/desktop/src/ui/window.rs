@@ -4,7 +4,7 @@ use super::{
     transcript::{LocalFold, TranscriptView},
 };
 use crate::{
-    actions,
+    actions::{self, Shortcut},
     controller::{Phase, SessionController, SessionRequest},
 };
 use gpui_kit::component::{
@@ -44,6 +44,8 @@ pub struct DesktopWindow {
     pub(super) question_focus: FocusHandle,
     pub(super) model_ui: Option<super::models::ModelPickerView>,
     pub(super) window_focus: FocusHandle,
+    #[cfg(windows)]
+    menu_bar: Entity<gpui_kit::component::menu::AppMenuBar>,
     picker: Option<Task<()>>,
     was_live: bool,
     _input: Subscription,
@@ -116,6 +118,8 @@ impl DesktopWindow {
         let transcript =
             cx.new(|cx| TranscriptView::new(controller.clone(), window_focus.clone(), window, cx));
         let weak = controller.downgrade();
+        // Kit's Windows caption button posts WM_CLOSE, so both it and OS close
+        // requests enter the same ordered shutdown as the Quit action.
         window.on_window_should_close(cx, move |_, cx| {
             let _ = weak.update(cx, |this, cx| this.quit(cx));
             false
@@ -141,6 +145,8 @@ impl DesktopWindow {
             question_focus: cx.focus_handle(),
             model_ui: None,
             window_focus,
+            #[cfg(windows)]
+            menu_bar: gpui_kit::component::menu::AppMenuBar::new(cx),
             picker: None,
             was_live: false,
             _input: input,
@@ -392,21 +398,17 @@ impl DesktopWindow {
         self.transcript.update(cx, f);
     }
     fn confirm_decision(&mut self, cx: &mut Context<Self>) {
-        if self.pending_replace.is_some() || self.controller.read(cx).model.models.is_open() {
+        let controller = self.controller.read(cx);
+        if self.pending_replace.is_some()
+            || controller.capturing_dialog
+            || controller.model.models.is_open()
+        {
             return;
         }
-        if self.controller.read(cx).model.question.is_some() {
+        if controller.model.question.is_some() {
             self.controller
                 .update(cx, |controller, cx| controller.answer_question(false, cx));
-        } else if self
-            .controller
-            .read(cx)
-            .model
-            .root
-            .workflow
-            .dialog()
-            .is_some()
-        {
+        } else if controller.model.root.workflow.dialog().is_some() {
             self.controller.update(cx, |controller, cx| {
                 controller.plan_decision(zevria_workflow::PlanDecision::ImplementCurrent, cx)
             });
@@ -484,7 +486,10 @@ impl DesktopWindow {
                     .icon(IconName::BookOpen)
                     .when(!self.compact, |button| button.label("Fold earlier content"))
                     .accessibility_label("Fold earlier content")
-                    .tooltip("Fold earlier content ⇧⌘R")
+                    .tooltip(format!(
+                        "Fold earlier content {}",
+                        Shortcut::FOLD_EARLIER.label()
+                    ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.with_transcript(cx, |view, cx| {
                             view.fold_turns(TurnFold::FinalExpanded, window, cx)
@@ -509,6 +514,13 @@ impl DesktopWindow {
                     })),
             );
         }
+        let title_sidebar_width = if visible {
+            style::SIDEBAR
+        } else if cfg!(windows) {
+            44.
+        } else {
+            120.
+        };
         TitleBar::new()
             .h(px(style::TITLE))
             .pl_0()
@@ -516,7 +528,7 @@ impl DesktopWindow {
             .bg(t.surfaces.canvas)
             .child(
                 div()
-                    .w(px(if visible { style::SIDEBAR } else { 120. }))
+                    .w(px(title_sidebar_width))
                     .h_full()
                     .flex_shrink_0()
                     .flex()
@@ -527,16 +539,19 @@ impl DesktopWindow {
                         t.surfaces.canvas
                     })
                     .when(visible, |d| d.border_r_1().border_color(tone.hairline))
-                    .child(div().w(px(80.)).flex_shrink_0())
+                    .when(cfg!(target_os = "macos"), |d| {
+                        d.child(div().w(px(80.)).flex_shrink_0())
+                    })
+                    .when(cfg!(windows), |d| d.pl(px(8.)))
                     .child(
                         style::icon_button(
                             "toggle-sidebar",
                             IconName::PanelLeft,
-                            if visible {
-                                "Hide sidebar ⌃⌘S"
-                            } else {
-                                "Show sidebar ⌃⌘S"
-                            },
+                            format!(
+                                "{} sidebar {}",
+                                if visible { "Hide" } else { "Show" },
+                                Shortcut::TOGGLE_SIDEBAR.label(),
+                            ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.sidebar_override = Some(
@@ -710,6 +725,18 @@ impl Render for DesktopWindow {
                 cx.notify();
             }));
         root = root.child(self.title_strip(visible, cx));
+        #[cfg(windows)]
+        {
+            root = root.child(
+                div()
+                    .h(px(30.))
+                    .px(px(8.))
+                    .flex_shrink_0()
+                    .border_b_1()
+                    .border_color(tones(cx).hairline)
+                    .child(self.menu_bar.clone()),
+            );
+        }
         if let Some(screen) = self.screen(cx) {
             root = root.child(div().flex_1().min_h_0().child(screen));
         } else {

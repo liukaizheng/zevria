@@ -3,10 +3,16 @@
 mod models;
 #[path = "turn_tests.rs"]
 mod turns;
+#[cfg(windows)]
+#[path = "windows_tests.rs"]
+mod windows;
 #[path = "thread_tests.rs"]
 mod working_thread;
 use super::{theme, window::DesktopWindow};
-use crate::{actions, controller::SessionController};
+use crate::{
+    actions::{self, Shortcut},
+    controller::SessionController,
+};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AppContext as _, Bounds, Context, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
@@ -467,13 +473,13 @@ fn dismissed_ready_plan_send_revises_and_rejection_restores_the_draft(cx: &mut T
     assert!(controller.read_with(cx, |this, _| this.model.root.workflow.dialog().is_none()));
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.press("cmd-enter", cx);
+        window.press(Shortcut::CONFIRM.0, cx);
     })
     .unwrap();
     cx.run_until_parked();
     assert!(
         receiver.try_recv().is_err(),
-        "hidden review cannot implement with cmd-enter"
+        "the decision shortcut cannot implement a hidden review"
     );
     // Ready forces Plan mode even if the old Build orchestration toggle remains set.
     controller.update(cx, |this, _| this.orchestrate = true);
@@ -969,8 +975,10 @@ fn editing_and_undoing_does_not_revive_a_submitted_draft_token(cx: &mut TestAppC
     cx.update_window(window.into(), |_, window, cx| window.input("later", cx))
         .unwrap();
     cx.run_until_parked();
-    cx.update_window(window.into(), |_, window, cx| window.press("cmd-z", cx))
-        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.press(if cfg!(windows) { "ctrl-z" } else { "cmd-z" }, cx)
+    })
+    .unwrap();
     cx.run_until_parked();
     assert!(controller.read_with(cx, |this, _| this.draft.is_empty()));
     event(
@@ -1149,7 +1157,7 @@ fn wide_window_centers_transcript_and_composer_on_one_axis(cx: &mut TestAppConte
     })
     .unwrap();
     cx.update_window(window.into(), |_, window, cx| {
-        window.press("ctrl-cmd-s", cx);
+        window.press(Shortcut::TOGGLE_SIDEBAR.0, cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -1160,7 +1168,7 @@ fn wide_window_centers_transcript_and_composer_on_one_axis(cx: &mut TestAppConte
     cx.update_window(window.into(), |_, window, cx| assert_column(0., window, cx))
         .unwrap();
     cx.update_window(window.into(), |_, window, cx| {
-        window.press("ctrl-cmd-s", cx);
+        window.press(Shortcut::TOGGLE_SIDEBAR.0, cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -1186,7 +1194,7 @@ fn non_live_sessions_keep_resting_window_focus_and_shortcuts(cx: &mut TestAppCon
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(view.read(cx).window_focus.is_focused(window));
-        window.press("ctrl-cmd-s", cx);
+        window.press(Shortcut::TOGGLE_SIDEBAR.0, cx);
     })
     .unwrap();
     assert_eq!(
@@ -1232,7 +1240,7 @@ fn sidebar_toggle_is_ui_local_and_obeys_the_automatic_breakpoint(cx: &mut TestAp
     .unwrap();
     assert_eq!(view.read_with(cx, |v, _| v.sidebar_override), Some(false));
     cx.update_window(window.into(), |_, window, cx| {
-        window.press("ctrl-cmd-s", cx)
+        window.press(Shortcut::TOGGLE_SIDEBAR.0, cx)
     })
     .unwrap();
     cx.run_until_parked();

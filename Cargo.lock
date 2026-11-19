@@ -11103,6 +11103,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "gpui-pre-windows",
  "image",
  "markdown 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ratex-font",
@@ -11118,6 +11119,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "ttf-parser",
+ "windows-sys 0.61.2",
  "zevria-content",
  "zevria-foundation",
  "zevria-host",

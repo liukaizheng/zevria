@@ -1,5 +1,6 @@
 //! Desktop design primitives. Geometry and typography are shared by the log and its next line.
 use super::theme::{palette, tones};
+use crate::actions::Shortcut;
 use gpui_kit::base::text::TextViewStyle;
 use gpui_kit::component::{
     Sizable,
@@ -17,8 +18,14 @@ pub const GAP: f32 = 24.;
 pub const CONTENT: f32 = 880.;
 pub const PROSE: f32 = 680.;
 pub const UI_FONT: &str = ".SystemUIFont";
+#[cfg(target_os = "macos")]
 pub const MONO_FONT: &str = "Menlo";
+#[cfg(windows)]
+pub const MONO_FONT: &str = "Consolas";
+#[cfg(target_os = "macos")]
 pub const DOCUMENT_FONT: &str = "Charter";
+#[cfg(windows)]
+pub const DOCUMENT_FONT: &str = "Georgia";
 
 /// Transcript typography in physical pixels; Kit's 14 px rem base is separate.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -168,15 +175,13 @@ pub fn thread_marker(glyph: impl Into<SharedString>, ink: Hsla, cx: &App) -> Div
                 .child(glyph.into()),
         )
 }
-pub fn key_hint(key: &'static str, label: &'static str, cx: &App) -> Div {
+pub(super) fn key_hint(shortcut: Shortcut, label: &'static str, cx: &App) -> Div {
     meta()
         .flex()
         .items_center()
         .gap(px(4.))
         .text_color(palette(cx).text.muted)
-        .child(gpui_kit::component::kbd::Kbd::new(
-            Keystroke::parse(key).expect("static desktop shortcut"),
-        ))
+        .child(gpui_kit::component::kbd::Kbd::new(shortcut.keystroke()))
         .child(label)
 }
 pub fn document() -> Div {

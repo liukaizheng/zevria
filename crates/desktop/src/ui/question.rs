@@ -1,4 +1,5 @@
 use super::{style, theme::palette, window::DesktopWindow};
+use crate::actions::Shortcut;
 use gpui_kit::component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
@@ -268,7 +269,7 @@ impl DesktopWindow {
                 "Send answers"
             })
             .disabled(pending)
-            .tooltip("Send answer ⌘↩")
+            .tooltip(format!("Send answer {}", Shortcut::CONFIRM.label()))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.controller
                     .update(cx, |this, cx| this.answer_question(false, cx))
@@ -285,7 +286,7 @@ impl DesktopWindow {
                     .ghost()
                     .small()
                     .label(if cancelling { "Stopping" } else { "Stop" })
-                    .tooltip("Stop the current turn ⌘.")
+                    .tooltip(format!("Stop the current turn {}", Shortcut::STOP.label()))
                     .disabled(cancelling)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller
@@ -328,7 +329,7 @@ impl DesktopWindow {
                     .child(
                         dialog.child(
                             buttons
-                                .child(style::key_hint("cmd-enter", "Send answer", cx))
+                                .child(style::key_hint(Shortcut::CONFIRM, "Send answer", cx))
                                 .child(answer_button),
                         ),
                     ),

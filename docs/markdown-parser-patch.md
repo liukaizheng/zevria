@@ -77,15 +77,16 @@ its no-blank-line fences at every character boundary.
 Application-specific tests live in
 [`crates/desktop/tests/markdown_math.rs`](../crates/desktop/tests/markdown_math.rs).
 They use the shared assistant-output-only proof fixture and run on **all three
-platforms**, with no GPUI or RaTeX dependency. Desktop's direct Markdown dependency
-is test-only; native GPUI remains its only production consumer.
+platforms**. The parser tests do not require GPUI or RaTeX; the Linux desktop
+stub builds without either. Desktop's direct Markdown dependency is test-only;
+native GPUI on macOS and Windows is the fork's only production consumer.
 
 ```sh
-rtk cargo test --locked -p zevria-desktop --test markdown_math
-rtk cargo test --locked -p zevria-desktop
+rtk cargo test --release --locked -p zevria-desktop --test markdown_math
+rtk cargo test --release --locked -p zevria-desktop
 rtk cargo fmt --all -- --check
-rtk cargo check --locked --workspace --all-targets
-rtk cargo test --locked --workspace
+rtk cargo check --release --locked --workspace --all-targets
+rtk cargo test --release --locked --workspace
 ```
 
 The proof must produce exactly 15 inline / 11 display nodes, exact delimited
@@ -113,11 +114,11 @@ remain).
    SHA. Refresh the lockfile with `rtk cargo check --release -p zevria-desktop --tests`
    (without `--locked`). Cargo requires the replacement to keep the exact package
    name and version.
-4. Run the portable proof test, native desktop tests/gallery, workspace gates,
-   and provider-prefix/cache-diagnostics gates. Confirm the lockfile source and
+4. Run the portable proof test, native desktop suites on macOS and Windows,
+   the macOS-only pixel gallery, workspace gates, and provider-prefix/cache-diagnostics gates. Confirm the lockfile source and
    build metadata select the intended Git revision, with no path fallback or
    unexpected dependency/version changes.
-5. Verify CLI and non-macOS desktop production trees still contain no GPUI or
+5. Verify the CLI and Linux desktop stub production trees still contain no GPUI or
    RaTeX, and the locked CLI install emits no unused-patch warning. Preserve
    existing session/replay bytes; never discard newer records from a live
    session just to recover an earlier whole-file hash.

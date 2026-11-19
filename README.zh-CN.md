@@ -399,7 +399,7 @@ cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace
 | 目录 | 职责 |
 | --- | --- |
 | `crates/zevria` | CLI 入口和终端启动。 |
-| `crates/desktop`（`zevria-desktop`） | macOS GPUI 前端；其他平台构建不依赖 GPUI 的路由/测试及提示平台不受支持的占位程序。 |
+| `crates/desktop`（`zevria-desktop`） | macOS 和 x64 Windows 的原生 GPUI 前端；Linux 提供不依赖 GPUI 的路由与测试，以及提示改用 CLI 的占位程序。 |
 | `crates/host`（`zevria-host`） | 前端无关的配置、会话生命周期、恢复、发现和宿主服务。 |
 | `crates/presentation` | 原生前端共享的会话 reducer、生命周期/Plan 状态、语义块及命令/补全语法。 |
 | `crates/core`、`crates/session-api` | 会话引擎以及前端/provider 契约。 |
@@ -409,7 +409,17 @@ cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace
 | `crates/theme` | 不依赖 Ratatui 的语义 sRGB 令牌、主题生成、持久化和验证。 |
 | 其他工作区 crate | 共享值、指令、模型、工作流、工具和对话记录。 |
 
-原生 GPUI 桌面前端现为 `crates/desktop` 工作区成员，共享同一份锁文件、依赖版本、host 和 presentation 模型。GPUI 依赖仅在 macOS 上启用，不会进入 CLI 的 `cargo build -p zevria` 依赖图。运行时使用 `cargo run -p zevria` 或 `cargo run -p zevria-desktop`。参阅[桌面说明](docs/desktop.md)。
+桌面版与 CLI 共用 host、会话模型和锁文件。GPUI 和 RaTeX 只用于原生桌面构建，不会进入 CLI 的依赖图。
+
+在 **x64 Windows** 上安装 Rust MSVC 工具链、C++ 生成工具和 Windows SDK 后，可在 PowerShell 中运行：
+
+```powershell
+cargo run --locked --release -p zevria-desktop -- 'C:\Projects\我的工作区'
+```
+
+不带路径时可选择工作区；传入 `.` 打开当前目录，或使用 `--continue` 恢复当前目录中的最近会话。Git for Windows 的 Bash 和原生 RTK 是命令工具的前置依赖，不影响打开 GUI。参阅[桌面设置](docs/desktop.md#build-and-run)和[无需 Fn 的 Windows 快捷键](docs/desktop.md#keyboard-shortcuts)。
+
+`python tools/package-windows-desktop.py` 可构建并测试**未签名的 Windows 开发 ZIP**。CI 仅在显式选择的手动构建中将其上传为 Actions 构建产物，不发布 Release，也不纳入 CLI 安装程序。
 
 关于 crate 边界和数据流，请参阅[架构说明](docs/architecture.md)。贡献代码时请遵循 [AGENTS.md](AGENTS.md)；所有更改都必须保留 provider 可缓存的提示前缀。
 

@@ -8,6 +8,7 @@ use super::{
     theme::palette,
 };
 use crate::{
+    actions::Shortcut,
     controller::SessionController,
     disclosure::{self, Phase, TailIdentity},
     turns::{self, TurnDirection},
@@ -855,7 +856,8 @@ impl Render for TranscriptView {
                     .child(div().flex_1().min_w_0().max_w(px(style::PROSE)).flex().flex_col().gap(px(16.))
                         .child(div().text_size(px(36.)).line_height(px(40.)).font_weight(FontWeight::SEMIBOLD).child(name))
                         .child(style::body().text_color(palette(cx).text.secondary).child("Describe a change to build, or switch to Plan to work through an approach."))
-                        .child(style::kbd_hint("⌘O  Open workspace     ⌘N  New session     ⇧⌘M  Switch mode", cx))))
+                        .child(style::kbd_hint(format!("{}  Open workspace     {}  New session     {}  Switch mode",
+                            Shortcut::OPEN_WORKSPACE.label(), Shortcut::NEW_SESSION.label(), Shortcut::TOGGLE_MODE.label()), cx))))
                 .into_any_element();
         }
         div()

@@ -76,7 +76,7 @@ fn compact_status_shortcut_and_menu_open_one_session_only_lifecycle(cx: &mut Tes
             assert!(control.bounds().right() <= px(720.));
             match entry {
                 "click" => window.click("status-model", cx),
-                "shortcut" => window.press("ctrl-cmd-m", cx),
+                "shortcut" => window.press(Shortcut::OPEN_MODELS.0, cx),
                 _ => view.read(cx).composer.focus_handle(cx).dispatch_action(
                     &actions::OpenModels,
                     window,
@@ -94,8 +94,8 @@ fn compact_status_shortcut_and_menu_open_one_session_only_lifecycle(cx: &mut Tes
             let bounds = window.find("model-picker").bounds();
             assert!(bounds.origin.x >= px(0.) && bounds.right() <= px(720.));
             assert!(bounds.origin.y >= px(0.) && bounds.bottom() <= px(520.));
-            window.press("ctrl-cmd-m", cx);
-            window.press("cmd-enter", cx); // Never a background Plan/decision action.
+            window.press(Shortcut::OPEN_MODELS.0, cx);
+            window.press(Shortcut::CONFIRM.0, cx); // Never a background Plan/decision action.
         })
         .unwrap();
         assert!(receiver.try_recv().is_err());
@@ -162,7 +162,7 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
     cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.press("alt-shift-cmd-right", cx);
+        window.press(Shortcut::EXPAND_THINKING.0, cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -175,7 +175,7 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
     });
     let epoch = controller.read_with(cx, |c, _| c.model.root.conversation.epoch());
     cx.update_window(window.into(), |_, window, cx| {
-        window.press("ctrl-cmd-m", cx)
+        window.press(Shortcut::OPEN_MODELS.0, cx)
     })
     .unwrap();
     cx.run_until_parked();
@@ -270,7 +270,7 @@ fn native_model_effort_and_apply_buttons_keep_enter_and_space_ownership(cx: &mut
     let (window, _, controller, mut receiver) = setup(cx);
     seed(&controller, cx);
     cx.update_window(window.into(), |_, window, cx| {
-        window.press("ctrl-cmd-m", cx)
+        window.press(Shortcut::OPEN_MODELS.0, cx)
     })
     .unwrap();
     cx.run_until_parked();
@@ -345,7 +345,7 @@ fn escape_before_catalog_keeps_cancellation_owned_until_acknowledged(cx: &mut Te
     let (window, view, controller, mut receiver) = setup(cx);
     seed(&controller, cx);
     cx.update_window(window.into(), |_, window, cx| {
-        window.press("ctrl-cmd-m", cx)
+        window.press(Shortcut::OPEN_MODELS.0, cx)
     })
     .unwrap();
     cx.run_until_parked();

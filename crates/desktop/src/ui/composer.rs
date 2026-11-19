@@ -3,7 +3,7 @@ use super::{
     theme::{palette, tones},
     window::DesktopWindow,
 };
-use crate::controller::Phase;
+use crate::{actions::Shortcut, controller::Phase};
 use gpui_kit::component::{
     Disableable, IconName, Sizable, ThemeStyled,
     button::{Button, ButtonVariants, Toggle, ToggleGroup},
@@ -303,8 +303,8 @@ impl DesktopWindow {
         footer = footer.child(div().flex_1());
         if !self.compact && (focus.contains_focused(window, cx) || controller.draft.is_empty()) {
             footer = footer
-                .child(style::key_hint("enter", "Send", cx))
-                .child(style::key_hint("shift-enter", "New line", cx));
+                .child(style::key_hint(Shortcut::ENTER, "Send", cx))
+                .child(style::key_hint(Shortcut::SHIFT_ENTER, "New line", cx));
         }
         if recovery {
             footer = footer.child(
@@ -331,7 +331,7 @@ impl DesktopWindow {
                     .small()
                     .icon(IconName::Square)
                     .label(if cancelling { "Stopping" } else { "Stop" })
-                    .tooltip("Stop ⌘.")
+                    .tooltip(format!("Stop {}", Shortcut::STOP.label()))
                     .disabled(cancelling)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |this, cx| this.cancel(cx))
@@ -354,8 +354,8 @@ impl DesktopWindow {
                 div()
                     .flex()
                     .gap(px(12.))
-                    .child(style::key_hint("enter", "Send", cx))
-                    .child(style::key_hint("shift-enter", "New line", cx)),
+                    .child(style::key_hint(Shortcut::ENTER, "Send", cx))
+                    .child(style::key_hint(Shortcut::SHIFT_ENTER, "New line", cx)),
             );
         }
         if focus.contains_focused(window, cx) {

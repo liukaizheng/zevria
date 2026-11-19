@@ -6,6 +6,22 @@ use crate::{
     ui::{assets::AppAssets, theme, window::DesktopWindow},
 };
 use gpui_kit::{AppContext as _, *};
+use std::{cell::Cell, rc::Rc};
+
+#[cfg(windows)]
+fn application() -> anyhow::Result<Application> {
+    use anyhow::Context as _;
+    // Kit's convenience wrapper panics on backend initialization failure.
+    // Surface the same backend's error to the launcher instead.
+    let platform = gpui_windows::WindowsPlatform::new(false)
+        .context("Could not initialize the Windows desktop backend")?;
+    Ok(Application::with_platform(Rc::new(platform)))
+}
+
+#[cfg(target_os = "macos")]
+fn application() -> anyhow::Result<Application> {
+    Ok(gpui_kit::application())
+}
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     let workspace = cli.workspace()?;
@@ -22,7 +38,9 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
     let runtime = EngineRuntime::new()?;
-    gpui_kit::application()
+    let launch_error = Rc::new(Cell::new(None));
+    let window_error = launch_error.clone();
+    application()?
         .with_assets(AppAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
@@ -46,7 +64,11 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 ))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Zevria".into()),
-                    traffic_light_position: Some(point(px(16.), px(13.))),
+                    traffic_light_position: if cfg!(target_os = "macos") {
+                        Some(point(px(16.), px(13.)))
+                    } else {
+                        None
+                    },
                     ..gpui_kit::component::TitleBar::title_bar_options()
                 }),
                 window_min_size: Some(size(px(720.), px(520.))),
@@ -61,6 +83,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 Err(error) => {
                     tracing::error!("Could not open desktop window: {error:#}");
+                    window_error.set(Some(error.context("Could not open desktop window")));
                     if cx.has_global::<LogGuard>() {
                         cx.global_mut::<LogGuard>().0.take();
                     }
@@ -68,5 +91,5 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
         });
-    Ok(())
+    launch_error.take().map_or(Ok(()), Err)
 }

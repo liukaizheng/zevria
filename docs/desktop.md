@@ -12,45 +12,77 @@ The sibling checkout is not needed to build or run the workspace.
 
 ## Build and run
 
-Requirements: Rust able to build the locked dependencies and a macOS native Rust
-build environment. A configured Zevria provider is needed for real sessions, not
-for the automated tests. The pre-merge frontend was validated on **macOS 27.0.1
-arm64**, **rustc 1.100.0-nightly (2026-08-23)**. The local Command Line Tools
-configuration builds both profiles; a `.app` bundle is not supplied.
+The native GUI builds on **macOS** and **x64 Windows (MSVC)**. Linux builds the
+GPUI-free session model and a stub that directs you to the `zevria` CLI. A
+configured provider is needed for real sessions, not for automated tests.
 
-From the Zevria repository root:
+### Windows x64
 
-```sh
-cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace
-cargo run -p zevria-desktop --locked --release -- /absolute/path/to/workspace --continue
-# -c is the short form; omit WORKSPACE to use cwd (a root cwd opens the picker).
-cargo run -p zevria-desktop --locked --release -- --help
+Install a Rust toolchain with the `x86_64-pc-windows-msvc` target, the Microsoft
+C++ build tools and a Windows SDK. From the repository root (PowerShell):
+
+```powershell
+cargo build --locked --release -p zevria-desktop --bin zevria-desktop --target x86_64-pc-windows-msvc
+.\target\x86_64-pc-windows-msvc\release\zevria-desktop.exe 'C:\Projects\My workspace 雪'
+.\target\x86_64-pc-windows-msvc\release\zevria-desktop.exe .
+.\target\x86_64-pc-windows-msvc\release\zevria-desktop.exe --continue
+cargo run --locked --release -p zevria-desktop -- --help
 ```
 
+Double-click `zevria-desktop.exe` or run it with no arguments to choose a
+workspace. The extraction directory is **not** opened as a workspace. Pass a
+path (including `.`) to open it directly. With `--continue` and no path, Zevria
+looks for the latest session in the current directory. The app opens without an
+extra console window. Its File, Session and View menus are inside the window.
+
+[Git for Windows Bash and native RTK](windows.md) are prerequisites for **command
+tools**, not for opening the GUI. Command-based credentials still need their
+commands available in the launch environment. Workspace state uses the same
+`.zevria/windows/` location as the native CLI.
+
+### macOS
+
+Install Xcode Command Line Tools and a Rust toolchain that can build the locked
+workspace. From the repository root:
+
+```sh
+cargo run --locked --release -p zevria-desktop -- /absolute/path/to/workspace
+cargo run --locked --release -p zevria-desktop -- /absolute/path/to/workspace --continue
+```
+
+Omitting `WORKSPACE` on macOS uses the current directory, except at a filesystem
+root. No `.app` bundle is supplied. Launch from a terminal when command-based
+credentials need its PATH.
+
+### Arguments and configuration
+
 Usage is `zevria-desktop [WORKSPACE] [--continue|-c]`. Use `--` before a workspace
-whose name begins with `-`. With two workspace binaries, select `-p zevria` for
-the CLI or `-p zevria-desktop` for the desktop rather than bare `cargo run`.
+whose name begins with `-`. `--help`/`-h` works everywhere. Select `-p zevria` for
+the CLI or `-p zevria-desktop` for the desktop when building from source.
 
-**The native GUI supports macOS only.** On Linux/Windows the package builds its
-GPUI-free CLI/session model and tests, plus a stub executable that reports the
-unsupported platform and suggests the Zevria CLI. `--help`/`-h` works on every
-platform. The desktop's GPUI Kit, math-rendering and tracing-appender dependency declarations
-and its actions, controller, engine, launch and UI modules are macOS-gated. Native
-Linux/Windows builds do not need GPUI; the shared host's existing logging
-dependencies are unchanged.
+On first run, the desktop shows the shared Zevria config skeleton and setup
+instructions. Use **Show config in File Explorer** on Windows or **Show config
+in Finder** on macOS, fill in the generated files, then **Try again**. Config
+and logs use the same home resolution as the CLI (`HOME` or, on Windows,
+`USERPROFILE` by default). The default config is `~/.zevria/config.toml` and the
+desktop log is `~/.zevria/logs/zevria-desktop.log`, unless overridden. The
+configuration schema, provider setup, policies and transcript formats are shared
+with the CLI. The old `zevria-app.log` is left alone.
 
-Start from a terminal. Finder launches have a minimal environment; command-based
-API keys may need a suitable PATH. The host's shell preparation, configuration,
-models.jsonc, workspace guidance, skills, tools, policy enforcement, leases and
-transcript formats are unchanged.
+### Unsigned Windows development ZIP
 
-On first run `Config::load` creates the ordinary Zevria config skeleton and
-returns an actionable error. The window shows that error rather than exiting:
-**Show config in Finder**, fill in the generated files, then **Try again**. The desktop does
-not create another configuration schema. Logs default to
-`~/.zevria/logs/zevria-desktop.log` (or the configured `[log]` directory).
-The old `zevria-app.log` is left alone; update any scripts using the old binary
-or log name.
+With Python 3.12 and Git available, run `python tools/package-windows-desktop.py`
+on Windows. It builds the same locked release-profile x64 MSVC executable,
+packages only `zevria-desktop.exe`, then extracts it and verifies the x64 GUI
+header and captured CLI probes with an isolated home. The ZIP is written to
+`target/desktop-dev/zevria-desktop-dev-x86_64-pc-windows-msvc-<commit SHA>.zip`.
+Local builds can include uncommitted changes; the SHA identifies the checkout.
+
+For a CI build, manually dispatch **Cross-platform checks** with `desktop_dev_zip`
+enabled. This runs only the Windows build/package job and uploads the ZIP to that
+run's **Artifacts** section. Pushes and pull requests run tests and do not produce
+a Desktop ZIP. The ZIP is **unsigned and for development testing only**: no
+installer, published release or CLI distribution changes.
 
 ## Design language
 
@@ -60,15 +92,15 @@ The transcript is one left-aligned working thread within a centered column, not
 message bubbles or a stack of cards. Its line and nodes record what happened,
 in provider order:
 
-- **Pencil:** a dashed thread and Charter italic 13/21 in graphite pencil ink
+- **Pencil:** a dashed thread and italic serif 13/21 in graphite pencil ink
   for provider-supplied thinking. Expanded notes are indented 24 px under the
   gray Thinking label; the folded preview is also italic. Plan documents use
-  upright Charter 15/24 instead.
-- **Carbon:** lifecycle nodes and Menlo 12/18 for commands, paths, code, literal
+  upright serif 15/24 instead.
+- **Carbon:** lifecycle nodes and monospace 12/18 for commands, paths, code, literal
   output and diffs. Expanded tools use recessed 8 px wells, with input before
   output and then the native diff. Output opens at 16 lines; **Show all N lines**
   expands in the transcript rather than creating another output scroll trap.
-- **Ink:** the solid thread and SF Pro (`.SystemUIFont`) 14/22 for answers;
+- **Ink:** the solid thread and Kit's system UI font 14/22 for answers;
   prompts use the same size with medium weight and a hanging **You** label.
   You/Task, Zevria and System labels use their semantic role inks; the Plan
   label uses the Plan workflow ink. Lavender belongs to the Zevria answer label,
@@ -81,16 +113,16 @@ ink; shell syntax, not the label, carries color. Background tags use info ink
 and appear only for commands started in or moved to the background; a live
 foreground command snapshot alone never adds the tag.
 
-SF Pro, Charter and Menlo are public macOS-bundled font families, with native
-fallback. Transcript typography is centralized as `Type { size, leading }` in
+The serif and mono families are Charter and Menlo on macOS, Georgia and
+Consolas on Windows. Transcript typography is centralized as `Type { size, leading }` in
 `ui/style.rs` (all values below are size/line height in pixels):
 
 | Role | Size/leading | Use |
 | --- | --- | --- |
 | `READING` | 14/22 | Answers, prompts, empty-state and screen body text |
-| `DOCUMENT` | 15/24 | Charter Plan documents, in the thread and review sheet |
-| `PENCIL` | 13/21 | Italic Charter thinking previews and expanded notes |
-| `CODE` | 12/18 | Menlo command headers, wells, code, completions and mono errors |
+| `DOCUMENT` | 15/24 | Serif Plan documents, in the thread and review sheet |
+| `PENCIL` | 13/21 | Italic serif thinking previews and expanded notes |
+| `CODE` | 12/18 | Monospace command headers, wells, code, completions and errors |
 | `SECONDARY` | 13/20 | In-thread notices, live tail, web/ensemble text, subtask titles |
 | `HEADINGS` | 18/24, 16/22, 15/21 | Markdown h1, h2, h3+; Plan card title uses h2 |
 | `LABEL`, `META` | 12/16, 11/14 | Gutter/tool labels and tabular metadata (unchanged) |
@@ -107,7 +139,7 @@ composer and decision sheets have distinct 4/6/8/12/14 px radii.
 The sidebar pins **This session**, using its first prompt, with subtasks nested
 beneath it. Earlier sessions are single-line titles with aligned relative times.
 Arrow keys navigate those rows; Enter opens one. Below a 900 px window the
-sidebar auto-hides; **⌃⌘S** overrides it. Below a 760 px main column the gutter
+sidebar auto-hides; **⌃⌘S** on macOS or **Ctrl+Shift+S** on Windows overrides it. Below a 760 px main column the gutter
 labels move above content. A Plan sheet overlays instead of squeezing the main
 column below 560 px. The minimum window is 720×520.
 
@@ -443,8 +475,7 @@ parser boundary separately from the fully covered proof fixture.
 
 ## Included controls
 
-- Open workspace (Cmd-O), new session (Cmd-N), Sessions sidebar and
-  `--continue`. If there is no latest session, continue starts a new one with a
+- Open workspace, new session, Sessions sidebar and `--continue`. If there is no latest session, continue starts a new one with a
   notice. Replacing a busy session from the sidebar offers **Keep working** or
   **Stop and switch**.
 - Live/restored transcripts, selectable user text, retained Markdown, collapsible
@@ -454,48 +485,51 @@ parser boundary separately from the fully covered proof fixture.
 - Multiline composer: **Enter** sends, **Shift-Enter** inserts a newline. Shared
   slash/skill completions support click, arrow selection, Tab and Enter. Built-in
   completion Enter executes the selected built-in; skill completion only inserts.
-- Build/Plan selection, next-Build-prompt Orchestrate subtasks switch, Stop / Cmd-. / Esc.
+- Build/Plan selection, next-Build-prompt Orchestrate subtasks switch, and Stop.
   Esc first belongs to an open model picker, question, review panel or completion. Cancellation
   targets the pending operation or the learned active turn, never a guessed ID.
 - Plan review: Implement, Implement in fresh session, Revise / recovery Close,
   Copy plan as Markdown and reopen Review plan. Every decision includes the authoritative version.
   After Escape dismisses the sheet, Send submits ordinary feedback or `$skill` as
   a Plan revision of that reviewed version, never as approval or implementation.
-  Rejection restores the draft and keeps review hidden. Cmd-Enter implements only
-  while the review sheet is visible.
+  Rejection restores the draft and keeps review hidden. The decision shortcut
+  can implement only while the review sheet is visible.
 - Text, single-select, Other, multi-select and optional-skip questions. Native
   answers use strings; ACP multi-select uses arrays. Dismiss is available only
   when the request permits it. Terminal/close correlation cannot dismiss a newer
   unrelated question.
 - Read-only subtask inspection and a breadcrumb back to the root. Child activity
   never takes over root busy state or root question ownership.
-- Session-only model/effort selection from the status control, Ctrl-Cmd-M or
-  Session menu. The model control stays visible and truncates long names in compact
+- Session-only model/effort selection from the status control, the shortcut
+  below or the Session menu. The model control stays visible and truncates long names in compact
   windows; its tooltip gives the full profile/effort, scope, shortcut and any blocker.
 - Shared profile/reasoning/context/response/network status and persistence/Plan
   warnings; 250 ms clock updates run only while root work is pending/active.
 - Exact primary/output copy values remain available even when display is bounded.
 
-Additional keyboard controls have discoverable View/Session menu items. View
-separates sidebar visibility, transcript folds, and turn navigation:
+### Keyboard shortcuts
 
-| Keys | Action |
-| --- | --- |
-| ⌥⌘← / ⌥⌘→ | Fold/unfold the focused message, block/item, or range |
-| ⌥⇧⌘→ / ⌥⇧⌘← | Expand/collapse all thinking in the active pane |
-| ⇧⌘R / ⌥⇧⌘R | Fold earlier content / Fold older turns |
-| ⌥⌘R | Unfold all in the active pane |
-| ⌥⌘↑ / ⌥⌘↓ | Previous/next turn, aligned to the transcript top |
-| ⌥⇧⌘↑ | Jump to beginning (row 0) |
-| ⌥⇧⌘↓ | Jump to latest and resume tail following |
-| ⌘↩ | Send the open question answer or implement the open Plan |
-| ⇧⌘M | Switch the next-turn Build/Plan mode |
-| ⌃⌘M | Open the current mode's session-only model/effort picker |
+Windows shortcuts do not use the Fn row, dedicated paging keys, the Windows key,
+or Ctrl+Alt. Most actions are also in the File, Session and View menus. Quit is
+in the Zevria menu on both platforms.
 
-Shift-Tab remains reverse focus traversal. Esc belongs first to an open
-model picker, replacement confirmation, dismissible question, completion or Plan sheet;
-a non-dismissible question cannot be dismissed with Esc. **⌘.** and the Stop
-control still cancel the active root turn, including while a question is open.
+| Action | macOS | Windows |
+| --- | --- | --- |
+| Open workspace / new session / quit | ⌘O / ⌘N / ⌘Q | `Ctrl+O` / `Ctrl+N` / `Ctrl+Q` |
+| Sidebar / switch mode / select model | ⌃⌘S / ⇧⌘M / ⌃⌘M | `Ctrl+Shift+S` / `Ctrl+Shift+M` / `Ctrl+Shift+P` |
+| Stop turn / confirm visible decision / copy focused disclosure | ⌘. / ⌘↩ / ⌘C | `Ctrl+.` / `Ctrl+Enter` / `Ctrl+C` |
+| Previous / next turn | ⌥⌘↑ / ⌥⌘↓ | `Ctrl+K` / `Ctrl+J` |
+| Jump to beginning / latest | ⌥⇧⌘↑ / ⌥⇧⌘↓ | `Ctrl+Shift+K` / `Ctrl+Shift+J` |
+| Fold / unfold focused item | ⌥⌘← / ⌥⌘→ | `Ctrl+Shift+F` / `Ctrl+Shift+U` |
+| Collapse / expand thinking | ⌥⇧⌘← / ⌥⇧⌘→ | `Ctrl+Shift+H` / `Ctrl+Shift+E` |
+| Fold earlier content / fold older turns / unfold all | ⇧⌘R / ⌥⇧⌘R / ⌥⌘R | `Ctrl+Shift+R` / `Ctrl+Shift+B` / `Ctrl+Shift+A` |
+
+Enter sends a draft, Shift+Enter adds a line, and Shift+Tab remains reverse focus
+traversal. Confirm sends the open question answer or implements the open Plan;
+it does not send an ordinary composer draft. Standard text editing still works
+in inputs. Esc belongs first to an open model picker, replacement confirmation,
+dismissible question, completion or Plan sheet. Stop still cancels the active
+root turn, including while a non-dismissible question is open.
 
 Supported shared grammar: ordinary text, `/orchestrate <prompt>`, `$skill [args]`,
 `/compact`, `/implement`, `/implement-fresh`, `/plan`, `/build`, `/new`, `/resume`,
@@ -573,15 +607,13 @@ production dependency, including target-specific dependencies. The manifest-boun
 tests discover all `crates/*` automatically and enforce these rules. Neither the
 host nor desktop has a Ratatui/Crossterm dependency path.
 
-The CLI's `cargo build -p zevria` graph contains no GPUI or RaTeX. Neither does
-the desktop's non-macOS compilation graph. Math and all of its runtime
-dependencies are macOS-only. The desktop's test-only Markdown dependency allows
-portable parser regressions without adding a renderer to other targets.
-macOS `--workspace`
-builds do include GPUI and unify additive features in shared dependencies, such
-as extra image codecs and regex support. Cross-platform workspace CI includes
-the desktop; CLI release check/test jobs exclude `zevria-desktop` to retain the
-shipping feature set and disk footprint. Workspace CI disables incremental
+The CLI's normal dependency graph and the Linux desktop stub contain no GPUI or
+RaTeX. Desktop's native GPUI Kit, math and logging dependencies are gated to
+macOS and Windows. The desktop's test-only Markdown dependency allows portable
+parser regressions without adding a renderer to other targets. Native
+`--workspace` builds can unify additive features such as extra image codecs.
+Cross-platform CI runs a desktop release-profile check and tests; CLI release
+check/test jobs still exclude `zevria-desktop` to retain the shipping graph. Workspace CI disables incremental
 compilation and dev/test debuginfo to absorb the native frontend's artifact growth.
 
 There is no RPC or app-server layer. The unmerged out-of-process `zevria-app`
@@ -642,7 +674,8 @@ cacheable prompt prefixes remain under the existing regression tests.
 
 ### Shutdown
 
-Window close and Cmd-Q do **not** quit immediately. The controller stops the pump
+The caption close button, OS close request, Quit menu item and Quit shortcut
+(Cmd+Q or Ctrl+Q) do **not** quit immediately. The controller stops the pump
 (dropping its sole receiver), drops cloned senders/exit/tick tasks, awaits the
 host's ordered engine/supervisor shutdown and lease release, flushes the named
 log guard, then quits. Replacements use the same path, including replacements
@@ -657,33 +690,20 @@ slow external credential commands can therefore delay close.
 
 ## Tests and validation
 
-Run from the workspace root on macOS:
+Run from the workspace root on native Windows and macOS:
 
 ```sh
-rtk cargo fmt --all -- --check
-rtk cargo check --release --locked --workspace --all-targets
-rtk cargo build --release --locked -p zevria
-rtk cargo test --release --locked --workspace
-rtk cargo test --release --locked -p zevria-desktop --test markdown_math
-rtk cargo test --release --locked -p zevria-desktop
-rtk cargo test --release --locked -p zevria-desktop --features fixtures --test gallery
-rtk cargo test --release --locked -p zevria --test crate_boundaries
-rtk cargo test --release --locked -p zevria-provider -p zevria-host --features cache-diagnostics
-rtk cargo clippy --release --locked -p zevria-desktop --all-targets -- -D warnings
-rtk cargo clippy --release --locked -p zevria-desktop --all-targets --features fixtures -- -D warnings
-rtk cargo build --locked --release -p zevria-desktop
-rtk proxy target/release/zevria-desktop --help
-rtk cargo tree --locked -p zevria-desktop -i ratatui
-rtk cargo tree --locked -p zevria-desktop -i crossterm
-rtk proxy cargo tree --locked -p zevria --prefix none | rg -ci '^(gpui|ratex)'
-rtk proxy cargo tree --locked -p zevria-desktop --target x86_64-unknown-linux-gnu --prefix none | rg -ci '^(gpui|ratex)'
-rtk proxy cargo tree --locked -p zevria-desktop --target x86_64-pc-windows-msvc --prefix none | rg -ci '^(gpui|ratex)'
-rtk cargo tree --locked -p zevria-desktop -e features -i rustls
+cargo fmt --all -- --check
+cargo check --locked --release -p zevria-desktop --all-targets --features fixtures
+cargo test --locked --release -p zevria-desktop
+cargo tree --locked -p zevria --edges normal --prefix none
+cargo tree --locked -p zevria-desktop --target x86_64-unknown-linux-gnu --edges normal --prefix none
+cargo tree --locked -p zevria-desktop -e features -i rustls
 ```
 
-The inverse terminal trees should report that the packages are absent from the
-desktop graph; Cargo's nonzero absent-package result is expected. The CLI and
-non-macOS desktop GPUI/RaTeX counts must be `0` (`rg` returns 1 for no matches). Native rustls must enable only `aws-lc-rs`, not `ring`; recheck
+The CLI and Linux Desktop stub normal trees must have no `gpui*` or `ratex*`
+packages. On Linux, the desktop binary tests also check that the stub recommends
+the CLI. Native rustls must enable only `aws-lc-rs`, not `ring`; recheck
 this after any GPUI Kit bump because enabling both providers can make the
 WebSocket TLS builder panic. `ring` in the lockfile alone is not a violation:
 the wasm-only `gpui-pre-reqwest` dependency can use it.
@@ -700,14 +720,11 @@ controller tests using a separate real Tokio runtime, and a local HTTP SSE
 fixture exercising host start, submit, completion through `WorkspaceModel`,
 ordered shutdown and resume. Real-I/O controller tests explicitly allow
 nondeterministic external wakes in GPUI's test scheduler; ordinary UI tests use
-synthetic events and a command channel. Linux/Windows run the GPUI-free CLI,
-routing/question and local-SSE tests, including the unsupported-platform stub
-check. No extra local targets/toolchains are needed for this; shared CI covers
-those platforms. Broad package-acquisition commands such as `cargo fetch` or
-unfiltered metadata can still fetch other platforms' crates. Cross-target
-inspection from a macOS host can also acquire GPUI/platform archives before
-narrowing the compilation graph; an offline failure there does not mean the
-non-macOS stub compiles GPUI.
+synthetic events and a command channel. Windows and macOS run the ordinary GPUI
+suites on GPUI's simulated platform. The opt-in [screenshot gallery](#screenshot-gallery)
+is macOS-only because it needs the Metal headless renderer. Linux runs the
+GPUI-free routing, parser, engine fixture and stub tests. Broad Cargo dependency
+fetches can still download other targets' archives without compiling them.
 
 ### Focused regression coverage
 
@@ -724,16 +741,31 @@ copying, raster allocation, baseline rounding, Unicode fallback, resource limits
 LRU eviction and typeset memoization. The active parser pin, provenance and
 maintenance obligations are recorded in [Desktop Markdown parser fork](markdown-parser-patch.md).
 
-Headless controls, local-SSE fixtures and Metal gallery captures do not establish
-human visual acceptance or a real-provider GUI run. macOS appearance switching,
-VoiceOver, native window interactions and real-provider sessions still require
-the manual checklist below.
+Headless controls, local-SSE fixtures and Metal gallery captures do not prove
+native window launch, human visual acceptance or a configured GUI session.
 
-## Manual acceptance (not performed)
+## Interactive acceptance checklists
 
-Automated headless tests and the local SSE fixture **do not constitute a manual
-real-provider GUI acceptance run**. Check these on a scratch workspace before a
-release:
+### Windows x64 development ZIP
+
+- [ ] Extract the ZIP, then double-click the executable. Check that no console
+  opens and that the extraction directory isn't selected as a workspace.
+- [ ] With a disposable home, verify **Show config in File Explorer**, then
+  **Try again**. Open a folder containing spaces and non-ASCII characters with
+  the picker and from a terminal.
+- [ ] Inspect system UI, monospace and serif text; minimize, maximize, restore
+  and close using the caption controls. Open the File/Session/View/Zevria menus.
+- [ ] On a real keyboard layout, try the shortcut table (including `Ctrl+.`),
+  the focused question editor and ordinary copy/paste/undo/select all. Verify
+  that turn navigation leaves the draft, caret and composer focus alone.
+- [ ] On a disposable configured workspace, submit and restore a session via
+  the sidebar and `--continue`. Close it with the caption button and with
+  `Ctrl+Q` (no Fn), and check that both shut down cleanly. The credential-free
+  `engine_e2e` test covers submit/resume independently of GUI acceptance.
+
+### macOS
+
+Check these on a scratch workspace:
 
 - [ ] First-run config error, Show config in Finder and Try again.
 - [ ] Drag the title strip; double-click to zoom; check traffic-light placement.
@@ -793,22 +825,21 @@ No external provider credentials were exercised for this acceptance checklist.
 
 ## Troubleshooting
 
-- **Config skeleton/error:** use Show config in Finder and Try again; provider/model errors
-  are host errors, not a desktop-specific configuration layer.
+- **Config skeleton/error:** use Show config in File Explorer or Finder, then
+  Try again; provider/model errors are not desktop-specific.
 - **Engine stopped:** inspect `zevria-desktop.log`, then Start new session. Startup
   and cleanup errors remain visible; session replacements do not overlap engines.
 - **Build/test-support resolution:** keep the root `Cargo.lock` and use `--locked`.
   When intentionally changing Kit features, resolve from the workspace root rather
   than hand-patching transitive versions. The validated graph retains taffy 0.15.0
   and unicode-properties 0.1.3 alongside Kit's test-support dependencies.
-- **Disk pressure on macOS:** native workspace builds add GPUI artifacts. Disable
+- **Disk pressure on native builds:** workspace builds add GPUI artifacts. Disable
   dev/test debuginfo and incremental compilation as above; use `-p zevria` when
   only working on the CLI. Rust-analyzer also indexes/builds the native dependency.
 - **Key-command environment:** launch via the terminal and check the command's
   PATH; credentials are still resolved exclusively by the host/provider layers.
-- **Unsupported platform:** Linux/Windows support only the GPUI-free tests and
-  stub binary. Use `zevria`; native GUI support requires lifting the target gate
-  and adding platform GUI development packages and validation to CI.
+- **Unsupported platform:** Linux has only the GPUI-free desktop stub. Use
+  `zevria`. Native Windows ARM64 and Linux GUI are outside this scope.
 
 ## Explicit limitations
 
@@ -823,7 +854,7 @@ No external provider credentials were exercised for this acceptance checklist.
   collapses and mode changes do rescue it. Real-provider, VoiceOver and native
   keyboard-only checks above remain manual acceptance, not gallery claims.
 - Math is KaTeX-compatible, not a TeX engine: unsupported commands show source,
-  not an approximation. Native math/gallery require macOS and Metal. Raster
+  not an approximation. Only the screenshot gallery requires macOS and Metal. Raster
   overhang, device dimensions and caches have the budgets listed above; Unicode
   fallback metrics and grayscale antialiasing can differ from surrounding text.
 - No live ensemble-worker panes or worker confirmation/review/abandon controls.
@@ -835,7 +866,8 @@ No external provider credentials were exercised for this acceptance checklist.
 - No transcript recall/edit UI, image attachment input or `@` file mentions.
   The shared model already supports transcript editing; restored images display.
 - One window and one live session; no tabs or concurrent-session UI.
-- No `.app` packaging, signing or notarization; no native Windows/Linux GUI.
+- No `.app` packaging, signing or notarization. Windows distribution is an
+  unsigned development ZIP only; neither a Desktop installer nor a release asset.
 - No theme-file hot reload or completed human accessibility/keyboard audit.
   Default palettes follow macOS live; named palettes remain pinned. Compact
   layout, question docks and Plan overlays are covered at 720×520 by native
