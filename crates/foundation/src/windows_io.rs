@@ -206,7 +206,7 @@ pub fn open_directory(path: &Path) -> io::Result<File> {
     );
     if !matches!(filesystem.as_str(), "NTFS" | "ReFS") {
         return Err(io::Error::other(format!(
-            "protected Windows reads do not support filesystem {filesystem:?}; use NTFS/ReFS or WSL"
+            "protected Windows reads do not support filesystem {filesystem:?}; use a local NTFS or ReFS drive"
         )));
     }
     for part in parts {

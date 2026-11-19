@@ -1,5 +1,5 @@
 //! Frozen command environment. Windows uses Git for Windows Bash, never SHELL,
-//! PowerShell, cmd.exe, or the legacy System32 WSL bash launcher.
+//! PowerShell, cmd.exe, or Windows System32 Bash.
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},

@@ -8,25 +8,24 @@ zevria --acp
 
 An editor or other ACP client should launch that command with the desired workspace as the process working directory. Zevria serves stable ACP protocol V1 as newline-delimited JSON-RPC on stdin/stdout. This is the opposite direction from Zevria's ensemble support: `--acp` lets a client launch Zevria, while `/ensemble-plan` and `/ensemble-review` make Zevria act as an ACP client that launches external workers.
 
-## Windows runtime selection
+## Windows setup
 
-Windows `zevria --acp` defaults to **native execution**, not automatic WSL handoff.
-Use `zevria --runtime native --acp` to pin this explicitly. Git Bash runs model
-commands even when the editor or launching terminal uses PowerShell. Native
-sessions require Git for Windows and native RTK; no PowerShell backend is added.
+On Windows, launch `zevria.exe --acp` directly. Remove `--runtime` (including
+`--runtime native`) and `--wsl-distro` from existing ACP client configurations.
+Use native Windows paths for the working directory, ACP file operations, and
+any `ZEVRIA_CONFIG` override. Zevria does not rewrite ACP paths. Model commands
+run in Git for Windows Bash even when the editor or launching terminal uses
+PowerShell. Startup checks Git Bash and native RTK, and reports platform,
+configuration, and state diagnostics only on stderr so stdout remains JSON-RPC.
 
-`zevria --runtime wsl --wsl-distro NAME --acp` is opt-in and requires a WSL-aware
-client supplying **Linux paths**. The launcher maps its startup directory and an
-explicit `ZEVRIA_CONFIG`, but never rewrites ACP messages. No native retry occurs
-after handoff. Runtime/config/state diagnostics are stderr-only.
-
-Native Windows history and leases are under `.zevria/windows/`, including
-`ensemble-sessions` and `agent-runs`; Unix/WSL use the `.zevria/` paths shown below.
-Listing, resume and cleanup never import the other runtime's history. Built-in
-Windows workers are explicitly pinned to native. Configured agent launches use
-a private Job Object helper so SDK direct-child shutdown also stops descendants,
-including Node/npm launchers resolved under Git Bash. See [Windows setup](windows.md)
-for configuration boundaries, filesystem limitations and real-machine acceptance.
+Windows history and leases are under `.zevria/windows/`, including
+`ensemble-sessions` and `agent-runs`; Linux and macOS use the `.zevria/` paths
+shown below. Listing, resume, and cleanup use only the local state root. Built-in
+ensemble workers launch the current executable with `--acp --ensemble-worker`.
+On Windows, configured ACP agents use a private Job Object helper so SDK
+direct-child shutdown also stops descendants, including Node/npm launchers
+resolved under Git Bash. See [Windows setup](windows.md) for configuration,
+filesystem boundaries, and the acceptance checklist.
 
 ## Explicit ensemble worker profile
 

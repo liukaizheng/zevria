@@ -22,7 +22,7 @@ Zevria 是一个用 Rust 编写的终端编程智能体。它可以检查代码�
 
 - **[ripgrep（`rg`）](https://github.com/BurntSushi/ripgrep)**：快速递归搜索文件和源代码中的文本或模式，是 Zevria 查找相关文件和代码的搜索工具；默认遵循忽略规则。
 - **[RTK](https://github.com/rtk-ai/rtk)**：负责转发 shell 命令，并筛选或压缩命令输出，让结果更简洁。Zevria 的命令工作流需要它；例如，使用 `rtk rg "pattern" src` 搜索。
-- **仅限 Windows — [Git for Windows](https://gitforwindows.org/)**：提供 Git Bash，供 Zevria 在原生 Windows 环境中运行命令。若在 WSL 中运行 Zevria，则不需要 Git Bash。
+- **仅限 Windows — [Git for Windows](https://gitforwindows.org/)**：提供 Git Bash，这是 Windows 上 Zevria 命令工具唯一使用的 shell。
 
 **终端支持：** Zevria 的状态标记（例如 `○`、`◐`、`✓` 和 `✗`）是带颜色的 Unicode 字符，并非特殊图片图标。任何支持 Unicode 字形和颜色的终端都可以显示它们。为获得完整的 TUI 输入体验，请选择支持增强键盘报告的终端；该功能让 Zevria 能区分 `Ctrl+Enter` 和 `Enter`（否则前者可能被当作普通 `Enter`）：
 
@@ -54,9 +54,9 @@ irm https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 | iex
 - 可固定二进制版本：在 Bash 安装管道末尾使用 `bash -s -- v0.0.1`，或下载 `install.ps1` 后运行 `./install.ps1 -Version v0.0.1`。示例中的版本号仅为占位符，并不表示最新版本。
 - 使用 `--no-path-update` / `-NoPathUpdate` 可不修改 PATH 和配置文件。
 - 打开新的 shell，或按安装程序打印的说明刷新环境。管道或子进程中的安装程序无法修改父 shell；Windows 的机器级 PATH 仍可能优先于用户级 PATH。
-- 再次运行安装程序会替换选定安装根目录中的内容，包括修复同版本安装或降级。要回退到其他版本，请用该版本重新运行安装程序。其他安装根目录和 provider 文件不会改动。Linux 安装还会记录安装根目录，供 Windows 发现 WSL 中的安装。
+- 再次运行安装程序会替换选定安装根目录中的内容，包括修复同版本安装或降级。要回退到其他版本，请用该版本重新运行安装程序。其他安装根目录和 provider 文件不会改动。
 
-请配置一个实现 **OpenAI Responses** 或原生 **Anthropic Messages** 的模型端点（仅支持 Chat Completions 并不够）。每个 provider 的 `protocol` 选择 wire adapter，两种协议可以在同一模型目录中共存。安装程序不会安装[准备工作](#preparation)中列出的工具、WSL 或 Rust，也不会配置 provider 凭据。另请参阅[命令约定](docs/instructions/command-conventions.md)。
+请配置一个实现 **OpenAI Responses** 或原生 **Anthropic Messages** 的模型端点（仅支持 Chat Completions 并不够）。每个 provider 的 `protocol` 选择 wire adapter，两种协议可以在同一模型目录中共存。安装程序不会安装[准备工作](#preparation)中列出的工具或 Rust，也不会配置 provider 凭据。另请参阅[命令约定](docs/instructions/command-conventions.md)。
 
 **从源码构建：** 如果已有 Rust/Cargo（支持 Rust 2024）、Git、网络访问和本机编译工具，可在代码检出目录中运行：
 
@@ -73,17 +73,13 @@ zevria
 
 启动时的工作目录决定工作区、项目指导文件、技能和会话存储位置。从仓库的子目录启动不会自动将 Git 根目录选为工作区。
 
-### Windows：优先使用 WSL，Git Bash 作为后备
+### Windows：原生 Zevria 与 Git Bash
 
-在 Windows 上，`zevria.exe` 会优先选择已就绪的 WSL 安装，其中必须有兼容的 **Linux 版 Zevria** 以及当前操作所需的工具。它会将整个应用交给 WSL 运行，而不是只转发单条命令。如果 WSL 未就绪，则静默回退到使用 **Git for Windows Bash** 的原生 Windows 环境，不会输出 WSL 警告或探测时捕获的帮助/错误信息。从 PowerShell 启动没有问题；但 PowerShell 不是智能体运行命令所使用的 shell。
+`zevria.exe` 始终作为原生 Windows 进程运行。你可以从 PowerShell、cmd、Git Bash 或 ACP 客户端启动它；命令工具始终使用非交互式 **Git for Windows Bash**，不使用启动它的 shell。使用交互界面或 ACP 之前，请安装 Git for Windows 和 Windows 版 RTK。帮助、版本信息以及 `skills`、`theme` 和 `clean` 命令不需要 Bash、RTK 或模型配置。
 
-使用 `--runtime native` 可跳过 WSL 探测；使用 `--runtime wsl` 可强制使用 WSL 并查看详细就绪状态错误；使用 `--wsl-distro <name>` 可选择发行版而不更改默认发行版。如果所选发行版不存在或未就绪，自动模式也会静默回退。正常的启动、运行环境/配置/状态诊断，以及原生 Git Bash/RTK 错误仍会显示。
+请从现有脚本和 ACP 客户端配置中移除已废弃的 `--runtime`（包括 `--runtime native`）和 `--wsl-distro`，直接使用 `zevria` 或 `zevria --acp`。ACP 使用原生 Windows 路径，工作区历史记录保存在 `.zevria/windows/`。请在 Windows 用户主目录中设置 provider；已有的 Linux 配置和历史记录不会被复制或删除。Linux 和 macOS 版仍直接运行，shell 行为不变。
 
-Windows 下的 `--acp` 默认使用原生环境。原生历史记录位于 `.zevria/windows/`；WSL 历史记录和全局配置相互独立。启动器不会安装、升级、复制或迁移任何内容；完成 WSL 交接后，即使 Linux 首次运行配置失败，也**绝不会重试原生运行**。
-
-Windows 和 Linux 安装程序应使用相同的固定二进制版本。新版 Windows 启动器会读取 Linux 安装程序写入的 `.zevria/install-root` 记录，包括自定义安装根目录，且不会加载 shell 配置文件；过期记录必须修复。只有包含这项改动构建的 Windows 二进制才支持该发现功能——安装旧版已发布程序并不会让它自动获得新功能。
-
-请参阅 [Windows 设置与验收清单](docs/windows.md)，了解双端安装、原生 RTK/Git Bash、支持的文件系统边界、ACP 和验证限制。初始验收目标为 Windows x86_64 MSVC 和 WSL 2；不承诺支持其他架构或 WSL 1。
+请参阅 [Windows 设置与验收清单](docs/windows.md)，了解 Git Bash 和 RTK 的设置、受支持的文件系统，以及 ACP 和终端检查。
 
 ### 2. 配置 provider 和模型角色
 

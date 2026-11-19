@@ -57,7 +57,7 @@ zevria_main "$FIXTURE_VERSION" --no-path-update
             executable = root / "bin/zevria"
         run([str(executable), "--version"], env, workspace, f"zevria {version}\n")
         run([str(executable), "--help"], env, workspace)
-        json.loads(run([str(executable), "--runtime", "native", "skills", "list", "--json"], env, workspace))
+        json.loads(run([str(executable), "skills", "list", "--json"], env, workspace))
         if (home / ".zevria/config.toml").exists() or (workspace / ".zevria").exists():
             raise SystemExit("Installer smoke unexpectedly created application configuration/state")
         print(f"Fresh-package installer smoke passed: {archive.name}")

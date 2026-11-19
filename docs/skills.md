@@ -49,9 +49,9 @@ The startup workspace is not a Git ancestor or a later shell working directory.
 `models.jsonc` for session routing; its directory cannot move skill discovery.
 Offline skill commands need neither providers nor the model file, but reject
 stale `[providers]`/`[modes]` TOML tables with a pointer to `models.jsonc`. Missing directories are empty. An unavailable runtime home produces a bounded
-diagnostic and project-only discovery. Native Windows falls back from a valid
-absolute HOME to the user profile; WSL has its own Linux home. Project skills stay
-shared in `.zevria/skills`, never under the runtime-specific `.zevria/windows` state root. Roots cannot be configured: ancestor,
+diagnostic and project-only discovery. On Windows, a valid absolute `HOME` takes
+precedence over the user profile. Project skills stay in `.zevria/skills`, not
+under the Windows `.zevria/windows` state root. Roots cannot be configured: ancestor,
 extra/shared, `.agents`, `.codex` and `.claude` roots are unsupported.
 
 Both layouts work:

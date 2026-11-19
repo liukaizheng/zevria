@@ -258,13 +258,14 @@ impl ThemeStore {
     }
 }
 
+#[cfg(unix)]
 fn no_follow(options: &mut OpenOptions) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
 }
+
+#[cfg(not(unix))]
+fn no_follow(_options: &mut OpenOptions) {}
 
 fn select_document(before: &str, name: Option<&str>) -> anyhow::Result<String> {
     // Recovery intentionally parses unrelated settings and any old selector as

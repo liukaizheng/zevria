@@ -1627,13 +1627,14 @@ shutdown and abandoned-transcript cleanup, removes eligible regular, zero-byte
 sidecars best-effort. Dropping a frontend or timing out an observer does not
 release an engine's ownership. File presence alone does not mean a lock is held.
 
-Native Windows uses `workspace_state_root` (`.zevria/windows`) for every run-state
-namespace; Unix/WSL use `.zevria`. Project guidance and `.zevria/skills` remain
-shared inputs. All listing, continue/resume, worker recovery and cleanup paths use
-that same helper. No cross-runtime migration or fallback scan is performed.
+Windows uses `workspace_state_root` (`.zevria/windows`) for every run-state
+namespace; Linux and macOS use `.zevria`. Project guidance and `.zevria/skills`
+remain shared inputs. All listing, continue/resume, worker recovery and cleanup
+paths use that same helper. There is no migration or scan outside the local
+state root.
 
-Each namespace (`.zevria/sessions` and `.zevria/ensemble-sessions` on Unix/WSL,
-with the additional `windows/` component natively) retains exactly
+Each namespace (`.zevria/sessions` and `.zevria/ensemble-sessions` on Unix, with
+the additional `windows/` component on Windows) retains exactly
 one permanent `.leases.lock` coordinator. Updated writers hold it for short
 sidecar open/lock and close-before-delete operations, never for the session's
 lifetime, transcript IO, or directory enumeration. This prevents contenders from
@@ -2393,9 +2394,9 @@ kinds and checks RTK before model-driven tools. It starts workloads suspended,
 assigns an owned kill-on-close Job Object, then resumes. Leader exit status is
 waited separately from job lifetime; remaining descendants are killed before
 capture drains, including on ordinary shell exit. Configured ACP agents use a
-private native job helper around the pinned SDK's direct-child cleanup. WSL
-handoff is whole-application and never treated as Windows-owned Linux descendants;
-no cleanup terminates a distribution. See [Windows runtime setup](windows.md).
+private native job helper around the pinned SDK's direct-child cleanup. The
+Windows executable runs locally, with Git Bash as the only command backend.
+See [Windows setup](windows.md).
 
 Root Build and Plan (including ACP roots) share a session-owned `CommandJobs`
 registry. Every root command is a job: foreground calls wait as before, while

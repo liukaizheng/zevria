@@ -227,11 +227,14 @@ impl PreparedUpdate {
 }
 
 /// Directory sync failures after publication cannot be rolled back safely.
+#[cfg(unix)]
 pub(crate) fn sync_parent(path: &Path) {
-    #[cfg(unix)]
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
         && let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all())
     {
         tracing::warn!(target: "zevria::settings", %error, path = %path.display(), "file committed but parent directory sync failed");
     }
 }
+
+#[cfg(not(unix))]
+pub(crate) fn sync_parent(_path: &Path) {}

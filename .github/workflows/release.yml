@@ -390,7 +390,7 @@ jobs:
                       raise SystemExit('Unexpected --help output')
                   if invoke('--version').strip() != f'zevria {version}':
                       raise SystemExit('Binary version does not match package/tag version')
-                  json.loads(invoke('--runtime', 'native', 'skills', 'list', '--json'))
+                  json.loads(invoke('skills', 'list', '--json'))
 
           smoke(binary)
           if windows:

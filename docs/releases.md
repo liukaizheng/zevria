@@ -40,7 +40,7 @@ The self-contained repository entry points are `install.sh` (Bash 3.2+) and
 `install.ps1` (Windows PowerShell 5.1 / PowerShell 7 on Windows x64). They require
 HTTPS access to GitHub; Bash also needs curl, tar, standard platform utilities,
 and either sha256sum or shasum. PowerShell uses built-in .NET facilities. They
-install **only Zevria**, without Rust, RTK, Git Bash, WSL, or provider setup.
+install **only Zevria**, without Rust, RTK, Git for Windows Bash, or provider setup.
 
 Moving installer-source URLs (usable after the files land on `main`):
 
@@ -144,24 +144,24 @@ that process; `powershell -File` / `pwsh -File` cannot refresh their parent. Res
 terminals from a refreshed environment (sign out/in if necessary). Opt-out skips
 all profiles and persistent/process PATH changes, not binary installation.
 
-On Linux, even with opt-out, the installer atomically records its absolute root
-as one data line in `~/.zevria/install-root`. See [WSL discovery and repair](windows.md#linux-install-root-discovery-and-repair).
+The Linux installer no longer writes `~/.zevria/install-root`. Any existing
+record is left untouched. Older Windows binaries relying on a newly written
+Linux locator are not supported by this installer.
 
 Reruns deliberately replace the **selected root**, including downgrades and
 same-version repairs; installations in other roots remain unchanged. Verification
 failures leave the old executable untouched. Replacement stages on the destination
-filesystem rather than overwriting a live file. Linux executable/locator updates
-keep backups and roll back handled failures; failed recovery reports retained
-backup paths for manual restoration. A Windows lock requires closing Zevria and
+filesystem rather than overwriting a live file. The Unix installer keeps a backup
+of the previous executable and rolls back handled replacement failures. If recovery
+fails, it reports where the backup was retained for manual restoration. A Windows lock requires closing Zevria and
 rerunning—no user process is killed. To return to an older release, rerun the
 installer with that version and the same root.
 
-This is not a crash-atomic transaction across filesystems. Power loss or forced
-termination can leave installer-owned `.zevria-install.*` / `.install-root.*`
+Power loss or forced termination can leave installer-owned `.zevria-install.*`
 (Windows `.zevria-install-*`) recovery directories. Inspect and preserve any
-`previous` / `previous.exe` backups; restore the intended executable and matching
-locator, or rerun for that root. Never recursively delete the shared `.zevria`
-root as a repair step. The installers never change provider material.
+`previous` / `previous.exe` backups; restore the intended executable or rerun for
+that root. Never recursively delete the shared `.zevria` root as a repair step.
+The installers never change provider material.
 
 ### Verify and install a manual download
 
@@ -206,22 +206,17 @@ your user `PATH`. Unix tar archives preserve executable permission.
 
 ### Dependencies are not bundled
 
-- Keep **RTK** on the selected runtime's `PATH`; Zevria's built-in
+- Keep **RTK** on `PATH` in Zevria's command environment; Zevria's built-in
   [command conventions](instructions/command-conventions.md) require it for
   model-driven commands. The unrelated crates.io package named `rtk` is not the
   required tool.
-- Native Windows model-driven commands require **Git for Windows Bash**, even
-  when Zevria is launched from PowerShell. `ZEVRIA_GIT_BASH` can select a verified
-  Git Bash executable. Neither Bash nor RTK is bundled with these downloads.
-- Windows automatic mode prefers a ready WSL environment. WSL needs a **separate,
-  same-version Linux Zevria** plus Linux RTK and its other prerequisites; downloading
-  `zevria.exe` does not provide that installation. Use the Linux x64 archive only
-  in a compatible GNU distribution. See [Windows setup](windows.md) for the
-  two-install procedure, configuration separation, and real-machine acceptance
-  checklist. Use `--runtime native` to explicitly select the Windows package.
-- Interactive/model-driven use still needs a suitable terminal and configured
+- `zevria.exe` runs natively and uses **Git for Windows Bash** for command tools,
+  even when launched from PowerShell. `ZEVRIA_GIT_BASH` can select a valid Git
+  Bash executable. See [Windows setup](windows.md) for Git Bash, RTK, and the
+  interactive acceptance checklist.
+- Interactive use needs a suitable terminal. Model-driven use needs configured
   provider/model roles. See [Getting started](../README.md#getting-started).
-  Help, version, and the native offline skills listing need no live provider.
+  Help, version, and offline management need no live provider or command backend.
 
 ### Offline installer validation
 
@@ -230,10 +225,11 @@ your user `PATH`. Unix tar archives preserve executable permission.
 PATH reads/writes. Production installers have no alternate mirror/checksum-bypass
 flags. `test.yml` runs system Bash fixtures on Linux/macOS (including Bash 3.2),
 ShellCheck and fish profile checks, plus Windows PowerShell 5.1 and PowerShell 7.
-The Linux workspace tests execute the actual fixed launcher discovery source.
-These are not proof of real WSL handoff: retain the opt-in, provisioned-host lane
-and validate matching installer-produced Windows/Linux versions and custom roots
-before claiming real WSL acceptance.
+Unix fixtures verify default and custom roots, preservation of legacy locator
+files without writing new ones, and executable replacement and recovery. Native
+Windows CI covers noninteractive startup and process cleanup. See the
+[Windows checklist](windows.md#troubleshooting-and-acceptance) for checks that
+require a real terminal or clipboard.
 
 ## Maintainer prerequisites and release preparation
 
@@ -253,8 +249,8 @@ before claiming real WSL acceptance.
    different or malformed version fails before the native matrix.
 4. Prefer a successful manual build-only run of that exact source first. Ensure
    the [Windows real-machine checklist](windows.md#troubleshooting-and-acceptance)
-   has appropriate evidence; automated native tests and mocked WSL probes do not
-   establish interactive Windows terminal, clipboard, or real WSL acceptance.
+   has appropriate evidence; automated native tests do not establish interactive
+   Windows terminal or clipboard behavior.
 5. After review and authorization, create and push a version tag pointing at the
    intended committed source. Both lightweight and annotated tags are supported.
    For example, run these yourself after confirming version and `HEAD`:
@@ -288,7 +284,7 @@ The dependency chain is `prepare → native build/test matrix → assemble → d
 - **Package validation:** builds only the production `zevria` executable with
   `--locked --release` and default features. Both the original and extracted
   executable must pass `--help`, the exact expected `--version`, and
-  `--runtime native skills list --json`. Each smoke invocation set uses disposable
+  `skills list --json`. Each smoke invocation set uses disposable
   HOME/USERPROFILE and workspace directories with inherited Zevria overrides
   removed. Each native job additionally feeds its **freshly built archive** and
   sidecar (served as `SHA256SUMS`) through the actual installer with offline fixture

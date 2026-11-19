@@ -26,6 +26,19 @@ review_mode = "review"
 }
 
 #[test]
+fn built_in_zevria_worker_uses_current_executable_and_exact_args() {
+    let mut config = EnsembleConfig::default();
+    config.resolve_runtime_commands().unwrap();
+
+    let worker = &config.agents["zevria"];
+    assert_eq!(
+        std::path::Path::new(&worker.command),
+        std::env::current_exe().unwrap()
+    );
+    assert_eq!(worker.args, ["--acp", "--ensemble-worker"]);
+}
+
+#[test]
 fn zevria_executable_resolution_is_distinctive_preserves_overrides_and_fails_closed() {
     let mut config = EnsembleConfig::default();
     let mut renamed = config.agents.remove("zevria").unwrap();
@@ -38,8 +51,6 @@ fn zevria_executable_resolution_is_distinctive_preserves_overrides_and_fails_clo
         .resolve_zevria_executable(|| Ok("/running/zevria".into()))
         .unwrap();
     renamed.command = "/running/zevria".into();
-    #[cfg(windows)]
-    renamed.args.extend(["--runtime".into(), "native".into()]);
     assert_eq!(config.agents["renamed"], renamed);
     let codex = config.agents["codex"].clone();
     let claude = config.agents["claude"].clone();

@@ -19,7 +19,6 @@ const CONTENTS: &[u8] = b"custom artifact or malformed history\n\xff";
 fn command(home: &Path, workspace: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zevria"));
     command
-        .args(["--runtime", "native"])
         .env("HOME", home)
         .env_remove("ZEVRIA_CONFIG")
         .env_remove("TERM")

@@ -37,32 +37,6 @@ pub fn system_executable(name: &str) -> io::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join(name))
 }
 
-/// The console delivers Ctrl-C/Break to both launcher and child. Keep the
-/// launcher alive to observe the child's status without suppressing the child's
-/// handler (unlike SetConsoleCtrlHandler(NULL, TRUE), this is not inherited).
-pub struct ForwardConsoleInterrupts;
-unsafe extern "system" fn console_handler(event: u32) -> i32 {
-    i32::from(event == 0 || event == 1)
-}
-impl ForwardConsoleInterrupts {
-    pub fn install() -> io::Result<Self> {
-        if unsafe {
-            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_handler), 1)
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self)
-    }
-}
-impl Drop for ForwardConsoleInterrupts {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_handler), 0);
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct Job(OwnedHandle);
 impl Job {

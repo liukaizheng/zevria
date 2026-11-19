@@ -384,7 +384,7 @@ function Write-ZevriaNextSteps([string] $Bin, [bool] $PathUpdated) {
     }
     if (-not (Get-Command rtk -ErrorAction SilentlyContinue)) { Write-Warning 'Install RTK separately from rtk-ai/rtk (not the unrelated crates.io package) for command tools.' }
     $gitBash = @($env:ZEVRIA_GIT_BASH, "$env:ProgramFiles\Git\bin\bash.exe", "${env:ProgramFiles(x86)}\Git\bin\bash.exe", "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe")
-    if (-not ($gitBash | Where-Object { $_ -and [IO.File]::Exists($_) })) { Write-Warning 'Native Windows command tools need Git for Windows Bash. Install it separately; WSL bash.exe is not Git Bash.' }
+    if (-not ($gitBash | Where-Object { $_ -and [IO.File]::Exists($_) })) { Write-Warning 'Zevria command tools require Git for Windows Bash. Install Git for Windows separately; Windows\System32\bash.exe is not Git Bash.' }
     Write-Host 'Provider/model configuration is separate first-run setup. No credentials or configuration were changed.'
 }
 function Install-Zevria([string] $RequestedVersion = 'latest', [switch] $SkipPath, [switch] $ShowHelp) {
@@ -395,7 +395,8 @@ function Install-Zevria([string] $RequestedVersion = 'latest', [switch] $SkipPat
 Usage: install.ps1 [-Version VERSION] [-NoPathUpdate] [-Help]
 Install latest stable or a SemVer version, optionally prefixed with v.
 ZEVRIA_INSTALL: absolute installation root; default: resolved home\.zevria.
-Installs only Zevria, not RTK, Git Bash, WSL, Rust, or provider configuration.
+Installs native Windows Zevria only. Install Git for Windows Bash and RTK
+separately for command tools, and configure model providers before use.
 '@
         return
     }

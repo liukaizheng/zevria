@@ -154,10 +154,11 @@ resume, recovery, and troubleshooting. Common locations are:
 | `<workspace>/.zevria/agent-runs/` and `plans/` | Ensemble evidence, worker journals and diagnostics, and generated plans. |
 | `~/.zevria/logs/zevria.log` | Operational logs, errors, paths, request or response identifiers, usage information, and other diagnostic details. The directory and log level are configurable under `[log]`; `RUST_LOG` overrides the configured level. |
 
-Here `~` means the home directory resolved by the runtime running Zevria. On
-native Windows, the workspace state directories above are under
-`<workspace>/.zevria/windows/` instead. WSL uses its Linux home, configuration,
-and state separately. External agents can create additional files elsewhere.
+Here `~` means the local home directory resolved by Zevria. `zevria.exe` runs
+natively on Windows and uses Git for Windows Bash for command tools. Its
+workspace state directories are under `<workspace>/.zevria/windows/`. It does
+not import or delete earlier Linux settings or history. External agents can
+create additional files elsewhere.
 Builds with the optional cache-diagnostics feature can also write local
 fingerprints and request/cache metadata beside session history.
 

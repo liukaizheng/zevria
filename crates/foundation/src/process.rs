@@ -104,3 +104,32 @@ pub async fn bounded_output(
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_output_enforces_limits_and_reaps_background_pipe_holders() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf partial; sleep 10"]);
+        let error = bounded_output(&mut command, Duration::from_millis(100), 1024)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf 123456789"]);
+        let error = bounded_output(&mut command, Duration::from_secs(2), 4)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("output limit"));
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 10 & printf foreground"]);
+        let output = bounded_output(&mut command, Duration::from_secs(2), 1024)
+            .await
+            .unwrap();
+        assert_eq!(output.stdout, b"foreground");
+    }
+}

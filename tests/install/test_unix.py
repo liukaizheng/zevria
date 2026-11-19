@@ -116,7 +116,7 @@ zevria_target''', expected=1)
         self.assertEqual(calls.count("latest"), 1)
         self.assertEqual(len(calls), 3)
         self.assertTrue(all("/download/v1.2.3/" in url for url in calls[1:]))
-        self.assertEqual((self.home / ".zevria/install-root").read_text(), str(self.root) + "\n")
+        self.assertFalse((self.home / ".zevria").exists())
         self.assertFalse((self.home / ".bashrc").exists())
 
     def test_prerelease_build_metadata_and_optional_v(self):
@@ -204,13 +204,36 @@ zevria_target''', expected=1)
             self.install(expected=1)
         self.assertFalse(self.root.exists())
 
-    def test_default_root_and_locator(self):
+    def test_default_linux_root_contains_only_the_binary_directory(self):
         self.env.pop("ZEVRIA_INSTALL")
         self.install(("--no-path-update",))
         self.assertTrue((self.home / ".zevria/bin/zevria").is_file())
-        self.assertEqual((self.home / ".zevria/install-root").read_text(), str(self.home / ".zevria") + "\n")
+        self.assertEqual([path.name for path in (self.home / ".zevria").iterdir()], ["bin"])
 
-    def test_macos_does_not_write_linux_locator(self):
+    def test_default_and_custom_linux_roots_ignore_existing_locator(self):
+        locator = self.home / ".zevria/install-root"
+        locator.parent.mkdir()
+        contents = b"untouched legacy data\x00\n"
+        for kind in ("file", "directory"):
+            if kind == "file":
+                sentinel = locator
+            else:
+                # A nonregular locator should not even be checked by the installer.
+                locator.mkdir()
+                sentinel = locator / "keep"
+            sentinel.write_bytes(contents)
+            for root in (self.root, None):
+                with self.subTest(kind=kind, root=root):
+                    if root is None:
+                        self.env.pop("ZEVRIA_INSTALL")
+                    else:
+                        self.env["ZEVRIA_INSTALL"] = str(root)
+                    self.install(("--no-path-update",))
+                    self.assertEqual(sentinel.read_bytes(), contents)
+            if kind == "file":
+                locator.unlink()
+
+    def test_macos_custom_root_leaves_default_root_absent(self):
         self.env["FIXTURE_ASSET"] = "zevria-v1.2.3-aarch64-apple-darwin.tar.gz"
         self.manifest()
         self.install(("--no-path-update",), hooks='zevria_target() { printf aarch64-apple-darwin; }')
@@ -232,32 +255,39 @@ zevria_target''', expected=1)
         self.install(expected=1)
         self.assertFalse((self.home / "zevria").exists())
 
-    def test_replacement_and_locator_failures_rollback(self):
+    def test_failed_executable_replacement_restores_previous_binary(self):
         self.install(("--no-path-update",))
-        old = (self.root / "bin/zevria").read_bytes()
-        old_locator = (self.home / ".zevria/install-root").read_bytes()
+        binary = self.root / "bin/zevria"
+        old = binary.read_bytes()
         self.archive("2.0.0")
-        for pattern in ("*/.zevria-install.*/new", "*/.install-root.*/new"):
-            hook = f'mv() {{ case $1 in {pattern}) return 1;; esac; command mv "$@"; }}'
-            self.install(("2.0.0", "--no-path-update"), hooks=hook, expected=1)
-            self.assertEqual((self.root / "bin/zevria").read_bytes(), old)
-            self.assertEqual((self.home / ".zevria/install-root").read_bytes(), old_locator)
+        result = self.install(("2.0.0", "--no-path-update"),
+                              hooks='mv() { case $1 in */.zevria-install.*/new) return 1;; esac; command mv "$@"; }',
+                              expected=1)
+        self.assertIn("Executable replacement failed", result.stderr)
+        self.assertEqual(binary.read_bytes(), old)
         self.assertFalse(list(self.root.glob("bin/.zevria-install.*")))
 
-    def test_first_install_locator_failure_leaves_no_executable(self):
-        self.install(hooks='mv() { case $1 in */.install-root.*/new) return 1;; esac; command mv "$@"; }', expected=1)
+    def test_first_install_failed_replacement_leaves_no_executable(self):
+        # Simulate a failure reported after the rename has already happened.
+        self.install(hooks='''mv() {
+command mv "$@" || return 1
+case $1 in */.zevria-install.*/new) return 1;; esac
+}''', expected=1)
         self.assertFalse((self.root / "bin/zevria").exists())
-        self.assertFalse((self.home / ".zevria/install-root").exists())
+        self.assertFalse(list(self.root.glob("bin/.zevria-install.*")))
 
-    def test_failed_recovery_retains_backups(self):
+    def test_failed_recovery_retains_backup(self):
         self.install(("--no-path-update",))
+        old = (self.root / "bin/zevria").read_bytes()
         self.archive("2.0.0")
         result = self.install(("2.0.0", "--no-path-update"), hooks='''mv() {
-case "$*" in *install-root.*/new*|*previous*) if [[ $1 == -f || $1 == */new ]]; then return 1; fi;; esac
+if [[ $1 == */.zevria-install.*/new || ( $1 == -f && $2 == */.zevria-install.*/previous ) ]]; then return 1; fi
 command mv "$@"
 }''', expected=1)
         self.assertIn("Recovery failed", result.stderr)
-        self.assertTrue(list(self.root.glob("bin/.zevria-install.*/previous")))
+        backups = list(self.root.glob("bin/.zevria-install.*/previous"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), old)
 
     def test_bash_profiles_login_precedence_and_deduplication(self):
         (self.home / ".profile").write_text("# preserve profile\n")

@@ -1,26 +1,4 @@
-//! Rejection and lease regressions after removing offline metadata initialization.
-use super::*;
-
-#[test]
-fn removed_session_recovery_command_is_rejected() {
-    for args in [
-        vec!["sessions"],
-        vec![
-            "sessions",
-            "recover-models",
-            "root",
-            "--build",
-            "test",
-            "model",
-            "--plan",
-            "test",
-            "model",
-        ],
-    ] {
-        let error = parse_args(args.into_iter().map(str::to_string)).unwrap_err();
-        assert!(error.to_string().contains("unknown"), "{error}");
-    }
-}
+//! Root lease regression around transcript replacement.
 
 #[test]
 fn transcript_replacement_does_not_release_root_lease() {

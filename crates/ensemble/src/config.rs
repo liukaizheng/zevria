@@ -226,10 +226,6 @@ impl EnsembleConfig {
         for (name, agent) in &mut self.agents {
             if selected.contains(name) && agent.is_builtin_zevria_launcher() {
                 agent.command = path.to_string();
-                #[cfg(windows)]
-                agent
-                    .args
-                    .extend(["--runtime".to_string(), "native".to_string()]);
             }
         }
         Ok(())

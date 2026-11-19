@@ -1,176 +1,67 @@
-# Windows runtime setup
+# Windows setup
 
-Initial acceptance targets are **Windows x86_64 MSVC and WSL 2**. The launcher,
-native fallback, and test lanes are implemented; a build or mocked probe is not
-proof of real Windows terminal/WSL acceptance. Use the checklist below before
-claiming a release is validated. WSL 1 and other Windows architectures are not
-part of the initial acceptance claim.
+`zevria.exe` always runs as a native Windows process. **Git for Windows Bash** is
+its only command-tool backend, whether you launch from PowerShell, cmd, Git Bash,
+or an ACP client. Zevria does not start WSL or translate paths into Linux paths.
+The packaged Windows target is **x86_64 MSVC**. Linux and macOS builds still run
+directly with their existing shell behavior.
 
-## Select the environment once
+Remove `--runtime` (including `--runtime native`) and `--wsl-distro` from older
+scripts and ACP configurations. Run `zevria` for the terminal UI or `zevria --acp`
+for ACP. Help, version, and offline operations like `skills list --json`,
+`theme`, and `clean` do not require Git Bash, RTK, or a configured model.
 
-| Invocation from Windows | Selected runtime |
-| --- | --- |
-| `zevria` or `zevria --runtime auto` | Ready default WSL distribution; otherwise silent native fallback |
-| `zevria --runtime wsl` | Require ready WSL; never fall back |
-| `zevria --runtime native` | Native; do not probe WSL |
-| `zevria --acp` (including `--ensemble-worker`) | Native by default |
-| `zevria --runtime wsl --acp` | WSL; the client must already understand Linux paths |
-| Direct Linux/macOS launch | Local process, without Windows selection |
+## Install Zevria
 
-`--wsl-distro NAME` chooses exactly that distribution to probe. It does not scan
-other distributions or change the user's default. In automatic mode, a missing
-or unready selected distribution silently falls back to native Windows;
-combine it with `--runtime wsl` to require that distribution and see detailed
-readiness errors instead. Invalid option syntax is always an error. With ACP, a
-distribution override requires `--runtime wsl`.
-`--runtime native --wsl-distro NAME` is invalid.
+Use Windows PowerShell 5.1 or PowerShell 7. Download and inspect the installer
+before running it, and substitute a published version for the example:
 
-Help, version, and the private machine-readable compatibility probe run before
-configuration/logging/terminal initialization. Offline management operations need
-no model/provider; native ones do not need Git Bash or RTK either.
+```powershell
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 -OutFile install.ps1
+Get-Content -LiteralPath ./install.ps1
+./install.ps1 -Version 0.0.1
+```
 
-Readiness requires more than `wsl.exe`: a usable selected distribution, an
-accessible workspace, a compatible Linux executable, and the dependencies for
-the requested operation. Probes use a trusted system `wsl.exe`, fixed bootstrap
-source, bounded output and deadlines, and positional arguments. They perform no
-installation or application configuration. The Linux bootstrap needs `/bin/sh`,
-`timeout`, `readlink`, `od`, `tr`, `head`, `wc`, `grep`, and (for Windows drive
-paths) `wslpath`. It never sources shell profiles.
+See [installer trust, source pinning, and PATH setup](releases.md#standalone-installers).
+Set an absolute `$env:ZEVRIA_INSTALL` for a custom executable root, or use
+`-NoPathUpdate` to opt out of user and process PATH changes. No elevation is
+required. A machine-PATH copy can still take priority in new terminals; verify
+with the printed absolute path and resolve the conflicting entry yourself.
 
-All automatic readiness failures are quiet, including missing distributions,
-missing or incompatible Linux companions, missing dependencies, and timeouts.
-Captured probe help/error output is not printed. Normal startup diagnostics,
-including the `zevria: runtime windows; configuration …; state …` line, and native
-Git Bash/RTK errors remain visible.
+## Install Git Bash and RTK
 
-**After handoff there is no native retry.** The Linux child's stdout, stderr,
-terminal handles and exit status belong to that invocation. First-run config,
-provider/network errors, and unsuccessful offline commands are not fallback
-signals. The launcher never shuts down a distribution or copies credentials.
-
-## WSL-first setup: two installations
-
-1. Install the Windows binary in PowerShell, using a **published pinned version**
-   (replace the example `0.0.1`). Inspect the downloaded script before running it:
-
-   ```powershell
-   Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 -OutFile install.ps1
-   Get-Content -LiteralPath ./install.ps1
-   ./install.ps1 -Version 0.0.1
-   ```
-
-   Quick latest-stable installation is `irm https://raw.githubusercontent.com/liukaizheng/zevria/main/install.ps1 | iex`.
-   The raw URL becomes available after the script reaches `main`. Review the
-   [installer trust, source-pinning and PATH details](releases.md#standalone-installers).
-   Set absolute `$env:ZEVRIA_INSTALL` for a custom Windows executable root, and
-   use `-NoPathUpdate` to opt out of user/process PATH changes. No elevation is
-   required. New terminals may still see a machine-PATH copy first; use the
-   printed absolute path and repair shadowing explicitly.
-
-2. Inspect WSL yourself (`wsl --list --verbose`). If it is not installed or has
-   no distribution, follow Microsoft's WSL installation instructions. Zevria
-   will not install a distribution, upgrade WSL, or change its default for you.
-3. Enter the desired **x64 GNU/glibc** distribution (`wsl`, or
-   `wsl --distribution NAME`). Install **the same binary version** there:
-
-   ```sh
-   curl -fsSL --proto '=https' --proto-redir '=https' -o install.sh https://raw.githubusercontent.com/liukaizheng/zevria/main/install.sh
-   less install.sh
-   bash install.sh 0.0.1
-   # Custom root alternative (recorded even when PATH changes are disabled):
-   # ZEVRIA_INSTALL="$HOME/Applications/Zevria" bash install.sh 0.0.1 --no-path-update
-   ```
-
-   Install Linux RTK separately using its upstream instructions. If you already
-   have Rust, `cargo install --git https://github.com/rtk-ai/rtk --locked` is one
-   option; the unrelated crates.io package named `rtk` is not the required tool.
-   The installer does not install dependencies or configure providers.
-
-   The launcher rejects Windows executables and shell wrappers as Linux Zevria
-   companions. Application version and launcher compatibility revision must
-   match. A discovery-only change does not bump that revision. **The install-root
-   discovery below requires a newly built Windows launcher containing this
-   change. Installing an older published binary does not retrofit its launcher.**
-4. Configure providers/models in the Linux runtime's home. You may run Linux
-   Zevria directly first to generate its setup templates. Windows credentials are
-   not imported. Re-run explicitly if first-run setup exits after a handoff.
-5. From a Windows terminal in your project, run `zevria --runtime wsl`. Once this
-   works, ordinary `zevria` may use automatic selection.
-
-Source-build alternative: use matching compatible checkouts and native Rust/build
-prerequisites in both environments, then `cargo install --path crates/zevria --locked`
-in each. No installer or launcher copies/upgrades the other runtime. If a locator
-from an earlier binary installation remains, repair/remove it before expecting
-Cargo discovery to win.
-
-### Linux install-root discovery and repair
-
-Every Linux installer run records its absolute root in the Linux home's
-`.zevria/install-root`, including default roots and `--no-path-update` installs.
-This file is bounded **data**, not shell source. A valid record selects precisely
-`<recorded-root>/bin/zevria`; that bin precedes Cargo and other fallbacks. The
-handoff stays bound to the exact executable selected by the successful probe.
-Windows `ZEVRIA_INSTALL` is never a Linux discovery input.
-
-Without a locator, search order is `~/.zevria/bin`, `~/.cargo/bin`, `~/.local/bin`,
-`/usr/local/bin`, `/usr/bin`, `/bin`, then inherited PATH. Custom roots do not
-require profile edits: WSL readiness and handoff never source Bash, zsh, or fish
-profiles or evaluate locator text.
-
-A malformed, unreadable, nonregular, linked/dangling or stale locator **fails WSL
-readiness**, rather than silently running another Linux Zevria. Automatic mode
-falls back silently to native Windows; explicit `--runtime wsl` reports the error.
-Repair inside the selected distribution by rerunning the matching Linux installer with
-the intended `ZEVRIA_INSTALL`. Or, after inspecting the record, remove only
-`~/.zevria/install-root` to deliberately restore fallback discovery. Do not delete
-the shared `.zevria` directory or credentials. An unavailable/non-ELF recorded
-executable also requires repair; a version mismatch requires matching Windows and
-Linux installations. These failures never trigger a native retry after handoff.
-
-Normal drive paths, canonical verbatim drive paths, and `\\wsl.localhost\NAME\...`
-(or `\\wsl$\NAME\...`) are recognized by the launcher. It deliberately translates
-the startup directory, `skills validate <path>`, and an explicit `ZEVRIA_CONFIG`.
-A WSL share for another distribution is rejected. General UNC/device paths and
-alternate data streams are not mapped. Arguments are not interpolated into shell
-source; spaces, Unicode, quotes, and metacharacters remain data.
-
-Windows HOME/SHELL/ZEVRIA_INSTALL are not forwarded as Linux defaults, including
-case-insensitive WSLENV entries with flags. Config and shell-injection overrides
-are filtered too. Other intentional WSLENV bridges remain the user's responsibility.
-
-## Native fallback: Git for Windows Bash and native RTK
-
-Install **Git for Windows**, not the legacy Windows/WSL Bash launcher. Install RTK
-with its documented Windows package or binary:
+Install **Git for Windows**, not Windows System32 Bash. Install native RTK with
+its Windows package or binary:
 
 ```powershell
 winget install rtk-ai.rtk
 ```
 
-Alternatively, use the upstream Windows MSVC release of `rtk.exe`, put it on your
-user PATH, and restart the launching terminal. The unrelated crates.io package
-named `rtk` is not the required tool. Zevria does not install these dependencies.
+Alternatively, put the upstream Windows MSVC `rtk.exe` on your user PATH and
+restart your terminal or editor. The unrelated crates.io package named `rtk` is
+not the required tool. Zevria and its installer do not install these dependencies.
 
 Discovery checks Git for Windows installation metadata, ordinary installation
-locations and PATH. An explicit executable override wins and fails clearly if
-invalid:
+locations, and PATH. An explicit executable override takes precedence and fails
+clearly if invalid:
 
 ```powershell
 $env:ZEVRIA_GIT_BASH = 'C:\Program Files\Git\bin\bash.exe'
-zevria --runtime native
+Set-Location -LiteralPath 'C:\Users\you\Project with spaces'
+zevria
 ```
 
-Starting from PowerShell, cmd, Windows Terminal or an ACP editor is supported by
-the selection contract; **model commands still use Bash**. Native command tools
-freeze one shell specification per process, shared by root, Explore and Build
-children. Bash is noninteractive (`--noprofile --norc -c`); BASH_ENV/ENV and shell
-option injection are removed. Zevria prepends Git's Unix utilities and Git binaries
-to each command child's PATH and retains the user's native development-tool PATH.
-It does not modify the machine's PATH. RTK readiness is checked in that actual
-command environment before model-driven command execution.
+Interactive and ACP startup validate Git Bash and RTK before loading model
+configuration. The check uses the actual command environment. Zevria freezes one
+shell specification per process, shared by the root and Explore and Build
+children. Bash is noninteractive (`--noprofile --norc -c`); `BASH_ENV`, `ENV`, and
+shell-option overrides are removed. Zevria prepends Git's Unix utilities and
+binaries to the command child's PATH and retains the user's native development
+tools without modifying the machine's PATH.
 
-Every call starts in its configured workspace; a prior `cd` does not persist.
-Use relative Bash paths wherever possible. For an absolute shell path:
+Each call starts in its configured workspace; a previous `cd` does not persist.
+Use relative Bash paths when possible. For an absolute shell path, convert it
+explicitly as needed:
 
 ```bash
 rtk proxy cygpath -u 'C:\Users\you\Project with spaces'
@@ -179,49 +70,48 @@ rtk sed -n '1,40p' README.md
 rtk git status
 ```
 
-Use native Windows paths for structured file tools. Command strings and arbitrary
-configuration contents are never rewritten. Git Bash's normal argument conversion
-for native development tools still applies; choose explicit `cygpath` conversion
-or per-command MSYS settings when a particular tool requires it.
+Use native Windows paths for structured file tools and ACP messages. Zevria does
+not rewrite command strings or arbitrary configuration contents. Git Bash's
+normal argument conversion for native tools still applies; use explicit `cygpath`
+conversion or per-command MSYS settings when a particular tool requires it.
 
-## Configuration, instructions and histories
+## Configuration, instructions, and history
 
-A valid absolute HOME override wins. Without one, native Windows uses USERPROFILE,
-then HOMEDRIVE/HOMEPATH. Configuration, logging, global guidance, themes, global
-skills, Claude handoff and Git Bash HOME use that same resolver. WSL uses its own
-Linux home. `ZEVRIA_CONFIG` remains intentional; its sibling `models.jsonc` is still
-the selected model catalog. Embedded executable paths, log directories and
-provider addresses must be valid **in the selected environment**. In particular,
-Windows and Linux localhost/provider reachability are not assumed equivalent.
+A valid absolute `HOME` override wins. Without one, Windows uses `USERPROFILE`,
+then `HOMEDRIVE`/`HOMEPATH`. Configuration, logging, global guidance, themes,
+global skills, Claude handoff, and Git Bash `HOME` use that same resolver.
+Configure providers in the Windows home. `ZEVRIA_CONFIG` can select a different
+configuration file and its sibling `models.jsonc`. Embedded executable paths,
+log directories, and provider addresses must be usable from Windows.
 
-| Input/state | Windows native | Linux/macOS/WSL |
+| Input or state | Windows | Linux/macOS |
 | --- | --- | --- |
-| Project guidance | `<workspace>/AGENTS.md` | same shared input |
-| Project skills | `<workspace>/.zevria/skills` | same shared input |
-| Runtime state root | `<workspace>/.zevria/windows` | `<workspace>/.zevria` |
-| State children | `sessions`, `subsessions`, `plans`, `agent-runs`, `ensemble-sessions` | same layout under its root |
+| Project guidance | `<workspace>/AGENTS.md` | Same shared input |
+| Project skills | `<workspace>/.zevria/skills` | Same shared input |
+| State root | `<workspace>/.zevria/windows/` | `<workspace>/.zevria/` |
+| State directories | `sessions`, `subsessions`, `plans`, `agent-runs`, `ensemble-sessions` | Same layout under its root |
 
-Continue/resume, ACP listing, leases, recovery and `clean` use only their runtime's
-state. There is no cross-runtime history import. `zevria --runtime native clean`
-does not purge WSL history; `zevria --runtime wsl clean` does not purge native
-history. Stop sessions/workers in the selected runtime before cleanup. Startup
-session diagnostics report runtime/distribution and effective config/state paths
-on stderr, never inside the provider's stable application prefix or ACP stdout.
+Continue, resume, ACP listing, leases, recovery, and `clean` use only the local
+platform's workspace state. Windows `zevria clean` leaves prior Linux history
+and shared project inputs untouched. No previous configuration or history is
+imported or migrated. Stop active sessions and workers before cleanup. Startup
+reports the platform and effective configuration and state paths on stderr,
+not in ACP stdout or the provider's stable application prefix.
 
 ### Protected-read boundaries
 
-Windows guidance, skill manifests/resources and artifact snapshots use owned
+Windows guidance, skill manifests/resources, and artifact snapshots use owned
 handles and component-relative `NtCreateFile` opens, not canonicalize-then-open.
 Startup and artifact paths retain lexical drive-prefix normalization so later
 opens can still reject a concurrently substituted reparse point; a prior path
-check is not permission to follow aliases. Identity, size/version and hard-link
-checks come from file handles. The backend
-accepts ordinary local drive paths and verbatim disk paths on NTFS/ReFS, and
-rejects reparse traversal (including junctions/aliases), network/mapped-network
-roots, device paths, streams, and ambiguous components. Unsupported filesystem
-arrangements fail explicitly; there is no unsafe read fallback. Unix contained
-alias behavior is unchanged. File versions detect observable changes, not every
-possible same-size/timestamp-restored concurrent rewrite.
+check is not permission to follow aliases. Identity, size/version, and hard-link
+checks come from file handles. The backend accepts ordinary local drive paths and
+verbatim disk paths on NTFS/ReFS, and rejects reparse traversal (including junctions
+and aliases), network and mapped-network roots, device paths, streams, and
+ambiguous components. Unsupported arrangements fail explicitly; there is no
+unsafe read fallback. Unix contained-alias behavior is unchanged. File versions
+detect observable changes, not every possible same-size/timestamp-restored
+concurrent rewrite.
 
 Settings and leases use no-follow handle opens and OS locking. Atomic replacement
 uses a same-directory staged file. Windows does not claim Unix directory-fsync
@@ -230,73 +120,47 @@ commands or ordinary structured editing tools.
 
 ## ACP and process lifetime
 
-Windows ACP defaults to native to preserve the client's Windows paths. Built-in
-native ensemble workers are explicitly pinned to `--runtime native`. Configured
-ACP agents run through a private native job helper, including `npx`/Node launch
-shims under Git Bash. The helper bypasses selection and preserves ACP stdio.
-Use a Bash-resolvable launcher such as `npx`, or an explicit native executable and
-argument vector; do not configure a PowerShell agent-command backend.
+Use `zevria --acp` with native Windows paths for session working directories and
+file operations. Built-in ensemble workers run the current Zevria executable
+with `--acp --ensemble-worker`. Configured ACP agents run through a private job
+helper that preserves stdio and exit status, including Node and `npx` launchers
+under Git Bash. Use a Bash-resolvable launcher or an explicit native executable
+and argument vector. See [ACP agent setup](acp-agent.md).
 
-Native command/ACP workloads start suspended, acquire a kill-on-close Job Object,
-and only then resume. Failed job setup terminates the suspended child. Shell
-leader status is independent of job lifetime; ordinary shell exit also kills
-background descendants before capture drains. Timeout, turn cancellation and
-worker-task abort preserve invocation-scoped cleanup. Unix process groups remain
-unchanged. A Windows job is **not** treated as Linux/WSL process-tree ownership.
-No cleanup shuts down a distribution.
-
-For explicit WSL ACP, the client must supply Linux paths for session cwd, file
-operations and other protocol paths. Only launch-time paths are mapped; Zevria
-does not rewrite ACP messages. See [ACP agent setup](acp-agent.md).
+Windows command and ACP workloads start suspended, acquire a kill-on-close Job
+Object, and only then resume. Failed job setup terminates the suspended child.
+Shell leader status is independent of job lifetime; ordinary shell exit also
+kills background descendants before capture drains. Timeout, turn cancellation,
+and worker-task abort preserve invocation-scoped cleanup. Unix process groups
+remain unchanged.
 
 ## Troubleshooting and acceptance
 
-- WSL not ready (missing distribution/companion/dependencies, incompatibility or
-  timeout): automatic mode falls back silently. Use `--runtime wsl` (with
-  `--wsl-distro NAME` if needed) for detailed readiness errors without fallback,
-  or `--runtime native` to skip probing.
-- Wrong companion: install the matching Linux version; do not point at zevria.exe.
-- Stale/custom root: repair the selected distro's `~/.zevria/install-root` as above;
-  do not assume a Cargo copy or profile PATH will override it.
-- Installer lock: close the running Windows Zevria and rerun; the installer does
-  not terminate user processes. Rerun with an older explicit version to roll back.
-- PATH refresh: source the printed Unix profile or open a new shell. PowerShell
-  child processes cannot update the parent's PATH; restart terminals from a
-  refreshed environment. Check the installed absolute path for shadowing.
-- Native Git Bash missing: install Git for Windows or correct ZEVRIA_GIT_BASH.
-- Native RTK missing: verify `rtk --version` in the command environment; restart
+- **Git Bash missing or invalid:** install Git for Windows or correct
+  `ZEVRIA_GIT_BASH`. Do not use `Windows\System32\bash.exe`.
+- **RTK missing:** verify `rtk --version` from Git Bash and restart the launcher
   after changing user PATH. Offline commands remain usable.
-- Skills/guidance unavailable: move protected inputs off unsupported network or
-  reparse-backed arrangements, or deliberately select WSL. Do not relax containment.
-- Missing history: check the startup runtime and state root before trying resume
-  or cleanup; configuration/provider errors never switch runtimes after handoff.
+- **Install or PATH issue:** close a running Zevria if the executable is locked.
+  Restart terminals if the installer ran in a child PowerShell process. Invoke
+  the printed absolute path to bypass a shadowing command. To roll back, rerun
+  the installer at the same root with an older, explicit version.
+- **Skills or guidance unavailable:** move protected inputs to a supported local
+  NTFS/ReFS path without junctions or other reparse points. Do not relax containment.
+- **Missing history or settings:** check the effective paths printed at startup.
+  Windows does not search or copy earlier Linux state or configuration.
 
-Automated lanes are configured to run locked workspace builds/tests on Windows,
-Linux and macOS. Mocked launcher tests are separate from the opt-in real WSL test. On an actual
-Windows machine, also record:
+Windows CI covers noninteractive regressions for Git Bash validation, native
+home and state isolation, protected inputs, and ACP/process cleanup. Automated
+checks do not exercise a live terminal or clipboard. On an actual Windows
+machine, record these end-to-end checks before claiming interactive acceptance:
 
-- [ ] native launch from a non-Bash terminal; cwd, inherited tools, RTK read/sed,
-  stdout/stderr/nonzero status, timeouts, cancellation and aborted workers;
-- [ ] default/explicit/stopped/absent WSL distribution; missing/incompatible Linux
-  companion; bounded readiness; no native retry after first-run/provider failure;
-- [ ] quiet automatic fallback (implicit, `--runtime auto`, and `--wsl-distro`):
-  no WSL warning or help/error dump, with the normal runtime/configuration/state
-  startup line preserved; explicit `--runtime wsl` retains detailed readiness
-  errors and never runs the native command;
-- [ ] matching installer-produced Windows/Linux versions, both default and custom
-  Linux roots, a competing Cargo copy, stale-locator repair, and no profile sourcing;
-- [ ] local workspace with spaces/Unicode and a WSL-hosted checkout;
-- [ ] terminal input/submission, paste and image clipboard, Ctrl-C and terminal
-  restoration, with unrelated WSL workloads left running;
-- [ ] native ACP and built-in/external worker shutdown, Node/npm descendants,
-  and explicit WSL-aware ACP using Linux paths;
-- [ ] independent continue/resume/list/clean, protected reads, reparse rejection,
-  hard-link aliases, resource pagination, atomic settings and cross-process leases.
-
-The opt-in WSL workflow requires an already-provisioned distro, the absolute
-installer-produced Windows executable path, and a matching **custom** Linux
-installation root already recorded by `install.sh`. Its ignored integration tests
-check the recorded root, matching versions, and real application handoff without
-installing or reconfiguring WSL. Also record default-root and interactive results
-using the checklist above. These real-machine items are not established by mocked
-tests or cross-compilation.
+- [ ] Launch from a non-Bash terminal in a local workspace with spaces and
+  Unicode; verify the working directory, native tools on PATH, and RTK
+  `read`/`sed`, stdout/stderr, and nonzero command status.
+- [ ] Verify terminal input and submission, text paste and image clipboard,
+  Ctrl+C cancellation, and terminal restoration after exit.
+- [ ] Open an ACP session using native paths; verify clean protocol stdout,
+  built-in and external worker shutdown, and Node/npm descendant cleanup after
+  exit, timeout, or cancellation.
+- [ ] Verify Windows continue/resume/list/clean isolation, protected reads and
+  reparse/hard-link rejection, resource pagination, atomic settings, and leases.

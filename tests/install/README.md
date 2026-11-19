@@ -3,7 +3,8 @@
 Run from the repository root:
 
 ```sh
-/bin/bash -n install.sh tests/install/transport.sh
+/bin/bash -n install.sh
+/bin/bash -n tests/install/transport.sh
 shellcheck install.sh tests/install/transport.sh
 INSTALL_TEST_BASH=/bin/bash python3 tests/install/test_unix.py
 python3 tests/install/test_release_contract.py
@@ -28,9 +29,10 @@ CI host; this is a test prerequisite, not an installer prerequisite.
 
 The Unix suite runs actual installer helpers, tar/checksum verification,
 transaction/rollback logic, and profile editing in disposable homes. It substitutes
-fixture transport and, for cross-platform Linux metadata scenarios, target
-selection. Target-detection helpers are independently tested with uname/libc/
-Rosetta fixtures. Actual zsh/fish profile execution runs when those shells are
+fixture transport and target selection; target detection is independently tested
+with uname/libc/Rosetta fixtures. Linux scenarios cover default and custom roots,
+unchanged legacy locators, executable replacement rollback, and retained backups
+after failed recovery. Actual zsh/fish profile execution runs when those shells are
 available; CI installs fish explicitly. The macOS lane uses system Bash 3.2.
 
 `transport.sh` and `transport.ps1` assert exact GitHub tag-specific download URLs,
@@ -46,18 +48,11 @@ python3 tests/install/smoke.py ARCHIVE ARCHIVE.sha256 VERSION
 ```
 
 This verifies the job's sidecar, serves it as `SHA256SUMS`, installs the **current
-job's archive**, and runs exact `--version`, `--help`, and native offline skills
-JSON smoke checks in temporary homes/workspaces. Windows runs both PowerShell
+job's archive**, and runs exact `--version`, `--help`, and `skills list --json`
+smoke checks in temporary homes/workspaces. Windows runs both PowerShell
 editions; no registry/profile writes occur. The release-contract fixture executes
 the workflow's actual assembly code with synthetic data to enforce exactly three
 archives plus `SHA256SUMS`; it is not native package or publication evidence.
 
-Linux launcher tests execute `launcher_linux.sh`, the actual shared POSIX source,
-against isolated homes and real Linux ELF fixture programs. macOS/Windows do not
-run those Linux-only tests. `launcher_mock_tests.rs` remains separate transport
-coverage. Real WSL acceptance stays in the opt-in provisioned-host workflow:
-provide an existing distro, an installer-produced Windows executable at the tested
-version, and a matching installed **custom** Linux root with its locator already
-published. The lane checks those inputs and real handoff; it never installs,
-upgrades, shuts down, or reconfigures WSL. Also complete the default-root and
-interactive checks in `docs/windows.md` before claiming full Windows/WSL acceptance.
+These installer checks are noninteractive. Use the [Windows checklist](../../docs/windows.md#troubleshooting-and-acceptance)
+for real terminal and clipboard validation.

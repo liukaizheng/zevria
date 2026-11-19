@@ -19,8 +19,8 @@ For example, put this in your startup workspace's `AGENTS.md`:
 
 Only two named files are considered, in this order:
 
-1. `~/.zevria/AGENTS.md`: global defaults, using the selected runtime's home
-   (valid absolute `HOME`, or the native Windows user profile).
+1. `~/.zevria/AGENTS.md`: global defaults, using the local home (a valid absolute
+   `HOME`, or the user profile on Windows when no such override is set).
 2. `<startup workspace>/AGENTS.md`: project guidance, overriding conflicting
    global guidance, independent of conversation history.
 
@@ -30,7 +30,7 @@ repository-root file. Project guidance is at the workspace root, not in
 `.zevria/skills`. `ZEVRIA_CONFIG` changes the ordinary configuration location and
 selects its sibling `models.jsonc`, not global guidance. If no valid home can be
 resolved, global guidance is unavailable with a startup diagnostic; project
-capture still proceeds. Windows and WSL global roots remain separate.
+capture still proceeds.
 
 For ACP, the workspace supplied for that particular session is used, not the
 agent process's working directory. Distinct ACP workspaces have independent

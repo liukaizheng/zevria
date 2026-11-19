@@ -5,7 +5,6 @@ use std::{
 
 fn cli(home: &Path, workspace: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_zevria"))
-        .args(["--runtime", "native"])
         .args(args)
         .env("HOME", home)
         .env_remove("ZEVRIA_CONFIG")
@@ -137,7 +136,6 @@ fn skills_config_path_does_not_change_roots_and_writes_preserve_unrelated_settin
     std::fs::write(&path, before).unwrap();
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_zevria"))
-            .args(["--runtime", "native"])
             .args(args)
             .env("HOME", home.path())
             .env("ZEVRIA_CONFIG", &path)
@@ -175,7 +173,6 @@ fn skills_cli_points_stale_provider_tables_to_models_jsonc() {
     let source = "[providers.private]\napi_key = 'do-not-print'\n";
     std::fs::write(&path, source).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_zevria"))
-        .args(["--runtime", "native"])
         .args(["skills", "list"])
         .env("HOME", home.path())
         .env("ZEVRIA_CONFIG", &path)
@@ -199,7 +196,6 @@ fn skills_cli_accepts_incomplete_offline_mode_assignments_without_a_catalog() {
     let path = home.path().join("offline.toml");
     std::fs::write(&path, "[modes]\nplan = { model = 'not-configured-yet' }\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_zevria"))
-        .args(["--runtime", "native"])
         .args(["skills", "list"])
         .env("HOME", home.path())
         .env("ZEVRIA_CONFIG", &path)

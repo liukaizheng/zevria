@@ -37,8 +37,7 @@ Install these prerequisites before running Zevria; its installer does not bundle
   frontends hide `rtk` routing when displaying commands, while copies and the
   model see the exact command.
 - **Windows only — [Git for Windows](https://gitforwindows.org/)** provides Git
-  Bash, the shell Zevria uses for native Windows commands. You do not need Git
-  Bash when running Zevria in WSL.
+  Bash, the only shell backend for Zevria command tools on Windows.
 
 **Terminal support:** Zevria's status markers (such as `○`, `◐`, `✓`, and `✗`)
 are colored Unicode characters, not special image icons. Any terminal with Unicode
@@ -92,13 +91,13 @@ ARM64/musl and Windows ARM64 are not packaged.
   cannot change its parent shell; Windows machine PATH may still shadow user PATH.
 - Reruns replace the selected root, including same-version repairs and downgrades.
   To roll back, rerun with the desired version. Other roots and provider files are
-  left alone. Linux installs also record the root for Windows-to-WSL discovery.
+  left alone.
 
 Configure a model endpoint implementing **OpenAI Responses** or native
 **Anthropic Messages** (not Chat Completions alone). The provider's `protocol`
 selects the wire adapter; protocols can coexist in one model catalog.
 The installer does not install the tools listed in [Preparation](#preparation),
-WSL, Rust, or provider credentials. See [command conventions](docs/instructions/command-conventions.md).
+install Rust, or set up provider credentials. See [command conventions](docs/instructions/command-conventions.md).
 
 **Source-build alternative:** with Rust/Cargo (Rust 2024 support), Git, network
 access, and native build tools, run this from a checkout:
@@ -119,35 +118,23 @@ The startup working directory determines the workspace, project guidance, skills
 and session storage. Starting in a repository subdirectory does not automatically
 select the Git root.
 
-### Windows: WSL first, Git Bash fallback
+### Windows: native Zevria with Git Bash
 
-On Windows, `zevria.exe` prefers a ready WSL installation containing a compatible
-**Linux Zevria** and the tools required by the operation. It hands off the entire
-application, not individual commands. Otherwise it silently falls back to native
-Windows with **Git for Windows Bash**, without a WSL warning or captured probe
-help/error output. Launching from PowerShell is fine; PowerShell is not the
-agent-command backend.
+`zevria.exe` always runs as a native Windows process. You can launch it from
+PowerShell, cmd, Git Bash, or an ACP client; command tools always run in
+noninteractive **Git for Windows Bash**, not the parent shell. Install Git for
+Windows and native RTK before interactive or ACP use. Help, version, and the
+`skills`, `theme`, and `clean` commands can run without Bash, RTK, or model setup.
 
-Use `--runtime native` to skip WSL probing, `--runtime wsl` to require WSL and see
-detailed readiness errors, and `--wsl-distro <name>` to select a distribution
-without changing the default. Automatic mode also falls back silently when that
-selected distribution is missing or unready. Normal runtime/configuration/state
-startup diagnostics and native Git Bash/RTK errors remain visible.
-Windows `--acp` defaults to native. Native history lives under `.zevria/windows/`;
-WSL history and global configuration remain separate. Nothing is installed,
-upgraded, copied, or migrated by the launcher, and an invocation is **never
-retried natively after handoff**, even if Linux first-run configuration fails.
+Remove the retired `--runtime` (including `--runtime native`) and `--wsl-distro`
+flags from existing scripts and ACP configurations. Use `zevria` or
+`zevria --acp` directly. ACP uses native Windows paths, and workspace history is
+stored under `.zevria/windows/`. Configure providers in your Windows home; no
+existing Linux configuration or history is copied or deleted. Linux and macOS
+builds run directly with their existing shell behavior.
 
-Use matching pinned binary versions for the Windows and Linux installers. A new
-Windows launcher discovers the Linux installer's `.zevria/install-root` record,
-including custom roots, without sourcing profiles; a stale record must be repaired.
-This discovery requires a Windows binary built with the change—installing an older
-published version does not retrofit its launcher.
-
-See [Windows setup and acceptance checklist](docs/windows.md) for the two-install
-setup, native RTK/Git Bash, supported filesystem boundaries, ACP, and validation
-limitations. Initial acceptance targets Windows x86_64 MSVC and WSL 2; other
-architectures and WSL 1 are not claimed.
+See the [Windows setup and acceptance checklist](docs/windows.md) for Git Bash
+and RTK setup, supported filesystems, and ACP and terminal checks.
 
 ### 2. Configure a provider and model roles
 

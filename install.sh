@@ -9,8 +9,8 @@ zevria_help() {
 Usage: install.sh [VERSION] [--no-path-update] [--help]
 Install latest stable, or a SemVer version (optional v prefix).
 ZEVRIA_INSTALL must be absolute; default: $HOME/.zevria, executable: bin/zevria.
---no-path-update skips shell changes, not Linux install-root metadata.
-Installs only Zevria, not RTK, Git Bash, WSL, Rust, or provider configuration.
+--no-path-update skips shell profile changes.
+Installs only Zevria, not RTK, Rust, or provider configuration.
 HELP
 }
 zevria_version() {
@@ -120,12 +120,9 @@ zevria_rollback() {
         if [[ -f $bin_stage/previous ]]; then mv -f "$bin_stage/previous" "$bin/zevria" || failed=1
         else rm -f "$bin/zevria" || failed=1; fi
     elif [[ -f $bin_stage/previous ]]; then mv -f "$bin_stage/previous" "$bin/zevria" || failed=1; fi
-    if [[ -n $locator_stage && -f $locator_stage/previous ]]; then
-        mv -f "$locator_stage/previous" "$locator" || failed=1
-    elif [[ $locator_committed == 1 ]]; then rm -f "$locator" || failed=1; fi
     if [[ $failed == 1 ]]; then
         keep_backups=1
-        zevria_warn "Recovery failed. Preserve and restore backups in $bin_stage and $locator_stage before rerunning."
+        zevria_warn "Recovery failed. Preserve and restore backups in $bin_stage before rerunning."
     fi
 }
 zevria_cleanup() {
@@ -136,7 +133,6 @@ zevria_cleanup() {
     [[ -z $stage ]] || rm -rf "$stage"
     if [[ $keep_backups == 0 ]]; then
         [[ -z $bin_stage ]] || rm -rf "$bin_stage"
-        [[ -z $locator_stage ]] || rm -rf "$locator_stage"
     fi
     exit "$status"
 }
@@ -147,22 +143,10 @@ zevria_commit() {
     bin_stage=$(mktemp -d "$bin/.zevria-install.XXXXXX") || zevria_die 'Cannot stage on destination filesystem.'
     cp "$stage/extracted/zevria" "$bin_stage/new" || zevria_die 'Cannot stage executable.'
     chmod 755 "$bin_stage/new" || zevria_die 'Cannot set executable permissions.'
-    if [[ $target == x86_64-unknown-linux-gnu ]]; then
-        zevria_directory "$home/.zevria"
-        locator=$home/.zevria/install-root
-        zevria_file_destination "$locator"
-        locator_stage=$(mktemp -d "$home/.zevria/.install-root.XXXXXX") || zevria_die 'Cannot stage Linux discovery metadata.'
-        printf '%s\n' "$root" > "$locator_stage/new" || zevria_die 'Cannot write Linux discovery metadata.'
-    fi
     transaction=1
     if [[ -e $bin/zevria ]]; then mv "$bin/zevria" "$bin_stage/previous" || zevria_die 'Cannot retain previous executable.'; fi
     binary_committed=1
     mv "$bin_stage/new" "$bin/zevria" || zevria_die 'Executable replacement failed; restoring previous installation.'
-    if [[ -n $locator_stage ]]; then
-        if [[ -e $locator ]]; then mv "$locator" "$locator_stage/previous" || zevria_die 'Cannot retain previous locator; rolling back.'; fi
-        locator_committed=1
-        mv "$locator_stage/new" "$locator" || zevria_die 'Cannot publish Linux locator; rolling back.'
-    fi
     transaction=0
 }
 zevria_shell_block() {
@@ -264,7 +248,7 @@ zevria_main() (
     # Subshell-scoped, not function-local: Bash unwinds locals before EXIT traps.
     version=latest version_seen=0 no_path=0 help=0
     target='' home='' root='' bin=''
-    stage='' bin_stage='' locator_stage='' locator='' transaction=0 binary_committed=0 locator_committed=0 keep_backups=0
+    stage='' bin_stage='' transaction=0 binary_committed=0 keep_backups=0
     for arg in "$@"; do
         case $arg in
             --help) [[ $help == 0 ]] || zevria_die 'Duplicate --help.'; help=1 ;;
@@ -286,7 +270,7 @@ zevria_main() (
     # Normalize dot segments and existing parent symlinks without evaluating text.
     # The selected root itself and bin must not be links (checked at commit).
     [[ $root != */../* && $root != */.. && $root != */./* && $root != */. ]] || zevria_die 'Use a normalized installation root without . or .. components.'
-    [[ ${#root} -le 4095 ]] || zevria_die 'Installation root is too long for bounded Linux discovery metadata.'
+    [[ ${#root} -le 4095 ]] || zevria_die 'Installation root is too long.'
     bin=${root%/}/bin
     for arg in curl tar mktemp chmod cp mv rm mkdir dirname readlink awk cmp cat wc tr; do
         command -v "$arg" >/dev/null 2>&1 || zevria_die "Required utility missing: $arg"
@@ -295,10 +279,6 @@ zevria_main() (
     zevria_check_directory "$root"
     zevria_check_directory "$bin"
     zevria_file_destination "$bin/zevria"
-    if [[ $target == x86_64-unknown-linux-gnu ]]; then
-        zevria_check_directory "$home/.zevria"
-        zevria_file_destination "$home/.zevria/install-root"
-    fi
     if [[ $version == latest ]]; then
         url=$(zevria_latest) || zevria_die 'Cannot resolve latest stable release (network failure or no published release).'
         case $url in https://github.com/liukaizheng/zevria/releases/tag/v*) tag=${url#https://github.com/liukaizheng/zevria/releases/tag/};; *) zevria_die 'Unexpected latest-release redirect identity.';; esac

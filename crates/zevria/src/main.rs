@@ -4,7 +4,7 @@
 #[cfg(test)]
 use zevria_ensemble as ensemble;
 use zevria_host::{acp_host, clean, config, runtime, skills, theme_store};
-mod launcher;
+mod cli;
 #[cfg(test)]
 mod session_model_tests;
 mod skills_cli;
@@ -25,21 +25,6 @@ use zevria_tui::{App, SessionViews, UiContext, UiOutcome, run_ui};
 use zevria_tui_widgets::render_startup_frame;
 
 use crate::config::Config;
-
-/// Command-line options stay hand-rolled because the public surface is small.
-#[derive(Debug, Default, PartialEq)]
-struct CliArgs {
-    /// Resume the workspace's most recent session instead of starting fresh.
-    continue_session: bool,
-    /// Serve ACP V1 over newline-delimited stdio without initializing a terminal.
-    acp: bool,
-    /// Isolated read-only ACP analysis worker, never an interactive root.
-    ensemble_worker: bool,
-    /// Purge the workspace's selected storage directories offline, without a prompt.
-    clean: bool,
-    skills: Option<skills_cli::SkillsCli>,
-    theme: Option<theme_cli::ThemeCli>,
-}
 
 /// Scoped Kitty keyboard-protocol activation.
 ///
@@ -189,58 +174,15 @@ impl Drop for AlternateScrollGuard {
     }
 }
 
-fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<CliArgs> {
-    let usage = "usage: zevria [--continue | -c] | zevria --acp [--ensemble-worker] | zevria skills <command> | zevria theme <command> | zevria clean";
-    let args: Vec<_> = args.collect();
-    if args.first().is_some_and(|arg| arg == "clean") {
-        anyhow::ensure!(
-            args.len() == 1,
-            "clean accepts no arguments and cannot be combined with other startup modes; {usage}"
-        );
-        return Ok(CliArgs {
-            clean: true,
-            ..CliArgs::default()
-        });
-    }
-    if args.first().is_some_and(|arg| arg == "skills") {
-        return Ok(CliArgs {
-            skills: Some(skills_cli::SkillsCli::parse(&args[1..])?),
-            ..CliArgs::default()
-        });
-    }
-    if args.first().is_some_and(|arg| arg == "theme") {
-        return Ok(CliArgs {
-            theme: Some(theme_cli::ThemeCli::parse(&args[1..])?),
-            ..CliArgs::default()
-        });
-    }
-    let mut parsed = CliArgs::default();
-    for arg in args {
-        match arg.as_str() {
-            "--continue" | "-c" => parsed.continue_session = true,
-            "--acp" => parsed.acp = true,
-            "--ensemble-worker" => parsed.ensemble_worker = true,
-            _ => anyhow::bail!("unknown argument {arg:?}; {usage}"),
-        }
-    }
-    if parsed.ensemble_worker && !parsed.acp {
-        anyhow::bail!("--ensemble-worker requires --acp");
-    }
-    if parsed.acp && parsed.continue_session {
-        anyhow::bail!("--acp cannot be combined with --continue or -c");
-    }
-    Ok(parsed)
-}
-
 #[cfg(test)]
 #[path = "sessions_cli_tests.rs"]
 mod sessions_cli_tests;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = match launcher::dispatch(std::env::args().skip(1).collect()).await? {
-        launcher::Launch::Local(args) => parse_args(args.into_iter())?,
-        launcher::Launch::Exit(code) => std::process::exit(code),
+    let args = match cli::startup(std::env::args().skip(1).collect()).await? {
+        cli::Startup::Run(args) => args,
+        cli::Startup::Exit(code) => std::process::exit(code),
     };
     if let Some(command) = args.theme {
         return command.run();
@@ -253,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(command) = args.skills {
         return command.run(&workspace);
     }
-    launcher::diagnostics(&workspace)?;
+    cli::diagnostics(&workspace)?;
     zevria_foundation::shell::prepare_native().await?;
     let app_config = Config::load()?;
     let _log_guard = logging::init(app_config.log())?;
@@ -491,113 +433,6 @@ mod tests {
         crossterm::Command::write_ansi(&DisableAlternateScroll, &mut disable)
             .expect("alternate-scroll disable should serialize");
         assert_eq!(disable.as_bytes(), b"\x1b[?1007l");
-    }
-
-    #[test]
-    fn parse_args_accepts_the_continue_flags() {
-        assert_eq!(
-            parse_args(std::iter::empty::<String>()).expect("no arguments should parse"),
-            CliArgs {
-                continue_session: false,
-                acp: false,
-                ensemble_worker: false,
-                clean: false,
-                skills: None,
-                theme: None,
-            }
-        );
-        for flag in ["--continue", "-c"] {
-            let args = parse_args([flag.to_string()].into_iter())
-                .unwrap_or_else(|_| panic!("{flag} should parse"));
-            assert!(args.continue_session);
-            assert!(!args.acp);
-        }
-    }
-
-    #[test]
-    fn parse_args_accepts_only_bare_clean() {
-        assert_eq!(
-            parse_args(["clean".to_string()].into_iter()).unwrap(),
-            CliArgs {
-                clean: true,
-                ..CliArgs::default()
-            }
-        );
-        for other in [
-            "extra",
-            "clean",
-            "skills",
-            "--continue",
-            "-c",
-            "--acp",
-            "--ensemble-worker",
-        ] {
-            for args in [["clean", other], [other, "clean"]] {
-                let error = parse_args(args.into_iter().map(str::to_string)).unwrap_err();
-                assert!(error.to_string().contains("usage"), "{args:?}: {error}");
-            }
-        }
-        for args in [
-            vec!["clean", "skills", "list"],
-            vec!["skills", "list", "clean"],
-            vec!["clean", "--acp", "--ensemble-worker"],
-            vec!["--acp", "clean", "--ensemble-worker"],
-            vec!["--acp", "--ensemble-worker", "clean"],
-        ] {
-            assert!(parse_args(args.into_iter().map(str::to_string)).is_err());
-        }
-    }
-
-    #[test]
-    fn parse_args_accepts_acp_and_rejects_continue_combination() {
-        let args = parse_args(["--acp".to_string()].into_iter()).expect("--acp should parse");
-        assert!(args.acp);
-        assert!(!args.continue_session);
-
-        for continue_flag in ["--continue", "-c"] {
-            let error = parse_args(["--acp".to_string(), continue_flag.to_string()].into_iter())
-                .expect_err("ACP and continue must be mutually exclusive");
-            assert!(error.to_string().contains("cannot be combined"));
-        }
-    }
-
-    #[test]
-    fn worker_flag_requires_acp_and_rejects_other_startup_modes() {
-        for flags in [
-            ["--acp", "--ensemble-worker"],
-            ["--ensemble-worker", "--acp"],
-        ] {
-            let parsed = parse_args(flags.into_iter().map(str::to_string)).unwrap();
-            assert!(parsed.acp && parsed.ensemble_worker);
-        }
-        for flags in [
-            vec!["--ensemble-worker"],
-            vec!["--ensemble-worker", "--continue"],
-            vec!["--acp", "--ensemble-worker", "-c"],
-            vec!["skills", "--ensemble-worker"],
-            vec!["sessions", "--ensemble-worker"],
-        ] {
-            assert!(parse_args(flags.into_iter().map(str::to_string)).is_err());
-        }
-    }
-
-    #[test]
-    fn parse_args_rejects_unknown_arguments() {
-        let error = parse_args(["--bogus".to_string()].into_iter())
-            .expect_err("unknown arguments should fail");
-        let message = error.to_string();
-        assert!(message.contains("--bogus"));
-        assert!(message.contains("usage"));
-        for mode in [
-            "--continue",
-            "-c",
-            "--acp",
-            "--ensemble-worker",
-            "skills",
-            "clean",
-        ] {
-            assert!(message.contains(mode), "{message}");
-        }
     }
 
     #[test]
