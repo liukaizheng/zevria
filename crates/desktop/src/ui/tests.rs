@@ -20,7 +20,8 @@ use gpui_kit::{
 };
 use rig_core::message::Message;
 use zevria_foundation::{
-    QuestionPrompt, QuestionPromptKind, QuestionRequest, QuestionRequestId, SessionMode, TurnId,
+    QuestionAnswer, QuestionOption, QuestionPrompt, QuestionPromptKind, QuestionRequest,
+    QuestionRequestId, QuestionResponse, SessionMode, TurnId,
 };
 use zevria_session_api::{ControlCommand, SessionCommand, SessionEvent as E, TurnCommand};
 use zevria_workflow::{PlanArtifact, PlanDecision, PlanId, PlanVersion, PlanWorkflowState};
@@ -661,6 +662,7 @@ fn question_dialog_emits_answer_question(cx: &mut TestAppContext) {
         E::QuestionAsked {
             turn_id,
             request: QuestionRequest {
+                allow_choice_notes: false,
                 id: request_id.clone(),
                 source_label: None,
                 dismissible: true,
@@ -695,6 +697,215 @@ fn question_dialog_emits_answer_question(cx: &mut TestAppContext) {
         matches!(receiver.try_recv().unwrap(),SessionCommand::Control(ControlCommand::AnswerQuestion{request_id:id,..})if id==request_id)
     );
 }
+#[gpui_kit::test]
+fn native_choice_note_editor_keeps_drafts_and_sends_the_chosen_note(cx: &mut TestAppContext) {
+    use gpui_kit::Focusable as _;
+    use gpui_kit::component::input::InputEvent;
+
+    let (window, view, controller, mut receiver) = setup(cx);
+    let turn_id = TurnId::new(9);
+    event(
+        &controller,
+        E::TurnStarted {
+            turn_id,
+            mode: SessionMode::Plan,
+            message: Message::user("ask"),
+        },
+        cx,
+    );
+    let request_id = QuestionRequestId::new("native-note");
+    let mut request = QuestionRequest {
+        allow_choice_notes: true,
+        id: request_id.clone(),
+        source_label: None,
+        dismissible: true,
+        questions: vec![QuestionPrompt {
+            id: "scope".into(),
+            header: "Scope".into(),
+            question: "Which scope?".into(),
+            kind: QuestionPromptKind::SingleSelect { allow_other: true },
+            options: vec![
+                QuestionOption {
+                    label: "Focused (Recommended)".into(),
+                    description: "Keep it narrow".into(),
+                },
+                QuestionOption {
+                    label: "Broad".into(),
+                    description: "Include adjacent work".into(),
+                },
+            ],
+            required: true,
+            default: None,
+        }],
+    };
+    event(
+        &controller,
+        E::QuestionAsked {
+            turn_id,
+            request: request.clone(),
+        },
+        cx,
+    );
+    let note = ("question-note", 0usize);
+    let focused = ("question-option", 0usize);
+    let broad = ("question-option", 1usize);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(note).is_none());
+        window.click(focused, cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).question_note_editor.is_none());
+        window.click(note, cx);
+        window.render_frame(cx);
+        let editor = view.read(cx).question_note_editor.as_ref().unwrap();
+        assert!(editor.input.focus_handle(cx).is_focused(window));
+        window.input("Only for the first release", cx);
+        window.press("enter", cx);
+        window.input("Revisit later", cx);
+    })
+    .unwrap();
+    let original = view.read_with(cx, |view, _| {
+        view.question_note_editor.as_ref().unwrap().input.clone()
+    });
+    assert!(
+        receiver.try_recv().is_err(),
+        "Enter in the note does not submit the form"
+    );
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(broad, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.question_note_editor.is_none()));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(note, cx);
+        window.render_frame(cx);
+        window.input("Do not send this draft", cx);
+    })
+    .unwrap();
+    assert_eq!(
+        controller
+            .read_with(cx, |controller, _| {
+                controller
+                    .model
+                    .question
+                    .as_ref()
+                    .unwrap()
+                    .choice_note_draft(0, 1)
+                    .map(str::to_owned)
+            })
+            .as_deref(),
+        Some("Do not send this draft")
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(focused, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.question_note_editor.is_none()));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(note, cx);
+    })
+    .unwrap();
+    const NOTE: &str = "Only for the first release\nRevisit later";
+    let reopened = view.read_with(cx, |view, cx| {
+        let editor = view.question_note_editor.as_ref().unwrap();
+        assert_eq!(editor.input.read(cx).value().as_ref(), NOTE);
+        editor.input.clone()
+    });
+    assert_ne!(original.entity_id(), reopened.entity_id());
+    // Even a late event from the first editor for the same option must not overwrite the draft.
+    cx.update_window(window.into(), |_, window, cx| {
+        original.update(cx, |input, cx| {
+            input.set_value("stale edit", window, cx);
+            cx.emit(InputEvent::Change);
+        });
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("answer-question", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let SessionCommand::Control(ControlCommand::AnswerQuestion {
+        request_id: actual_id,
+        response,
+    }) = receiver.try_recv().unwrap()
+    else {
+        panic!("expected AnswerQuestion");
+    };
+    assert_eq!(actual_id, request_id);
+    assert_eq!(
+        response,
+        QuestionResponse::Answered {
+            answers: vec![QuestionAnswer {
+                id: "scope".into(),
+                answer: Some("Focused (Recommended)".to_string().into()),
+                note: Some(NOTE.into()),
+            }]
+        }
+    );
+    // Pending submission freezes the draft, even if an input change was already queued.
+    cx.update_window(window.into(), |_, window, cx| {
+        reopened.update(cx, |input, cx| {
+            input.set_value("late change", window, cx);
+            cx.emit(InputEvent::Change);
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    controller.read_with(cx, |controller, _| {
+        let form = controller.model.question.as_ref().unwrap();
+        assert!(form.pending);
+        assert_eq!(form.choice_note_draft(0, 0), Some(NOTE));
+    });
+    event(
+        &controller,
+        E::QuestionClosed {
+            turn_id,
+            request_id: QuestionRequestId::new("stale"),
+        },
+        cx,
+    );
+    assert!(view.read_with(cx, |v, _| v.question_note_editor.is_some()));
+    event(
+        &controller,
+        E::QuestionClosed {
+            turn_id,
+            request_id,
+        },
+        cx,
+    );
+    assert!(view.read_with(cx, |v, _| v.question_note_editor.is_none()));
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(view.read(cx).composer.focus_handle(cx).is_focused(window));
+    })
+    .unwrap();
+    request.id = QuestionRequestId::new("new-question");
+    request.questions[0].default = Some("Focused (Recommended)".to_string().into());
+    event(&controller, E::QuestionAsked { turn_id, request }, cx);
+    reopened.update(cx, |_, cx| cx.emit(InputEvent::Change));
+    assert_eq!(
+        controller.read_with(cx, |controller, _| {
+            controller
+                .model
+                .question
+                .as_ref()
+                .unwrap()
+                .choice_note_draft(0, 0)
+                .map(str::to_owned)
+        }),
+        Some(String::new())
+    );
+    assert!(receiver.try_recv().is_err());
+}
+
 #[gpui_kit::test]
 fn rejected_submit_preserves_the_draft_and_unlocks(cx: &mut TestAppContext) {
     let (window, view, controller, mut receiver) = setup(cx);
@@ -1305,6 +1516,7 @@ fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
         E::QuestionAsked {
             turn_id,
             request: QuestionRequest {
+                allow_choice_notes: false,
                 id: QuestionRequestId::new("choice"),
                 source_label: Some("Explore".into()),
                 dismissible: true,
@@ -1340,6 +1552,11 @@ fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
         vec![0]
     );
     cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("question-note", 0usize)).is_none(),
+            "worker forms must not offer notes"
+        );
         window.click(("question-other", 0usize), cx)
     })
     .unwrap();

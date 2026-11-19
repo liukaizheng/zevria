@@ -3606,6 +3606,7 @@ fn question_modal_cursor_edits_are_correlated_and_isolated_from_main_composer() 
                 request_id: QuestionRequestId::new("cursor-question"),
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
+                        note: None,
                         id: "scope".into(),
                         answer: Some(if multi {
                             QuestionAnswerValue::Strings(vec!["abc".into()])
@@ -3622,6 +3623,52 @@ fn question_modal_cursor_edits_are_correlated_and_isolated_from_main_composer() 
             !rendered_views_text(&mut views, 100, 28).contains("How broad should this change be?")
         );
     }
+}
+
+#[test]
+fn choice_note_captures_printable_keys_and_paste_without_touching_the_composer() {
+    let mut root = App::new();
+    start_empty_turn(&mut root, TEST_TURN_ID, SessionMode::Plan);
+    root.set_focus_for_test(crate::app::FocusState::Insert);
+    root.set_input_for_test("draft for later", 5);
+    let mut views = test_session_views(root);
+    let mut request = question_request("native-note");
+    request.allow_choice_notes = true;
+    request.questions.truncate(1);
+    views.apply(SessionEvent::QuestionAsked {
+        turn_id: TEST_TURN_ID,
+        request,
+    });
+
+    assert!(rendered_views_text(&mut views, 100, 28).contains("n add note"));
+    for event in [
+        key(KeyCode::Char('n')),
+        key(KeyCode::Char('q')),
+        key(KeyCode::Char('?')),
+        key(KeyCode::Char(' ')),
+        Event::Paste("Only for the first release".into()),
+        key(KeyCode::Esc),
+    ] {
+        assert_eq!(views.handle_event(event), None);
+        assert_eq!(views.root().input(), "draft for later");
+        assert_eq!(views.root().input_cursor(), 5);
+    }
+    assert!(rendered_views_text(&mut views, 100, 28).contains("n edit note"));
+    assert_eq!(
+        views.handle_event(key(KeyCode::Enter)),
+        Some(UiAction::AnswerQuestion {
+            request_id: QuestionRequestId::new("native-note"),
+            response: QuestionResponse::Answered {
+                answers: vec![QuestionAnswer {
+                    id: "scope".into(),
+                    answer: Some("Focused".to_string().into()),
+                    note: Some("q? Only for the first release".into()),
+                }]
+            },
+        })
+    );
+    assert_eq!(views.root().input(), "draft for later");
+    assert_eq!(views.root().input_cursor(), 5);
 }
 
 #[test]
@@ -3671,10 +3718,12 @@ fn question_modal_is_global_collects_the_batch_and_dismisses_with_escape() {
             response: QuestionResponse::Answered {
                 answers: vec![
                     QuestionAnswer {
+                        note: None,
                         id: "scope".to_string(),
                         answer: Some(QuestionAnswerValue::String("Focused".to_string())),
                     },
                     QuestionAnswer {
+                        note: None,
                         id: "tests".to_string(),
                         answer: Some(QuestionAnswerValue::String("Full".to_string())),
                     },
@@ -3706,6 +3755,7 @@ fn question_modal_codex_three_questions_use_inline_other_without_note_steps() {
     // Host-normalized Codex ACP 1.13.1 shape: six wire properties have already
     // become three required selects. The TUI never sees note IDs or wire tokens.
     let request = QuestionRequest {
+        allow_choice_notes: false,
         id: QuestionRequestId::new("codex-three"),
         questions: (0..3)
             .map(|index| QuestionPrompt {
@@ -3780,6 +3830,7 @@ fn question_modal_codex_three_questions_use_inline_other_without_note_steps() {
                                 .into_iter()
                                 .enumerate()
                                 .map(|(index, answer)| QuestionAnswer {
+                                    note: None,
                                     id: format!("question_{index}"),
                                     answer: Some(QuestionAnswerValue::String(answer.into())),
                                 })

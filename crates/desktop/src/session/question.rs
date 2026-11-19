@@ -1,4 +1,6 @@
 //! Renderer-free question form state and wire-value validation.
+use std::collections::BTreeMap;
+
 use zevria_foundation::{
     QuestionAnswer, QuestionAnswerValue, QuestionPromptKind, QuestionRequest, QuestionResponse,
     TurnId,
@@ -9,6 +11,7 @@ pub struct AnswerDraft {
     pub selected: Vec<usize>,
     pub other: bool,
     pub skip: bool,
+    choice_notes: BTreeMap<usize, String>,
 }
 #[derive(Debug)]
 pub struct QuestionForm {
@@ -57,17 +60,43 @@ impl QuestionForm {
             error: None,
         }
     }
+    /// A draft exists only for the currently selected, note-capable radio path.
+    /// An empty string denotes an eligible option with no note yet.
+    pub fn choice_note_draft(&self, prompt: usize, option: usize) -> Option<&str> {
+        let draft = self.answers.get(prompt)?;
+        if self.request.allows_choice_note(prompt, option)
+            && !draft.other
+            && !draft.skip
+            && draft.selected.as_slice() == [option]
+        {
+            Some(draft.choice_notes.get(&option).map_or("", String::as_str))
+        } else {
+            None
+        }
+    }
+
+    pub fn set_choice_note_draft(&mut self, prompt: usize, option: usize, value: String) -> bool {
+        if self.pending || self.choice_note_draft(prompt, option).is_none() {
+            return false;
+        }
+        self.answers[prompt].choice_notes.insert(option, value);
+        self.error = None;
+        true
+    }
+
     pub fn response(&self) -> anyhow::Result<QuestionResponse> {
         let mut answers = Vec::new();
-        for (q, draft) in self.request.questions.iter().zip(&self.answers) {
+        for (index, (q, draft)) in self.request.questions.iter().zip(&self.answers).enumerate() {
             if draft.skip {
                 anyhow::ensure!(!q.required, "{} is required", q.header);
                 answers.push(QuestionAnswer {
                     id: q.id.clone(),
                     answer: None,
+                    note: None,
                 });
                 continue;
             }
+            let mut note = None;
             let value = match &q.kind {
                 QuestionPromptKind::Text {
                     min_length,
@@ -79,6 +108,7 @@ impl QuestionForm {
                         answers.push(QuestionAnswer {
                             id: q.id.clone(),
                             answer: None,
+                            note: None,
                         });
                         continue;
                     }
@@ -101,11 +131,16 @@ impl QuestionForm {
                             "{}: select one answer",
                             q.header
                         );
-                        q.options
-                            .get(draft.selected[0])
-                            .ok_or_else(|| anyhow::anyhow!("invalid choice"))?
-                            .label
-                            .clone()
+                        let option = draft.selected[0];
+                        let choice = q
+                            .options
+                            .get(option)
+                            .ok_or_else(|| anyhow::anyhow!("invalid choice"))?;
+                        note = self
+                            .choice_note_draft(index, option)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(str::to_owned);
+                        choice.label.clone()
                     };
                     anyhow::ensure!(!value.trim().is_empty(), "{}: enter an answer", q.header);
                     QuestionAnswerValue::String(value)
@@ -150,6 +185,7 @@ impl QuestionForm {
             answers.push(QuestionAnswer {
                 id: q.id.clone(),
                 answer: Some(value),
+                note,
             });
         }
         Ok(QuestionResponse::Answered { answers })

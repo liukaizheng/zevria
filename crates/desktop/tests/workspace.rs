@@ -17,6 +17,7 @@ fn start(workspace: &mut WorkspaceModel) {
 }
 fn question(kind: QuestionPromptKind) -> QuestionRequest {
     QuestionRequest {
+        allow_choice_notes: false,
         id: QuestionRequestId::new("q"),
         source_label: None,
         dismissible: false,
@@ -186,6 +187,60 @@ fn question_text_single_other_multiselect_and_optional_skip_have_exact_wire_type
     };
     assert_eq!(answers[0].answer, None);
 }
+#[test]
+fn choice_notes_are_scoped_to_the_selected_radio_and_omitted_for_other_and_skip() {
+    let mut request = question(QuestionPromptKind::SingleSelect { allow_other: true });
+    request.allow_choice_notes = true;
+    request.questions[0].required = false;
+    let mut form = QuestionForm::new(TURN, request);
+    assert_eq!(form.choice_note_draft(0, 0), None);
+    form.answers[0].selected = vec![0];
+    assert!(form.set_choice_note_draft(
+        0,
+        0,
+        " Only for the first release \nNext step later ".into()
+    ));
+    form.answers[0].selected = vec![1];
+    assert!(!form.set_choice_note_draft(0, 0, "stale edit".into()));
+    assert!(form.set_choice_note_draft(0, 1, " \u{2003} ".into()));
+    let first = |form: &QuestionForm| {
+        let QuestionResponse::Answered { mut answers } = form.response().unwrap() else {
+            panic!()
+        };
+        answers.remove(0)
+    };
+    assert_eq!(first(&form).note, None);
+    form.answers[0].selected = vec![0];
+    assert_eq!(
+        first(&form).note.as_deref(),
+        Some(" Only for the first release \nNext step later ")
+    );
+    form.pending = true;
+    assert!(!form.set_choice_note_draft(0, 0, "late edit".into()));
+    form.pending = false;
+    form.answers[0].other = true;
+    form.answers[0].text = "A".into();
+    assert_eq!(first(&form).answer, Some("A".to_string().into()));
+    assert_eq!(first(&form).note, None);
+    form.answers[0].other = false;
+    form.answers[0].skip = true;
+    assert_eq!(first(&form).answer, None);
+    assert_eq!(first(&form).note, None);
+
+    form.answers[0].skip = false;
+    form.request.allow_choice_notes = false;
+    assert_eq!(form.choice_note_draft(0, 0), None);
+    assert_eq!(first(&form).note, None);
+    form.request.allow_choice_notes = true;
+    form.request.questions[0].kind = QuestionPromptKind::MultiSelect {
+        min_selections: None,
+        max_selections: None,
+        allow_other: true,
+    };
+    assert_eq!(form.choice_note_draft(0, 0), None);
+    assert_eq!(first(&form).note, None);
+}
+
 #[test]
 fn shared_grammar_routes_supported_commands_and_retains_unsupported_drafts() {
     let mut workspace = WorkspaceModel::default();

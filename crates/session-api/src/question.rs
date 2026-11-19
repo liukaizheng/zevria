@@ -127,6 +127,7 @@ impl QuestionRequester {
     pub async fn ask(
         &self,
         questions: Vec<QuestionPrompt>,
+        allow_choice_notes: bool,
         turn: TurnContext,
     ) -> Result<QuestionResponse, QuestionRequestError> {
         let request = QuestionRequest {
@@ -134,6 +135,7 @@ impl QuestionRequester {
             questions,
             source_label: None,
             dismissible: true,
+            allow_choice_notes,
         };
         self.ask_request(request, turn).await
     }
@@ -281,7 +283,7 @@ mod tests {
         let requester = channels.requester.clone();
         let wait = tokio::spawn(async move {
             requester
-                .ask(vec![prompt("scope")], turn(CancellationToken::new()))
+                .ask(vec![prompt("scope")], false, turn(CancellationToken::new()))
                 .await
         });
 
@@ -289,6 +291,7 @@ mod tests {
             SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
             update => panic!("unexpected update: {update:?}"),
         };
+        assert!(!request.allow_choice_notes);
         assert!(!channels.responder.respond(
             &QuestionRequestId::new("stale"),
             QuestionResponse::Dismissed
@@ -297,6 +300,7 @@ mod tests {
             answers: vec![QuestionAnswer {
                 id: "scope".to_string(),
                 answer: Some(QuestionAnswerValue::String("Focused".to_string())),
+                note: None,
             }],
         };
         assert!(channels.responder.respond(&request.id, response.clone()));
@@ -324,7 +328,7 @@ mod tests {
         let child_cancellation = cancellation.clone();
         let wait = tokio::spawn(async move {
             requester
-                .ask(vec![prompt("scope")], turn(child_cancellation))
+                .ask(vec![prompt("scope")], false, turn(child_cancellation))
                 .await
         });
         let request = match events_rx.recv().await.expect("question event") {
@@ -357,7 +361,7 @@ mod tests {
         let first_requester = channels.requester.clone();
         let first = tokio::spawn(async move {
             first_requester
-                .ask(vec![prompt("first")], turn(CancellationToken::new()))
+                .ask(vec![prompt("first")], false, turn(CancellationToken::new()))
                 .await
         });
         let request = match events_rx.recv().await.expect("question event") {
@@ -367,7 +371,11 @@ mod tests {
 
         let error = channels
             .requester
-            .ask(vec![prompt("second")], turn(CancellationToken::new()))
+            .ask(
+                vec![prompt("second")],
+                false,
+                turn(CancellationToken::new()),
+            )
             .await
             .expect_err("second request must fail");
         assert_eq!(error, QuestionRequestError::AlreadyPending);
@@ -389,7 +397,7 @@ mod tests {
         let channels = question_channels(events_tx);
         let error = channels
             .requester
-            .ask(vec![prompt("scope")], turn(CancellationToken::new()))
+            .ask(vec![prompt("scope")], false, turn(CancellationToken::new()))
             .await
             .expect_err("closed frontend must fail");
         assert_eq!(error, QuestionRequestError::FrontendUnavailable);
@@ -403,7 +411,7 @@ mod tests {
         cancellation.cancel();
         let error = channels
             .requester
-            .ask(vec![prompt("scope")], turn(cancellation))
+            .ask(vec![prompt("scope")], false, turn(cancellation))
             .await
             .expect_err("pre-cancelled question must fail");
         assert_eq!(error, QuestionRequestError::Cancelled);
@@ -420,7 +428,7 @@ mod tests {
         let requester = channels.requester.clone();
         let waiter = tokio::spawn(async move {
             requester
-                .ask(vec![prompt("first")], turn(CancellationToken::new()))
+                .ask(vec![prompt("first")], false, turn(CancellationToken::new()))
                 .await
         });
         let first = match events_rx.recv().await.expect("first question") {
@@ -440,7 +448,11 @@ mod tests {
         let requester = channels.requester.clone();
         let second_waiter = tokio::spawn(async move {
             requester
-                .ask(vec![prompt("second")], turn(CancellationToken::new()))
+                .ask(
+                    vec![prompt("second")],
+                    false,
+                    turn(CancellationToken::new()),
+                )
                 .await
         });
         let second = match events_rx.recv().await.expect("second question") {

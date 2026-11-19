@@ -1,4 +1,5 @@
 use super::{
+    question::ChoiceNoteEditor,
     style,
     theme::{palette, tones},
     transcript::{LocalFold, TranscriptView},
@@ -33,6 +34,7 @@ pub struct DesktopWindow {
     pub(super) question_id: String,
     pub(super) question_inputs: Vec<Entity<TextareaState>>,
     pub(super) question_subscriptions: Vec<Subscription>,
+    pub(super) question_note_editor: Option<ChoiceNoteEditor>,
     pub(super) pending_replace: Option<Replacement>,
     pub(super) completion_dismissed: Option<(String, usize)>,
     pub(super) completion_selected: usize,
@@ -134,6 +136,7 @@ impl DesktopWindow {
             question_id: String::new(),
             question_inputs: Vec::new(),
             question_subscriptions: Vec::new(),
+            question_note_editor: None,
             pending_replace: None,
             completion_dismissed: None,
             completion_selected: 0,

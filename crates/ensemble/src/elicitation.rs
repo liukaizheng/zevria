@@ -516,6 +516,7 @@ pub(super) fn convert_elicitation_form(
             questions: prompts,
             source_label: Some(source_label.to_string()),
             dismissible: true,
+            allow_choice_notes: false,
         },
         fields: mappings,
     })

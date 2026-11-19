@@ -979,6 +979,7 @@ impl Tool for QuestionStubTool {
                     required: true,
                     default: None,
                 }],
+                true,
                 turn,
             )
             .await?;

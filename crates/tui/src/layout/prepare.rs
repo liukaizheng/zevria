@@ -8,8 +8,8 @@ use crate::presentation::{
     PresentationBlock, PresentationBlockKind, PresentationRole, PresentedChecklist, PresentedPlan,
     PresentedPlanContent, PresentedTool, PromptPhase, TextFlavor, TranscriptAppearance,
     WebActivityPresentation, launch_batch_notice, native_header_status, native_list,
-    question_response, subtask_icon, tool_argument, tool_call_denied, tool_call_failed,
-    tool_result_plain_text,
+    question_answer_text, question_note_lines, question_response, subtask_icon, tool_argument,
+    tool_call_denied, tool_call_failed, tool_result_plain_text,
 };
 use crate::status_icon::{StatusIcon, StatusIconColor};
 use crate::text::{display_width, format_elapsed};
@@ -1687,20 +1687,14 @@ fn render_question_call(
     if let Some(QuestionResponse::Answered { answers }) = response {
         for (id, header) in prompts {
             if let Some(answer) = answers.iter().find(|answer| answer.id == id) {
-                let answer = match &answer.answer {
-                    Some(zevria_foundation::QuestionAnswerValue::String(value)) => value.clone(),
-                    Some(zevria_foundation::QuestionAnswerValue::Strings(values)) => {
-                        values.join(", ")
-                    }
-                    None => "Skipped".to_string(),
-                };
+                let muted = Style::default().fg(theme().text.muted);
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{header}: "),
-                        Style::default().fg(theme().text.muted),
-                    ),
-                    Span::raw(answer),
+                    Span::styled(format!("{header}: "), muted),
+                    Span::raw(question_answer_text(answer)),
                 ]));
+                if let Some(note) = &answer.note {
+                    lines.extend(question_note_lines(note).map(|line| Line::styled(line, muted)));
+                }
             }
         }
     } else if denied || failed {

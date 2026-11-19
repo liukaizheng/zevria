@@ -1,6 +1,9 @@
 //! Bounded tool-log display; raw copy payloads remain exact.
 use gpui_kit::component::diff::DiffFile;
-use zevria_foundation::{FileChange, FileChangeOutput};
+use zevria_foundation::{FileChange, FileChangeOutput, QuestionResponse};
+use zevria_presentation::blocks::{
+    NativeToolState, question_answer_text, question_note_lines, question_response,
+};
 pub fn patch(changes: &[FileChangeOutput]) -> String {
     let mut patch = String::new();
     for file in changes {
@@ -184,20 +187,10 @@ pub fn diff_height(changes: &[FileChangeOutput]) -> f32 {
 
 /// Human-oriented views for known control tools, not a second tool schema or
 /// dispatcher. Missing/malformed data falls back to exact generic JSON.
-pub fn details(
-    name: &str,
-    state: &zevria_presentation::blocks::NativeToolState,
-) -> Option<(String, bool)> {
+pub fn details(name: &str, state: &NativeToolState) -> Option<(String, bool)> {
     use zevria_presentation::blocks::{LaunchBatchNotice, launch_batch_notice, tool_argument};
     match name {
-        "question" => {
-            let questions = state.arguments.as_ref()?.get("questions")?.as_array()?;
-            Some((questions.iter().map(|question| {
-                let text = question.get("question").and_then(|v|v.as_str()).unwrap_or_default();
-                let options = question.get("options").and_then(|v|v.as_array()).map(|options| options.iter().filter_map(|option| option.get("label").and_then(|v|v.as_str())).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-                format!("{text}\n{options}")
-            }).collect::<Vec<_>>().join("\n\n"), true))
-        }
+        "question" => question_details(state).map(|body| (body, true)),
         "skill" | "skill_read" => {
             let skill = tool_argument(state,"skill")?;
             let resource = tool_argument(state,"resource").map(|r|format!("\nResource: {r}")).unwrap_or_default();
@@ -216,10 +209,86 @@ pub fn details(
     }
 }
 
+fn question_details(state: &NativeToolState) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let questions = state.arguments.as_ref()?.get("questions")?.as_array()?;
+    let answers = match question_response(state) {
+        Some(QuestionResponse::Answered { answers }) => answers,
+        _ => Vec::new(),
+    };
+    let entries = questions
+        .iter()
+        .map(|prompt| {
+            let text = prompt
+                .get("question")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let options = prompt
+                .get("options")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|option| option.get("label")?.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut detail = format!("{text}\n{options}");
+            if let Some(id) = prompt.get("id").and_then(|value| value.as_str())
+                && let Some(answer) = answers.iter().find(|answer| answer.id == id)
+            {
+                write!(detail, "\nAnswer: {}", question_answer_text(answer))
+                    .expect("write to String");
+                if let Some(note) = &answer.note {
+                    for line in question_note_lines(note) {
+                        detail.push('\n');
+                        detail.push_str(&line);
+                    }
+                }
+            }
+            detail
+        })
+        .collect::<Vec<_>>();
+    Some(entries.join("\n\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn expanded_question_history_uses_literal_notes_under_the_correlated_answer() {
+        use rig_core::message::{CallId, ToolName, ToolResultContent, UserContent};
+        use zevria_presentation::blocks::{NativeToolCallStatus, tool_result_plain_text};
+
+        let args = json!({"questions": [
+            {"id": "scope", "question": "Which scope?", "options": [{"label":"Focused (Recommended)"}]},
+            {"id": "checks", "question": "Which checks?", "options": [{"label":"Full"}]}
+        ]});
+        let raw = json!({"status": "answered", "answers": [
+            {"id":"checks", "answer":"Full"},
+            {"id":"scope", "answer":"Focused (Recommended)", "note":"Only for the <first> release\nRevisit \u{1b}[2Jlater"},
+        ]}).to_string();
+        let UserContent::ToolResult(result) = UserContent::tool_result(
+            CallId::from_wire("question-call"),
+            ToolName::new("question").unwrap(),
+            vec![ToolResultContent::text(raw.clone())],
+        ) else {
+            unreachable!()
+        };
+        let mut state = NativeToolState::new(NativeToolCallStatus::Finished, &args);
+        state.result = Some(result);
+        let (body, plain) = details("question", &state).expect("expanded detail");
+        assert!(plain);
+        assert!(body.contains("Answer: Focused (Recommended)\n  Note: Only for the <first> release\n        Revisit  [2Jlater\n\nWhich checks?"));
+        assert!(body.ends_with("Answer: Full"));
+        assert_eq!(
+            tool_summary("question", state.arguments.as_ref()),
+            "Which scope?"
+        );
+        assert_eq!(tool_result_plain_text(state.result.as_ref().unwrap()), raw);
+    }
+
     #[test]
     fn known_tool_summaries_and_malformed_arguments() {
         for (name, args, expected) in [

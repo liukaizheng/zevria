@@ -24,6 +24,7 @@ pub enum Action {
     Home,
     End,
     Confirm,
+    EditChoiceNote,
     Help,
     Select,
     Insert,

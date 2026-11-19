@@ -891,6 +891,7 @@ async fn idle_question_answers_and_maintenance_do_not_allocate_turns() {
             .requester
             .ask_request(
                 QuestionRequest {
+                    allow_choice_notes: false,
                     id: QuestionRequestId::new("idle-question"),
                     questions: Vec::new(),
                     source_label: None,

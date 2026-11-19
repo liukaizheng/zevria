@@ -2611,6 +2611,7 @@ fn fixture_answers(
             .iter()
             .zip(answers)
             .map(|(question, answer)| zevria_foundation::QuestionAnswer {
+                note: None,
                 id: question.id.clone(),
                 answer,
             })
@@ -3003,6 +3004,7 @@ fn codex_titled_select_and_other_companion_preserve_wire_values() {
     ));
     let selected_response = QuestionResponse::Answered {
         answers: vec![zevria_foundation::QuestionAnswer {
+            note: None,
             id: "scope".to_string(),
             answer: Some(QuestionAnswerValue::String("Focused".to_string())),
         }],
@@ -3026,6 +3028,7 @@ fn codex_titled_select_and_other_companion_preserve_wire_values() {
 
     let custom_response = QuestionResponse::Answered {
         answers: vec![zevria_foundation::QuestionAnswer {
+            note: None,
             id: "scope".to_string(),
             answer: Some(QuestionAnswerValue::String("A custom scope".to_string())),
         }],
@@ -3111,6 +3114,7 @@ fn claude_multi_select_custom_boolean_skip_defaults_and_bounds_convert() {
         .fields
         .iter()
         .map(|field| zevria_foundation::QuestionAnswer {
+            note: None,
             id: field.property.clone(),
             answer: match field.property.as_str() {
                 "details" => Some(QuestionAnswerValue::String("valid".to_string())),
@@ -3184,6 +3188,7 @@ fn oversized_normalized_decisions_become_explicit_unavailable_markers() {
     }));
     let response = QuestionResponse::Answered {
         answers: vec![zevria_foundation::QuestionAnswer {
+            note: None,
             id: "details".to_string(),
             answer: Some(QuestionAnswerValue::String(
                 "x".repeat(MAX_NORMALIZED_USER_DECISION_BYTES),
@@ -6567,6 +6572,7 @@ for line in sys.stdin:
         &question.id,
         QuestionResponse::Answered {
             answers: vec![zevria_foundation::QuestionAnswer {
+                note: None,
                 id: "compatibility".to_string(),
                 answer: Some(QuestionAnswerValue::String("Preserve API".to_string())),
             }],
@@ -6917,6 +6923,7 @@ for line in sys.stdin:
         })
         .await
         .expect("ACP question appears");
+        assert!(!request.allow_choice_notes);
         assert_eq!(request.source_label.as_deref(), Some(source_label));
         assert_eq!(request.questions.len(), field_count);
         for question in &request.questions {
@@ -6960,6 +6967,7 @@ for line in sys.stdin:
                 .questions
                 .iter()
                 .map(|question| zevria_foundation::QuestionAnswer {
+                    note: None,
                     id: question.id.clone(),
                     answer: match question.id.as_str() {
                         "question_0" => Some(QuestionAnswerValue::String("Focused".into())),
@@ -7314,6 +7322,7 @@ for line in sys.stdin:
         &first.id,
         QuestionResponse::Answered {
             answers: vec![zevria_foundation::QuestionAnswer {
+                note: None,
                 id: "answer".to_string(),
                 answer: Some(QuestionAnswerValue::String("first answer".to_string())),
             }],
@@ -7327,6 +7336,7 @@ for line in sys.stdin:
         &second.id,
         QuestionResponse::Answered {
             answers: vec![zevria_foundation::QuestionAnswer {
+                note: None,
                 id: "answer".to_string(),
                 answer: Some(QuestionAnswerValue::String("second answer".to_string())),
             }],
@@ -7472,6 +7482,7 @@ for line in sys.stdin:
         &active.id,
         QuestionResponse::Answered {
             answers: vec![zevria_foundation::QuestionAnswer {
+                note: None,
                 id: "answer".to_string(),
                 answer: Some(QuestionAnswerValue::String("continue".to_string())),
             }],
@@ -7643,6 +7654,7 @@ for line in sys.stdin:
     )));
 
     let fresh = QuestionRequest {
+        allow_choice_notes: false,
         id: QuestionRequestId::new("fresh-after-cancel"),
         questions: vec![QuestionPrompt {
             id: "answer".to_string(),

@@ -139,6 +139,7 @@ fn delayed_question_cannot_open_a_response_path_during_mode_management() {
     views.apply(SessionEvent::QuestionAsked {
         turn_id: zevria_foundation::TurnId::new(99),
         request: zevria_foundation::QuestionRequest {
+            allow_choice_notes: false,
             id: zevria_foundation::QuestionRequestId::new("stale-question"),
             source_label: None,
             dismissible: true,

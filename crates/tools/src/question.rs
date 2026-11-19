@@ -94,7 +94,7 @@ impl QuestionTool {
         let questions = validate_questions(args)?;
         let response = self
             .requester
-            .ask(questions.clone(), turn)
+            .ask(questions.clone(), true, turn)
             .await
             .map_err(|error| match error {
                 QuestionRequestError::Cancelled => QuestionError::Cancelled(error.to_string()),
@@ -309,17 +309,33 @@ fn validate_response(
                 answer.id, question.id
             )));
         }
-        let Some(QuestionAnswerValue::String(answer)) = &answer.answer else {
+        let Some(QuestionAnswerValue::String(value)) = &answer.answer else {
             return Err(QuestionError::InvalidResponse(format!(
                 "answer for {:?} must contain exactly one string",
                 question.id
             )));
         };
-        if answer.trim().is_empty() {
+        if value.trim().is_empty() {
             return Err(QuestionError::InvalidResponse(format!(
                 "answer for {:?} must not be blank",
                 question.id
             )));
+        }
+        if let Some(note) = &answer.note {
+            if note.trim().is_empty() {
+                return Err(QuestionError::InvalidResponse(format!(
+                    "note for {:?} must not be blank",
+                    question.id
+                )));
+            }
+            if !matches!(question.kind, QuestionPromptKind::SingleSelect { .. })
+                || !question.options.iter().any(|option| option.label == *value)
+            {
+                return Err(QuestionError::InvalidResponse(format!(
+                    "note for {:?} requires a predefined choice",
+                    question.id
+                )));
+            }
         }
     }
     Ok(())
@@ -375,6 +391,8 @@ mod tests {
         let schema_text = schema.to_string();
         assert!(schema_text.contains("header"));
         assert!(schema_text.contains("options"));
+        assert!(!schema_text.contains("note"));
+        assert!(!tool.description().contains("note"));
         assert!(tool.description().contains("blocks until"));
         assert!(tool.description().contains("Do not add an Other option"));
         assert!(tool.description().contains("exactly one `question` call"));
@@ -451,12 +469,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn answered_and_dismissed_batches_preserve_long_option_labels() {
+    async fn answered_and_dismissed_batches_preserve_long_option_labels_and_notes() {
         for response in [
             QuestionResponse::Answered {
                 answers: vec![QuestionAnswer {
                     id: "scope_choice".to_string(),
                     answer: Some(QuestionAnswerValue::String(LONG_RECOMMENDED_LABEL.into())),
+                    note: Some(" Only for the first release ".into()),
                 }],
             },
             QuestionResponse::Dismissed,
@@ -475,6 +494,7 @@ mod tests {
                 SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
                 update => panic!("unexpected update: {update:?}"),
             };
+            assert!(request.allow_choice_notes);
             assert_eq!(
                 request.questions[0].options[0].label,
                 LONG_RECOMMENDED_LABEL
@@ -490,7 +510,8 @@ mod tests {
                     serde_json::from_str::<serde_json::Value>(&output).unwrap(),
                     serde_json::json!({
                         "status": "answered",
-                        "answers": [{"id": "scope_choice", "answer": LONG_RECOMMENDED_LABEL}]
+                        "answers": [{"id": "scope_choice", "answer": LONG_RECOMMENDED_LABEL,
+                            "note": " Only for the first release "}]
                     })
                 );
             }
@@ -510,11 +531,45 @@ mod tests {
                     answers: vec![QuestionAnswer {
                         id: "scope_choice".to_string(),
                         answer,
+                        note: None,
                     }],
                 },
             )
             .expect_err("non-string native answer must fail");
             assert!(error.to_string().contains("exactly one string"));
+        }
+    }
+
+    #[test]
+    fn native_notes_require_nonblank_text_and_an_exact_single_select_label() {
+        let select = args();
+        let mut text = args();
+        text.questions[0].options.clear();
+        for (args, value, note) in [
+            (select.clone(), "Focused (Recommended)", " \t\u{2003}"),
+            (select.clone(), "Focused", "First release only"),
+            (
+                select.clone(),
+                "focused (Recommended)",
+                "First release only",
+            ),
+            (select, " Focused (Recommended) ", "First release only"),
+            (text, "Focused (Recommended)", "First release only"),
+        ] {
+            let questions = validate_questions(args).unwrap();
+            assert!(matches!(
+                validate_response(
+                    &questions,
+                    &QuestionResponse::Answered {
+                        answers: vec![QuestionAnswer {
+                            id: "scope_choice".into(),
+                            answer: Some(value.to_string().into()),
+                            note: Some(note.into()),
+                        }],
+                    }
+                ),
+                Err(QuestionError::InvalidResponse(_))
+            ));
         }
     }
 
@@ -528,6 +583,7 @@ mod tests {
                         answer: Some(QuestionAnswerValue::String(
                             "Focused (Recommended)".to_string(),
                         )),
+                        note: Some("Only for the first release".into()),
                     }],
                 },
                 QuestionTerminalDisposition::Answered,
@@ -539,6 +595,16 @@ mod tests {
             (
                 QuestionResponse::Answered {
                     answers: Vec::new(),
+                },
+                QuestionTerminalDisposition::InvalidFrontendResponse,
+            ),
+            (
+                QuestionResponse::Answered {
+                    answers: vec![QuestionAnswer {
+                        id: "scope_choice".into(),
+                        answer: Some("A custom answer".to_string().into()),
+                        note: Some("Only for the first release".into()),
+                    }],
                 },
                 QuestionTerminalDisposition::InvalidFrontendResponse,
             ),

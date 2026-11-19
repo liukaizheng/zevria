@@ -4,7 +4,7 @@
 //! segments and width it draws, then chooses pinned prompt/validation regions
 //! or a whole-body fallback when the terminal cannot leave one answer row.
 
-use std::cell::Cell;
+use std::{cell::Cell, collections::BTreeMap};
 
 use ratatui::{
     Frame,
@@ -30,6 +30,7 @@ use crate::composer::{
 };
 #[cfg(test)]
 use crate::text::display_width;
+use crate::text::truncate_display_width;
 use crate::theme::theme;
 use crate::viewport::{RowRange, Viewport, render_scrollbar, rows_to_u16};
 use crate::{
@@ -66,10 +67,26 @@ struct QuestionLayoutKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorPrefix {
+    Answer,
+    Note,
+}
+
+impl EditorPrefix {
+    const fn text(self) -> &'static str {
+        match self {
+            Self::Answer => "  > ",
+            Self::Note => "  Note: ",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct EditorMeasurementKey {
     revision: u64,
     caret: usize,
     width: u16,
+    prefix: EditorPrefix,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,16 +97,30 @@ struct EditorMeasurement {
 }
 
 #[derive(Default)]
+struct EditorState {
+    input: String,
+    /// Byte offset at an extended-grapheme boundary.
+    caret: usize,
+    revision: u64,
+    // Rendering may update measurements, never the draft or its caret.
+    measurement: Cell<Option<EditorMeasurement>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ChoiceEditor {
+    #[default]
+    Browsing,
+    Other,
+    Note(usize),
+}
+
+#[derive(Default)]
 struct PromptState {
     cursor: usize,
-    answer: Option<Option<QuestionAnswerValue>>,
-    input: String,
-    /// Byte offset at an extended-grapheme boundary, independent of the selected row.
-    caret: usize,
-    input_revision: u64,
-    // Rendering may update measurements, never the draft or its caret.
-    editor_measurement: Cell<Option<EditorMeasurement>>,
-    editing_other: bool,
+    answer: Option<QuestionAnswer>,
+    editor: EditorState,
+    choice_editor: ChoiceEditor,
+    choice_notes: BTreeMap<usize, EditorState>,
     other_selected: bool,
     multi_selected: Vec<bool>,
     viewport: Viewport,
@@ -105,7 +136,7 @@ impl PromptState {
         };
         match (&prompt.kind, &prompt.default) {
             (QuestionPromptKind::Text { .. }, Some(QuestionAnswerValue::String(value))) => {
-                state.input.clone_from(value);
+                state.editor.input.clone_from(value);
             }
             (
                 QuestionPromptKind::SingleSelect { allow_other },
@@ -119,7 +150,7 @@ impl PromptState {
                     state.cursor = index;
                 } else if *allow_other && !value.trim().is_empty() {
                     state.cursor = prompt.options.len();
-                    state.input.clone_from(value);
+                    state.editor.input.clone_from(value);
                 }
             }
             (
@@ -134,20 +165,52 @@ impl PromptState {
                     {
                         state.multi_selected[index] = true;
                     } else if *allow_other && !state.other_selected && !value.trim().is_empty() {
-                        state.input.clone_from(value);
+                        state.editor.input.clone_from(value);
                         state.other_selected = true;
                     }
                 }
             }
             _ => {}
         }
-        state.caret = state.input.len();
+        state.editor.caret = state.editor.input.len();
         state.reveal_requested = true;
         state
     }
 
-    /// `None` leaves the key to the dialog; `Some(changed)` consumes even boundary no-ops.
+    fn active_editor_mut(&mut self) -> &mut EditorState {
+        match self.choice_editor {
+            ChoiceEditor::Note(index) => {
+                self.choice_notes.get_mut(&index).expect("open note draft")
+            }
+            ChoiceEditor::Other | ChoiceEditor::Browsing => &mut self.editor,
+        }
+    }
+
     fn handle_editor_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<bool> {
+        let changed = self.active_editor_mut().handle_key(code, modifiers)?;
+        self.reveal_requested |= changed;
+        Some(changed)
+    }
+
+    fn choice_note(&self, index: usize) -> Option<&str> {
+        let text = &self.choice_notes.get(&index)?.input;
+        (!text.trim().is_empty()).then_some(text)
+    }
+}
+
+impl EditorState {
+    fn paste(&mut self, text: &str) -> bool {
+        let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
+        if text.is_empty() {
+            return false;
+        }
+        let caret = clamp_cursor(&self.input, self.caret);
+        self.input.insert_str(caret, &text);
+        self.finish_edit(caret + text.len(), true)
+    }
+
+    /// `None` leaves the key to the dialog; `Some(changed)` consumes even boundary no-ops.
+    fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<bool> {
         let caret = clamp_cursor(&self.input, self.caret);
         let mut text_changed = false;
         let next = match code {
@@ -183,19 +246,22 @@ impl PromptState {
             }
             _ => return None,
         };
+        Some(self.finish_edit(next, text_changed))
+    }
+
+    fn finish_edit(&mut self, next: usize, text_changed: bool) -> bool {
         // Edits can join neighboring graphemes (e.g. inserting a ZWJ). Normalize
-        // after mutation too, using the composer's preceding-boundary rule.
+        // after mutation too, using the preceding-boundary rule.
         let next = clamp_cursor(&self.input, next);
         let changed = text_changed || self.caret != next;
         self.caret = next;
         if text_changed {
-            self.input_revision = self.input_revision.wrapping_add(1);
+            self.revision = self.revision.wrapping_add(1);
         }
         if changed {
-            self.editor_measurement.set(None);
-            self.reveal_requested = true;
+            self.measurement.set(None);
         }
-        Some(changed)
+        changed
     }
 }
 
@@ -237,19 +303,17 @@ impl QuestionDialog {
 
     /// Paste is text in this form, never a sequence of activation keys.
     pub fn paste(&mut self, text: &str) {
-        if self.state().editing_other
+        if self.state().choice_editor != ChoiceEditor::Browsing
             || (matches!(self.current().kind, QuestionPromptKind::Text { .. })
                 && self.state().cursor == 0)
         {
-            for character in text.chars().filter(|ch| !ch.is_control()) {
-                self.state_mut()
-                    .handle_editor_key(KeyCode::Char(character), KeyModifiers::NONE);
-            }
+            let state = self.state_mut();
+            state.reveal_requested |= state.active_editor_mut().paste(text);
         }
     }
 
     pub fn context(&self) -> KeyContext {
-        if self.state().editing_other
+        if self.state().choice_editor != ChoiceEditor::Browsing
             || matches!(self.current().kind, QuestionPromptKind::Text { .. })
         {
             KeyContext::TextEntry
@@ -260,7 +324,8 @@ impl QuestionDialog {
 
     pub fn hint_eligibility(&self) -> Eligibility {
         let mut hints = Eligibility::default();
-        if !self.request.dismissible && !self.state().editing_other {
+        let editing = self.state().choice_editor;
+        if !self.request.dismissible && editing == ChoiceEditor::Browsing {
             hints.disabled.push(Action::Close);
         }
         if !matches!(self.current().kind, QuestionPromptKind::MultiSelect { .. }) {
@@ -269,9 +334,22 @@ impl QuestionDialog {
         if self.question_index == 0 {
             hints.disabled.push(Action::Back);
         }
+        if self.can_edit_choice_note() {
+            let draft = self.state().choice_note(self.state().cursor);
+            hints.labels.push((
+                Action::EditChoiceNote,
+                if draft.is_some() {
+                    "edit note"
+                } else {
+                    "add note"
+                },
+            ));
+        } else {
+            hints.disabled.push(Action::EditChoiceNote);
+        }
         hints.labels.push((
             Action::Confirm,
-            if self.state().editing_other {
+            if editing == ChoiceEditor::Other {
                 "accept"
             } else if matches!(self.current().kind, QuestionPromptKind::Text { .. })
                 && self.state().cursor > 0
@@ -283,7 +361,7 @@ impl QuestionDialog {
         ));
         hints.labels.push((
             Action::Close,
-            if self.state().editing_other {
+            if editing != ChoiceEditor::Browsing {
                 "choices"
             } else {
                 "dismiss"
@@ -297,6 +375,17 @@ impl QuestionDialog {
             self.context(),
             ratatui::crossterm::event::KeyEvent::new(code, modifiers),
         );
+        if action == Some(Action::EditChoiceNote) {
+            if self.can_edit_choice_note() {
+                let state = self.state_mut();
+                let index = state.cursor;
+                state.choice_notes.entry(index).or_default();
+                state.choice_editor = ChoiceEditor::Note(index);
+                state.reveal_requested = true;
+                self.validation_error = None;
+            }
+            return QuestionDialogAction::Handled;
+        }
         if let Some(
             action
             @ (Action::PageUp | Action::PageDown | Action::HalfPageUp | Action::HalfPageDown),
@@ -339,8 +428,7 @@ impl QuestionDialog {
         if !modifiers.is_empty() {
             if modifiers == KeyModifiers::CONTROL
                 && matches!(code, KeyCode::Left | KeyCode::Right)
-                && (self.state().editing_other
-                    || matches!(self.current().kind, QuestionPromptKind::Text { .. }))
+                && self.context() == KeyContext::TextEntry
             {
                 self.validation_error = None;
                 self.state_mut().handle_editor_key(code, modifiers);
@@ -361,12 +449,15 @@ impl QuestionDialog {
         }
 
         self.validation_error = None;
-        if self.state().editing_other {
-            return self.handle_other_key(code, modifiers);
+        match self.state().choice_editor {
+            ChoiceEditor::Other => return self.handle_other_key(code, modifiers),
+            ChoiceEditor::Note(index) => return self.handle_note_key(index, code, modifiers),
+            ChoiceEditor::Browsing => {}
         }
+        let editor = &self.state().editor;
         let text_back = code == KeyCode::Left
             && modifiers.is_empty()
-            && clamp_cursor(&self.state().input, self.state().caret) == 0;
+            && clamp_cursor(&editor.input, editor.caret) == 0;
         if matches!(&self.current().kind, QuestionPromptKind::Text { .. })
             && self.state().cursor == 0
             && !text_back
@@ -433,7 +524,7 @@ impl QuestionDialog {
                 self.accept_answer(None)
             }
             KeyCode::Enter => {
-                let length = self.state().input.chars().count();
+                let length = self.state().editor.input.chars().count();
                 if let Some(minimum) = min_length
                     && length < minimum
                 {
@@ -445,7 +536,7 @@ impl QuestionDialog {
                     return self.invalid(format!("Enter no more than {maximum} characters."));
                 }
                 self.accept_answer(Some(QuestionAnswerValue::String(
-                    self.state().input.clone(),
+                    self.state().editor.input.clone(),
                 )))
             }
             KeyCode::Backspace => {
@@ -488,11 +579,10 @@ impl QuestionDialog {
                 QuestionDialogAction::Handled
             }
             KeyCode::Enter if self.state().cursor < option_count => {
-                let answer = self.current().options[self.state().cursor].label.clone();
-                self.accept_answer(Some(QuestionAnswerValue::String(answer)))
+                self.accept_choice(self.state().cursor)
             }
             KeyCode::Enter if allow_other && self.state().cursor == option_count => {
-                self.state_mut().editing_other = true;
+                self.state_mut().choice_editor = ChoiceEditor::Other;
                 self.request_reveal();
                 QuestionDialogAction::Handled
             }
@@ -542,7 +632,7 @@ impl QuestionDialog {
                 if self.state().other_selected {
                     self.state_mut().other_selected = false;
                 } else {
-                    self.state_mut().editing_other = true;
+                    self.state_mut().choice_editor = ChoiceEditor::Other;
                 }
                 self.request_reveal();
                 QuestionDialogAction::Handled
@@ -550,9 +640,10 @@ impl QuestionDialog {
             KeyCode::Enter if skip_index == Some(self.state().cursor) => self.accept_answer(None),
             KeyCode::Enter
                 if other_index == Some(self.state().cursor)
-                    && (!self.state().other_selected || self.state().input.trim().is_empty()) =>
+                    && (!self.state().other_selected
+                        || self.state().editor.input.trim().is_empty()) =>
             {
-                self.state_mut().editing_other = true;
+                self.state_mut().choice_editor = ChoiceEditor::Other;
                 self.request_reveal();
                 QuestionDialogAction::Handled
             }
@@ -571,17 +662,17 @@ impl QuestionDialog {
         }
         match code {
             KeyCode::Esc => {
-                self.state_mut().editing_other = false;
+                self.state_mut().choice_editor = ChoiceEditor::Browsing;
                 self.request_reveal();
                 QuestionDialogAction::Handled
             }
-            KeyCode::Enter if !self.state().input.trim().is_empty() => {
-                self.state_mut().editing_other = false;
+            KeyCode::Enter if !self.state().editor.input.trim().is_empty() => {
+                self.state_mut().choice_editor = ChoiceEditor::Browsing;
                 self.state_mut().other_selected = true;
                 self.request_reveal();
                 match self.current().kind.clone() {
                     QuestionPromptKind::SingleSelect { .. } => self.accept_answer(Some(
-                        QuestionAnswerValue::String(self.state().input.trim().to_string()),
+                        QuestionAnswerValue::String(self.state().editor.input.trim().to_string()),
                     )),
                     QuestionPromptKind::MultiSelect { .. } => QuestionDialogAction::Handled,
                     QuestionPromptKind::Text { .. } => QuestionDialogAction::Handled,
@@ -589,6 +680,43 @@ impl QuestionDialog {
             }
             _ => QuestionDialogAction::Handled,
         }
+    }
+
+    fn handle_note_key(
+        &mut self,
+        option: usize,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> QuestionDialogAction {
+        match code {
+            KeyCode::Esc => {
+                self.state_mut().choice_editor = ChoiceEditor::Browsing;
+                self.request_reveal();
+            }
+            KeyCode::Enter => return self.accept_choice(option),
+            _ => {
+                self.state_mut().handle_editor_key(code, modifiers);
+            }
+        }
+        QuestionDialogAction::Handled
+    }
+
+    fn can_edit_choice_note(&self) -> bool {
+        self.state().choice_editor == ChoiceEditor::Browsing
+            && self
+                .request
+                .allows_choice_note(self.question_index, self.state().cursor)
+    }
+
+    fn accept_choice(&mut self, index: usize) -> QuestionDialogAction {
+        let label = self.current().options[index].label.clone();
+        let note = if self.request.allows_choice_note(self.question_index, index) {
+            self.state().choice_note(index).map(str::to_owned)
+        } else {
+            None
+        };
+        self.state_mut().choice_editor = ChoiceEditor::Browsing;
+        self.record_answer(Some(QuestionAnswerValue::String(label)), note)
     }
 
     fn accept_multi(
@@ -604,7 +732,7 @@ impl QuestionDialog {
             .filter_map(|(option, selected)| selected.then_some(option.label.clone()))
             .collect::<Vec<_>>();
         if self.state().other_selected {
-            answers.push(self.state().input.trim().to_string());
+            answers.push(self.state().editor.input.trim().to_string());
         }
         if let Some(minimum) = min_selections
             && answers.len() < minimum
@@ -626,19 +754,28 @@ impl QuestionDialog {
     }
 
     fn accept_answer(&mut self, answer: Option<QuestionAnswerValue>) -> QuestionDialogAction {
-        self.state_mut().answer = Some(answer);
+        self.record_answer(answer, None)
+    }
+
+    fn record_answer(
+        &mut self,
+        answer: Option<QuestionAnswerValue>,
+        note: Option<String>,
+    ) -> QuestionDialogAction {
+        self.state_mut().answer = Some(QuestionAnswer {
+            id: self.current().id.clone(),
+            answer,
+            note,
+        });
         if self.question_index + 1 == self.request.questions.len() {
             let answers = self
-                .request
-                .questions
+                .states
                 .iter()
-                .zip(&self.states)
-                .map(|(question, state)| QuestionAnswer {
-                    id: question.id.clone(),
-                    answer: state
+                .map(|state| {
+                    state
                         .answer
                         .clone()
-                        .expect("every preceding question was answered before advancing"),
+                        .expect("every preceding question was answered before advancing")
                 })
                 .collect();
             return self.respond(QuestionResponse::Answered { answers });
@@ -676,7 +813,7 @@ impl QuestionDialog {
         }
         let cursor = if end { row_count - 1 } else { 0 };
         let state = self.state_mut();
-        state.editing_other = false;
+        state.choice_editor = ChoiceEditor::Browsing;
         state.cursor = cursor;
         state.reveal_requested = true;
     }
@@ -711,6 +848,7 @@ impl QuestionDialog {
         let content = QuestionContent::new(
             self.current(),
             self.state(),
+            self.request.allow_choice_notes,
             self.validation_error.as_deref(),
             inner_width,
         );
@@ -910,6 +1048,7 @@ impl QuestionContent {
     fn new(
         prompt: &QuestionPrompt,
         state: &PromptState,
+        allow_choice_notes: bool,
         validation_error: Option<&str>,
         width: u16,
     ) -> Self {
@@ -929,7 +1068,7 @@ impl QuestionContent {
             QuestionPromptKind::Text { .. } => {
                 let selected = state.cursor == 0;
                 let style = selected_style(selected);
-                let (line, measurement) = editor_layout(state, style, width);
+                let (line, measurement) = state.editor.layout(EditorPrefix::Answer, style, width);
                 let range = push_measured_segment(
                     &mut answer_lines,
                     &mut answer_rows,
@@ -953,20 +1092,41 @@ impl QuestionContent {
                     } else {
                         ""
                     };
-                    let range = push_segment(
+                    let muted = style.fg(theme().text.muted);
+                    let mut lines = vec![
+                        Line::from(Span::styled(format!("{prefix}{}", option.label), style)),
+                        Line::from(Span::styled(format!("  {}", option.description), muted)),
+                    ];
+                    let mut rows = measured_rows(&lines, width);
+                    let mut caret_row = None;
+                    if allow_choice_notes && !multi {
+                        if state.choice_editor == ChoiceEditor::Note(index) {
+                            let editor = &state.choice_notes[&index];
+                            let (line, measurement) =
+                                editor.layout(EditorPrefix::Note, style, width);
+                            caret_row = Some(rows.saturating_add(measurement.caret_row));
+                            rows = rows.saturating_add(measurement.rows);
+                            lines.push(line);
+                        } else if let Some(note) = state.choice_note(index).filter(|_| width > 0) {
+                            let preview = truncate_display_width(
+                                &format!("{}{note}", EditorPrefix::Note.text()),
+                                usize::from(width),
+                            );
+                            lines.push(Line::styled(preview, muted));
+                            rows = rows.saturating_add(1);
+                        }
+                    }
+                    let range = push_measured_segment(
                         &mut answer_lines,
                         &mut answer_rows,
-                        vec![
-                            Line::from(Span::styled(format!("{prefix}{}", option.label), style)),
-                            Line::from(Span::styled(
-                                format!("  {}", option.description),
-                                style.fg(theme().text.muted),
-                            )),
-                        ],
-                        width,
+                        lines,
+                        rows,
                         selected,
                     );
-                    focus_targets.push(FocusTarget::full(range));
+                    focus_targets.push(caret_row.map_or_else(
+                        || FocusTarget::full(range),
+                        |row| FocusTarget::row(range, row),
+                    ));
                 }
             }
         }
@@ -989,15 +1149,16 @@ impl QuestionContent {
             let mut lines = vec![Line::from(Span::styled(format!("{prefix}Other"), style))];
             let mut rows = measured_rows(&lines, width);
             let mut caret_row = 0;
-            if state.editing_other {
-                let (line, measurement) = editor_layout(state, style, width);
+            let editing_other = state.choice_editor == ChoiceEditor::Other;
+            if editing_other {
+                let (line, measurement) = state.editor.layout(EditorPrefix::Answer, style, width);
                 caret_row = rows.saturating_add(measurement.caret_row);
                 rows = rows.saturating_add(measurement.rows);
                 lines.push(line);
             }
             let range =
                 push_measured_segment(&mut answer_lines, &mut answer_rows, lines, rows, selected);
-            focus_targets.push(if state.editing_other {
+            focus_targets.push(if editing_other {
                 FocusTarget::row(range, caret_row)
             } else {
                 FocusTarget::full(range)
@@ -1143,42 +1304,45 @@ fn paint_focus_selection(
     );
 }
 
-fn editor_line(input: &str, caret: usize, style: Style) -> Line<'static> {
-    let caret = clamp_cursor(input, caret);
-    Line::from(vec![
-        Span::styled("  > ", style.fg(theme().roles.tools)),
-        Span::styled(input[..caret].to_string(), style),
-        Span::styled("▌", style.fg(theme().roles.tools)),
-        Span::styled(input[caret..].to_string(), style),
-    ])
-}
-
-fn editor_layout(
-    state: &PromptState,
-    style: Style,
-    width: u16,
-) -> (Line<'static>, EditorMeasurement) {
-    let key = EditorMeasurementKey {
-        revision: state.input_revision,
-        caret: clamp_cursor(&state.input, state.caret),
-        width,
-    };
-    let line = editor_line(&state.input, key.caret, style);
-    let measurement = state
-        .editor_measurement
-        .get()
-        .filter(|cached| cached.key == key)
-        .unwrap_or_else(|| {
-            let rows = measured_rows(std::slice::from_ref(&line), width);
-            let measurement = EditorMeasurement {
-                key,
-                rows,
-                caret_row: measured_caret_row(&line, width, rows),
-            };
-            state.editor_measurement.set(Some(measurement));
-            measurement
-        });
-    (line, measurement)
+impl EditorState {
+    fn layout(
+        &self,
+        prefix: EditorPrefix,
+        style: Style,
+        width: u16,
+    ) -> (Line<'static>, EditorMeasurement) {
+        let key = EditorMeasurementKey {
+            revision: self.revision,
+            caret: clamp_cursor(&self.input, self.caret),
+            width,
+            prefix,
+        };
+        let prefix_color = match prefix {
+            EditorPrefix::Answer => theme().roles.tools,
+            EditorPrefix::Note => theme().text.muted,
+        };
+        let line = Line::from(vec![
+            Span::styled(prefix.text(), style.fg(prefix_color)),
+            Span::styled(self.input[..key.caret].to_string(), style),
+            Span::styled("▌", style.fg(theme().roles.tools)),
+            Span::styled(self.input[key.caret..].to_string(), style),
+        ]);
+        let measurement = self
+            .measurement
+            .get()
+            .filter(|cached| cached.key == key)
+            .unwrap_or_else(|| {
+                let rows = measured_rows(std::slice::from_ref(&line), width);
+                let measurement = EditorMeasurement {
+                    key,
+                    rows,
+                    caret_row: measured_caret_row(&line, width, rows),
+                };
+                self.measurement.set(Some(measurement));
+                measurement
+            });
+        (line, measurement)
+    }
 }
 
 /// Locate the synthetic caret using the same renderer and complete suffix as
@@ -1321,6 +1485,7 @@ mod tests {
 
     fn request() -> QuestionRequest {
         QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("request-1"),
             questions: vec![
                 QuestionPrompt {
@@ -1427,7 +1592,7 @@ mod tests {
                 dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
             }
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-            assert!(dialog.state().editing_other);
+            assert!(dialog.state().choice_editor == ChoiceEditor::Other);
         }
         dialog
     }
@@ -1448,12 +1613,205 @@ mod tests {
                 request_id: dialog.request.id.clone(),
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
+                        note: None,
                         id: "scope".into(),
                         answer,
                     }],
                 },
             }
         );
+    }
+
+    fn native_request() -> QuestionRequest {
+        QuestionRequest {
+            allow_choice_notes: true,
+            ..request()
+        }
+    }
+
+    fn note_key(dialog: &mut QuestionDialog, code: KeyCode) -> QuestionDialogAction {
+        dialog.handle_key(code, KeyModifiers::NONE)
+    }
+
+    fn note_hint(dialog: &QuestionDialog) -> String {
+        hint_line(dialog.context(), &dialog.hint_eligibility(), 80).to_string()
+    }
+
+    #[test]
+    fn note_shortcut_is_only_offered_on_opted_in_predefined_single_choices() {
+        let mut native = native_request();
+        native.questions[0].required = false;
+        let mut dialog = QuestionDialog::new(TurnId::new(1), native);
+        assert!(note_hint(&dialog).contains("n add note"));
+        for _ in 0..2 {
+            note_key(&mut dialog, KeyCode::Down);
+        }
+        for index in [2, 3] {
+            // Other, then Skip
+            assert_eq!(dialog.state().cursor, index);
+            assert!(!note_hint(&dialog).contains("note"));
+            note_key(&mut dialog, KeyCode::Char('n'));
+            assert_eq!(dialog.context(), KeyContext::Question);
+            note_key(&mut dialog, KeyCode::Down);
+        }
+        assert!(dialog.state().choice_notes.is_empty());
+
+        for request in [
+            request(),
+            QuestionRequest {
+                allow_choice_notes: true,
+                ..editor_request(
+                    QuestionPromptKind::MultiSelect {
+                        min_selections: None,
+                        max_selections: None,
+                        allow_other: true,
+                    },
+                    "",
+                    false,
+                )
+            },
+        ] {
+            let mut dialog = QuestionDialog::new(TurnId::new(1), request);
+            assert!(!note_hint(&dialog).contains("note"));
+            note_key(&mut dialog, KeyCode::Char('n'));
+            assert_eq!(dialog.context(), KeyContext::Question);
+            assert!(dialog.state().choice_notes.is_empty());
+        }
+        let mut text = native_request();
+        text.questions[0].options.clear();
+        text.questions[0].kind = text_kind();
+        let mut dialog = QuestionDialog::new(TurnId::new(1), text);
+        assert!(!note_hint(&dialog).contains("note"));
+        note_key(&mut dialog, KeyCode::Char('n'));
+        assert_eq!(dialog.state().editor.input, "n");
+    }
+
+    #[test]
+    fn note_drafts_survive_switching_options_and_backtracking_without_leaking() {
+        let mut dialog = QuestionDialog::new(TurnId::new(1), native_request());
+        note_key(&mut dialog, KeyCode::Char('n'));
+        assert_eq!(dialog.context(), KeyContext::TextEntry);
+        assert!(!note_hint(&dialog).contains("add note"));
+        type_text(&mut dialog, "qjkn? ");
+        dialog.paste("first release only ");
+        note_key(&mut dialog, KeyCode::Left);
+        assert_eq!(
+            note_key(&mut dialog, KeyCode::Esc),
+            QuestionDialogAction::Handled
+        );
+        assert!(dialog.state().answer.is_none());
+        assert!(note_hint(&dialog).contains("n edit note"));
+        assert!(render_text(&mut dialog, 100, 16).contains("Note: qjkn? first release only"));
+
+        note_key(&mut dialog, KeyCode::Down);
+        assert!(note_hint(&dialog).contains("n add note"));
+        note_key(&mut dialog, KeyCode::Char('n'));
+        type_text(&mut dialog, "keep separate");
+        note_key(&mut dialog, KeyCode::Enter);
+        assert_eq!(dialog.question_index, 1);
+        assert_eq!(
+            dialog.states[0].answer.as_ref().unwrap().note.as_deref(),
+            Some("keep separate")
+        );
+        assert!(dialog.state().choice_notes.is_empty());
+        assert!(!render_text(&mut dialog, 100, 16).contains("first release only"));
+        note_key(&mut dialog, KeyCode::Left);
+        note_key(&mut dialog, KeyCode::Up);
+        note_key(&mut dialog, KeyCode::Char('n'));
+        assert!(render_text(&mut dialog, 100, 16).contains("first release only▌"));
+        note_key(&mut dialog, KeyCode::Esc);
+        note_key(&mut dialog, KeyCode::Enter); // Direct Enter includes the saved draft.
+        assert_eq!(dialog.question_index, 1);
+        note_key(&mut dialog, KeyCode::Down);
+        note_key(&mut dialog, KeyCode::Char('n'));
+        dialog.paste("Run before release");
+        assert_eq!(
+            note_key(&mut dialog, KeyCode::Enter),
+            QuestionDialogAction::Respond {
+                request_id: QuestionRequestId::new("request-1"),
+                response: QuestionResponse::Answered {
+                    answers: vec![
+                        QuestionAnswer {
+                            id: "scope".into(),
+                            answer: Some("Focused".to_string().into()),
+                            note: Some("qjkn? first release only ".into())
+                        },
+                        QuestionAnswer {
+                            id: "tests".into(),
+                            answer: Some("Full".to_string().into()),
+                            note: Some("Run before release".into())
+                        },
+                    ]
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn blank_drafts_and_other_never_send_a_note_even_for_the_same_label() {
+        let mut request = native_request();
+        request.questions.truncate(1);
+        request.questions[0].options[0].label = "Focused (Recommended)".into();
+        for draft in [None, Some(" \u{2003} "), Some("only for the first release")] {
+            let mut dialog = QuestionDialog::new(TurnId::new(1), request.clone());
+            if let Some(draft) = draft {
+                note_key(&mut dialog, KeyCode::Char('n'));
+                dialog.paste(draft);
+                if !draft.trim().is_empty() {
+                    note_key(&mut dialog, KeyCode::Esc);
+                    note_key(&mut dialog, KeyCode::End);
+                    note_key(&mut dialog, KeyCode::Enter);
+                    dialog.paste("Focused (Recommended)");
+                }
+            }
+            assert_submitted(
+                &mut dialog,
+                Some("Focused (Recommended)".to_string().into()),
+            );
+        }
+    }
+
+    #[test]
+    fn prefixed_note_reveals_its_caret_across_viewports_and_closes_to_one_row() {
+        let mut dialog = QuestionDialog::new(TurnId::new(1), native_request());
+        note_key(&mut dialog, KeyCode::Char('n'));
+        let rendered = render_text(&mut dialog, 100, 20);
+        assert!(rendered.contains("  Note: ▌"));
+        dialog.paste("e\u{301}👩‍💻");
+        note_key(&mut dialog, KeyCode::Backspace);
+        assert_eq!(dialog.state().choice_note(0), Some("e\u{301}"));
+        note_key(&mut dialog, KeyCode::Backspace);
+        assert_eq!(dialog.state().choice_note(0), None);
+        dialog.paste(&"Only for 世界 ".repeat(60));
+        for (width, height, mode, key) in [
+            (26, 9, QuestionLayoutMode::Pinned, KeyCode::End),
+            (12, 4, QuestionLayoutMode::WholeBody, KeyCode::End),
+            (14, 4, QuestionLayoutMode::WholeBody, KeyCode::Home),
+            (28, 10, QuestionLayoutMode::Pinned, KeyCode::Right),
+        ] {
+            note_key(&mut dialog, key);
+            let buffer = render_buffer(&mut dialog, width, height);
+            assert_eq!(dialog.state().last_layout.unwrap().mode, mode);
+            assert_focus_reachable(&dialog);
+            assert!(
+                buffer.content().iter().any(|cell| {
+                    cell.symbol() == "▌" && cell.bg == theme().surfaces.selection_background
+                }),
+                "missing selected caret in {width}x{height}"
+            );
+        }
+        note_key(&mut dialog, KeyCode::Esc);
+        let buffer = render_buffer(&mut dialog, 32, 14);
+        let rows: Vec<_> = buffer
+            .content()
+            .chunks(32)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect();
+        let preview = rows.iter().position(|row| row.contains("  Note:")).unwrap();
+        assert!(rows[preview - 2].contains("Focused"));
+        assert!(rows[preview - 1].contains("  Keep it narrow."));
+        assert!(rows[preview].contains('…'));
+        assert!(rows[preview + 1].contains("Broad"));
     }
 
     #[test]
@@ -1465,21 +1823,33 @@ mod tests {
                 type_text(&mut dialog, "ac");
                 dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
                 type_text(&mut dialog, "b");
-                assert_eq!((&*dialog.state().input, dialog.state().caret), ("abc", 2));
+                assert_eq!(
+                    (&*dialog.state().editor.input, dialog.state().editor.caret),
+                    ("abc", 2)
+                );
                 dialog.handle_key(KeyCode::Right, KeyModifiers::NONE);
                 for code in [KeyCode::Right, KeyCode::Delete, KeyCode::End] {
                     dialog.state_mut().reveal_requested = false;
                     dialog.handle_key(code, KeyModifiers::NONE);
                     assert!(!dialog.state().reveal_requested, "boundary {code:?}");
-                    assert_eq!((&*dialog.state().input, dialog.state().caret), ("abc", 3));
+                    assert_eq!(
+                        (&*dialog.state().editor.input, dialog.state().editor.caret),
+                        ("abc", 3)
+                    );
                 }
                 dialog.handle_key(KeyCode::Home, KeyModifiers::NONE);
                 dialog.handle_key(KeyCode::Delete, KeyModifiers::NONE);
-                assert_eq!((&*dialog.state().input, dialog.state().caret), ("bc", 0));
+                assert_eq!(
+                    (&*dialog.state().editor.input, dialog.state().editor.caret),
+                    ("bc", 0)
+                );
                 type_text(&mut dialog, "a");
                 dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
                 dialog.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
-                assert_eq!((&*dialog.state().input, dialog.state().caret), ("ab", 2));
+                assert_eq!(
+                    (&*dialog.state().editor.input, dialog.state().editor.caret),
+                    ("ab", 2)
+                );
                 type_text(&mut dialog, "c");
                 if multi {
                     assert_eq!(
@@ -1487,7 +1857,7 @@ mod tests {
                         QuestionDialogAction::Handled
                     );
                     assert!(dialog.state().other_selected);
-                    assert!(!dialog.state().editing_other);
+                    assert!(dialog.state().choice_editor != ChoiceEditor::Other);
                     assert_submitted(
                         &mut dialog,
                         Some(QuestionAnswerValue::Strings(vec!["abc".into()])),
@@ -1512,7 +1882,7 @@ mod tests {
                 KeyCode::Delete,
             ] {
                 assert_eq!(state.handle_editor_key(code, modifiers), Some(false));
-                assert_eq!(state.caret, 0);
+                assert_eq!(state.editor.caret, 0);
                 assert!(!state.reveal_requested);
             }
         }
@@ -1533,8 +1903,8 @@ mod tests {
             state.handle_editor_key(KeyCode::Char('J'), KeyModifiers::SHIFT),
             Some(true)
         );
-        assert_eq!(state.input, "J");
-        assert_eq!(state.caret, 1);
+        assert_eq!(state.editor.input, "J");
+        assert_eq!(state.editor.caret, 1);
         assert!(state.reveal_requested);
     }
 
@@ -1573,10 +1943,10 @@ mod tests {
                 (KeyCode::Right, right.as_slice()),
             ] {
                 for &(start, expected) in cases {
-                    dialog.state_mut().caret = start;
+                    dialog.state_mut().editor.caret = start;
                     dialog.handle_key(code, KeyModifiers::CONTROL);
-                    assert_eq!(dialog.state().caret, expected, "{code:?} at {start}");
-                    assert_eq!(dialog.state().input, input);
+                    assert_eq!(dialog.state().editor.caret, expected, "{code:?} at {start}");
+                    assert_eq!(dialog.state().editor.input, input);
                     assert_eq!(dialog.question_index, 0);
                 }
             }
@@ -1588,18 +1958,18 @@ mod tests {
         for kind in editor_kinds() {
             let mut dialog = editor_dialog(kind, "e\u{301}界👩‍💻", true);
             dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
-            assert_eq!(dialog.state().caret, "e\u{301}界".len());
+            assert_eq!(dialog.state().editor.caret, "e\u{301}界".len());
             dialog.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
-            assert_eq!(dialog.state().input, "e\u{301}👩‍💻");
+            assert_eq!(dialog.state().editor.input, "e\u{301}👩‍💻");
             dialog.handle_key(KeyCode::Delete, KeyModifiers::NONE);
-            assert_eq!(dialog.state().input, "e\u{301}");
+            assert_eq!(dialog.state().editor.input, "e\u{301}");
             dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
-            assert_eq!(dialog.state().caret, 0);
+            assert_eq!(dialog.state().editor.caret, 0);
             dialog.handle_key(KeyCode::Right, KeyModifiers::NONE);
-            assert_eq!(dialog.state().caret, "e\u{301}".len());
+            assert_eq!(dialog.state().editor.caret, "e\u{301}".len());
             dialog.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
-            assert!(dialog.state().input.is_empty());
-            assert_eq!(dialog.state().caret, 0);
+            assert!(dialog.state().editor.input.is_empty());
+            assert_eq!(dialog.state().editor.caret, 0);
         }
     }
 
@@ -1614,12 +1984,12 @@ mod tests {
             ("🇦X🇧", "🇦".len(), KeyCode::Delete, "🇦🇧"),
             ("\rX\n", 1, KeyCode::Delete, "\r\n"),
         ] {
-            let mut state = PromptState {
+            let mut state = EditorState {
                 input: input.into(),
                 caret,
-                ..PromptState::default()
+                ..EditorState::default()
             };
-            assert_eq!(state.handle_editor_key(key, KeyModifiers::NONE), Some(true));
+            assert_eq!(state.handle_key(key, KeyModifiers::NONE), Some(true));
             assert_eq!(state.input, expected);
             assert_eq!(state.caret, 0, "{key:?} in {input:?}");
             assert!(
@@ -1630,12 +2000,12 @@ mod tests {
             );
         }
         // Defensive normalization also precedes slicing, even for invalid UTF-8 offsets.
-        let mut state = PromptState {
+        let mut state = EditorState {
             input: "界x".into(),
             caret: 1,
-            ..PromptState::default()
+            ..EditorState::default()
         };
-        state.handle_editor_key(KeyCode::Delete, KeyModifiers::NONE);
+        state.handle_key(KeyCode::Delete, KeyModifiers::NONE);
         assert_eq!((&*state.input, state.caret), ("x", 0));
     }
 
@@ -1644,9 +2014,9 @@ mod tests {
         for kind in editor_kinds() {
             let request = editor_request(kind, " custom 界 ", true);
             let state = PromptState::new(&request.questions[0]);
-            assert_eq!(state.caret, state.input.len());
-            assert_eq!(state.input, " custom 界 ");
-            assert!(!state.editing_other);
+            assert_eq!(state.editor.caret, state.editor.input.len());
+            assert_eq!(state.editor.input, " custom 界 ");
+            assert!(state.choice_editor != ChoiceEditor::Other);
             assert!(state.answer.is_none());
         }
     }
@@ -1662,10 +2032,13 @@ mod tests {
                 .push(PromptState::new(&dialog.request.questions[1]));
             dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
             dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-            assert!(!dialog.state().editing_other);
+            assert!(dialog.state().choice_editor != ChoiceEditor::Other);
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-            assert!(dialog.state().editing_other);
-            assert_eq!((&*dialog.state().input, dialog.state().caret), ("abc", 2));
+            assert!(dialog.state().choice_editor == ChoiceEditor::Other);
+            assert_eq!(
+                (&*dialog.state().editor.input, dialog.state().editor.caret),
+                ("abc", 2)
+            );
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
             if multi {
                 dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
@@ -1677,8 +2050,11 @@ mod tests {
                 dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
             }
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-            assert!(dialog.state().editing_other);
-            assert_eq!((&*dialog.state().input, dialog.state().caret), ("abc", 2));
+            assert!(dialog.state().choice_editor == ChoiceEditor::Other);
+            assert_eq!(
+                (&*dialog.state().editor.input, dialog.state().editor.caret),
+                ("abc", 2)
+            );
         }
     }
 
@@ -1694,26 +2070,32 @@ mod tests {
         for expected in [1, 0] {
             dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
             assert_eq!(dialog.question_index, 1);
-            assert_eq!(dialog.state().caret, expected);
+            assert_eq!(dialog.state().editor.caret, expected);
         }
         dialog.handle_key(KeyCode::Left, KeyModifiers::CONTROL);
         dialog.handle_key(KeyCode::Left, KeyModifiers::SHIFT);
         assert_eq!(dialog.question_index, 1);
         dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(dialog.question_index, 0);
-        assert_eq!((&*dialog.state().input, dialog.state().caret), ("first", 4));
+        assert_eq!(
+            (&*dialog.state().editor.input, dialog.state().editor.caret),
+            ("first", 4)
+        );
         dialog.handle_key(KeyCode::Home, KeyModifiers::NONE);
         dialog.state_mut().reveal_requested = false;
         dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(dialog.question_index, 0);
         assert!(!dialog.state().reveal_requested);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!((&*dialog.state().input, dialog.state().caret), ("xy", 0));
+        assert_eq!(
+            (&*dialog.state().editor.input, dialog.state().editor.caret),
+            ("xy", 0)
+        );
         dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(dialog.question_index, 0, "Skip's Left still goes back");
-        assert_eq!(dialog.states[1].caret, 2);
+        assert_eq!(dialog.states[1].editor.caret, 2);
     }
 
     #[test]
@@ -1738,12 +2120,12 @@ mod tests {
             ] {
                 for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
                     dialog.handle_key(code, modifiers);
-                    assert!(dialog.state().editing_other);
+                    assert!(dialog.state().choice_editor == ChoiceEditor::Other);
                     assert_eq!(dialog.question_index, 1);
                 }
             }
             type_text(&mut dialog, "jk ");
-            assert_eq!(dialog.state().input, "jk ");
+            assert_eq!(dialog.state().editor.input, "jk ");
             assert_eq!(dialog.state().cursor, 0);
             assert!(!dialog.state().other_selected);
         }
@@ -1756,11 +2138,11 @@ mod tests {
             dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
             dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
             assert_eq!(dialog.state().cursor, 1);
-            assert_eq!(dialog.state().caret, input.len());
+            assert_eq!(dialog.state().editor.caret, input.len());
             dialog.handle_key(KeyCode::Home, KeyModifiers::NONE);
             assert_eq!(dialog.state().cursor, 0);
             assert_eq!(
-                dialog.state().caret,
+                dialog.state().editor.caret,
                 input.len(),
                 "row Home must not move the caret"
             );
@@ -1770,7 +2152,7 @@ mod tests {
             assert_eq!(dialog.state().cursor, 0);
             assert!(dialog.state().reveal_requested);
             assert_eq!(
-                dialog.state().input,
+                dialog.state().editor.input,
                 if input.is_empty() { "" } else { "ab" }
             );
             dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
@@ -1781,7 +2163,7 @@ mod tests {
             dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
             type_text(&mut dialog, "k ");
             assert_eq!(dialog.state().cursor, 0);
-            assert!(dialog.state().input.ends_with("Jk "));
+            assert!(dialog.state().editor.input.ends_with("Jk "));
             dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
             assert_submitted(&mut dialog, None);
         }
@@ -1879,11 +2261,11 @@ mod tests {
             "editor-only test fixture"
         );
         let (row, column, _) = reference_editor_caret(
-            &state.input,
-            clamp_cursor(&state.input, state.caret),
+            &state.editor.input,
+            clamp_cursor(&state.editor.input, state.editor.caret),
             key.inner_width,
         );
-        let label_rows = if state.editing_other {
+        let label_rows = if state.choice_editor == ChoiceEditor::Other {
             let label = if matches!(
                 dialog.current().kind,
                 QuestionPromptKind::MultiSelect { .. }
@@ -1943,14 +2325,14 @@ mod tests {
             assert!(render_text(&mut dialog, 80, 20).contains("abc▌"));
         }
         let mut dialog = editor_dialog(text_kind(), "e\u{301}bc", true);
-        dialog.state_mut().caret = 1;
+        dialog.state_mut().editor.caret = 1;
         assert!(render_text(&mut dialog, 80, 20).contains("> ▌e\u{301}bc"));
         assert_eq!(
-            dialog.state().caret,
+            dialog.state().editor.caret,
             1,
             "defensive rendering cannot normalize draft state"
         );
-        assert_eq!(dialog.state().input, "e\u{301}bc");
+        assert_eq!(dialog.state().editor.input, "e\u{301}bc");
     }
 
     #[test]
@@ -1977,18 +2359,19 @@ mod tests {
             let dialog = editor_dialog(text_kind(), &input, true);
             for width in [1, 2, 5, 8, 12, 26, 64] {
                 for &caret in &carets {
-                    let state = PromptState {
+                    let state = EditorState {
                         input: input.clone(),
                         caret,
-                        ..PromptState::default()
+                        ..EditorState::default()
                     };
-                    let (_, measurement) = editor_layout(&state, selection_style(), width);
+                    let (_, measurement) =
+                        state.layout(EditorPrefix::Answer, selection_style(), width);
                     let (row, _, rows) = reference_editor_caret(&input, caret, width);
                     assert_eq!(
                         (measurement.caret_row, measurement.rows),
                         (row, rows),
                         "width {width}, caret {caret}, input {:?}",
-                        dialog.state().input
+                        dialog.state().editor.input
                     );
                 }
             }
@@ -2002,12 +2385,12 @@ mod tests {
         // A very wide layout reduces the cell-bounded probe to one row. The
         // suffix moves the caret to row one, outside the initial prefix probe.
         let input = format!("abc {}", "x".repeat(19_994));
-        let mut state = PromptState {
+        let mut state = EditorState {
             input,
             caret: 4,
-            ..PromptState::default()
+            ..EditorState::default()
         };
-        let (_, measured) = editor_layout(&state, Style::default(), 20_000);
+        let (_, measured) = state.layout(EditorPrefix::Answer, Style::default(), 20_000);
         assert_eq!(measured.caret_row, 1);
         assert_eq!(
             measured.caret_row,
@@ -2018,25 +2401,31 @@ mod tests {
             caret_row: 123,
             ..measured
         };
-        state.editor_measurement.set(Some(sentinel));
-        assert_eq!(editor_layout(&state, selection_style(), 20_000).1, sentinel);
-        state.handle_editor_key(KeyCode::Right, KeyModifiers::NONE);
-        assert!(state.editor_measurement.get().is_none());
+        state.measurement.set(Some(sentinel));
         assert_eq!(
-            state.input_revision, 0,
-            "caret movement is not a text revision"
+            state
+                .layout(EditorPrefix::Answer, selection_style(), 20_000)
+                .1,
+            sentinel
         );
-        editor_layout(&state, Style::default(), 20_000);
-        state.handle_editor_key(KeyCode::Char('!'), KeyModifiers::NONE);
-        assert!(state.editor_measurement.get().is_none());
-        assert_eq!(state.input_revision, 1);
+        state.handle_key(KeyCode::Right, KeyModifiers::NONE);
+        assert!(state.measurement.get().is_none());
+        assert_eq!(state.revision, 0, "caret movement is not a text revision");
+        state.layout(EditorPrefix::Answer, Style::default(), 20_000);
+        state.handle_key(KeyCode::Char('!'), KeyModifiers::NONE);
+        assert!(state.measurement.get().is_none());
+        assert_eq!(state.revision, 1);
 
         let mut dialog = editor_dialog(text_kind(), &"x".repeat(32_000), true);
-        dialog.state_mut().caret = 20_000;
-        let (_, measured) = editor_layout(dialog.state(), Style::default(), 64);
+        dialog.state_mut().editor.caret = 20_000;
+        let (_, measured) =
+            dialog
+                .state()
+                .editor
+                .layout(EditorPrefix::Answer, Style::default(), 64);
         assert_eq!(
             measured.caret_row,
-            reference_editor_caret(&dialog.state().input, 20_000, 64).0
+            reference_editor_caret(&dialog.state().editor.input, 20_000, 64).0
         );
         assert!(
             measured.rows > 32,
@@ -2071,7 +2460,7 @@ mod tests {
                     (6, 3, QuestionLayoutMode::WholeBody),
                 ] {
                     let mut dialog = editor_dialog(kind.clone(), input, true);
-                    dialog.state_mut().caret = *caret;
+                    dialog.state_mut().editor.caret = *caret;
                     let buffer = render_buffer(&mut dialog, width, height);
                     assert_eq!(dialog.state().last_layout.unwrap().mode, mode);
                     assert_caret_visible(&dialog, &buffer);
@@ -2117,9 +2506,9 @@ mod tests {
             let mut dialog = editor_dialog(kind, &"word ".repeat(80), true);
             let buffer = render_buffer(&mut dialog, 36, 5);
             assert_caret_visible(&dialog, &buffer);
-            let cached = dialog.state().editor_measurement.get();
-            let caret = dialog.state().caret;
-            let input = dialog.state().input.clone();
+            let cached = dialog.state().editor.measurement.get();
+            let caret = dialog.state().editor.caret;
+            let input = dialog.state().editor.input.clone();
             dialog.handle_key(KeyCode::PageUp, KeyModifiers::NONE);
             let pan = dialog.state().viewport.top();
             for (code, modifiers) in [
@@ -2131,9 +2520,9 @@ mod tests {
                 dialog.handle_key(code, modifiers);
                 assert!(!render_text(&mut dialog, 36, 5).contains('▌'));
                 assert_eq!(dialog.state().viewport.top(), pan);
-                assert_eq!(dialog.state().editor_measurement.get(), cached);
-                assert_eq!(dialog.state().caret, caret);
-                assert_eq!(dialog.state().input, input);
+                assert_eq!(dialog.state().editor.measurement.get(), cached);
+                assert_eq!(dialog.state().editor.caret, caret);
+                assert_eq!(dialog.state().editor.input, input);
                 assert!(dialog.state().answer.is_none());
             }
             dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
@@ -2184,8 +2573,8 @@ mod tests {
         dialog.handle_key(KeyCode::Right, KeyModifiers::CONTROL);
         let buffer = render_buffer(&mut dialog, 36, 3);
         assert_caret_visible(&dialog, &buffer);
-        let caret = dialog.state().caret;
-        let cache = dialog.state().editor_measurement.get().unwrap();
+        let caret = dialog.state().editor.caret;
+        let cache = dialog.state().editor.measurement.get().unwrap();
         let buffer = render_buffer(&mut dialog, 96, 20);
         assert_caret_visible(&dialog, &buffer);
         assert_eq!(
@@ -2193,10 +2582,10 @@ mod tests {
             QuestionLayoutMode::Pinned
         );
         assert_ne!(
-            dialog.state().editor_measurement.get().unwrap().key.width,
+            dialog.state().editor.measurement.get().unwrap().key.width,
             cache.key.width
         );
-        assert_eq!(dialog.state().caret, caret);
+        assert_eq!(dialog.state().editor.caret, caret);
     }
 
     #[test]
@@ -2250,7 +2639,7 @@ mod tests {
                 }
                 assert!(!footer.contains("? help"));
             }
-            if !dialog.state().editing_other {
+            if dialog.state().choice_editor != ChoiceEditor::Other {
                 dialog
                     .request
                     .questions
@@ -2275,6 +2664,7 @@ mod tests {
         let content = QuestionContent::new(
             dialog.current(),
             state,
+            dialog.request.allow_choice_notes,
             dialog.validation_error.as_deref(),
             key.inner_width,
         );
@@ -2333,7 +2723,7 @@ mod tests {
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
             QuestionDialogAction::Handled
         );
-        assert_eq!(dialog.state().input, "");
+        assert_eq!(dialog.state().editor.input, "");
         dialog.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
         assert_eq!(
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
@@ -2341,6 +2731,7 @@ mod tests {
                 request_id: QuestionRequestId::new("request-1"),
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
+                        note: None,
                         id: "scope".to_string(),
                         answer: Some(QuestionAnswerValue::String("x".to_string())),
                     }],
@@ -2419,10 +2810,12 @@ mod tests {
                 response: QuestionResponse::Answered {
                     answers: vec![
                         QuestionAnswer {
+                            note: None,
                             id: "scope".to_string(),
                             answer: Some(QuestionAnswerValue::String("Broad".to_string())),
                         },
                         QuestionAnswer {
+                            note: None,
                             id: "tests".to_string(),
                             answer: Some(QuestionAnswerValue::String("Focused".to_string())),
                         },
@@ -2438,15 +2831,15 @@ mod tests {
         dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(dialog.state().editing_other);
+        assert!(dialog.state().choice_editor == ChoiceEditor::Other);
         dialog.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
         assert_eq!(
             dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE),
             QuestionDialogAction::Handled
         );
-        assert!(!dialog.state().editing_other);
+        assert!(dialog.state().choice_editor != ChoiceEditor::Other);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(dialog.state().input, "x", "the draft survives Esc");
+        assert_eq!(dialog.state().editor.input, "x", "the draft survives Esc");
         dialog.handle_key(KeyCode::Char('y'), KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(dialog.question_index, 1);
@@ -2457,10 +2850,12 @@ mod tests {
                 response: QuestionResponse::Answered {
                     answers: vec![
                         QuestionAnswer {
+                            note: None,
                             id: "scope".to_string(),
                             answer: Some(QuestionAnswerValue::String("xy".to_string())),
                         },
                         QuestionAnswer {
+                            note: None,
                             id: "tests".to_string(),
                             answer: Some(QuestionAnswerValue::String("Focused".to_string())),
                         },
@@ -2485,8 +2880,8 @@ mod tests {
         request.questions[0].default = Some(QuestionAnswerValue::String(" custom scope ".into()));
         let mut dialog = QuestionDialog::new(TurnId::new(1), request);
         assert_eq!(dialog.state().cursor, 2);
-        assert_eq!(dialog.state().input, " custom scope ");
-        assert!(!dialog.state().editing_other);
+        assert_eq!(dialog.state().editor.input, " custom scope ");
+        assert!(dialog.state().choice_editor != ChoiceEditor::Other);
         assert!(dialog.state().answer.is_none());
         let rendered = render_text(&mut dialog, 120, 24);
         assert_eq!(rendered.matches("Other").count(), 1);
@@ -2495,17 +2890,17 @@ mod tests {
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
             QuestionDialogAction::Handled
         );
-        assert!(dialog.state().editing_other);
+        assert!(dialog.state().choice_editor == ChoiceEditor::Other);
         assert_eq!(
             dialog.question_index, 0,
             "Enter opens the editor, not another question"
         );
         assert!(render_text(&mut dialog, 120, 24).contains("custom scope"));
         dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(!dialog.state().editing_other);
-        assert_eq!(dialog.state().input, " custom scope ");
+        assert!(dialog.state().choice_editor != ChoiceEditor::Other);
+        assert_eq!(dialog.state().editor.input, " custom scope ");
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        while !dialog.state().input.is_empty() {
+        while !dialog.state().editor.input.is_empty() {
             dialog.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
         }
         dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
@@ -2514,7 +2909,7 @@ mod tests {
             QuestionDialogAction::Handled
         );
         assert!(
-            dialog.state().editing_other,
+            dialog.state().choice_editor == ChoiceEditor::Other,
             "blank text cannot be accepted"
         );
         for character in "revised ".chars() {
@@ -2524,7 +2919,11 @@ mod tests {
         assert_eq!(dialog.question_index, 1);
         assert_eq!(
             dialog.states[0].answer,
-            Some(Some(QuestionAnswerValue::String("revised".into())))
+            Some(QuestionAnswer {
+                id: "scope".into(),
+                answer: Some(QuestionAnswerValue::String("revised".into())),
+                note: None
+            })
         );
         assert_eq!(
             dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE),
@@ -2549,7 +2948,7 @@ mod tests {
         );
         assert_eq!(dialog.question_index, 1);
         assert_eq!(dialog.current().id, "tests");
-        assert!(!dialog.state().editing_other);
+        assert!(dialog.state().choice_editor != ChoiceEditor::Other);
         assert_eq!(dialog.state().cursor, 1, "ordinary defaults are unchanged");
         let rendered = render_text(&mut dialog, 120, 24);
         assert_eq!(rendered.matches("Other").count(), 1);
@@ -2562,10 +2961,12 @@ mod tests {
                 response: QuestionResponse::Answered {
                     answers: vec![
                         QuestionAnswer {
+                            note: None,
                             id: "scope".into(),
                             answer: Some(QuestionAnswerValue::String("Focused".into()))
                         },
                         QuestionAnswer {
+                            note: None,
                             id: "tests".into(),
                             answer: None
                         },
@@ -2591,8 +2992,8 @@ mod tests {
         let mut dialog = QuestionDialog::new(TurnId::new(1), request.clone());
         assert_eq!(dialog.state().multi_selected, [true, false]);
         assert!(dialog.state().other_selected);
-        assert_eq!(dialog.state().input, " custom ");
-        assert!(!dialog.state().editing_other);
+        assert_eq!(dialog.state().editor.input, " custom ");
+        assert!(dialog.state().choice_editor != ChoiceEditor::Other);
         let rendered = render_text(&mut dialog, 120, 24);
         assert_eq!(rendered.matches("Other").count(), 1);
         assert!(!rendered.contains("Skip"));
@@ -2611,14 +3012,14 @@ mod tests {
         dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
         assert!(!dialog.state().other_selected);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(dialog.state().editing_other);
+        assert!(dialog.state().choice_editor == ChoiceEditor::Other);
         assert_eq!(
-            dialog.state().input,
+            dialog.state().editor.input,
             " custom ",
             "toggling retains the custom draft"
         );
         dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(!dialog.state().editing_other);
+        assert!(dialog.state().choice_editor != ChoiceEditor::Other);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Char('!'), KeyModifiers::NONE);
@@ -2626,7 +3027,7 @@ mod tests {
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
             QuestionDialogAction::Handled
         );
-        assert!(!dialog.state().editing_other);
+        assert!(dialog.state().choice_editor != ChoiceEditor::Other);
         assert!(dialog.state().other_selected);
         assert_eq!(
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
@@ -2634,6 +3035,7 @@ mod tests {
                 request_id: request.id.clone(),
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
+                        note: None,
                         id: "scope".into(),
                         answer: Some(QuestionAnswerValue::Strings(vec![
                             "Focused".into(),
@@ -2652,6 +3054,7 @@ mod tests {
                 request_id: request.id,
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
+                        note: None,
                         id: "scope".into(),
                         answer: None
                     }]
@@ -2679,9 +3082,9 @@ mod tests {
             prompt.kind = kind;
             let state = PromptState::new(&prompt);
             assert_eq!(state.cursor, 0);
-            assert!(state.input.is_empty());
+            assert!(state.editor.input.is_empty());
             assert!(!state.other_selected);
-            assert!(!state.editing_other);
+            assert!(state.choice_editor != ChoiceEditor::Other);
             assert_eq!(state.multi_selected, [false, false]);
         }
     }
@@ -2689,6 +3092,7 @@ mod tests {
     #[test]
     fn acp_multi_select_defaults_bounds_skip_and_source_label_are_supported() {
         let multi = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("multi"),
             questions: vec![QuestionPrompt {
                 id: "targets".to_string(),
@@ -2733,6 +3137,7 @@ mod tests {
                 request_id: QuestionRequestId::new("multi"),
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
+                        note: None,
                         id: "targets".to_string(),
                         answer: Some(QuestionAnswerValue::Strings(vec![
                             "Core".to_string(),
@@ -2746,6 +3151,7 @@ mod tests {
         let mut dialog = QuestionDialog::new(
             TurnId::new(4),
             QuestionRequest {
+                allow_choice_notes: false,
                 id: QuestionRequestId::new("skip"),
                 questions: vec![QuestionPrompt {
                     id: "optional".to_string(),
@@ -2770,6 +3176,7 @@ mod tests {
                 request_id: QuestionRequestId::new("skip"),
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
+                        note: None,
                         id: "optional".to_string(),
                         answer: None,
                     }],
@@ -2798,6 +3205,7 @@ mod tests {
     #[test]
     fn multi_select_other_returns_to_choices_and_clears_stale_validation() {
         let request = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("multi-other"),
             questions: vec![QuestionPrompt {
                 id: "targets".to_string(),
@@ -2832,7 +3240,7 @@ mod tests {
         assert!(dialog.validation_error.is_some());
 
         dialog.state_mut().cursor = 2;
-        dialog.state_mut().editing_other = true;
+        dialog.state_mut().choice_editor = ChoiceEditor::Other;
         dialog.handle_key(KeyCode::Char('c'), KeyModifiers::NONE);
         assert_eq!(dialog.validation_error, None);
         for character in "ustom".chars() {
@@ -2844,7 +3252,7 @@ mod tests {
             "accepting Other should return to the checkbox list"
         );
         assert!(dialog.state().other_selected);
-        assert!(!dialog.state().editing_other);
+        assert!(dialog.state().choice_editor != ChoiceEditor::Other);
 
         dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
@@ -2854,6 +3262,7 @@ mod tests {
                 request_id: QuestionRequestId::new("multi-other"),
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
+                        note: None,
                         id: "targets".to_string(),
                         answer: Some(QuestionAnswerValue::Strings(vec![
                             "TUI".to_string(),
@@ -2869,6 +3278,7 @@ mod tests {
     fn wrapped_options_keep_every_selectable_row_reachable() {
         let option_count = 10;
         let wrapped = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("wrapped"),
             questions: vec![QuestionPrompt {
                 id: "wrapped-options".to_string(),
@@ -2945,14 +3355,14 @@ mod tests {
         render_text(&mut dialog, 42, 11);
         let selected = dialog.state().cursor;
         let answer = dialog.state().answer.clone();
-        let input = dialog.state().input.clone();
+        let input = dialog.state().editor.input.clone();
         let bottom = dialog.state().viewport.top();
         dialog.handle_key(KeyCode::PageUp, KeyModifiers::NONE);
         render_text(&mut dialog, 42, 11);
         assert!(dialog.state().viewport.top() < bottom);
         assert_eq!(dialog.state().cursor, selected);
         assert_eq!(dialog.state().answer, answer);
-        assert_eq!(dialog.state().input, input);
+        assert_eq!(dialog.state().editor.input, input);
 
         dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
         render_text(&mut dialog, 42, 11);
@@ -3022,6 +3432,7 @@ mod tests {
     #[test]
     fn optional_text_navigation_is_directional_and_j_k_remain_text() {
         let text_request = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("text-navigation"),
             questions: vec![QuestionPrompt {
                 id: "text".to_string(),
@@ -3047,13 +3458,14 @@ mod tests {
         assert_eq!(dialog.state().cursor, 0);
         dialog.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Char('k'), KeyModifiers::NONE);
-        assert_eq!(dialog.state().input, "jk");
+        assert_eq!(dialog.state().editor.input, "jk");
         assert_eq!(dialog.state().cursor, 0);
     }
 
     #[test]
     fn pinned_prompt_and_validation_remain_visible_while_answers_scroll() {
         let validation_request = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("validation"),
             questions: vec![QuestionPrompt {
                 id: "multi".to_string(),
@@ -3097,6 +3509,7 @@ mod tests {
     #[test]
     fn oversized_options_and_long_editors_keep_their_anchor_reachable() {
         let tall_request = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("tall-option"),
             questions: vec![QuestionPrompt {
                 id: "tall".to_string(),
@@ -3119,6 +3532,7 @@ mod tests {
         assert_focus_reachable(&tall);
 
         let text_request = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("long-text"),
             questions: vec![QuestionPrompt {
                 id: "text".to_string(),
@@ -3171,6 +3585,7 @@ mod tests {
         let fit_content = QuestionContent::new(
             fitting.current(),
             fitting.state(),
+            fitting.request.allow_choice_notes,
             None,
             fit_layout.inner_width,
         );
@@ -3184,6 +3599,7 @@ mod tests {
         assert!(!rendered.contains('█'), "fitting answers need no scrollbar");
 
         let fallback_request = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("fallback"),
             questions: vec![QuestionPrompt {
                 id: "fallback-text".to_string(),
@@ -3231,6 +3647,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let transition_request = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("transitions"),
             questions: vec![
                 QuestionPrompt {
@@ -3288,6 +3705,7 @@ mod tests {
     #[test]
     fn malformed_empty_select_is_defensive_even_when_constructed_in_memory() {
         let request = QuestionRequest {
+            allow_choice_notes: false,
             id: QuestionRequestId::new("empty-select"),
             questions: vec![QuestionPrompt {
                 id: "empty".to_string(),

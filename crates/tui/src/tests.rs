@@ -1190,6 +1190,7 @@ fn session_summary(id: &str, preview: Option<&str>) -> SessionSummary {
 
 fn question_request(id: &str) -> QuestionRequest {
     QuestionRequest {
+        allow_choice_notes: false,
         id: QuestionRequestId::new(id),
         questions: vec![
             QuestionPrompt {

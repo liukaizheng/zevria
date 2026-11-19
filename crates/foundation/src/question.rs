@@ -174,6 +174,10 @@ const fn is_true(value: &bool) -> bool {
     *value
 }
 
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// A live batch announced to the frontend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -184,6 +188,19 @@ pub struct QuestionRequest {
     pub source_label: Option<String>,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub dismissible: bool,
+    /// Whether the frontend can attach notes to predefined single-select answers.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_choice_notes: bool,
+}
+
+impl QuestionRequest {
+    pub fn allows_choice_note(&self, prompt: usize, option: usize) -> bool {
+        self.allow_choice_notes
+            && self.questions.get(prompt).is_some_and(|question| {
+                matches!(question.kind, QuestionPromptKind::SingleSelect { .. })
+                    && option < question.options.len()
+            })
+    }
 }
 
 /// One answer correlated by the model-provided question id.
@@ -193,6 +210,9 @@ pub struct QuestionAnswer {
     pub id: String,
     /// `None` means that an optional field was explicitly skipped.
     pub answer: Option<QuestionAnswerValue>,
+    /// Qualification attached to the selected predefined option, not a replacement answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The frontend's terminal resolution. Both variants are successful tool
@@ -241,3 +261,50 @@ impl fmt::Display for QuestionRequestError {
 }
 
 impl std::error::Error for QuestionRequestError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn choice_note_capability_is_opt_in() {
+        let legacy = json!({"id": "req", "questions": []});
+        let mut request: QuestionRequest = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!request.allow_choice_notes);
+        assert_eq!(serde_json::to_value(&request).unwrap(), legacy);
+
+        request.allow_choice_notes = true;
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["allowChoiceNotes"], true);
+        assert_eq!(
+            serde_json::from_value::<QuestionRequest>(wire).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn optional_note_round_trips_beside_the_full_answer_without_changing_legacy_json() {
+        let legacy = json!({"status": "answered", "answers": [
+            {"id": "scope", "answer": "Focused (Recommended)"}
+        ]});
+        let mut response: QuestionResponse = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&response).unwrap(), legacy);
+
+        let QuestionResponse::Answered { answers } = &mut response else {
+            unreachable!()
+        };
+        answers[0].note = Some("Only for the first release".into());
+        let with_note = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            with_note["answers"][0],
+            json!({
+                "id": "scope", "answer": "Focused (Recommended)", "note": "Only for the first release"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<QuestionResponse>(with_note).unwrap(),
+            response
+        );
+    }
+}

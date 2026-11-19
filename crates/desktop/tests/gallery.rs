@@ -56,6 +56,7 @@ mod native {
         TranscriptFolds,
         Plan,
         Question,
+        QuestionNote,
         Confirm,
         Completion,
         Models,
@@ -82,6 +83,7 @@ mod native {
                 Self::TranscriptFolds => "transcript-folds",
                 Self::Plan => "plan-review",
                 Self::Question => "question",
+                Self::QuestionNote => "question-note",
                 Self::Confirm => "replace-confirmation",
                 Self::Completion => "completion",
                 Self::Models => "model-picker",
@@ -145,6 +147,7 @@ mod native {
                 Scene::TranscriptFolds,
                 Scene::Plan,
                 Scene::Question,
+                Scene::QuestionNote,
                 Scene::Confirm,
                 Scene::Completion,
                 Scene::Models,
@@ -208,6 +211,7 @@ mod native {
         for scene in [
             Scene::ThinkingLive,
             Scene::Question,
+            Scene::QuestionNote,
             Scene::Plan,
             Scene::Models,
             Scene::ModelConversion,
@@ -369,6 +373,7 @@ mod native {
             }
             if scene == Scene::Question {
                 controller.update(cx, |c,cx| c.fixture_event(E::QuestionAsked { turn_id: TurnId::new(8), request: QuestionRequest {
+                    allow_choice_notes: false,
                     id: QuestionRequestId::new("gallery-question"), source_label: Some("Explore: desktop layout".into()), dismissible: true,
                     questions: vec![QuestionPrompt { id: "approach".into(), header: "Review approach".into(),
                         question: "How should the transcript present completed tool calls?".into(), kind: QuestionPromptKind::SingleSelect { allow_other: true },
@@ -377,6 +382,23 @@ mod native {
                         QuestionPrompt { id: "notes".into(),header: "Additional notes".into(),question: "Anything else to keep in mind?".into(),
                             kind: QuestionPromptKind::Text { min_length: None, max_length: None }, options: vec![],required: false,default: None }],
                 }},cx));
+            }
+            if scene == Scene::QuestionNote {
+                controller.update(cx, |c, cx| {
+                    let turn_id = TurnId::new(8);
+                    c.fixture_event(E::TurnStarted { turn_id, mode: SessionMode::Plan, message: Message::user("Plan the transcript redesign.") }, cx);
+                    c.fixture_event(E::QuestionAsked { turn_id, request: QuestionRequest {
+                        id: QuestionRequestId::new("gallery-question-note"), source_label: None,
+                        dismissible: true, allow_choice_notes: true,
+                        questions: vec![QuestionPrompt {
+                            id: "scope".into(), header: "Scope".into(), question: "How broad should this change be?".into(),
+                            kind: QuestionPromptKind::SingleSelect { allow_other: true }, required: true,
+                            default: Some("Focused (Recommended)".to_string().into()),
+                            options: vec![QuestionOption { label: "Focused (Recommended)".into(), description: "Change only the requested workflow.".into() },
+                                QuestionOption { label: "Broad".into(), description: "Include adjacent cleanup.".into() }],
+                        }],
+                    } }, cx);
+                });
             }
             if scene == Scene::Completion { controller.update(cx, |c,cx| c.edit_draft("/".into(),cx)); }
             let (window,_view) = gpui_kit::open_window(WindowOptions {
@@ -391,6 +413,14 @@ mod native {
             Scene::ThinkingLive | Scene::ThinkingInterrupted | Scene::ThinkingUnsaved
         ) {
             cx.update(|cx| thinking_scene(scene, &controller, cx));
+            settle(&mut cx, window)?;
+        }
+        if scene == Scene::QuestionNote {
+            cx.update_window(window, |_, window, cx| {
+                window.click(("question-note", 0usize), cx);
+                window.render_frame(cx);
+                window.input("Only for the first release", cx);
+            })?;
             settle(&mut cx, window)?;
         }
         if scene == Scene::TranscriptFolds {

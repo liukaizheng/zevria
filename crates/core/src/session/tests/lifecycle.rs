@@ -200,6 +200,7 @@ async fn direct_control_answers_questions_without_allocating_a_turn() {
             .requester
             .ask_request(
                 QuestionRequest {
+                    allow_choice_notes: false,
                     id: QuestionRequestId::new("direct"),
                     questions: Vec::new(),
                     source_label: None,
@@ -668,7 +669,7 @@ async fn channel_closure_drains_both_sources_before_returning_none() {
 }
 
 #[tokio::test]
-async fn question_answer_resumes_the_same_turn_and_persists_as_a_tool_result() {
+async fn question_answer_and_note_resume_the_same_turn_and_persist_as_one_tool_result() {
     let provider = ScriptedProvider::new([
         Ok(Message::Assistant(
             rig_core::message::AssistantMessage::new(vec![named_tool_call(
@@ -734,10 +735,12 @@ async fn question_answer_resumes_the_same_turn_and_persists_as_a_tool_result() {
     })
     .await
     .expect("question should arrive promptly");
+    assert!(request.allow_choice_notes);
     let response = QuestionResponse::Answered {
         answers: vec![QuestionAnswer {
             id: "scope".to_string(),
             answer: Some(QuestionAnswerValue::String("Focused".to_string())),
+            note: Some("Only for the first release".into()),
         }],
     };
     commands
@@ -772,28 +775,43 @@ async fn question_answer_resumes_the_same_turn_and_persists_as_a_tool_result() {
         .expect("engine join")
         .expect("valid replay");
 
-    assert_eq!(requests.lock().expect("request lock").len(), 2);
+    let requests = requests.lock().expect("request lock");
+    let [initial, continued] = requests.as_slice() else {
+        panic!("one request, one continuation")
+    };
+    assert_eq!(initial.instructions, continued.instructions);
+    assert_eq!(initial.tools, continued.tools);
+    assert_eq!(initial.allowed_tool_names, continued.allowed_tool_names);
+    assert!(continued.input.starts_with(&initial.input));
+    let continued_result = &continued.prompt;
+    let Message::User { content } = continued_result else {
+        panic!("expected tool results")
+    };
+    let [UserContent::ToolResult(result)] = content.as_slice() else {
+        panic!("one correlated result")
+    };
+    assert_eq!(
+        result.call,
+        rig_core::message::CallId::from_wire("question-call")
+    );
+    assert_eq!(result.name, QUESTION_TOOL_NAME);
+    let [ToolResultContent::Text(text)] = result.content.as_slice() else {
+        panic!("one result body")
+    };
+    assert_eq!(
+        serde_json::from_str::<QuestionResponse>(&text.text).unwrap(),
+        response
+    );
+
     let persisted = zevria_transcript::transcript::load(&transcript_path).expect("load transcript");
-    let persisted_response = persisted.iter().find_map(|item| {
-        let TranscriptItem::ToolResults { message, .. } = item else {
-            return None;
-        };
-        let Message::User { content } = message else {
-            return None;
-        };
-        content.iter().find_map(|content| {
-            let UserContent::ToolResult(result) = content else {
-                return None;
-            };
-            result.content.iter().find_map(|content| match content {
-                ToolResultContent::Text(text) => {
-                    serde_json::from_str::<QuestionResponse>(&text.text).ok()
-                }
-                ToolResultContent::Image(_) | ToolResultContent::Json { .. } => None,
-            })
+    let persisted_results: Vec<_> = persisted
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::ToolResults { message, .. } => Some(message),
+            _ => None,
         })
-    });
-    assert_eq!(persisted_response, Some(response));
+        .collect();
+    assert_eq!(persisted_results, vec![continued_result]);
     assert_eq!(
         persisted
             .iter()

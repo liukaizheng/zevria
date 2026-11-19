@@ -592,6 +592,7 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
         E::QuestionAsked {
             turn_id: id,
             request: QuestionRequest {
+                allow_choice_notes: false,
                 id: request_id.clone(),
                 source_label: None,
                 dismissible: false,
@@ -791,6 +792,7 @@ fn root_question_dock_keeps_ownership_while_a_child_is_inspected(cx: &mut TestAp
         E::QuestionAsked {
             turn_id: id,
             request: QuestionRequest {
+                allow_choice_notes: false,
                 id: request_id.clone(),
                 source_label: None,
                 dismissible: true,
@@ -839,6 +841,7 @@ fn stop_shortcut_works_even_with_a_non_dismissible_question(cx: &mut TestAppCont
         E::QuestionAsked {
             turn_id: id,
             request: QuestionRequest {
+                allow_choice_notes: false,
                 id: QuestionRequestId::new("must-answer"),
                 source_label: None,
                 dismissible: false,

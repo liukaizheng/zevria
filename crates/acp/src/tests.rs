@@ -177,6 +177,7 @@ pub(super) fn chunk_id(update: &AcpSessionUpdate) -> &str {
 #[test]
 fn question_forms_round_trip_optional_text_multi_select_and_other_values() {
     let request = QuestionRequest {
+        allow_choice_notes: false,
         id: QuestionRequestId::new("batch"),
         questions: vec![
             QuestionPrompt {
@@ -399,6 +400,7 @@ fn native_question_companions_preserve_requiredness_defaults_and_round_trip_answ
                 }
             };
             let request = QuestionRequest {
+                allow_choice_notes: true,
                 id: QuestionRequestId::new("native"),
                 questions: vec![QuestionPrompt {
                     id: "target".into(),
@@ -425,6 +427,12 @@ fn native_question_companions_preserve_requiredness_defaults_and_round_trip_answ
             };
             let form = question_form(&"session".into(), &request).unwrap();
             let wire = serde_json::to_value(&form.request).unwrap();
+            let legacy_request = QuestionRequest {
+                allow_choice_notes: false,
+                ..request
+            };
+            let legacy = question_form(&"session".into(), &legacy_request).unwrap();
+            assert_eq!(wire, serde_json::to_value(&legacy.request).unwrap());
             let schema = &wire["requestedSchema"];
             assert_eq!(
                 schema["properties"]["question_0_other"]["_meta"],
@@ -504,6 +512,7 @@ fn native_question_companions_preserve_requiredness_defaults_and_round_trip_answ
                 assert_eq!(answers.len(), 1);
                 assert_eq!(answers[0].id, "target");
                 assert_eq!(answers[0].answer, Some(answer(custom)));
+                assert!(answers[0].note.is_none());
             }
             let missing = respond(BTreeMap::from([(
                 "question_0_other".into(),
@@ -914,6 +923,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                     .send(SessionEvent::QuestionAsked {
                                         turn_id,
                                         request: QuestionRequest {
+                                            allow_choice_notes: false,
                                             id: QuestionRequestId::new("question-1"),
                                             questions: vec![QuestionPrompt {
                                                 id: "scope".to_string(),

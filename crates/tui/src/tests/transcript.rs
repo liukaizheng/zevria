@@ -2804,8 +2804,10 @@ fn question_history_renders_and_restores_compact_answer_summaries() {
             QuestionAnswer {
                 id: "scope".to_string(),
                 answer: Some(QuestionAnswerValue::String("Focused".to_string())),
+                note: Some("Only for **the first release**\nRevisit\x1b[2J later".into()),
             },
             QuestionAnswer {
+                note: None,
                 id: "tests".to_string(),
                 answer: Some(QuestionAnswerValue::String("Full".to_string())),
             },
@@ -2842,7 +2844,7 @@ fn question_history_renders_and_restores_compact_answer_summaries() {
             metadata: vec![metadata.clone()],
         },
     );
-    let live_text = rendered_text(&mut live, 80, 20);
+    let live_rows = rendered_rows(&mut live, 80, 20);
 
     let mut restored = App::new();
     restored.restore(vec![
@@ -2853,18 +2855,19 @@ fn question_history_renders_and_restores_compact_answer_summaries() {
             metadata: vec![metadata],
         },
     ]);
-    let restored_text = rendered_text(&mut restored, 80, 20);
-    for expected in ["question · 2 prompts ✓", "Scope: Focused", "Tests: Full"] {
-        assert!(
-            live_text.contains(expected),
-            "live history missing {expected:?}"
-        );
-        assert!(
-            restored_text.contains(expected),
-            "restored history missing {expected:?}"
-        );
+    let restored_rows = rendered_rows(&mut restored, 80, 20);
+    for rows in [live_rows, restored_rows] {
+        let answer_row = rows
+            .iter()
+            .position(|row| row.contains("Scope: Focused"))
+            .unwrap();
+        assert!(rows[answer_row - 1].contains("question · 2 prompts ✓"));
+        assert!(rows[answer_row + 1].contains("  Note: Only for **the first release**"));
+        assert!(rows[answer_row + 2].contains("        Revisit [2J later"));
+        assert!(rows[answer_row + 3].contains("Tests: Full"));
+        assert!(!rows.concat().contains("Which scope?"));
+        assert!(!rows.concat().contains('\x1b'));
     }
-    assert!(!live_text.contains("Which scope?"));
 }
 
 #[test]

@@ -1596,6 +1596,7 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
     let question_id = question.id.clone();
     let response = QuestionResponse::Answered {
         answers: vec![QuestionAnswer {
+            note: None,
             id: "scope".to_string(),
             answer: Some(QuestionAnswerValue::String("Focused".to_string())),
         }],

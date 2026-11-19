@@ -12,8 +12,8 @@ use zevria_foundation::ToolCallOutcome;
 use zevria_foundation::ToolResultMetadata;
 use zevria_foundation::subtask::{SubtaskDescriptor, SubtaskStatus};
 use zevria_foundation::{
-    QUESTION_TOOL_NAME, QuestionResponse, RECONCILE_REPORTS_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
-    TASK_TOOL_NAME, TaskList, TaskStatus,
+    QUESTION_TOOL_NAME, QuestionAnswer, QuestionAnswerValue, QuestionResponse,
+    RECONCILE_REPORTS_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, TaskList, TaskStatus,
 };
 use zevria_workflow::{
     AgentRunLocation, RecordedDecisionDisposition, ReportDisagreementClassification,
@@ -395,12 +395,40 @@ pub fn native_tool_status(state: &NativeToolState) -> PresentedToolStatus {
     }
 }
 
+/// Decode the historical answer and optional choice note from the correlated tool result.
 pub fn question_response(state: &NativeToolState) -> Option<QuestionResponse> {
     state
         .result
         .as_ref()
         .map(tool_result_plain_text)
         .and_then(|output| serde_json::from_str(&output).ok())
+}
+
+pub fn question_answer_text(answer: &QuestionAnswer) -> String {
+    match &answer.answer {
+        Some(QuestionAnswerValue::String(value)) => value.clone(),
+        Some(QuestionAnswerValue::Strings(values)) => values.join(", "),
+        None => "Skipped".to_string(),
+    }
+}
+
+/// Plain display lines only: keep the submitted note unchanged in the result
+/// and copy payload, but do not feed controls into either renderer.
+pub fn question_note_lines(note: &str) -> impl Iterator<Item = String> + '_ {
+    note.lines().enumerate().map(|(index, line)| {
+        let prefix = if index == 0 { "  Note: " } else { "        " };
+        let mut display = prefix.to_owned();
+        display.extend(line.chars().map(|ch| {
+            if ch.is_control()
+                || matches!(ch, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            {
+                ' '
+            } else {
+                ch
+            }
+        }));
+        display
+    })
 }
 
 /// Resolved operation outcome shared by expanded headers, readable lists and

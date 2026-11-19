@@ -367,6 +367,7 @@ const PLAN: &[Binding] = &[
 ];
 const QUESTION: &[Binding] = &[
     b!(Confirm, "answer", 1, "Question", key(Enter)),
+    b!(EditChoiceNote, "add note", 2, "Question", key(Char('n'))),
     b!(Close, "dismiss", 2, "Question", key(Esc), key(Char('q'))),
     b!(Home, "first choice", 0, "Question", key(Char('g'))),
     b!(End, "last choice", 0, "Question", key(Char('G'))),

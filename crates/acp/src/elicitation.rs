@@ -134,6 +134,7 @@ impl QuestionForm {
             answers.push(QuestionAnswer {
                 id: binding.id.clone(),
                 answer,
+                note: None,
             });
         }
         Ok(QuestionResponse::Answered { answers })

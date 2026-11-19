@@ -89,6 +89,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                                 tx.send(SessionEvent::QuestionAsked {
                                     turn_id,
                                     request: QuestionRequest {
+                                        allow_choice_notes: false,
                                         id: QuestionRequestId::new("scope"),
                                         questions: vec![QuestionPrompt {
                                             id: "scope".into(),

@@ -2243,14 +2243,22 @@ that target an older modal.
 Native `question` option labels must be nonblank after trimming and unique
 within the question (case-insensitive). Prefer 1–5 words for readability; the
 range is advisory. The full trimmed label is preserved, and option counts are
-unrestricted.
+unrestricted. Native requests opt into `allowChoiceNotes` for predefined
+single-select rows. In the terminal, `n` opens the inline note editor (`n add
+note` or `n edit note`); Enter answers with that option and its note, and Esc
+returns to the choices without answering. Enter from the list also includes an
+existing draft for the highlighted option. In Desktop, `Add note` / `Edit note`
+appears under the selected radio option and uses the existing `Send answer`
+action. Drafts belong to an option within a prompt and survive moving the
+selection or revisiting a terminal question. `Other`, text, Skip, and ACP
+forms do not attach notes.
 
 The question popup measures prompts, answer labels/descriptions, editors, and
 validation with the exact width and wrapping configuration used to render.
 When space permits, the wrapped prompt and validation remain pinned around an
 independently scrollable answer viewport; terminals too small to leave one
 answer row use one whole-body viewport inside the same border. Selection is
-bounded. Text and Other share editor-first key routing: Left/Right move by
+bounded. Text, Other, and choice notes share editor-first key routing: Left/Right move by
 extended grapheme, Ctrl+Left/Right use the composer's alphanumeric/underscore
 word boundaries (punctuation and whitespace separate words), Backspace/Delete
 remove the preceding/following grapheme, and typing inserts at the caret.
@@ -2276,7 +2284,11 @@ become the existing tool call's result, while ACP answers resume the suspended
 worker request rather than creating a root user prompt. A drop-safe
 registration guard releases the single-pending slot on cancellation, frontend
 loss, or waiter teardown. Native question JSON retains its historical
-string-answer shape. Tool-result metadata adds a typed terminal disposition:
+string-answer shape, with an optional `note` alongside the exact label and
+question ID in the same correlated tool result. A blank draft is omitted.
+Expanded history shows the note under its answer; the raw output, transcript
+envelope, and provider prefix before the result are unchanged. Tool-result
+metadata adds a typed terminal disposition:
 `answered`, `dismissed`, `unavailable`, or `invalid_frontend_response`. All four
 settle an Ensemble Plan question attempt according to conservative disclosure
 policy. Invalid model arguments carry no disposition and do not release the
