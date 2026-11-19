@@ -36,9 +36,19 @@ fn private_environment_export_does_not_initialize_gpui_or_configuration() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
+    let mut entries = output.stdout.split(|&byte| byte == 0);
+    assert_eq!(entries.next(), Some(b"desktop-marker".as_slice()));
+    assert_eq!(entries.next_back(), Some(b"".as_slice()));
+
+    // macOS can supply this variable at process startup even with env_clear().
+    let entries: Vec<_> = entries
+        .filter(|entry| {
+            !(cfg!(target_os = "macos") && entry.starts_with(b"__CF_USER_TEXT_ENCODING="))
+        })
+        .collect();
     assert_eq!(
-        output.stdout,
-        "desktop-marker\0CAPTURE_TEST=space = 雪\nnext\r\nline\0".as_bytes()
+        entries,
+        ["CAPTURE_TEST=space = 雪\nnext\r\nline".as_bytes()]
     );
     assert!(std::fs::read_dir(cwd.path()).unwrap().next().is_none());
 }

@@ -25,11 +25,11 @@ executable release gates run there.
 
 ## 1. Establish the release scope
 
-- Read `AGENTS.md`, `docs/releases.md`, `.github/workflows/release.yml`, the root
-  `Cargo.toml`, and `crates/zevria/Cargo.toml`. Consult
-  `docs/transcript-performance.md` for provider-prefix gates and `docs/windows.md`
-  for platform acceptance requirements. Re-read these sources on each release;
-  versions, targets, commands, and gates can change.
+- Read `AGENTS.md`, `docs/releases.md`, `.github/workflows/release.yml`,
+  `.github/workflows/test.yml`, the root `Cargo.toml`, and `crates/zevria/Cargo.toml`.
+  Consult `docs/transcript-performance.md` for provider-prefix gates and
+  `docs/windows.md` for platform acceptance requirements. Re-read these sources
+  on each release; versions, targets, commands, and gates can change.
 - Inspect the worktree, staged changes, branch, remotes, tags, and recent history.
   Preserve unrelated user work. Do not reset, clean, stash, or stage everything.
 - Confirm the intended version, source commit/ref, previous release, and whether
@@ -153,10 +153,11 @@ exists so the commit never needs to contain its own SHA.
   locking policy. Required coverage includes formatting, locked workspace and
   all-target checks/tests, and the default-feature production release build.
   Do not provide or execute a local validation/build recipe.
-- Preserve the provider's cacheable prompt prefix. CI must run the current
-  explicit provider-prefix gates as well as the ordinary suite, checking raw
-  libtest listings so every filtered gate selects at least one test. A green
-  zero-test invocation is not evidence.
+- Preserve the provider's cacheable prompt prefix. Before pushing, compare the
+  workflow's actual filters by test name with `docs/transcript-performance.md`;
+  a step title or a matching count does not establish coverage. Run every
+  explicit gate as well as the ordinary suite, checking raw libtest listings
+  so every filtered gate selects at least one test.
 - CI must run the separate provider/host `cache-diagnostics` regressions required
   by the workflow. Never enable `cache-diagnostics` or `--all-features` on the
   production build; diagnostic tests and production packaging remain separate.
@@ -164,6 +165,10 @@ exists so the commit never needs to contain its own SHA.
   package, installer, inventory, checksum, and uploaded-asset checks. Hosted
   smoke tests use disposable homes/workspaces, not real credentials/config.
   Inspect CI receipts rather than running these checks locally.
+- A build-only dispatch skips the draft job. Before tagging, exercise the actual
+  upload-verification code in hosted CI with offline fixtures that accept a
+  complete upload and reject missing or extra assets and same-size corruption.
+  Fixtures do not replace verification of the real uploaded bytes on the tag run.
 - Inspect hosted coverage before tagging. If a required check is missing, add or
   repair it in CI within the authorized source-change scope, or report a blocker.
   Never substitute local checks, skip a gate, or weaken an assertion to release.
@@ -178,12 +183,13 @@ exists so the commit never needs to contain its own SHA.
    dirty worktree or silently exclude intended files. Resolve the committed
    source SHA after every amendment and keep pending notes/checkpoints aligned.
 2. With push/dispatch authorization, push the source branch to the confirmed
-   `origin` and watch its CI. Run the existing `release.yml` build-only dispatch
-   at that source ref before tagging; all required source gates must pass at the
-   final source SHA. Use the repair loop below for source failures. A dispatch
-   is always build-only, even for a version tag; it cannot create or repair a
-   GitHub Release. Verify the run's event, ref, and immutable source rather than
-   assuming a selected branch stayed unchanged. Record its run ID and attempt.
+   `origin` and watch its CI. Dispatch `release.yml` at that source ref before
+   tagging. Both branch CI and the build-only release checks must pass at the
+   final source SHA, even if they use different runner images. Use the repair
+   loop below for source failures. A dispatch is always build-only, even for a
+   version tag; it cannot create or repair a GitHub Release. Verify the run's
+   event, ref, and immutable source rather than assuming a selected branch
+   stayed unchanged. Record its run ID and attempt.
    After an amendment, watch newly triggered CI and dispatch the new source;
    rerunning an old run cannot test the amended commit.
 3. After explicit version-tag push authorization, create an annotated `v<VERSION>`
@@ -206,11 +212,13 @@ exists so the commit never needs to contain its own SHA.
      the selected version cannot be established unambiguously.
    - Read hosted bundle/upload verification receipts for the explicit successful
      run ID and attempt. CI must verify the expected inventory, archive members,
-     and `SHA256SUMS` against archive bytes, and compare uploaded GitHub assets
-     with the successful tag run's bundle. Names, sizes, and API digest metadata
-     alone do not replace a required hosted gate. Missing CI evidence is a
-     blocker, not a reason to run local archive/checksum helpers. Stop on
-     unexpected inventory; do not delete unrelated assets to make it pass.
+     and `SHA256SUMS` against archive bytes. The tag job must re-download every
+     uploaded asset by ID, including `SHA256SUMS`, and match its SHA-256 to the
+     corresponding file's digest in that run's verified bundle. Names, sizes,
+     and API digest metadata alone do not replace a required hosted gate.
+     Missing CI evidence is a blocker, not a reason to run local archive/checksum
+     helpers. Stop on unexpected inventory; do not delete unrelated assets to
+     make it pass.
    - Inspect the GitHub asset metadata and CI-confirmed hashes against the tag
      run, not the build-only run. Independent builds can produce different
      archive hashes at the same source; do not require dry-run/tag-run hash
@@ -226,9 +234,10 @@ exists so the commit never needs to contain its own SHA.
      reviewed evidence. Reconcile unreviewed maintainer changes rather than
      overwriting them, and reverify evidence invalidated by a retry.
    - Inspect the installed `gh release edit --help` before using `--notes-file`.
-     After editing, re-read by release ID and verify the reviewed body, exactly
-     one matching source marker, draft/tag/title/prerelease identity, and
-     unchanged verified asset IDs, upload states, sizes, and digests.
+     Make a notes-only edit; omit flags that set release identity or publication
+     state. After editing, re-read by release ID and verify the reviewed body,
+     exactly one matching source marker, draft/tag/title/prerelease identity,
+     and unchanged verified asset IDs, upload states, sizes, and digests.
    - Capture the fresh `html_url` after the edit. A draft URL can change while its
      release ID and tag remain the same; do not use an old URL as identity or
      report it without refreshing.
@@ -251,6 +260,8 @@ exists so the commit never needs to contain its own SHA.
   `gh run watch` exit can instead be an EOF, timeout, or API transport failure.
   Retry transient read-only requests with bounded backoff, without redispatching
   the workflow, rerunning jobs, or changing tags merely to repair monitoring.
+  A fresh dispatch can queue behind an older run on the same ref; monitor the
+  new run ID rather than redispatching or reusing the older result.
 - Logs may be unavailable through `gh run view --log` while a run is in progress.
   Poll structured status/jobs until logs are available, then inspect them;
   unavailable logs alone are not a failed job. Persistent API/authentication
@@ -263,21 +274,26 @@ Within an authorized release/CI-repair scope, use this loop for actual source or
 workflow failures. Do not run local builds, tests, linters, smoke tests, or other
 validation to reproduce or check a fix.
 
-1. Read the failing GitHub job/step logs and make the necessary scoped local
-   source/workflow edits. Preserve provider-prefix behavior and existing gates;
-   do not rewrite unrelated code or weaken tests to obtain green CI.
+1. Inspect the failed job's logs, assertions, and exact runner image when
+   available. Distinguish production, fixture, and runner service failures
+   before editing. Fix only the affected layer. For example, a fixture that
+   launches a binary under a new name should use a standalone executable rather
+   than assume a renamed multicall utility behaves the same. Preserve runner
+   coverage, existing assertions, and provider-prefix behavior.
 2. Inspect the branch tip, worktree, staged diff, and remote refs. Amend only the
    agent-owned last commit for this ongoing release, before any release tag
    references it. Preserve unrelated user work and record the confirmed remote
-   source-branch SHA before rewriting. If the tip is unrelated or already tagged,
-   stop rather than amending it.
+   source-branch SHA. If the tip is unrelated or already tagged, stop rather than
+   amending it. Authorization for a local amendment or fast-forward push does
+   not authorize rewriting an already-pushed branch; confirm that scope first.
 3. Stage only the intended fix files and amend that commit, normally with
    `rtk git commit --amend --no-edit`. If unrelated changes are already staged,
    stop and resolve scope instead of including or unstaging them. Update a stale
    commit message if needed; do not attach old validation claims to changed source.
-4. Push the amended source branch to `origin` with an explicit lease, never an
-   unconditional `--force`. Substitute the previously confirmed, nonempty
-   source-branch name and remote SHA in this form:
+4. If the confirmed remote tip is an ancestor of the amended commit, use a
+   normal fast-forward push to `origin`. For an authorized non-fast-forward
+   update, use an explicit lease, never an unconditional `--force`. Substitute
+   the previously confirmed, nonempty source-branch name and remote SHA:
 
    ```sh
    rtk git push --force-with-lease="refs/heads/$branch:$expected_remote_sha" \
@@ -292,8 +308,8 @@ validation to reproduce or check a fix.
    pending source markers. Watch the newly triggered branch CI and start a new
    build-only release run at the amended source. Check its actual source/run ID;
    do not rerun an older workflow expecting it to pick up the fix. Repeat the
-   local fix -> amend -> force-with-lease -> GitHub CI loop until required gates
-   pass, then finalize the reviewed notes/source marker and tag that exact SHA.
+   scoped repair, safe push, and hosted validation until required gates pass,
+   then finalize the reviewed notes/source marker and tag that exact SHA.
 
 ### Recover from transient or tagged-workflow failures
 

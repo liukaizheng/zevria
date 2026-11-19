@@ -1,6 +1,8 @@
 //! Summary-only write/delete results and grammar-aware, bounded edit diffs.
 //! Unavailable-content diagnostics remain visible for all file tools.
 
+use std::path::Path;
+
 use diffy::{Hunk, Patch};
 use ratatui::{
     style::{Modifier, Style},
@@ -53,6 +55,78 @@ pub struct FileChangeSummary {
     pub removed: usize,
 }
 
+fn file_change_path_label(path: &Path) -> String {
+    #[cfg(windows)]
+    if let Some(label) = conventional_windows_path_label(path) {
+        return label;
+    }
+    path.display().to_string()
+}
+
+#[cfg(windows)]
+fn conventional_windows_path_label(path: &Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+    let raw = path.to_str()?;
+    let (leading, tail, names) = match prefix.kind() {
+        Prefix::VerbatimDisk(_) => {
+            let tail = raw.strip_prefix(r"\\?\")?;
+            // The disk designator is two ASCII bytes. Require a physical root.
+            let names = tail[2..].strip_prefix('\\')?;
+            ("", tail, names)
+        }
+        Prefix::VerbatimUNC(server, share) if !server.is_empty() && !share.is_empty() => {
+            let tail = raw.strip_prefix(r"\\?\UNC\")?;
+            (r"\\", tail, tail)
+        }
+        _ => return None,
+    };
+
+    // Check the raw components without normalizing them, and keep the prefix
+    // if the label would exceed MAX_PATH (260 UTF-16 units including the NUL).
+    const MAX_PATH: usize = 260;
+    if leading.len() + tail.encode_utf16().count() >= MAX_PATH
+        || !names
+            .split_terminator('\\')
+            .all(is_conventional_windows_name)
+    {
+        return None;
+    }
+    Some(format!("{leading}{tail}"))
+}
+
+#[cfg(windows)]
+fn is_conventional_windows_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.ends_with(['.', ' '])
+        || name.bytes().any(|byte| {
+            matches!(
+                byte,
+                0..=31 | b'/' | b':' | b'<' | b'>' | b'"' | b'|' | b'?' | b'*'
+            )
+        })
+    {
+        return false;
+    }
+
+    // DOS device names can also be reserved with a file extension.
+    let stem = name
+        .split_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .trim_end_matches(' ');
+    let reserved = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+        || stem.split_at_checked(3).is_some_and(|(prefix, number)| {
+            (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
+                && (matches!(number.as_bytes(), [b'1'..=b'9']) || matches!(number, "¹" | "²" | "³"))
+        });
+    !reserved
+}
+
 pub fn summarize_file_change(change: &FileChangeOutput) -> FileChangeSummary {
     let (added, removed) = line_counts(&change.change);
     let verb = match &change.change {
@@ -64,12 +138,13 @@ pub fn summarize_file_change(change: &FileChangeOutput) -> FileChangeSummary {
         FileChange::Update { .. } => "Edited",
         FileChange::Omitted { operation, .. } => operation_verb(*operation),
     };
+    let path = file_change_path_label(&change.path);
     let path = match &change.change {
         FileChange::Update {
             move_path: Some(move_path),
             ..
-        } => format!("{} -> {}", change.path.display(), move_path.display()),
-        _ => change.path.display().to_string(),
+        } => format!("{path} -> {}", file_change_path_label(move_path)),
+        _ => path,
     };
     FileChangeSummary {
         verb,
@@ -605,7 +680,6 @@ fn push_styled_character(spans: &mut Vec<Span<'static>>, character: char, style:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn render_file_change(change: &FileChangeOutput, width: u16) -> Vec<Line<'static>> {
         super::render_file_change(
@@ -706,6 +780,90 @@ mod tests {
                 "missing {expected:?}: {rendered:?}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn edited_verbatim_drive_path_renders_as_an_ordinary_absolute_path() {
+        let change = FileChangeOutput {
+            path: r"\\?\D:\codes\rust\zevria\crates\zevria\tests\cli_startup.rs".into(),
+            change: FileChange::Update {
+                unified_diff: diffy::create_patch("old\n", "new\n").to_string(),
+                move_path: None,
+            },
+        };
+        let lines = render_file_change(&change, 80);
+        assert_eq!(line_text(&lines[0]), "• Edited 1 file (+1 -1)");
+        assert_eq!(
+            line_text(&lines[1]),
+            r"  D:\codes\rust\zevria\crates\zevria\tests\cli_startup.rs (+1 -1)"
+        );
+        for expected in ["@@ -1 +1 @@", "1 - old", "1 + new"] {
+            find_line(&lines, expected);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn moved_verbatim_paths_render_both_endpoints_using_ordinary_spelling() {
+        let change = FileChangeOutput {
+            path: r"\\?\D:\repo\before.rs".into(),
+            change: FileChange::Update {
+                unified_diff: diffy::create_patch("old\n", "new\n").to_string(),
+                move_path: Some(r"\\?\UNC\server\share\after.rs".into()),
+            },
+        };
+        let lines = render_file_change(&change, 80);
+        assert_eq!(line_text(&lines[0]), "• Moved 1 file (+1 -1)");
+        assert_eq!(
+            line_text(&lines[1]),
+            r"  D:\repo\before.rs -> \\server\share\after.rs (+1 -1)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn other_windows_file_change_paths_keep_their_labels() {
+        for path in [
+            r"D:\repo\file.rs",
+            r"\\server\share\file.rs",
+            "src/lib.rs",
+            r"\\.\PhysicalDrive0",
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\file.rs",
+            r"\\?\D:",
+            r"\\?\UNC\server",
+            r"\\?\D:\repo\file.rs.",
+            r"\\?\UNC\server\share\name \file.rs",
+            r"\\?\D:\repo\NuL .rs",
+            r"\\?\D:\repo\COM¹.rs",
+            r"\\?\D:\repo\..\file.rs",
+            r"\\?\D:\repo/dir\file.rs",
+            r"\\?\D:\repo\\file.rs",
+        ] {
+            let change = FileChangeOutput {
+                path: path.into(),
+                change: FileChange::Add {
+                    content: String::new(),
+                },
+            };
+            assert_eq!(
+                line_text(&render_file_change(&change, 80)[1]),
+                format!("  {path} (+0 -0)")
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_windows_path_labels_that_fit_max_path_drop_the_prefix() {
+        // 259 UTF-16 units, not including the NUL or the verbatim prefix.
+        let plain = format!(r"D:\{}\{}", "a".repeat(127), "🦀".repeat(64));
+        assert_eq!(
+            file_change_path_label(Path::new(&format!(r"\\?\{plain}"))),
+            plain
+        );
+        let overlong = format!(r"\\?\{plain}a");
+        assert_eq!(file_change_path_label(Path::new(&overlong)), overlong);
     }
 
     #[test]

@@ -690,6 +690,10 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
         "move_to": null
     });
     let output = "applied edits (1 file changed)";
+    #[cfg(windows)]
+    let (resolved_path, display_path) = (r"\\?\D:\repo\src\lib.rs", r"D:\repo\src\lib.rs");
+    #[cfg(not(windows))]
+    let (resolved_path, display_path) = ("src/lib.rs", "src/lib.rs");
     let mut app = App::new();
     apply_turn_event(
         &mut app,
@@ -721,7 +725,7 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
                 "edit",
                 ToolCallOutcome::Success,
                 vec![FileChangeOutput {
-                    path: "src/lib.rs".into(),
+                    path: resolved_path.into(),
                     change: FileChange::Update {
                         unified_diff: diffy::create_patch("old\n", "new\n").to_string(),
                         move_path: None,
@@ -732,10 +736,12 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
     );
 
     let rendered = rendered_text(&mut app, 120, 24);
+    let path_row = format!("  {display_path} (+1 -1)");
     for expected in [
         "edit src/lib.rs ✓",
         output,
         "Edited 1 file",
+        &path_row,
         "1 - old",
         "1 + new",
     ] {
