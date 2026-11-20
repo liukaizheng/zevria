@@ -112,6 +112,9 @@ in provider order:
   output and diffs. Expanded tools use recessed 8 px wells, with input before
   output and then the native diff. Output opens at 16 lines; **Show all N lines**
   expands in the transcript rather than creating another output scroll trap.
+  Provider-hosted web work uses the same thread nodes, not a globe in the
+  gutter. Adjacent actions in an entry share one row; expand it to see each
+  search, page open or find in provider order.
 - **Ink:** the solid thread and Kit's system UI font 14/22 for answers;
   prompts use the same size with medium weight and a hanging **You** label.
   You/Task, Zevria and System labels use their semantic role inks; the Plan
@@ -134,8 +137,8 @@ Consolas on Windows. Transcript typography is centralized as `Type { size, leadi
 | `READING` | 14/22 | Answers, prompts, empty-state and screen body text |
 | `DOCUMENT` | 15/24 | Serif Plan documents, in the thread and review sheet |
 | `PENCIL` | 13/21 | Serif thinking previews and expanded notes, upright by default |
-| `CODE` | 12/18 | Monospace command headers, wells, code, completions and errors |
-| `SECONDARY` | 13/20 | In-thread notices, live tail, web/ensemble text, subtask titles |
+| `CODE` | 12/18 | Monospace command headers, wells, code, web URLs, completions and errors |
+| `SECONDARY` | 13/20 | In-thread notices, live tail, web queries and patterns, ensemble text, subtask titles |
 | `HEADINGS` | 18/24, 16/22, 15/21 | Markdown h1, h2, h3+; Plan card title uses h2 |
 | `LABEL`, `META` | 12/16, 11/14 | Gutter/tool labels and tabular metadata (unchanged) |
 
@@ -197,8 +200,38 @@ remain available; answer code fences also have a language label and Copy action.
 
 The thread's live tip and the status bar share one vocabulary: **Waiting for the
 model**, **Thinking**, **Writing**, **Running command** (or another tool name),
-**Reconnecting** with attempt/countdown, **Compacting context**, and **Stopping**.
-Opaque-only progress cannot be called thinking, so it remains waiting.
+**Searching the web**, **Opening a page**, **Finding in page**, **Reconnecting**
+with attempt/countdown, **Compacting context**, and **Stopping**. Opaque-only
+progress cannot be called thinking, so it remains waiting.
+
+### Web activity and Sources
+
+A single action shows its label and summary; a group shows action counts and,
+when terminal outcomes differ, colored outcome counts. Each expanded item has
+its own status glyph. A confirmed interruption says **interrupted**; a closed
+response without provider confirmation says **unconfirmed**. Running nodes use
+the same Reduce Motion-aware clock as other work.
+
+Expanded rows wrap queries, find patterns and page addresses. A folded row
+keeps one line; a search with several queries shows the first and **+N more**.
+Page addresses use link ink for the scheme-free host and muted mono for the
+path, query and fragment. Safe HTTP(S) pages open by clicking the address or
+using the focusable **Open page in browser** control. Hover shows the full
+destination. Other addresses are plain text. **Copy web activity** preserves
+the exact copy text of each member, one per line.
+
+An expanded assistant answer with citations has a **Sources** footer, in
+first-cited domain order. A single-page tag opens the page; a tag with a count
+opens a menu of page-title links. **Show all N sources** reveals domains beyond
+the first eight. The footer hides when the answer or message is folded; inline
+links and answer copy are unchanged.
+
+Grouping is desktop-only; the TUI keeps its existing rows. The group keeps the
+first member's identity and fold as it grows. If that member is absent at
+commit, the new group starts expanded. Sources come only from Responses
+`url_citation` annotations (including indexed ACP display when present); no
+provider result lists are requested. Host labels use lowercase ASCII/punycode
+and omit a leading `www.`.
 
 ### Transcript folding and turn navigation
 
@@ -309,7 +342,7 @@ stripe and no second focus outline; mode stays on the gutter selector/compact
 toggle and Send. Custom disclosures use a concentric 2 px selection-ink ring
 with a 2 px offset (outer radius = control radius + 4 px). Ancestors leave room
 for the halo instead of clipping it. Icon controls have accessible names;
-thinking and tool headers expose their expanded state. GPUI Kit has no Increase Contrast signal,
+thinking, tool and web headers expose their expanded state. GPUI Kit has no Increase Contrast signal,
 so that separate macOS preference is not implemented.
 
 Clicking blank space moves focus to the window, clearing disclosure, Copy,
@@ -337,8 +370,8 @@ PNGs are written to the repository's `target/desktop-gallery/`. The 1240×840 an
 720×840 logical viewports are captured at the native test renderer's 2× scale.
 Empty, working, question, Plan and completion scenes also have wide Graphite
 1920×1080 captures named `{scene}-1920x1080.png`, showing the centered column.
-Thinking-live, question-dock and Plan-overlay scenes also have dark/light
-720×520 minimum-window captures.
+Thinking-live, web-search-live, question-dock and Plan-overlay scenes also
+have dark/light 720×520 minimum-window captures.
 The model picker and conversion-warning scenes also have dark/light minimum-size
 captures. To capture just model controls at 720×520, 1240×840 and 1920×1080 under
 Graphite, Graphite Light and a generated configured theme, set
@@ -349,7 +382,10 @@ failed/idle/empty sessions, working prose and tool loops with an expanded native
 diff, Plan review, questions, replacement confirmation and completions. Working
 scenes, thinking-live, thinking-restored, thinking-interrupted, thinking-unsaved,
 code-heavy answers, docked questions and Plan review also render under Graphite
-Light. The `math` scene restores
+Light. The `web-search` and `web-search-live` scenes show grouped actions,
+inline citations and Sources chips, and the running **Searching the web** tip.
+They render in Graphite at both widths and in Graphite Light at 1240×840.
+The `math` scene restores
 the shared Hölder proof fixture at 1240×3200 and 720×3200, plus a light-palette
 1240×3200 capture. The `transcript-folds` scene restores three turns, then
 invokes **Fold earlier content**. Its 1240×1600 and 720×1600 Graphite captures
@@ -494,8 +530,9 @@ parser boundary separately from the fully covered proof fixture.
   notice. Replacing a busy session from the sidebar offers **Keep working** or
   **Stop and switch**.
 - Live/restored transcripts, selectable user text, retained Markdown, collapsible
-  reasoning, web activity, native tool rows, structured task/reconciliation
-  lists, command fences, file-change counts and expandable diffs, Plan artifacts
+  reasoning, grouped web activity with Open and Copy, Sources tags and menus,
+  native tool rows, structured task/reconciliation lists, command fences,
+  file-change counts and expandable diffs, Plan artifacts
   and handoffs, validated prompt-image thumbnails, errors and compaction dividers.
 - Multiline composer: **Enter** sends, **Shift-Enter** inserts a newline. Shared
   slash/skill completions support click, arrow selection, Tab and Enter. Built-in
@@ -813,6 +850,13 @@ Check these on a scratch workspace:
   Fold a projected history thought, then verify it stays folded on revision.
   Stop mid-thinking and restore the saved interrupted output: it starts open.
   Test a model without readable thoughts; expect no empty Thinking header.
+- [ ] Real Responses session with web search enabled: watch the live tip as web
+  work runs, fold a growing group and verify it stays folded. Expand it and open
+  an address with both the text link and **Open page in browser**. Verify Sources
+  tags open single pages and a multi-page dropdown opens the chosen citation.
+  Escape closes the dropdown without stopping the turn. Check the running node
+  with Reduce Motion on and off, and verify keyboard focus and VoiceOver names
+  for **Web activity details**, **Copy web activity**, Open and the source tags.
 - [ ] Complete a turn while scrolled up. Nothing folds or jumps; Jump to latest
   and another turn don't create new folds. Check that both bulk actions keep the
   newest answer readable and fold only its Thinking blocks.

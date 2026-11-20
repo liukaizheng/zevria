@@ -2,8 +2,100 @@
 //! and annotations are never modified in native replay.
 
 use rig_core::message::{AssistantContent, Text};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
+
+pub(crate) const MAX_SOURCES: usize = 64;
+pub(crate) const MAX_SOURCE_URL_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_SOURCE_TITLE_CHARS: usize = 512;
+
+/// A display-only citation, independent of its position in the answer text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CitedSource {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlDisplay {
+    pub host: String,
+    pub rest: String,
+}
+
+/// Readable parts of a page address. Opening it still requires `safe_http_url`.
+pub fn url_display(raw: &str) -> Option<UrlDisplay> {
+    let parsed = url::Url::parse(raw).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    let host = host.strip_prefix("www.").unwrap_or(host).to_owned();
+    let mut rest = match parsed.path() {
+        "/" => String::new(),
+        path => path.to_owned(),
+    };
+    if let Some(query) = parsed.query() {
+        rest.push('?');
+        rest.push_str(query);
+    }
+    if let Some(fragment) = parsed.fragment() {
+        rest.push('#');
+        rest.push_str(fragment);
+    }
+    Some(UrlDisplay { host, rest })
+}
+
+/// Collect usable cited pages in annotation order, even when their offsets
+/// cannot yet be applied to the live answer. The first citation owns its title.
+pub fn sources(annotations: Option<&Value>) -> Vec<CitedSource> {
+    let mut sources = Vec::new();
+    let mut seen = HashSet::new();
+    for annotation in annotations.and_then(Value::as_array).into_iter().flatten() {
+        if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
+            continue;
+        }
+        let Some(url) = annotation
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|url| url.len() <= MAX_SOURCE_URL_BYTES)
+            .and_then(safe_http_url)
+            .filter(|url| url.len() <= MAX_SOURCE_URL_BYTES)
+        else {
+            continue;
+        };
+        if !seen.insert(url.clone()) {
+            continue;
+        }
+        let title = annotation
+            .get("title")
+            .and_then(Value::as_str)
+            .map(sanitize_display)
+            .map(|title| {
+                title
+                    .trim()
+                    .chars()
+                    .take(MAX_SOURCE_TITLE_CHARS)
+                    .collect::<String>()
+            })
+            .filter(|title| !title.is_empty());
+        sources.push(CitedSource { url, title });
+        if sources.len() == MAX_SOURCES {
+            break;
+        }
+    }
+    sources
+}
+
+pub fn text_sources(text: &Text) -> Vec<CitedSource> {
+    sources(
+        text.native
+            .as_ref()
+            .and_then(|native| native.item.get("annotations")),
+    )
+}
 
 /// Strip terminal control and Unicode directional formatting characters from
 /// untrusted display metadata. Newlines in titles must not create new blocks.
@@ -346,6 +438,55 @@ mod tests {
             text,
             "canonical raw projection is unchanged"
         );
+    }
+
+    #[test]
+    fn cited_sources_are_safe_ordered_and_bounded_independently_of_offsets() {
+        let annotations = json!([
+            {"type":"url_citation", "url":"https://EXAMPLE.org/doc", "title":"  \u{202e}First\n title\u{1b}  ", "end_index":999},
+            {"type":"url_citation", "url":"https://example.org/doc", "title":"Later title"},
+            {"type":"url_citation", "url":"http://example.org/blank", "title":" \t\u{200e} "},
+            {"type":"url_citation", "url":"https://rust-lang.org/", "title":"🦀".repeat(513)},
+            {"type":"file_citation", "url":"https://example.org/file"},
+            {"type":"url_citation", "url":"javascript:alert(1)"},
+            {"type":"url_citation", "url":"https://user:pass@example.org/"},
+            {"type":"url_citation", "url":"https://example.org/\u{1b}no"},
+            {"type":"url_citation", "url":format!("https://example.org/{}", "x".repeat(8192))},
+            {"type":"url_citation", "url":format!("https://example.org/{}", "é".repeat(1500))}
+        ]);
+        let pages = sources(Some(&annotations));
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages[0].url, "https://example.org/doc");
+        assert_eq!(pages[0].title.as_deref(), Some("First title"));
+        assert_eq!(pages[1].url, "http://example.org/blank");
+        assert_eq!(pages[1].title, None);
+        assert_eq!(pages[2].title.as_ref().unwrap().chars().count(), 512);
+        assert!(sources(None).is_empty());
+        assert!(sources(Some(&json!({}))).is_empty());
+        let native = text_with_openai_extras("answer", json!({"annotations": annotations}));
+        assert_eq!(text_sources(&native), pages);
+
+        let many: Vec<_> = (0..70)
+            .map(|i| json!({"type":"url_citation", "url":format!("https://example.org/{i}")}))
+            .collect();
+        let pages = sources(Some(&json!(many)));
+        assert_eq!(pages.len(), 64);
+        assert_eq!(pages[63].url, "https://example.org/63");
+    }
+
+    #[test]
+    fn display_address_uses_the_ascii_host_and_preserves_the_path_query_and_fragment() {
+        assert_eq!(
+            url_display("HTTPS://WWW.Bücher.DE:8080/a%20b?x=1&y=2#answer"),
+            Some(UrlDisplay {
+                host: "xn--bcher-kva.de".into(),
+                rest: "/a%20b?x=1&y=2#answer".into(),
+            })
+        );
+        assert_eq!(url_display("https://example.org/").unwrap().rest, "");
+        assert_eq!(url_display("http://example.org/?#").unwrap().rest, "?#");
+        assert!(url_display("file:///tmp/x").is_none());
+        assert!(url_display("not a URL").is_none());
     }
 
     #[test]

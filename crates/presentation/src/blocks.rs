@@ -6,7 +6,7 @@
 //! and cache invalidation rules.
 
 use rig_core::message::{ProviderCallId, Reasoning, ToolCall, ToolResult};
-use zevria_content::HostedActivityStatus;
+use zevria_content::{CitedSource, HostedActivity, HostedActivityStatus};
 use zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME;
 use zevria_foundation::ToolCallOutcome;
 use zevria_foundation::ToolResultMetadata;
@@ -503,7 +503,7 @@ impl AcpToolPresentation {
         if !zevria_content::response::is_hosted_search_input(&self.id, self.raw_input.as_ref()) {
             return None;
         }
-        let activity = zevria_content::HostedActivity {
+        let activity = HostedActivity {
             kind: zevria_content::HostedActivityKind::WebSearch,
             output_index: zevria_content::response::HostedSearchAddress::parse(&self.id)?
                 .output_index,
@@ -516,10 +516,12 @@ impl AcpToolPresentation {
                 .filter(|action| !action.is_null())
                 .cloned(),
         };
+        let icon = self.presented_status().icon();
         Some(WebActivityPresentation {
             members: vec![activity.output_index],
             detail: (!activity.details().is_empty()).then(|| activity.label()),
-            outcomes: vec![(self.presented_status().icon(), 1)],
+            outcomes: vec![(icon, 1)],
+            actions: vec![WebActionPresentation::from_activity(&activity, icon)],
         })
     }
 
@@ -756,6 +758,70 @@ pub struct PresentedDiagnostic {
     pub tone: DiagnosticTone,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebActionKind {
+    Search,
+    OpenPage,
+    FindInPage,
+    Other,
+}
+
+/// A readable provider-hosted action, with link safety checked before the URL
+/// is sanitized for display.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebActionPresentation {
+    pub output_index: u64,
+    pub kind: WebActionKind,
+    pub queries: Vec<String>,
+    pub url: Option<String>,
+    pub pattern: Option<String>,
+    pub status: StatusIcon,
+    safe_url: Option<String>,
+}
+
+impl WebActionPresentation {
+    fn from_activity(activity: &HostedActivity, status: StatusIcon) -> Self {
+        let kind = match activity.action_kind() {
+            Some("search") => WebActionKind::Search,
+            Some("open_page") => WebActionKind::OpenPage,
+            Some("find_in_page") => WebActionKind::FindInPage,
+            _ if activity.status == HostedActivityStatus::Searching => WebActionKind::Search,
+            _ => WebActionKind::Other,
+        };
+        Self {
+            output_index: activity.output_index,
+            kind,
+            queries: activity.queries(),
+            url: activity.url(),
+            pattern: activity.pattern(),
+            status,
+            safe_url: activity.safe_url(),
+        }
+    }
+
+    pub fn safe_url(&self) -> Option<&str> {
+        self.safe_url.as_deref()
+    }
+}
+
+pub fn aggregate_web_status(statuses: impl IntoIterator<Item = StatusIcon>) -> StatusIcon {
+    use StatusIcon::*;
+    statuses
+        .into_iter()
+        .min_by_key(|status| match status {
+            Running => 0,
+            Pending => 1,
+            Failed => 2,
+            Denied => 3,
+            Interrupted => 4,
+            Updated => 5,
+            Unknown => 6,
+            Dismissed => 7,
+            Done => 8,
+        })
+        .unwrap_or(Unknown)
+}
+
 /// Inline hosted actions, shared by native and ACP attempt projections. A
 /// group's identity is its first member, so selection follows it on a split.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -763,13 +829,15 @@ pub struct WebActivityPresentation {
     pub members: Vec<u64>,
     pub detail: Option<String>,
     pub outcomes: Vec<(StatusIcon, usize)>,
+    pub actions: Vec<WebActionPresentation>,
 }
 impl WebActivityPresentation {
     pub fn from_actions(
         attempt: &zevria_content::ResponseAttempt,
-        actions: &[&zevria_content::HostedActivity],
+        actions: &[&HostedActivity],
     ) -> Self {
         let mut outcomes: Vec<(StatusIcon, usize)> = Vec::new();
+        let mut presented = Vec::with_capacity(actions.len());
         for action in actions {
             let icon = match attempt.action_display_status(action) {
                 "in progress" | "searching" => StatusIcon::Running,
@@ -778,6 +846,7 @@ impl WebActivityPresentation {
                 "interrupted" => StatusIcon::Interrupted,
                 _ => StatusIcon::Updated,
             };
+            presented.push(WebActionPresentation::from_activity(action, icon));
             if let Some((_, count)) = outcomes.iter_mut().find(|(status, _)| *status == icon) {
                 *count += 1;
             } else {
@@ -789,7 +858,11 @@ impl WebActivityPresentation {
             detail: (actions.len() == 1 && !actions[0].details().is_empty())
                 .then(|| actions[0].label()),
             outcomes,
+            actions: presented,
         }
+    }
+    pub fn status(&self) -> StatusIcon {
+        aggregate_web_status(self.outcomes.iter().map(|(status, _)| *status))
     }
     pub fn copy_text(&self) -> String {
         let counted = self.detail.is_none();
@@ -825,6 +898,7 @@ pub enum PresentationBlockKind {
         text: String,
         flavor: TextFlavor,
         editable: bool,
+        sources: Vec<CitedSource>,
     },
     Reasoning {
         parts: Vec<String>,

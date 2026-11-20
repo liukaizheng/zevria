@@ -150,11 +150,13 @@ fn item_spacing_preserves_authored_whitespace_and_grouped_internals() {
             text: "\nsecond".into(),
             flavor: TextFlavor::Plain,
             editable: false,
+            sources: Vec::new(),
         },
         PresentationBlockKind::Text {
             text: "- first bullet\n- second bullet\n\n```text\ncode\n```".into(),
             flavor: TextFlavor::Markdown,
             editable: false,
+            sources: Vec::new(),
         },
         PresentationBlockKind::Reasoning {
             parts: vec!["first thought\n\nlast thought".into(), "next part".into()],
@@ -190,6 +192,7 @@ fn item_spacing_preserves_authored_whitespace_and_grouped_internals() {
         }),
         PresentationBlockKind::WebActivity(WebActivityPresentation {
             detail: Some("first web action\nsecond web action".into()),
+            actions: Vec::new(),
             members: vec![0, 1],
             outcomes: vec![(StatusIcon::Done, 2)],
         }),

@@ -41,9 +41,9 @@ fn attempt() -> ResponseAttempt {
                 part: zevria_content::AssistantPartIdentity::Content(0),
                 item_id: Some("answer".into()),
             },
-            content: zevria_content::AssistantPresentationContent::Answer {
-                text: "observed partial answer".into(),
-            },
+            content: zevria_content::AssistantPresentationContent::answer(
+                "observed partial answer",
+            ),
         });
     attempt
 }
@@ -218,7 +218,7 @@ async fn every_model_exit_flushes_retry_trail_before_terminal_publication() {
             assert_eq!(attempts[1].hosted_activity[0].status, Status::Completed);
         }
         assert!(attempts.iter().all(|attempt| matches!(&attempt.presentation[0].content,
-            zevria_content::AssistantPresentationContent::Answer { text } if text == "observed partial answer")));
+            zevria_content::AssistantPresentationContent::Answer { text, .. } if text == "observed partial answer")));
         assert!(
             items
                 .iter()
@@ -462,7 +462,7 @@ async fn cancellation_while_provider_is_blocked_on_delivery_flushes_once() {
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].outcome, Outcome::Interrupted);
     assert!(
-        matches!(&attempts[0].presentation[0].content, zevria_content::AssistantPresentationContent::Answer { text } if text == "observed partial answer")
+        matches!(&attempts[0].presentation[0].content, zevria_content::AssistantPresentationContent::Answer { text, .. } if text == "observed partial answer")
     );
     assert!(
         items
@@ -764,9 +764,9 @@ mod recovery_lifecycle {
                         part: AssistantPartIdentity::Content(0),
                         item_id: Some("answer".into()),
                     },
-                    content: AssistantPresentationContent::Answer {
-                        text: "provisional answer before citation finality".into(),
-                    },
+                    content: AssistantPresentationContent::answer(
+                        "provisional answer before citation finality",
+                    ),
                 });
                 attempt.touch();
                 attempt.close(ResponseAttemptOutcome::Failed);

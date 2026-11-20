@@ -99,6 +99,40 @@ fn immutable_recovery_round_trip_is_model_inert_and_restore_is_pure() {
 }
 
 #[test]
+fn incomplete_answer_sources_round_trip_without_entering_model_input() {
+    let mut attempt = attempt();
+    attempt.presentation.push(AssistantPresentationPart {
+        source: AssistantSourceAddress {
+            output_index: 2,
+            part: AssistantPartIdentity::Content(0),
+            item_id: None,
+        },
+        content: AssistantPresentationContent::Answer {
+            text: "Partial answer".into(),
+            sources: vec![zevria_content::CitedSource {
+                url: "https://example.org/partial?claim=1".into(),
+                title: Some("Evidence".into()),
+            }],
+        },
+    });
+    let record = IncompleteResponse::from_attempt(&attempt).unwrap().unwrap();
+    record.validate().unwrap();
+    let item = TranscriptItem::IncompleteResponse(record);
+    let bytes = serde_json::to_vec(&item).unwrap();
+    let loaded: TranscriptItem = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(loaded, item);
+    assert_eq!(
+        restored_attempt(&loaded, 0).unwrap().presentation,
+        attempt.presentation
+    );
+    assert!(model_input(&[loaded]).is_empty());
+    let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    invalid["zevria_incomplete_response"]["presentation"][1]["content"]["sources"][0]["url"] =
+        json!("file:///tmp/not-a-source");
+    assert!(serde_json::from_value::<TranscriptItem>(invalid).is_err());
+}
+
+#[test]
 fn recovery_conversion_requires_abandonment_and_drops_tool_bindings() {
     let mut attempt = ResponseAttempt::new(ModelProfileRef::new("p", "m"));
     assert!(IncompleteResponse::from_attempt(&attempt).is_err());

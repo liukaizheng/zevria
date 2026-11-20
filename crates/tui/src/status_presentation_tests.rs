@@ -625,6 +625,7 @@ fn hosted_headers_share_structured_rendering_without_changing_copy_bytes() {
         (None, "Web actions · 3 · 2 ✓ · 1 ✗"),
     ] {
         let activity = WebActivityPresentation {
+            actions: Vec::new(),
             detail,
             members: vec![1, 2, 3],
             outcomes: vec![(StatusIcon::Done, 2), (StatusIcon::Failed, 1)],
@@ -729,6 +730,7 @@ fn typed_folds_preserve_outcomes_geometry_selection_and_copy_across_cache_paths(
         }),
         block(PresentationBlockKind::WebActivity(
             WebActivityPresentation {
+                actions: Vec::new(),
                 members: (0..8).collect(),
                 detail: None,
                 outcomes: vec![
@@ -941,6 +943,7 @@ fn grouped_folds_prioritize_each_non_success_before_done_and_keep_full_groups_wh
     ] {
         let block = block(PresentationBlockKind::WebActivity(
             WebActivityPresentation {
+                actions: Vec::new(),
                 detail: None,
                 members: vec![1, 2],
                 outcomes: vec![(StatusIcon::Done, 999), (icon, 2)],

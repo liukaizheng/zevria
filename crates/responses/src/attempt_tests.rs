@@ -15,7 +15,7 @@ fn answer(state: &AttemptReducer) -> String {
         .presentation
         .iter()
         .filter_map(|part| match &part.content {
-            Content::Answer { text } => Some(text.as_str()),
+            Content::Answer { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -272,6 +272,39 @@ fn multiple_parts_and_mixed_activity_keep_source_order_as_the_current_part_grows
             (3, Part::Content(1))
         ]
     );
+}
+
+#[test]
+fn future_annotations_update_sources_before_text_and_final_items_replace_them() {
+    let mut state = state();
+    let annotation = |url: &str| json!({"type":"url_citation", "url":url, "title":"Source", "start_index":100,"end_index":200});
+    state.ingest(&delta("Claim.", 1));
+    let revision = state.attempt().revision;
+    state.ingest(
+        &json!({"type":"response.output_text.annotation.added","output_index":0,
+        "content_index":0,"annotation_index":0,"annotation":annotation("https://draft.test/")}),
+    );
+    assert_eq!(answer(&state), "Claim.");
+    assert_eq!(state.attempt().revision, revision + 1);
+    let sources =
+        |state: &AttemptReducer, index: usize| match &state.attempt().presentation[index].content {
+            Content::Answer { sources, .. } => sources
+                .iter()
+                .map(|page| page.url.clone())
+                .collect::<Vec<_>>(),
+            _ => panic!("expected answer"),
+        };
+    assert_eq!(sources(&state, 0), ["https://draft.test/"]);
+    state.ingest(&json!({"type":"response.content_part.added","output_index":0,"content_index":2,
+        "part":{"type":"output_text","text":"Trailing draft","annotations":[annotation("https://trimmed.test/")]}}));
+    state.ingest(&json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","content":[
+        {"type":"output_text","text":"Claim.","annotations":[annotation("https://final.test/")]},
+        {"type":"refusal","refusal":"No.","annotations":[annotation("https://ignored.test/")]}
+    ]}}));
+    assert_eq!(state.attempt().presentation.len(), 2);
+    assert_eq!(sources(&state, 0), ["https://final.test/"]);
+    assert!(sources(&state, 1).is_empty());
+    assert!(!state.display_sources.contains_key(&(0, 2)));
 }
 
 #[test]

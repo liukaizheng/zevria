@@ -4,9 +4,10 @@
 use rig_core::message::Text;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
-use zevria_content::HostedActivity;
 use zevria_content::HostedActivityStatus;
 use zevria_content::ResponseAttempt;
+use zevria_content::citations;
+use zevria_content::{CitedSource, HostedActivity};
 
 #[cfg(test)]
 #[path = "attempt_tests.rs"]
@@ -15,6 +16,7 @@ mod tests;
 #[derive(Default)]
 struct LiveText {
     raw: String,
+    refusal: bool,
     annotations: BTreeMap<u64, Value>,
     annotation_sequences: HashMap<u64, u64>,
     // Text authority: added/delta (0), text-done (1), part-done (2),
@@ -33,6 +35,7 @@ pub struct AttemptReducer {
     completed_text: BTreeMap<(u64, u64), Text>,
     live_text: BTreeMap<(u64, u64), LiveText>,
     display_text: BTreeMap<(u64, u64), Text>,
+    display_sources: BTreeMap<(u64, u64), Vec<CitedSource>>,
     dirty_text: std::collections::BTreeSet<(u64, u64)>,
     // Zero is a growing message; completed items also fence unknown late parts.
     text_outputs: BTreeMap<u64, u8>,
@@ -65,6 +68,7 @@ impl AttemptReducer {
             item_ids: Default::default(),
             live_text: Default::default(),
             display_text: Default::default(),
+            display_sources: Default::default(),
             dirty_text: Default::default(),
         }
     }
@@ -188,6 +192,7 @@ impl AttemptReducer {
             return;
         }
         live.raw = raw.into();
+        live.refusal = kind == Some("refusal");
         live.text_authority = authority;
         if let Some(annotations) = part.get("annotations").and_then(Value::as_array) {
             if authority > 0 {
@@ -216,7 +221,15 @@ impl AttemptReducer {
         self.dirty_text.insert(key);
     }
 
-    fn text(&mut self, output: u64, content: u64, text: &str, done: bool, sequence: Option<u64>) {
+    fn text(
+        &mut self,
+        key: (u64, u64),
+        text: &str,
+        done: bool,
+        refusal: bool,
+        sequence: Option<u64>,
+    ) {
+        let (output, _) = key;
         if self
             .text_outputs
             .get(&output)
@@ -225,7 +238,6 @@ impl AttemptReducer {
             return;
         }
         self.text_outputs.entry(output).or_default();
-        let key = (output, content);
         let live = self.live_text.entry(key).or_default();
         if live.text_authority > u8::from(done)
             || (!done && live.text_authority > 0)
@@ -242,6 +254,7 @@ impl AttemptReducer {
         } else {
             live.raw.push_str(text);
         }
+        live.refusal = refusal;
         live.sequence = sequence.or(live.sequence);
         self.dirty_text.insert(key);
     }
@@ -400,6 +413,7 @@ impl AttemptReducer {
                         let keep = |key: &(u64, u64)| key.0 != index || key.1 < parts.len() as u64;
                         self.live_text.retain(|key, _| keep(key));
                         self.display_text.retain(|key, _| keep(key));
+                        self.display_sources.retain(|key, _| keep(key));
                         self.completed_text.retain(|key, _| keep(key));
                         self.dirty_text.retain(keep);
                     }
@@ -514,14 +528,16 @@ impl AttemptReducer {
             let live = &self.live_text[&key];
             let annotations = Value::Array(live.annotations.values().cloned().collect());
             let text = if live.annotation_authority > 0 {
-                zevria_content::citations::render(&live.raw, Some(&annotations))
+                citations::render(&live.raw, Some(&annotations))
             } else {
-                zevria_content::citations::render_preview(
-                    &live.raw,
-                    Some(&annotations),
-                    live.text_authority > 0,
-                )
+                citations::render_preview(&live.raw, Some(&annotations), live.text_authority > 0)
             };
+            let sources = if live.refusal {
+                Vec::new()
+            } else {
+                citations::sources(Some(&annotations))
+            };
+            self.display_sources.insert(key, sources);
             self.display_text.insert(
                 key,
                 Text::new(zevria_content::readable::sanitize_readable(&text)),
@@ -537,22 +553,24 @@ impl AttemptReducer {
             .into_iter()
             .filter(|(_, text)| !text.text.trim().is_empty())
             .filter_map(|((output, content), text)| {
+                let sources = &self.display_sources[&(output, content)];
                 let unchanged = self.attempt.presentation.iter().any(|part| {
                     part.source.output_index == output
                         && part.source.part == Content(content)
                         && part.source.item_id.as_ref()
                             == self.item_ids.get(&output).map(|(id, _)| id)
-                        && matches!(&part.content, Answer { text: prior } if prior == &text.text)
+                        && matches!(&part.content, Answer { text: prior, sources: prior_sources }
+                            if prior == &text.text && prior_sources == sources)
                 });
-                (!unchanged).then(|| (output, content, text.text.clone()))
+                (!unchanged).then(|| (output, content, text.text.clone(), sources.clone()))
             })
             .collect::<Vec<_>>();
         let before = self.attempt.presentation.len();
         self.attempt.presentation.retain(|part| !matches!(&part.content, Answer { .. })
             || matches!(part.source.part, Content(content) if keys.contains(&(part.source.output_index, content))));
         self.changed |= before != self.attempt.presentation.len();
-        for (output, content, text) in answers {
-            self.set_part(output, Content(content), Answer { text });
+        for (output, content, text, sources) in answers {
+            self.set_part(output, Content(content), Answer { text, sources });
         }
         let key = |part: &zevria_content::AssistantPresentationPart| {
             (part.source.output_index, part.source.part)
@@ -666,9 +684,10 @@ impl AttemptReducer {
             | "response.refusal.delta"
             | "response.refusal.done" => {
                 let done = kind.ends_with(".done");
+                let refusal = kind.starts_with("response.refusal.");
                 let field = if !done {
                     "delta"
-                } else if kind.contains("refusal") {
+                } else if refusal {
                     "refusal"
                 } else {
                     "text"
@@ -676,7 +695,7 @@ impl AttemptReducer {
                 if let (Some(output), Some(content), Some(text)) =
                     (output, content, event.get(field).and_then(Value::as_str))
                 {
-                    self.text(output, content, text, done, sequence);
+                    self.text((output, content), text, done, refusal, sequence);
                 }
             }
             "response.output_text.annotation.added" => {

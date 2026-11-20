@@ -54,9 +54,7 @@ fn ordered_attempt() -> ResponseAttempt {
         part(
             4,
             AssistantPartIdentity::Content(0),
-            AssistantPresentationContent::Answer {
-                text: "cited answer [source](https://example.com)".into(),
-            },
+            AssistantPresentationContent::answer("cited answer [source](https://example.com)"),
         ),
     ];
     attempt.hosted_activity = vec![
@@ -755,7 +753,7 @@ fn metadata(attempt: ResponseAttempt) -> ResponseDisplay {
         let text = parts
             .iter()
             .map(|part| match &part.content {
-                AssistantPresentationContent::Answer { text }
+                AssistantPresentationContent::Answer { text, .. }
                 | AssistantPresentationContent::Reasoning { text } => text.as_str(),
                 _ => unreachable!(),
             })

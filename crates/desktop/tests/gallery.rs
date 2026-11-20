@@ -52,6 +52,8 @@ mod native {
         ThinkingRestored,
         ThinkingInterrupted,
         ThinkingUnsaved,
+        WebSearch,
+        WebSearchLive,
         CodeHeavy,
         TranscriptFolds,
         Plan,
@@ -79,6 +81,8 @@ mod native {
                 Self::ThinkingRestored => "thinking-restored",
                 Self::ThinkingInterrupted => "thinking-interrupted",
                 Self::ThinkingUnsaved => "thinking-unsaved",
+                Self::WebSearch => "web-search",
+                Self::WebSearchLive => "web-search-live",
                 Self::CodeHeavy => "code-heavy-answer",
                 Self::TranscriptFolds => "transcript-folds",
                 Self::Plan => "plan-review",
@@ -139,6 +143,8 @@ mod native {
                 Scene::Idle,
                 Scene::Empty,
                 Scene::Working,
+                Scene::WebSearch,
+                Scene::WebSearchLive,
                 Scene::ThinkingLive,
                 Scene::ThinkingRestored,
                 Scene::ThinkingInterrupted,
@@ -186,6 +192,15 @@ mod native {
                 )?;
             }
         }
+        for scene in [Scene::WebSearch, Scene::WebSearchLive] {
+            capture(
+                scene,
+                1240.,
+                840.,
+                light,
+                &directory.join(format!("{}-light-1240.png", scene.name())),
+            )?;
+        }
         capture(
             Scene::TranscriptFolds,
             1240.,
@@ -210,6 +225,7 @@ mod native {
         }
         for scene in [
             Scene::ThinkingLive,
+            Scene::WebSearchLive,
             Scene::Question,
             Scene::QuestionNote,
             Scene::Plan,
@@ -359,6 +375,9 @@ mod native {
                 });
             }
             if matches!(scene,Scene::Working | Scene::Question | Scene::Confirm) { working(&controller,cx); }
+            if matches!(scene, Scene::WebSearch | Scene::WebSearchLive) {
+                web_scene(&controller, scene == Scene::WebSearchLive, cx)?;
+            }
             if scene == Scene::Plan {
                 controller.update(cx, |c,cx| {
                     c.model.root.conversation.restore(vec![
@@ -553,6 +572,81 @@ mod native {
             }
         });
     }
+    fn web_scene(
+        controller: &Entity<SessionController>,
+        live: bool,
+        cx: &mut gpui_kit::App,
+    ) -> anyhow::Result<()> {
+        use serde_json::json;
+        use zevria_content::{
+            AssistantStreamSnapshot, ResponseAttempt, response::responses_native_display,
+        };
+        use zevria_transcript::transcript::TranscriptItem;
+        let prompt =
+            Message::user("How should I make a page address clickable in a GPUI Kit transcript?");
+        let profile = ModelProfileRef::new("fixture", "fixture");
+        let mut items = vec![
+            json!({"type":"reasoning","id":"web_reasoning","summary":[{"type":"summary_text","text":"Check the link component and the keyboard alternative before recommending a pattern."}]}),
+            json!({"type":"web_search_call","id":"web_search_a","status":"completed","action":{"type":"search","queries":["gpui kit text view links","gpui kit open_url button"]}}),
+        ];
+        if live {
+            items.push(json!({"type":"web_search_call","id":"web_search_b","status":"searching","action":{"type":"search"}}));
+            let (presentation, hosted_activity) = responses_native_display(&items);
+            let mut attempt = ResponseAttempt::new(profile);
+            attempt.presentation = presentation;
+            attempt.hosted_activity = hosted_activity;
+            attempt.touch();
+            controller.update(cx, |c, cx| {
+                let turn_id = TurnId::new(32);
+                c.fixture_event(
+                    E::TurnStarted {
+                        turn_id,
+                        mode: SessionMode::Build,
+                        message: prompt,
+                    },
+                    cx,
+                );
+                c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
+                c.fixture_event(
+                    E::AssistantStreamUpdated {
+                        turn_id,
+                        snapshot: AssistantStreamSnapshot {
+                            message: None,
+                            attempt: Some(attempt),
+                        },
+                    },
+                    cx,
+                );
+            });
+        } else {
+            let link = "https://docs.rs/gpui-kit/latest/gpui_kit/component/link/struct.Link.html";
+            let button =
+                "https://docs.rs/gpui-kit/latest/gpui_kit/component/button/struct.Button.html";
+            let project = "https://crates.io/crates/gpui-kit";
+            let first = "Use a `Link` for the readable address and a labeled `Button` for the keyboard action.";
+            let text = format!(
+                "{first}\n\nGive both the same checked destination. Keep the host visible, show the full address on hover, and leave unsupported schemes as text."
+            );
+            let citation = |title: &str, url: &str, end: usize| json!({"type":"url_citation","title":title,"url":url,"start_index":0,"end_index":end});
+            items.extend([
+                json!({"type":"web_search_call","id":"web_search_b","status":"completed","action":{"type":"search","query":"gpui kit keyboard accessible link button"}}),
+                json!({"type":"web_search_call","id":"web_open","status":"completed","action":{"type":"open_page","url":link}}),
+                json!({"type":"web_search_call","id":"web_find","status":"completed","action":{"type":"find_in_page","url":button,"pattern":"accessibility_label"}}),
+                json!({"type":"message","id":"web_answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[citation("Link API",link,first.len()),citation("Button API",button,first.len()),citation("GPUI Kit",project,text.len())]}]}),
+            ]);
+            let replay = zevria_model::ProviderReplay::openai_responses(profile, items);
+            controller.update(cx, |c, cx| {
+                c.model.root.restore_transcript(vec![
+                    TranscriptItem::Message(prompt),
+                    TranscriptItem::provider_message(replay)?,
+                ]);
+                cx.notify();
+                Ok::<_, anyhow::Error>(())
+            })?;
+        }
+        Ok(())
+    }
+
     fn working(controller: &Entity<SessionController>, cx: &mut gpui_kit::App) {
         controller.update(cx, |c,cx| {
             let turn_id = TurnId::new(8);

@@ -58,6 +58,7 @@ fn assert_status_tokens_and_selection() {
             prompt: None,
             visibility: BlockVisibility::Always,
             kind: PresentationBlockKind::WebActivity(WebActivityPresentation {
+                actions: Vec::new(),
                 detail: Some(
                     "A deliberately long themed hosted activity label that must fold".into(),
                 ),

@@ -7,9 +7,7 @@ fn native_answer_frames_grow_and_reconcile_citations_in_the_same_selected_block(
     attempt.presentation = vec![part(
         0,
         AssistantPartIdentity::Content(0),
-        AssistantPresentationContent::Answer {
-            text: "A streamed answer".into(),
-        },
+        AssistantPresentationContent::answer("A streamed answer"),
     )];
     let mut app = App::new();
     publish(&mut app, attempt.clone());
@@ -20,9 +18,8 @@ fn native_answer_frames_grow_and_reconcile_citations_in_the_same_selected_block(
         HistoryEntry::Conversation(entry) => entry.blocks[0].id,
         _ => panic!("answer"),
     };
-    attempt.presentation[0].content = AssistantPresentationContent::Answer {
-        text: "A streamed answer continues before completion".into(),
-    };
+    attempt.presentation[0].content =
+        AssistantPresentationContent::answer("A streamed answer continues before completion");
     attempt.touch();
     publish(&mut app, attempt.clone());
     assert_eq!(attempt.outcome, Outcome::InProgress);
@@ -31,9 +28,7 @@ fn native_answer_frames_grow_and_reconcile_citations_in_the_same_selected_block(
     );
     assert_eq!(app.selection(), cursor(0, 0));
     let final_text = "A streamed answer [source](https://example.com) continues before completion";
-    attempt.presentation[0].content = AssistantPresentationContent::Answer {
-        text: final_text.into(),
-    };
+    attempt.presentation[0].content = AssistantPresentationContent::answer(final_text);
     attempt.close(Outcome::Completed);
     publish(&mut app, attempt.clone());
     apply_turn_event(
@@ -63,7 +58,7 @@ fn native_answer_frames_grow_and_reconcile_citations_in_the_same_selected_block(
 fn long_answer_frames_rebuild_only_the_growing_source_block() {
     let mut attempt = ordered_attempt();
     let mut text = String::from("A long streaming answer\n\n```rust\n");
-    attempt.presentation[2].content = AssistantPresentationContent::Answer { text: text.clone() };
+    attempt.presentation[2].content = AssistantPresentationContent::answer(text.clone());
     let mut app = App::new();
     publish(&mut app, attempt.clone());
     rendered_text(&mut app, 100, 30);
@@ -71,8 +66,7 @@ fn long_answer_frames_rebuild_only_the_growing_source_block() {
     for _ in 0..16 {
         let before = app.view_cache().block_rebuilds;
         text.push_str(&"let readable_unicode = \"🦀\";\n".repeat(128));
-        attempt.presentation[2].content =
-            AssistantPresentationContent::Answer { text: text.clone() };
+        attempt.presentation[2].content = AssistantPresentationContent::answer(text.clone());
         attempt.touch();
         publish(&mut app, attempt.clone());
         rendered_text(&mut app, 100, 30);
@@ -128,12 +122,11 @@ fn acp_citation_replacements_cover_prior_segments_even_when_previews_are_skipped
         attempt.presentation = vec![part(
             0,
             AssistantPartIdentity::Content(0),
-            AssistantPresentationContent::Answer {
-                text: "Claim.".into(),
-            },
+            AssistantPresentationContent::answer("Claim."),
         )];
         let bound = |attempt: ResponseAttempt, id: &str| {
-            let AssistantPresentationContent::Answer { text } = &attempt.presentation[0].content
+            let AssistantPresentationContent::Answer { text, .. } =
+                &attempt.presentation[0].content
             else {
                 panic!("answer")
             };
@@ -168,8 +161,7 @@ fn acp_citation_replacements_cover_prior_segments_even_when_previews_are_skipped
             assert_eq!(visible(&conversation), ["Claim."]);
         }
         let draft = "Claim. More prose.";
-        attempt.presentation[0].content =
-            AssistantPresentationContent::Answer { text: draft.into() };
+        attempt.presentation[0].content = AssistantPresentationContent::answer(draft);
         attempt.touch();
         reducer.apply_event(
             &mut conversation,
@@ -181,9 +173,7 @@ fn acp_citation_replacements_cover_prior_segments_even_when_previews_are_skipped
             reducer.apply_preview(&mut conversation, preview(draft, "draft"));
         }
         let corrected = "Claim. [source](https://example.com) More prose.";
-        attempt.presentation[0].content = AssistantPresentationContent::Answer {
-            text: corrected.into(),
-        };
+        attempt.presentation[0].content = AssistantPresentationContent::answer(corrected);
         attempt.touch();
         reducer.apply_event(
             &mut conversation,
@@ -371,7 +361,8 @@ fn nonfollowing_viewport_tracks_semantic_block_through_growth_and_group_split() 
     attempt
         .presentation
         .retain(|part| part.source.output_index != 2);
-    let AssistantPresentationContent::Answer { text } = &mut attempt.presentation[1].content else {
+    let AssistantPresentationContent::Answer { text, .. } = &mut attempt.presentation[1].content
+    else {
         panic!("answer fixture");
     };
     *text = (0..40).map(|i| format!("answer line {i}\n")).collect();

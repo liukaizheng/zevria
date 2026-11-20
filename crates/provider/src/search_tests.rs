@@ -145,7 +145,7 @@ pub(super) async fn held_answer_stream(websocket: bool, advertised: bool, search
         let attempt = snapshot.attempt.unwrap();
         assert_eq!(attempt.outcome, Outcome::InProgress);
         assert_eq!(attempt.hosted_activity.is_empty(), !searched);
-        assert!(attempt.presentation.iter().any(|part| matches!(&part.content, zevria_content::AssistantPresentationContent::Answer { text } if text == expected)));
+        assert!(attempt.presentation.iter().any(|part| matches!(&part.content, zevria_content::AssistantPresentationContent::Answer { text, .. } if text == expected)));
         release.send(()).await.unwrap();
     }
     let response = tokio::time::timeout(std::time::Duration::from_secs(5), task)

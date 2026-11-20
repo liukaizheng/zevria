@@ -336,7 +336,7 @@ pub(crate) fn display_message(attempt: &zevria_content::ResponseAttempt) -> Opti
         .presentation
         .iter()
         .filter_map(|part| match &part.content {
-            zevria_content::AssistantPresentationContent::Answer { text } => {
+            zevria_content::AssistantPresentationContent::Answer { text, .. } => {
                 Some(AssistantContent::Text(rig_core::message::Text::new(text)))
             }
             zevria_content::AssistantPresentationContent::Reasoning { text } => {
@@ -398,7 +398,10 @@ pub(crate) fn replay_display(
                 continue;
             }
             let value = match (&part.content, kind) {
-                (zevria_content::AssistantPresentationContent::Answer { text }, Kind::Message)
+                (
+                    zevria_content::AssistantPresentationContent::Answer { text, .. },
+                    Kind::Message,
+                )
                 | (
                     zevria_content::AssistantPresentationContent::Reasoning { text },
                     Kind::Thought,

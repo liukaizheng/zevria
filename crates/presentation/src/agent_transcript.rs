@@ -26,6 +26,124 @@ use review::ReviewProjection;
 #[cfg(test)]
 mod hosted_tests {
     use super::*;
+    use crate::{blocks::WebActionKind, status_icon::StatusIcon};
+    use serde_json::json;
+
+    #[test]
+    fn fallback_hosted_group_keeps_order_and_structured_outcomes() {
+        let mut reducer = AgentTranscriptReducer::default();
+        let mut conversation = ConversationState::default();
+        for (index, kind, status) in [(2, "search", "completed"), (3, "open_page", "in_progress")] {
+            reducer.apply_event(
+                &mut conversation,
+                AgentRunEvent::ToolCall {
+                    id: format!("hosted-search:attempt:{index}"),
+                    title: "Web search".into(),
+                    kind: "search".into(),
+                    status: status.into(),
+                    content: vec![],
+                    locations: vec![],
+                    raw_output: None,
+                    raw_input: Some(
+                        json!({"origin":"provider_hosted_web_search","action":{"type":kind}}),
+                    ),
+                },
+            );
+        }
+        let [HistoryEntry::Conversation(entry)] = conversation.history() else {
+            panic!("one entry")
+        };
+        let groups = entry
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                PresentationBlockKind::WebActivity(activity) if block.visible(false) => {
+                    Some(activity)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [group] = groups.as_slice() else {
+            panic!("one hosted group")
+        };
+        assert_eq!(group.members, [2, 3]);
+        assert_eq!(group.status(), StatusIcon::Running);
+        assert_eq!(group.copy_text(), "Web actions · 2 · 1 ✓ · 1 ◐");
+        assert_eq!(
+            group
+                .actions
+                .iter()
+                .map(|action| (action.output_index, action.kind, action.status))
+                .collect::<Vec<_>>(),
+            [
+                (2, WebActionKind::Search, StatusIcon::Done),
+                (3, WebActionKind::OpenPage, StatusIcon::Running),
+            ]
+        );
+    }
+
+    #[test]
+    fn indexed_acp_answer_projects_sources_on_its_covered_text() {
+        use zevria_content::response::{
+            DisplayProjectionBinding, DisplayProjectionKind, RESPONSE_DISPLAY_VERSION,
+            ResponseDisplay, responses_native_display,
+        };
+        let (parts, web) = responses_native_display(&[
+            json!({"type":"web_search_call","action":{"type":"search","query":"Rust"},"status":"completed"}),
+            json!({"type":"message","content":[{"type":"output_text","text":"Claim.","annotations":[
+                {"type":"url_citation","url":"https://example.org/","title":"Source","start_index":0,"end_index":6}
+            ]}]}),
+        ]);
+        let mut attempt =
+            zevria_content::ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("p", "m"));
+        attempt.complete_with(parts, web);
+        let text = "Claim. [Source](https://example.org/)";
+        let display = ResponseDisplay {
+            version: RESPONSE_DISPLAY_VERSION,
+            bindings: vec![DisplayProjectionBinding::Text {
+                kind: DisplayProjectionKind::Message,
+                message_id: "answer".into(),
+                start: 0,
+                end: text.len(),
+                sources: vec![attempt.presentation[0].source.clone()],
+            }],
+            attempt,
+        };
+        let mut reducer = AgentTranscriptReducer::default();
+        let mut conversation = ConversationState::default();
+        reducer.apply_event(
+            &mut conversation,
+            AgentRunEvent::AgentMessage {
+                text: text.into(),
+                message_id: Some("answer".into()),
+            },
+        );
+        reducer.apply_event(
+            &mut conversation,
+            AgentRunEvent::ResponseDisplay {
+                display: Box::new(display),
+            },
+        );
+        let answers = conversation
+            .history()
+            .iter()
+            .filter_map(|entry| match entry {
+                HistoryEntry::Conversation(entry) => Some(&entry.blocks),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|block| match &block.kind {
+                PresentationBlockKind::Text { text, sources, .. } if block.visible(false) => {
+                    Some((text, sources))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].0, text);
+        assert_eq!(answers[0].1[0].url, "https://example.org/");
+    }
+
     #[test]
     fn new_hosted_actions_separate_text_but_sparse_updates_do_not() {
         let mut reducer = AgentTranscriptReducer::default();
@@ -195,6 +313,7 @@ impl AgentTranscriptReducer {
                     text: zevria_workflow::ensemble::WORKER_ABANDONMENT_REASON.into(),
                     flavor: TextFlavor::Plain,
                     editable: false,
+                    sources: Vec::new(),
                 },
             );
         }
@@ -572,6 +691,7 @@ impl AgentTranscriptReducer {
                     text,
                     flavor: TextFlavor::Markdown,
                     editable: false,
+                    ..
                 } if block.role == Some(PresentationRole::Assistant) => Some(text.as_str()),
                 _ => None,
             })
@@ -625,6 +745,7 @@ impl AgentTranscriptReducer {
                     text: report.to_string(),
                     flavor: TextFlavor::Markdown,
                     editable: false,
+                    sources: Vec::new(),
                 },
             )
         });
@@ -708,6 +829,7 @@ impl AgentTranscriptReducer {
                     text,
                     flavor: TextFlavor::Plain,
                     editable: false,
+                    sources: Vec::new(),
                 },
                 zevria_content::PromptBlock::Image(image) => {
                     ordinal += 1;
@@ -939,6 +1061,7 @@ impl AgentTranscriptReducer {
             };
             let next = tool.hosted_activity().expect("hosted action");
             activity.members.extend(next.members);
+            activity.actions.extend(next.actions);
             for (status, count) in next.outcomes {
                 if let Some((_, prior)) = activity
                     .outcomes
@@ -1203,7 +1326,7 @@ impl AgentTranscriptReducer {
                             {
                                 let mut offset = *start;
                                 for source in sources {
-                                    let length = display.attempt.presentation.iter().find(|part| &part.source == source).map_or(0, |part| match &part.content { zevria_content::AssistantPresentationContent::Reasoning { text } | zevria_content::AssistantPresentationContent::Answer { text } => text.len(), _ => 0 });
+                                    let length = display.attempt.presentation.iter().find(|part| &part.source == source).map_or(0, |part| match &part.content { zevria_content::AssistantPresentationContent::Reasoning { text } | zevria_content::AssistantPresentationContent::Answer { text, .. } => text.len(), _ => 0 });
                                     if piece.start < offset + length {
                                         conversation.alias_attempt_part(
                                             (piece.location.history_index, piece.location.block_id),
@@ -1277,6 +1400,7 @@ impl AgentTranscriptReducer {
                     text,
                     flavor: TextFlavor::Plain,
                     editable: false,
+                    sources: Vec::new(),
                 },
             ),
             SegmentKind::Agent => (
@@ -1285,6 +1409,7 @@ impl AgentTranscriptReducer {
                     text,
                     flavor: TextFlavor::Markdown,
                     editable: false,
+                    sources: Vec::new(),
                 },
             ),
             SegmentKind::Thought => (

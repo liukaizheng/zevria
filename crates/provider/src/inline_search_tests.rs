@@ -89,7 +89,7 @@ async fn duplicate_sequences_and_late_part_events_do_not_regress_native_answers(
     let revision = search.attempt().revision;
     search.observe(&json!({"type":"response.content_part.done","output_index":1,"content_index":0,"part":{"type":"output_text","text":"late provisional","annotations":[]}}), &progress).await;
     assert_eq!(search.attempt().revision, revision);
-    assert!(search.attempt().presentation.iter().any(|part| matches!(&part.content, AssistantPresentationContent::Answer { text } if text == "authoritative")));
+    assert!(search.attempt().presentation.iter().any(|part| matches!(&part.content, AssistantPresentationContent::Answer { text, .. } if text == "authoritative")));
 }
 
 #[tokio::test]
@@ -118,11 +118,11 @@ async fn answers_stream_before_final_annotations_and_only_display_copies_are_san
     ] {
         search.observe(&event, &progress).await;
         assert!(matches!(&search.attempt().presentation[0].content,
-            AssistantPresentationContent::Answer { text } if text.starts_with("Claim") && !text.contains('\u{1b}') && !text.contains('\u{202e}')));
+            AssistantPresentationContent::Answer { text, .. } if text.starts_with("Claim") && !text.contains('\u{1b}') && !text.contains('\u{202e}')));
         assert_eq!(search.attempt().outcome, Outcome::InProgress);
     }
     search.observe(&json!({"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"output_text","text":text,"annotations":[annotation]}}), &progress).await;
-    let AssistantPresentationContent::Answer { text: display } =
+    let AssistantPresentationContent::Answer { text: display, .. } =
         &search.attempt().presentation[0].content
     else {
         panic!("answer")

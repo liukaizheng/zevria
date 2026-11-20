@@ -45,9 +45,7 @@ fn attempt() -> ResponseAttempt {
                 part: AssistantPartIdentity::Content(0),
                 item_id: Some("answer".into()),
             },
-            content: AssistantPresentationContent::Answer {
-                text: "answer [source](https://example.com)".into(),
-            },
+            content: AssistantPresentationContent::answer("answer [source](https://example.com)"),
         },
     ];
     attempt.hosted_activity = vec![HostedActivity {
@@ -84,6 +82,44 @@ fn display(updates: Vec<SessionUpdate>) -> ResponseDisplay {
 }
 
 #[test]
+fn v2_metadata_carries_sources_without_changing_ordinary_text_or_source_less_json() {
+    let turn = TurnId::new(1);
+    let mut attempt = attempt();
+    let mut streams = StreamSegments::default();
+    let snapshot = |attempt: &ResponseAttempt| AssistantStreamSnapshot {
+        message: None,
+        attempt: Some(attempt.clone()),
+    };
+    let plain = display(streams.display_snapshot(turn, snapshot(&attempt)));
+    let mut plain_json = serde_json::to_value(plain).unwrap();
+    let content = &mut plain_json["attempt"]["presentation"][2]["content"];
+    assert_eq!(
+        *content,
+        json!({"type":"answer", "text":"answer [source](https://example.com)"})
+    );
+    let pages = vec![zevria_content::CitedSource {
+        url: "https://example.com/".into(),
+        title: Some("Source".into()),
+    }];
+    attempt.presentation[2].content = AssistantPresentationContent::Answer {
+        text: "answer [source](https://example.com)".into(),
+        sources: pages.clone(),
+    };
+    attempt.touch();
+    let updates = streams.display_snapshot(turn, snapshot(&attempt));
+    assert_eq!(
+        updates.len(),
+        1,
+        "the sources-only update is metadata, not a new text segment"
+    );
+    let sourced = display(updates);
+    plain_json["attempt"]["presentation"][2]["content"]["sources"] =
+        serde_json::to_value(pages).unwrap();
+    plain_json["attempt"]["revision"] = json!(attempt.revision);
+    assert_eq!(serde_json::to_value(sourced).unwrap(), plain_json);
+}
+
+#[test]
 fn provisional_answers_emit_suffixes_then_authoritative_citation_segments() {
     use crate::tests::{chunk_id, chunk_text};
     let turn = TurnId::new(1);
@@ -94,8 +130,7 @@ fn provisional_answers_emit_suffixes_then_authoritative_citation_segments() {
         .presentation
         .retain(|part| matches!(part.content, AssistantPresentationContent::Answer { .. }));
     let update = |streams: &mut StreamSegments, attempt: &mut ResponseAttempt, text: &str| {
-        attempt.presentation[0].content =
-            AssistantPresentationContent::Answer { text: text.into() };
+        attempt.presentation[0].content = AssistantPresentationContent::answer(text);
         attempt.touch();
         streams.display_snapshot(
             turn,
@@ -149,9 +184,7 @@ fn repeated_attempt_revision_can_finish_an_ordinary_projection_and_its_binding()
     attempt
         .presentation
         .retain(|part| matches!(part.content, AssistantPresentationContent::Answer { .. }));
-    attempt.presentation[0].content = AssistantPresentationContent::Answer {
-        text: "complete text".into(),
-    };
+    attempt.presentation[0].content = AssistantPresentationContent::answer("complete text");
     let mut streams = StreamSegments::default();
     let incomplete = streams.display_snapshot(
         turn,

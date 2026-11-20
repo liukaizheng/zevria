@@ -162,6 +162,7 @@ impl HistoryEntry {
                             text: text.text,
                             flavor: TextFlavor::Plain,
                             editable: true,
+                            sources: Vec::new(),
                         },
                         UserContent::ToolResult(_) => continue,
                         UserContent::Image(_) => {
@@ -205,6 +206,7 @@ impl HistoryEntry {
                             text: zevria_content::citations::render_text(&text),
                             flavor: TextFlavor::Markdown,
                             editable: false,
+                            sources: zevria_content::citations::text_sources(&text),
                         },
                         AssistantContent::Reasoning(reasoning) => {
                             let parts = readable_reasoning_parts(&reasoning)
@@ -252,6 +254,7 @@ impl HistoryEntry {
                     text: content,
                     flavor: TextFlavor::Plain,
                     editable: false,
+                    sources: Vec::new(),
                 },
             }),
         }
@@ -899,11 +902,12 @@ impl ConversationState {
                         parts: vec![zevria_content::readable::sanitize_readable(text)],
                     }
                 }
-                Content::Answer { text } if !text.trim().is_empty() => {
+                Content::Answer { text, sources } if !text.trim().is_empty() => {
                     PresentationBlockKind::Text {
                         text: zevria_content::readable::sanitize_readable(text),
                         flavor: TextFlavor::Markdown,
                         editable: false,
+                        sources: sources.clone(),
                     }
                 }
                 Content::NativeTool { call_id } => {
@@ -2510,12 +2514,42 @@ mod tests {
             action: Some(serde_json::json!({"type":"search","query":"Rust"})),
         });
         let mut conversation = ConversationState::default();
+        let items = [
+            serde_json::json!({"type":"message","id":"m","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Claim","annotations":[{"type":"url_citation","start_index":0,"end_index":5,"title":"Source","url":"https://example.com/a"}]}]}),
+        ];
+        attempt.presentation = zevria_content::response::responses_native_display(&items).0;
+        attempt.presentation[0].source.output_index = 1;
+        let sources_for = |history: &HistoryEntry| {
+            let HistoryEntry::Conversation(entry) = history else {
+                panic!("conversation")
+            };
+            entry
+                .blocks
+                .iter()
+                .find_map(|block| match &block.kind {
+                    PresentationBlockKind::Text { sources, .. } => Some(sources.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
         conversation.update_response_attempt(attempt.clone());
+        let HistoryEntry::Conversation(entry) = &conversation.history()[0] else {
+            panic!("conversation")
+        };
+        let PresentationBlockKind::WebActivity(web) = &entry.blocks[0].kind else {
+            panic!("web activity")
+        };
+        assert_eq!(web.status(), crate::status_icon::StatusIcon::Running);
+        assert_eq!(web.actions[0].kind, crate::blocks::WebActionKind::Search);
+        assert_eq!(web.actions[0].queries, ["Rust"]);
+        assert_eq!(web.copy_text(), "Web search: Rust ◐");
+        let live_sources = sources_for(&conversation.history()[0]);
+        assert_eq!(live_sources[0].url, "https://example.com/a");
         attempt.close(ResponseAttemptOutcome::Interrupted);
         conversation.update_response_attempt(attempt.clone());
         assert_eq!(conversation.history().len(), 1);
         assert!(
-            selected_plain_text(&conversation.history()[0], 1)
+            selected_plain_text(&conversation.history()[0], 2)
                 .unwrap()
                 .contains("interrupted")
         );
@@ -2525,13 +2559,13 @@ mod tests {
                 .unwrap(),
         )]);
         assert_eq!(conversation.history().len(), 1);
+        assert_eq!(sources_for(&conversation.history()[0]), live_sources);
         let replay = zevria_model::ProviderReplay::openai_responses(
             ModelProfileRef::new("p", "m"),
-            vec![
-                serde_json::json!({"type":"message","id":"m","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Claim","annotations":[{"type":"url_citation","start_index":0,"end_index":5,"title":"Source","url":"https://example.com/a"}]}]}),
-            ],
+            items.to_vec(),
         );
         conversation.push_message(replay.to_message().unwrap(), ToolCallStatus::Finished);
+        assert_eq!(sources_for(&conversation.history()[1]), live_sources);
         assert_eq!(
             selected_plain_text(&conversation.history()[1], 0).unwrap(),
             "Claim [Source](https://example.com/a)"

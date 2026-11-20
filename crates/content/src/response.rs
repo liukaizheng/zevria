@@ -1,6 +1,9 @@
 //! Model-inert provider presentation. Native replay remains the sole authority
 //! for successful messages, model input and executable tool calls.
 
+use crate::citations::{
+    self, CitedSource, MAX_SOURCE_TITLE_CHARS, MAX_SOURCE_URL_BYTES, MAX_SOURCES,
+};
 use crate::readable::{readable_reasoning_value, sanitize_readable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -99,6 +102,45 @@ impl HostedActivity {
             _ => "Web action",
         }
     }
+    pub fn queries(&self) -> Vec<String> {
+        let Some(action) = &self.action else {
+            return Vec::new();
+        };
+        let mut queries = Vec::new();
+        for query in action
+            .get("queries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .chain(action.get("query"))
+            .filter_map(Value::as_str)
+            .map(sanitize_readable)
+        {
+            if !query.trim().is_empty() && !queries.contains(&query) {
+                queries.push(query);
+            }
+        }
+        queries
+    }
+    fn raw_detail(&self, key: &str) -> Option<&str> {
+        self.action.as_ref()?.get(key)?.as_str()
+    }
+    fn readable_detail(&self, key: &str) -> Option<String> {
+        self.raw_detail(key)
+            .map(sanitize_readable)
+            .filter(|value| !value.trim().is_empty())
+    }
+    pub fn url(&self) -> Option<String> {
+        self.readable_detail("url")
+    }
+    /// Check the original URL, not the sanitized display string: stripping a
+    /// control character must not turn a rejected URL into an openable one.
+    pub fn safe_url(&self) -> Option<String> {
+        citations::safe_http_url(self.raw_detail("url")?)
+    }
+    pub fn pattern(&self) -> Option<String> {
+        self.readable_detail("pattern")
+    }
     pub fn details(&self) -> Vec<String> {
         let mut details = Vec::new();
         let mut push = |value: &str| {
@@ -157,9 +199,26 @@ pub enum AssistantPartIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AssistantPresentationContent {
-    Reasoning { text: String },
-    Answer { text: String },
-    NativeTool { call_id: String },
+    Reasoning {
+        text: String,
+    },
+    Answer {
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<CitedSource>,
+    },
+    NativeTool {
+        call_id: String,
+    },
+}
+
+impl AssistantPresentationContent {
+    pub fn answer(text: impl Into<String>) -> Self {
+        Self::Answer {
+            text: text.into(),
+            sources: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,7 +317,7 @@ impl ResponseAttempt {
             }
             match &part.content {
                 AssistantPresentationContent::Reasoning { text }
-                | AssistantPresentationContent::Answer { text } => {
+                | AssistantPresentationContent::Answer { text, .. } => {
                     anyhow::ensure!(
                         text.len() <= 4 * 1024 * 1024,
                         "response display part exceeds limit"
@@ -268,11 +327,33 @@ impl ResponseAttempt {
                             && part.source.part != AssistantPartIdentity::Tool,
                         "display text must be readable and have a text-part address"
                     );
-                    if matches!(part.content, AssistantPresentationContent::Answer { .. }) {
+                    if let AssistantPresentationContent::Answer { sources, .. } = &part.content {
                         anyhow::ensure!(
                             matches!(part.source.part, AssistantPartIdentity::Content(_)),
                             "answer requires a content-part address"
                         );
+                        anyhow::ensure!(
+                            sources.len() <= MAX_SOURCES,
+                            "answer has too many sources"
+                        );
+                        let mut urls = HashSet::new();
+                        for source in sources {
+                            anyhow::ensure!(
+                                source.url.len() <= MAX_SOURCE_URL_BYTES
+                                    && citations::safe_http_url(&source.url).as_deref()
+                                        == Some(source.url.as_str()),
+                                "invalid source URL"
+                            );
+                            anyhow::ensure!(urls.insert(&source.url), "duplicate source URL");
+                            if let Some(title) = &source.title {
+                                anyhow::ensure!(
+                                    !title.trim().is_empty()
+                                        && title.chars().count() <= MAX_SOURCE_TITLE_CHARS
+                                        && citations::sanitize_display(title) == *title,
+                                    "invalid source title"
+                                );
+                            }
+                        }
                     }
                 }
                 AssistantPresentationContent::NativeTool { call_id } => {
@@ -387,7 +468,8 @@ pub fn responses_native_display(
                     .flatten()
                     .enumerate()
                 {
-                    let text = match part.get("type").and_then(Value::as_str) {
+                    let kind = part.get("type").and_then(Value::as_str);
+                    let text = match kind {
                         Some("output_text") => part.get("text").and_then(Value::as_str),
                         Some("refusal") => part.get("refusal").and_then(Value::as_str),
                         _ => None,
@@ -398,10 +480,15 @@ pub fn responses_native_display(
                             part.get("annotations"),
                         ));
                         if !text.trim().is_empty() {
-                            push(
-                                AssistantPartIdentity::Content(index as u64),
-                                AssistantPresentationContent::Answer { text },
-                            );
+                            let content = if kind == Some("output_text") {
+                                AssistantPresentationContent::Answer {
+                                    text,
+                                    sources: citations::sources(part.get("annotations")),
+                                }
+                            } else {
+                                AssistantPresentationContent::answer(text)
+                            };
+                            push(AssistantPartIdentity::Content(index as u64), content);
                         }
                     }
                 }
@@ -569,7 +656,7 @@ impl ResponseDisplay {
                     .find(|part| &part.source == source)
                     .and_then(|part| match (&part.content, kind) {
                         (
-                            AssistantPresentationContent::Answer { text },
+                            AssistantPresentationContent::Answer { text, .. },
                             DisplayProjectionKind::Message,
                         )
                         | (

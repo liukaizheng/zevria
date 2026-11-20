@@ -49,15 +49,103 @@ fn native_display_derives_every_readable_item_without_mutating_replay() {
     assert_eq!(
         parts[4].content,
         AssistantPresentationContent::Answer {
-            text: "🦀é [Source](https://example.org/)".into()
+            text: "🦀é [Source](https://example.org/)".into(),
+            sources: vec![CitedSource {
+                url: "https://example.org/".into(),
+                title: Some("Source".into()),
+            }],
         }
     );
-    assert_eq!(
-        parts[5].content,
-        AssistantPresentationContent::Answer { text: "No".into() }
-    );
+    assert_eq!(parts[5].content, AssistantPresentationContent::answer("No"));
     assert_eq!(hosted[0].status, HostedActivityStatus::Interrupted);
     assert_eq!(hosted[0].details(), ["first", "second"]);
+}
+
+#[test]
+fn sources_are_additive_in_answer_json_and_validated_at_the_boundary() {
+    let old = r#"{"type":"answer","text":"Answer"}"#;
+    let answer: AssistantPresentationContent = serde_json::from_str(old).unwrap();
+    assert_eq!(answer, AssistantPresentationContent::answer("Answer"));
+    assert_eq!(serde_json::to_string(&answer).unwrap(), old);
+    assert_eq!(
+        serde_json::to_string(&CitedSource {
+            url: "https://example.org/".into(),
+            title: None
+        })
+        .unwrap(),
+        r#"{"url":"https://example.org/"}"#
+    );
+    assert!(
+        serde_json::from_str::<CitedSource>(r#"{"url":"https://example.org/","extra":1}"#).is_err()
+    );
+
+    let mut attempt = attempt();
+    let (parts, hosted) = responses_native_display(&[json!({"type":"message","content":[
+        {"type":"output_text","text":"Answer"}
+    ]})]);
+    attempt.complete_with(parts, hosted);
+    let page = |url: &str, title: Option<&str>| CitedSource {
+        url: url.into(),
+        title: title.map(str::to_owned),
+    };
+    let check = |sources| {
+        let mut attempt = attempt.clone();
+        attempt.presentation[0].content = AssistantPresentationContent::Answer {
+            text: "Answer".into(),
+            sources,
+        };
+        attempt.validate()
+    };
+    assert!(check(vec![page("https://example.org/", None)]).is_ok());
+    for url in [
+        "https://example.org",
+        "https://EXAMPLE.org/",
+        "https://name@example.org/",
+        "https://example.org/\n",
+        "javascript:alert(1)",
+    ] {
+        assert!(check(vec![page(url, None)]).is_err(), "{url}");
+    }
+    for title in [" \t", "bad\u{200e}title", "bad\nline", &"🦀".repeat(513)] {
+        assert!(check(vec![page("https://example.org/", Some(title))]).is_err());
+    }
+    assert!(check(vec![page("https://example.org/", None); 2]).is_err());
+    assert!(
+        check(vec![page(
+            &format!("https://example.org/{}", "x".repeat(8192)),
+            None
+        )])
+        .is_err()
+    );
+    assert!(
+        check(
+            (0..65)
+                .map(|i| page(&format!("https://example.org/{i}"), None))
+                .collect()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn hosted_accessors_keep_readable_fields_separate_from_link_safety() {
+    let mut action = activity(HostedActivityStatus::Searching);
+    assert!(action.queries().is_empty());
+    assert_eq!(action.url(), None);
+    assert_eq!(action.pattern(), None);
+    action.action = Some(json!({
+        "type":"find_in_page", "queries":[" first ", "\t", "\u{1b}[31msecond", false, "second"],
+        "query":"third", "url":"https://example.org/a\u{7}b", "pattern":"néedle\u{202e}"
+    }));
+    assert_eq!(action.queries(), [" first ", "second", "third"]);
+    assert_eq!(action.url().as_deref(), Some("https://example.org/ab"));
+    assert_eq!(action.safe_url(), None);
+    assert_eq!(action.pattern().as_deref(), Some("néedle"));
+    action.action.as_mut().unwrap()["url"] = json!("https://example.org/ab?x=1&y=2");
+    assert_eq!(
+        action.safe_url().as_deref(),
+        Some("https://example.org/ab?x=1&y=2")
+    );
 }
 
 #[test]
@@ -227,14 +315,11 @@ fn text_addresses_sizes_and_binding_coverage_remain_strict_in_v2() {
     invalid.presentation[0].source.part = AssistantPartIdentity::Summary(0);
     assert!(invalid.validate().is_err());
     let mut invalid = attempt.clone();
-    invalid.presentation[0].content = AssistantPresentationContent::Answer {
-        text: "\n\t".into(),
-    };
+    invalid.presentation[0].content = AssistantPresentationContent::answer("\n\t");
     assert!(invalid.validate().is_err());
     let mut invalid = attempt.clone();
-    invalid.presentation[0].content = AssistantPresentationContent::Answer {
-        text: "x".repeat(4 * 1024 * 1024 + 1),
-    };
+    invalid.presentation[0].content =
+        AssistantPresentationContent::answer("x".repeat(4 * 1024 * 1024 + 1));
     assert!(invalid.validate().is_err());
     let mut invalid = attempt;
     invalid.presentation[1].source.part = AssistantPartIdentity::Content(0);

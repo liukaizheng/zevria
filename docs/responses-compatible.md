@@ -97,6 +97,10 @@ are replaced. Only safe HTTP(S) destinations are linked. Terminal controls are
 removed from display copies, never from raw native text or annotations. TUI URLs
 are fully visible and copyable; the terminal emulator determines URL recognition
 and activation gestures (there is no in-app opener or universal click shortcut).
+The desktop groups adjacent web actions and lists cited domains under expanded
+answers. A single-page Sources tag opens the citation directly; a counted tag
+lists the cited pages from that domain. This uses existing `url_citation`
+annotations, not provider search result lists.
 
 Completed native output and unknown annotations are preserved for exact-profile
 replay. Switching profiles carries readable titles and URLs, but not hosted items,

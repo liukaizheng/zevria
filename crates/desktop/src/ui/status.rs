@@ -171,7 +171,7 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
     if cancelling {
         return "Stopping".into();
     }
-    match model.tail(Instant::now()) {
+    let streamed = match model.tail(Instant::now()) {
         ConversationTail::Compacting { .. } => return "Compacting context".into(),
         ConversationTail::Retrying {
             notice,
@@ -187,28 +187,23 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
         ConversationTail::Streaming {
             message: rig_core::message::Message::Assistant(message),
             ..
-        } => {
-            for part in message.content.iter().rev() {
-                match part {
-                    rig_core::message::AssistantContent::Reasoning(reasoning)
-                        if zevria_content::reasoning::readable_parts(reasoning)
-                            .next()
-                            .is_some() =>
-                    {
-                        return "Thinking".into();
-                    }
-                    rig_core::message::AssistantContent::Text(text)
-                        if !text.text.trim().is_empty() =>
-                    {
-                        return "Writing".into();
-                    }
-                    _ => {}
-                }
+        } => message.content.iter().rev().find_map(|part| match part {
+            rig_core::message::AssistantContent::Reasoning(reasoning)
+                if zevria_content::reasoning::readable_parts(reasoning)
+                    .next()
+                    .is_some() =>
+            {
+                Some("Thinking")
             }
-        }
-        _ => {}
-    }
+            rig_core::message::AssistantContent::Text(text) if !text.text.trim().is_empty() => {
+                Some("Writing")
+            }
+            _ => None,
+        }),
+        _ => None,
+    };
     let header = model.session.call_header();
+    let mut newest_web = true;
     for entry in model.conversation.history().iter().rev() {
         let HistoryEntry::Conversation(entry) = entry else {
             continue;
@@ -218,6 +213,12 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
         }
         for block in entry.blocks.iter().rev().filter(|b| b.visible(false)) {
             match &block.kind {
+                PresentationBlockKind::WebActivity(activity) if newest_web => {
+                    newest_web = false;
+                    if let Some(phrase) = super::blocks::web::live_phrase(&activity.actions) {
+                        return phrase.into();
+                    }
+                }
                 PresentationBlockKind::Tool(tool)
                     if match tool {
                         zevria_presentation::blocks::PresentedTool::Native { state, .. } => {
@@ -235,21 +236,22 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
                         }
                         zevria_presentation::blocks::PresentedTool::Acp(tool) => &tool.title,
                     };
-                    return format!("Running {}", name.to_lowercase());
+                    return streamed
+                        .map_or_else(|| format!("Running {}", name.to_lowercase()), str::to_owned);
                 }
                 PresentationBlockKind::Reasoning { parts }
                     if parts.iter().any(|part| !part.trim().is_empty()) =>
                 {
-                    return "Thinking".into();
+                    return streamed.unwrap_or("Thinking").into();
                 }
                 PresentationBlockKind::Text { text, .. } if !text.trim().is_empty() => {
-                    return "Writing".into();
+                    return streamed.unwrap_or("Writing").into();
                 }
                 _ => {}
             }
         }
     }
-    "Waiting for the model".into()
+    streamed.unwrap_or("Waiting for the model").into()
 }
 
 pub fn compact_number(n: u64) -> String {

@@ -94,11 +94,22 @@ closure never changes it. A terminal status is displayed as is. A live attempt
 shows a non-terminal action's live status; after closure that action shows `•`
 (**completion unconfirmed**), not a manufactured provider failure. Each failed or
 interrupted display has one **Incomplete response · failed/interrupted** marker.
-Detail-free adjacent actions form counted rows; late details split them. Queries
-keep supplied order with repeated details deduplicated, and full queries/URLs/
-patterns remain copyable. Terminal escapes and directional controls are removed
-from display copies only. Consecutive visible reasoning shares one heading;
-empty and opaque-only reasoning creates no selectable block.
+The shared projection groups adjacent detail-free actions into counted blocks;
+late details split them. It also exposes structured action kinds, ordered
+queries, page addresses, find patterns and individual status icons. The desktop
+coalesces consecutive visible web blocks within each entry by their first
+member's identity; TUI grouping and copy text are unchanged. Terminal escapes
+and directional controls are removed from display copies only. Consecutive
+visible reasoning shares one heading; empty and opaque-only reasoning creates
+no selectable block.
+
+`AssistantPresentationContent::Answer.sources` carries ordered, deduplicated
+Responses `url_citation` destinations and optional sanitized titles for display
+only. It can advance independently of provisional Markdown when a citation's
+range hasn't arrived. The committed ledger replaces provisional sources, and
+restoration derives them from native annotations. `sources` is additive and
+omitted when empty in incomplete-response v1 and ACP `zevria.response_display`
+v2. No source list enters canonical text, native replay or model input.
 
 The opt-in search definition and task allow-list still meet at
 `prepare_turn_request`; completion transports and exact counts use the same

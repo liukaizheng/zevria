@@ -589,6 +589,10 @@ in provider output. Part identities are `{ "summary": n }`, `{ "content": n }`,
 or `"tool"`. Native-tool presentation stores only a `call_id`, never executable
 arguments. Tool bindings carry `tool_call_id`, `output_index`, and `native`;
 hosted IDs remain `hosted-search:<attempt-id>:<output-index>`.
+An `answer` part may also carry `sources: [{ "url": "…", "title": "…" }]`:
+safe Responses `url_citation` destinations in annotation order, up to 64 per
+part, with titles optional. This display-only field is omitted when empty and
+is distinct from a text binding's source-part addresses.
 
 Metadata is emitted only when an attempt has hosted activity, is failed or
 interrupted, or already emitted metadata that must keep reconciling. Ordinary
@@ -624,10 +628,11 @@ repair preserves indexed answers in the current prompt rather than flattening or
 promoting provisional/failed content; an earlier prompt's indexed answer does not
 disable repair of a later ordinary preview.
 
-All Zevria panes use the same inline action presentation: full readable queries,
-URLs and find patterns, counted adjacent detail-free actions, one incomplete
-marker per failed/interrupted attempt, and **completion unconfirmed** where no
-provider terminal evidence exists. Readable reasoning runs have one heading;
+Zevria panes share structured, readable queries, page addresses and find
+patterns, one incomplete marker per failed/interrupted attempt, and unconfirmed
+states where no provider terminal evidence exists. The TUI counts adjacent
+detail-free actions; the desktop groups adjacent visible actions in one row and
+shows cited domains under expanded answers when metadata supplies sources. Readable reasoning runs have one heading;
 opaque/empty reasoning is hidden. Responses answer parts update in place as text
 and citations arrive. One shared derivation from the committed ledger is
 authoritative at success, so live-only hosted actions missing from it disappear.

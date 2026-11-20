@@ -3,6 +3,8 @@
 mod models;
 #[path = "turn_tests.rs"]
 mod turns;
+#[path = "web_tests.rs"]
+mod web;
 #[cfg(windows)]
 #[path = "windows_tests.rs"]
 mod windows;

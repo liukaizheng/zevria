@@ -36,6 +36,7 @@ pub(super) fn plain_block(id: u64, role: PresentationRole, text: &str) -> Presen
             text: text.into(),
             flavor: TextFlavor::Plain,
             editable: false,
+            sources: Vec::new(),
         },
     }
 }

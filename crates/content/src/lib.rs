@@ -3,6 +3,7 @@ use zevria_foundation::ModelProfileRef;
 pub mod message;
 pub use message::assistant_plain_text;
 pub mod citations;
+pub use citations::CitedSource;
 pub mod image_diagnostics;
 pub mod image_facts;
 pub mod image_preparation;

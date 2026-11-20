@@ -251,16 +251,13 @@ fn slow_consumers_receive_only_the_latest_large_indexed_answer_and_collector_rev
                 part: zevria_content::AssistantPartIdentity::Content(0),
                 item_id: Some("answer".into()),
             },
-            content: zevria_content::AssistantPresentationContent::Answer {
-                text: String::new(),
-            },
+            content: zevria_content::AssistantPresentationContent::answer(String::new()),
         });
     let mut answer = String::new();
     for _ in 0..1000 {
         answer.push_str("🦀 Readable provisional answer, with an unfinished **Markdown span.\n");
-        attempt.presentation[0].content = zevria_content::AssistantPresentationContent::Answer {
-            text: answer.clone(),
-        };
+        attempt.presentation[0].content =
+            zevria_content::AssistantPresentationContent::answer(answer.clone());
         attempt.touch();
         progress.stream_snapshot(zevria_content::AssistantStreamSnapshot {
             message: Some(Message::assistant(&answer)),

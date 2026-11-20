@@ -1,5 +1,6 @@
 //! Retained semantic log blocks. They never infer or mutate engine semantics.
 mod tools;
+pub(super) mod web;
 use super::{
     math, style,
     theme::{palette, tones},
@@ -112,7 +113,7 @@ pub enum BlockKind {
     Image {
         label: String,
     },
-    Web,
+    Web(web::WebRow),
     Notice {
         level: NoticeLevel,
     },
@@ -141,6 +142,7 @@ pub struct BlockData {
     pub kind: BlockKind,
     pub gutter: Gutter,
     pub body: String,
+    pub sources: Vec<zevria_content::CitedSource>,
     pub plain: bool,
     pub row: usize,
     pub target: Option<FoldKey>,
@@ -172,6 +174,7 @@ impl BlockData {
             gutter,
             primary: body.clone(),
             body,
+            sources: Vec::new(),
             plain,
             row: 0,
             target: None,
@@ -231,8 +234,13 @@ impl BlockData {
         data.source = Some(block.id);
         data.secondary = block.secondary_copy();
         match &block.kind {
-            PresentationBlockKind::Text { flavor, .. } => {
+            PresentationBlockKind::Text {
+                flavor, sources, ..
+            } => {
                 data.plain = *flavor == TextFlavor::Plain;
+                if role == PresentationRole::Assistant {
+                    data.sources = sources.clone();
+                }
                 data.kind = BlockKind::Prose {
                     role,
                     plain: data.plain,
@@ -359,8 +367,9 @@ impl BlockData {
                 data.image =
                     format.map(|f| Arc::new(Image::from_bytes(f, image.encoded_bytes().to_vec())));
             }
-            PresentationBlockKind::WebActivity(_) => {
-                data.kind = BlockKind::Web;
+            PresentationBlockKind::WebActivity(activity) => {
+                data.kind = BlockKind::Web(web::WebRow::new(activity, data.primary.clone()));
+                data.gutter = Gutter::Glyph(activity.status());
                 data.plain = true;
             }
             PresentationBlockKind::Error(_) => {
@@ -463,7 +472,7 @@ pub fn entry(
                     }
                 }
             }
-            blocks
+            web::coalesce(blocks)
         }
         HistoryEntry::PlanArtifact(a) => vec![BlockData::new(
             key,
@@ -587,6 +596,7 @@ impl BlockData {
             BlockKind::RangeSummary
             | BlockKind::Tool { .. }
             | BlockKind::Subtask { .. }
+            | BlockKind::Web(_)
             | BlockKind::Live(_) => None,
             BlockKind::Reasoning => Some(TailKind::Thinking),
             BlockKind::Prose {
@@ -625,6 +635,7 @@ pub struct BlockView {
     output: Entity<TextViewState>,
     compact: bool,
     show_all_output: bool,
+    show_all_sources: bool,
     diff: Option<Entity<DiffState>>,
     diff_error: Option<String>,
     diff_task: Option<Task<()>>,
@@ -687,7 +698,9 @@ impl BlockView {
         cx: &mut Context<Self>,
     ) -> Self {
         let text = cx.new(|cx| {
-            if data.plain {
+            if matches!(data.kind, BlockKind::Web(_)) {
+                TextViewState::html("", cx)
+            } else if data.plain {
                 TextViewState::html(&plain_html(&data.body), cx)
             } else {
                 TextViewState::markdown(&data.body, cx)
@@ -720,6 +733,7 @@ impl BlockView {
             output,
             compact,
             show_all_output: false,
+            show_all_sources: false,
             diff: None,
             diff_error: None,
             diff_task: None,
@@ -748,7 +762,10 @@ impl BlockView {
             || data.key != self.data.key
             || data.gutter != self.data.gutter
             || data.target != self.data.target
-            || data.message != self.data.message;
+            || data.message != self.data.message
+            || data.sources != self.data.sources
+            || matches!((&self.data.kind, &data.kind),
+                (BlockKind::Web(old), BlockKind::Web(new)) if old != new);
         if data.revision == self.data.revision
             && data.body == self.data.body
             && data.secondary == self.data.secondary
@@ -762,7 +779,9 @@ impl BlockView {
             }
             return;
         }
-        let body = if data.plain {
+        let body = if matches!(data.kind, BlockKind::Web(_)) {
+            String::new()
+        } else if data.plain {
             plain_html(&data.body)
         } else {
             data.body.clone()
@@ -935,6 +954,7 @@ impl BlockView {
                         Some(FoldKey::Span { .. }) => "Copy messages",
                         Some(FoldKey::Message { .. }) => "Copy message",
                         _ if matches!(self.data.kind, BlockKind::Tool { .. }) => "Copy input",
+                        _ if matches!(self.data.kind, BlockKind::Web(_)) => "Copy web activity",
                         _ => "Copy text",
                     },
                 )
@@ -1025,6 +1045,7 @@ impl BlockView {
             BlockKind::Tool { name, summary, .. } => format!("{}  {summary}", tool_label(name)),
             BlockKind::Subtask { title, .. } | BlockKind::Document { title, .. } => title.clone(),
             BlockKind::Image { label } => label.clone(),
+            BlockKind::Web(row) => row.preview(),
             _ => crate::disclosure::preview(&self.data.body),
         };
         let t = palette(cx);
@@ -1189,9 +1210,6 @@ impl Render for BlockView {
         if message.is_none() {
             gutter = gutter.pt(px(7.));
         }
-        if matches!(self.data.kind, BlockKind::Web) {
-            gutter = gutter.child(Icon::new(IconName::Globe).small().text_color(t.roles.tools));
-        }
         let mut content = div()
             .flex_1()
             .min_w_0()
@@ -1203,10 +1221,7 @@ impl Render for BlockView {
             .gap(px(8.));
         let text_like = matches!(
             self.data.kind,
-            BlockKind::Prose { .. }
-                | BlockKind::Notice { .. }
-                | BlockKind::Web
-                | BlockKind::Ensemble
+            BlockKind::Prose { .. } | BlockKind::Notice { .. } | BlockKind::Ensemble
         );
         match &self.data.kind {
             _ if folded_message.is_some() && !text_like => {
@@ -1241,6 +1256,9 @@ impl Render for BlockView {
                         cx,
                     ),
                 );
+                if *role == PresentationRole::Assistant && self.shows_details() {
+                    content = content.children(web::sources_footer(self, cx));
+                }
             }
             BlockKind::RangeSummary => {
                 let title = self.data.body.clone();
@@ -1717,16 +1735,17 @@ impl Render for BlockView {
                         controller.cancelling,
                     ));
             }
-            BlockKind::Web | BlockKind::Ensemble => {
+            BlockKind::Web(row) => {
+                content = content
+                    .max_w(px(style::PROSE))
+                    .child(web::render_row(row, self, ink, window, cx));
+            }
+            BlockKind::Ensemble => {
                 content = content.max_w(px(style::PROSE)).child(
                     self.text_row(
                         self.rich_text(false, cx)
                             .map(|view| style::SECONDARY.apply(view)),
-                        if matches!(self.data.kind, BlockKind::Web) {
-                            "Web activity"
-                        } else {
-                            "Worker details"
-                        },
+                        "Worker details",
                         window,
                         cx,
                     ),
@@ -1751,18 +1770,21 @@ impl Render for BlockView {
                 _ => None,
             };
             if let Some(status) = node {
-                content = content.child(
-                    if matches!(
-                        self.data.kind,
-                        BlockKind::Notice {
-                            level: NoticeLevel::Neutral
-                        }
-                    ) {
-                        style::thread_marker("◼", t.text.secondary, cx)
-                    } else {
-                        style::thread_node(status, ink, cx)
-                    },
-                );
+                let marker = if matches!(
+                    self.data.kind,
+                    BlockKind::Notice {
+                        level: NoticeLevel::Neutral
+                    }
+                ) {
+                    style::thread_marker("◼", t.text.secondary, cx)
+                } else {
+                    style::thread_node(status, ink, cx)
+                };
+                content = if matches!(self.data.kind, BlockKind::Web(_)) {
+                    content.child(marker.id("web-thread-node").test_support())
+                } else {
+                    content.child(marker)
+                };
             }
         }
         let show_gutter = !self.compact || speaker.is_some() || message.is_some();

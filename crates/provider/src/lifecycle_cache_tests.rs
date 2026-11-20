@@ -184,6 +184,6 @@ async fn cancelling_before_the_cadence_tick_retains_the_latest_ingested_attempt(
     let attempts = progress.drain_attempts();
     assert_eq!(attempts.len(), 1);
     assert!(attempts[0].presentation.iter().any(|part| matches!(
-        &part.content, zevria_content::AssistantPresentationContent::Answer { text } if text == "first latest"
+        &part.content, zevria_content::AssistantPresentationContent::Answer { text, .. } if text == "first latest"
     )));
 }
