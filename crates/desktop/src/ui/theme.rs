@@ -488,12 +488,12 @@ mod tests {
             .unwrap()
             .palette
             .tokens();
-        for tokens in [
+        let built_ins = [
             zevria_theme::ZEVRIA_GRAPHITE,
             zevria_theme::ZEVRIA_GRAPHITE_LIGHT,
             zevria_theme::ZEVRIA_DARK,
-            generated,
-        ] {
+        ];
+        for tokens in built_ins.into_iter().chain([generated]) {
             let t = tokens.map(color);
             let tones = Tones::new(t);
             // Model sheet: normal/selected rows, supporting copy, errors and
@@ -508,6 +508,12 @@ mod tests {
             assert!(contrast(t.feedback.error, t.surfaces.overlay) >= 4.5);
             assert!(contrast(tones.focus, t.surfaces.overlay) >= 3.);
             assert!(apca(tones.pencil, t.surfaces.canvas).abs() >= 75.);
+            if built_ins.contains(&tokens) {
+                assert!(
+                    contrast(tones.pencil, t.surfaces.canvas)
+                        < contrast(t.text.primary, t.surfaces.canvas)
+                );
+            }
             assert!(contrast(tones.thread, t.surfaces.canvas) >= 3.);
             assert!(contrast(t.workflow.build, tones.build_tint) >= 4.5);
             assert!(contrast(t.workflow.plan, tones.plan_tint) >= 4.5);

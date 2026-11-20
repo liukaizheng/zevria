@@ -131,8 +131,11 @@ pub fn meta() -> Div {
 pub fn mono() -> Div {
     CODE.apply(div()).font_family(MONO_FONT)
 }
-pub fn pencil() -> Div {
-    PENCIL.apply(div()).font_family(DOCUMENT_FONT)
+pub fn pencil(cx: &App) -> Div {
+    PENCIL
+        .apply(div())
+        .font_family(DOCUMENT_FONT)
+        .text_color(tones(cx).pencil)
 }
 pub fn focus_ring(radius: f32, cx: &App) -> Div {
     div()
@@ -354,7 +357,6 @@ pub fn thought_markdown(cx: &App) -> TextViewStyle {
             PENCIL
                 .apply(StyleRefinement::default())
                 .font_family(DOCUMENT_FONT)
-                .italic()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(tone.pencil)
         })
@@ -401,10 +403,10 @@ pub fn shell_ink(token: ShellToken, t: &ZevriaTheme<Hsla>) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::{
-        CODE, HEADINGS, PENCIL, focus_ring, glyph_color, markdown, palette, shell_ink,
-        thought_markdown, tones,
+        CODE, DOCUMENT_FONT, HEADINGS, PENCIL, focus_ring, glyph_color, markdown, palette, pencil,
+        shell_ink, thought_markdown, tones,
     };
-    use gpui_kit::{FontStyle, FontWeight, Styled, TestAppContext, px};
+    use gpui_kit::{FontWeight, Styled, TestAppContext, px};
     use zevria_presentation::{shell::ShellToken, status_icon::StatusIcon};
 
     #[gpui_kit::test]
@@ -413,11 +415,20 @@ mod tests {
             gpui_kit::init(cx);
             super::super::theme::apply(zevria_theme::ZEVRIA_GRAPHITE, cx);
             let t = palette(cx);
-            let pencil = tones(cx).pencil;
+            let pencil_ink = tones(cx).pencil;
+            let mut preview = pencil(cx);
+            let preview = &preview.style().text;
+            assert_eq!(preview.color, Some(pencil_ink));
+            assert_eq!(preview.font_family, Some(DOCUMENT_FONT.into()));
+            assert_eq!(preview.font_size, Some(px(PENCIL.size).into()));
+            assert_eq!(preview.line_height, Some(px(PENCIL.leading).into()));
+            assert_eq!(preview.font_style, None);
+
             let answer = markdown(cx, false);
             let thought = thought_markdown(cx);
-            assert_eq!(thought.foreground(), pencil);
-            assert_eq!(thought.muted_foreground(), pencil);
+            assert_eq!(answer.foreground(), t.text.primary);
+            assert_eq!(thought.foreground(), pencil_ink);
+            assert_eq!(thought.muted_foreground(), pencil_ink);
             assert_eq!(thought.link(), t.content.link);
             for level in 1..=6 {
                 let heading = answer.heading(level);
@@ -427,13 +438,14 @@ mod tests {
                     Some(px(HEADINGS[(level as usize - 1).min(2)].size).into())
                 );
                 let note = thought.heading(level);
-                assert_eq!(note.text.color, Some(pencil));
+                assert_eq!(note.text.color, Some(pencil_ink));
                 assert_eq!(note.text.font_size, Some(px(PENCIL.size).into()));
+                assert_eq!(note.text.line_height, Some(px(PENCIL.leading).into()));
                 assert_eq!(note.text.font_weight, Some(FontWeight::SEMIBOLD));
-                assert_eq!(note.text.font_style, Some(FontStyle::Italic));
+                assert_eq!(note.text.font_style, None);
             }
             for code in [thought.code_block(), thought.inline_code_style()] {
-                assert_eq!(code.text.color, Some(pencil));
+                assert_eq!(code.text.color, Some(pencil_ink));
                 assert_eq!(code.text.font_size, Some(px(CODE.size).into()));
                 assert_eq!(code.background, Some(t.surfaces.panel.into()));
             }

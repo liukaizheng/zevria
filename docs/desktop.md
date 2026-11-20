@@ -103,10 +103,11 @@ The transcript is one left-aligned working thread within a centered column, not
 message bubbles or a stack of cards. Its line and nodes record what happened,
 in provider order:
 
-- **Pencil:** a dashed thread and italic serif 13/21 in graphite pencil ink
-  for provider-supplied thinking. Expanded notes are indented 24 px under the
-  gray Thinking label; the folded preview is also italic. Plan documents use
-  upright serif 15/24 instead.
+- **Pencil:** a dashed thread and upright serif 13/21 in theme-derived pencil
+  ink, quieter than answer text, for provider-supplied thinking. Expanded notes
+  stay indented under the **Thinking** label. Thought previews are single-line
+  plain text, whether the thought or its message is folded. Plan documents use
+  the larger upright serif 15/24.
 - **Carbon:** lifecycle nodes and monospace 12/18 for commands, paths, code, literal
   output and diffs. Expanded tools use recessed 8 px wells, with input before
   output and then the native diff. Output opens at 16 lines; **Show all N lines**
@@ -132,7 +133,7 @@ Consolas on Windows. Transcript typography is centralized as `Type { size, leadi
 | --- | --- | --- |
 | `READING` | 14/22 | Answers, prompts, empty-state and screen body text |
 | `DOCUMENT` | 15/24 | Serif Plan documents, in the thread and review sheet |
-| `PENCIL` | 13/21 | Italic serif thinking previews and expanded notes |
+| `PENCIL` | 13/21 | Serif thinking previews and expanded notes, upright by default |
 | `CODE` | 12/18 | Monospace command headers, wells, code, completions and errors |
 | `SECONDARY` | 13/20 | In-thread notices, live tail, web/ensemble text, subtask titles |
 | `HEADINGS` | 18/24, 16/22, 15/21 | Markdown h1, h2, h3+; Plan card title uses h2 |
@@ -179,10 +180,13 @@ summaries can therefore show no section. The UI does not infer missing thoughts.
   **Stopped before the response finished** or **The response failed before it
   finished**. Actual failures remain red. Copy payloads are unchanged.
 
-Thinking Markdown stays pencil-toned: headings are semibold at the pencil size,
-inline code and unhighlighted code blocks use pencil on the panel, and only
-links retain `content.link` for affordance. No extra vertical rule is added
-beside the existing dashed thread. In the TUI, reasoning Markdown inherits its
+Thinking Markdown stays pencil-toned and upright by default, preserving authored
+italics and bold. Headings are semibold at the pencil size, inline code and
+unhighlighted code blocks use pencil on the panel, and only links retain
+`content.link` for affordance. No extra vertical rule is added beside the
+existing dashed thread.
+
+In the TUI, reasoning Markdown inherits its
 muted italic tone throughout, including bold titles, headings, inline/fenced
 code and underlined links; ordinary answer Markdown keeps its accents.
 

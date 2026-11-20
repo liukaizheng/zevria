@@ -1045,7 +1045,7 @@ impl BlockView {
             })
             .child(
                 if thinking {
-                    style::pencil().italic().text_color(tones(cx).pencil)
+                    style::pencil(cx)
                 } else {
                     style::body().text_color(t.text.secondary)
                 }
@@ -1301,12 +1301,10 @@ impl Render for BlockView {
                 if !self.data.expanded {
                     label = label
                         .child(
-                            style::pencil()
+                            style::pencil(cx)
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .italic()
-                                .text_color(tones(cx).pencil)
                                 .child(preview.clone()),
                         )
                         .child(
@@ -1361,7 +1359,6 @@ impl Render for BlockView {
                                 .code_block_highlighter(|_| Vec::new())
                                 .font_family(style::DOCUMENT_FONT)
                                 .map(|view| style::PENCIL.apply(view))
-                                .italic()
                                 .text_color(tones(cx).pencil),
                         ),
                     );
