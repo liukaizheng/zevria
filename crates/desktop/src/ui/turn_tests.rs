@@ -169,7 +169,7 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
     let runs = summaries(&view, cx);
     assert_eq!(
         runs.iter().map(|b| b.body.as_str()).collect::<Vec<_>>(),
-        ["3 earlier messages", "3 earlier messages"]
+        ["3 folded messages", "1 folded message", "2 folded messages"]
     );
     let data = blocks(&view, cx);
     for index in [0, 5] {
@@ -178,21 +178,23 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
                 .any(|b| b.row == index && b.message.is_some_and(|m| m.folded))
         );
     }
-    for index in [4, 9] {
-        assert!(
-            data.iter()
-                .any(|b| b.row == index && b.message.is_some_and(|m| !m.folded))
-        );
-        let thoughts = data
-            .iter()
-            .filter(|b| b.row == index && matches!(b.kind, BlockKind::Reasoning))
-            .collect::<Vec<_>>();
-        assert_eq!(thoughts.len(), 2);
-        assert!(thoughts.iter().all(|b| b.expanded == (index == 4)));
-    }
+    let thoughts = data
+        .iter()
+        .filter(|b| b.row == 4 && matches!(b.kind, BlockKind::Reasoning))
+        .collect::<Vec<_>>();
+    assert_eq!(thoughts.len(), 2);
+    assert!(thoughts.iter().all(|b| b.summary && !b.expanded));
     assert!(
         data.iter()
-            .any(|b| b.body.contains("Full answer detail") && b.expanded)
+            .any(|b| b.body == "First final answer" && b.expanded)
+    );
+    assert!(
+        data.iter().any(|b| b.row == 7 && b.expanded),
+        "the Plan is the second turn's result"
+    );
+    assert!(
+        !data.iter().any(|b| b.row == 9),
+        "closing prose is not the result"
     );
     cx.update_window(window.into(), |_, window, cx| {
         let button = window.find("fold-earlier-content");
@@ -227,18 +229,14 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
     })
     .unwrap();
     press(window, Shortcut::FOLD_OLDER.0, cx);
-    assert!(
-        blocks(&view, cx)
-            .iter()
-            .any(|b| b.row == 4 && b.message.is_some_and(|m| m.folded))
-    );
+    assert!(!blocks(&view, cx).iter().any(|b| b.row == 4));
     dispatch(window, actions::FoldEarlierContent, cx);
     assert!(
         blocks(&view, cx)
             .iter()
-            .any(|b| b.row == 4 && b.message.is_some_and(|m| m.folded)),
-        "earlier-content must not undo older-turn folds"
+            .any(|b| b.row == 4 && b.body == "First final answer" && b.expanded)
     );
+    assert!(!blocks(&view, cx).iter().any(|b| b.row == 2));
     press(window, Shortcut::UNFOLD_ALL.0, cx);
     assert!(summaries(&view, cx).is_empty());
     assert_eq!(
@@ -379,7 +377,7 @@ fn range_restores_the_covered_anchor_and_focus_and_keeps_nested_folds(cx: &mut T
     let range = summaries(&view, cx).remove(0);
     cx.update_window(window.into(), |_, window, cx| {
         let summary = window.within(range.key.clone()).find("range-disclosure");
-        assert_eq!(summary.label(), Some("2 earlier messages"));
+        assert_eq!(summary.label(), Some("2 folded messages"));
         assert_eq!(summary.role(), Some(Role::Button));
         assert_eq!(summary.expanded(), Some(false));
         assert_eq!(summary.bounds().size.height, px(28.));
@@ -681,6 +679,14 @@ fn acp_history_uses_stable_block_folds_and_no_native_header_is_required(cx: &mut
     );
     focus(window, &view, thought, thought.target.unwrap(), cx);
     press(window, Shortcut::UNFOLD.0, cx);
+    assert!(
+        blocks(&view, cx)
+            .iter()
+            .find(|b| b.target == thought.target)
+            .unwrap()
+            .expanded
+    );
+    press(window, Shortcut::UNFOLD_ALL.0, cx);
     assert!(blocks(&view, cx).iter().all(|b| b.expanded));
 }
 
@@ -793,4 +799,230 @@ fn unfold_all_is_pane_local_and_replacement_retires_old_folds(cx: &mut TestAppCo
             .iter()
             .all(|b| b.expanded && b.message.is_none_or(|m| !m.folded))
     );
+}
+
+fn web_response() -> TranscriptItem {
+    use serde_json::json;
+    TranscriptItem::provider_message(zevria_model::ProviderReplay::openai_responses(
+        zevria_foundation::ModelProfileRef::new("fixture", "model"),
+        vec![
+            json!({"type":"message","id":"comment","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Interim prose"}]}),
+            json!({"type":"web_search_call","id":"search","status":"completed","action":{"type":"search","query":"bees"}}),
+            json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[
+                {"type":"output_text","text":"Final reply"},
+                {"type":"output_text","text":"More context","annotations":[{"type":"url_citation","title":"Cited study","url":"https://example.org/study","start_index":0,"end_index":12}]}
+            ]}),
+            json!({"type":"web_search_call","id":"page","status":"completed","action":{"type":"open_page","url":"https://example.net/special-page"}}),
+            json!({"type":"web_search_call","id":"find","status":"completed","action":{"type":"find_in_page","url":"https://example.net/special-page","pattern":"needle"}}),
+        ],
+    )).unwrap()
+}
+
+#[gpui_kit::test]
+fn bulk_shortcuts_and_title_action_hide_web_details_not_answers_or_sources(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::test::TestQueryExt as _;
+
+    for width in [720., 1240.] {
+        let (window, view, controller, _) = setup_at_size(cx, width, 1400.);
+        restore(
+            &controller,
+            vec![
+                TranscriptItem::Message(Message::user("first prompt")),
+                TranscriptItem::Message(Message::assistant("Older reply")),
+                TranscriptItem::Message(Message::user("second prompt")),
+                web_response(),
+                TranscriptItem::Error {
+                    error: "trailing notice".into(),
+                },
+            ],
+            cx,
+        );
+        render(window, cx);
+        let original = blocks(&view, cx);
+        let search = original
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Web(_)) && b.body.contains("bees"))
+            .unwrap();
+        let open_find = original
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Web(_)) && b.body.contains("needle"))
+            .unwrap();
+        let final_reply = original.iter().find(|b| b.body == "Final reply").unwrap();
+        let citing = original
+            .iter()
+            .find(|b| b.body.contains("More context"))
+            .unwrap();
+        let older = original.iter().find(|b| b.body == "Older reply").unwrap();
+        let assert_rendered = |cx: &mut TestAppContext, expanded_web, expanded_older| {
+            cx.update_window(window.into(), |_, window, _| {
+                assert_eq!(
+                    window
+                        .within(search.key.clone())
+                        .try_find("web-detail")
+                        .is_some(),
+                    expanded_web
+                );
+                assert_eq!(
+                    window
+                        .within(open_find.key.clone())
+                        .try_find("web-action-list")
+                        .is_some(),
+                    expanded_web
+                );
+                assert!(
+                    window
+                        .within(final_reply.key.clone())
+                        .try_find("text-body")
+                        .is_some()
+                );
+                assert!(
+                    window
+                        .within(citing.key.clone())
+                        .try_find("text-body")
+                        .is_some()
+                );
+                assert!(
+                    window
+                        .within(citing.key.clone())
+                        .try_find("answer-sources")
+                        .is_some()
+                );
+                assert!(
+                    window
+                        .try_find_by_label("Open source from example.org")
+                        .is_some()
+                );
+                assert_eq!(window.try_find(older.key.clone()).is_some(), expanded_older);
+            })
+            .unwrap();
+        };
+        assert_rendered(cx, true, true);
+        focus(window, &view, final_reply, final_reply.target.unwrap(), cx);
+        press(window, Shortcut::FOLD.0, cx);
+        focus_composer(window, &view, cx);
+        press(window, Shortcut::FOLD_EARLIER.0, cx);
+        assert_rendered(cx, false, true);
+        assert!(
+            blocks(&view, cx)
+                .iter()
+                .any(|b| b.key == final_reply.key && b.expanded)
+        );
+        press(window, Shortcut::FOLD_OLDER.0, cx);
+        assert_rendered(cx, false, false);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.click("fold-earlier-content", cx)
+        })
+        .unwrap();
+        render(window, cx);
+        assert_rendered(cx, false, true);
+        focus(window, &view, open_find, open_find.target.unwrap(), cx);
+        press(window, Shortcut::UNFOLD.0, cx);
+        cx.update_window(window.into(), |_, window, _| {
+            assert!(
+                window
+                    .within(open_find.key.clone())
+                    .try_find("web-action-list")
+                    .is_some()
+            );
+            assert!(
+                window
+                    .within(search.key.clone())
+                    .try_find("web-detail")
+                    .is_none()
+            );
+        })
+        .unwrap();
+        press(window, Shortcut::UNFOLD_ALL.0, cx);
+        assert_rendered(cx, true, true);
+        let reopened = blocks(&view, cx);
+        for web in [search, open_find] {
+            let row = reopened.iter().find(|b| b.key == web.key).unwrap();
+            assert!(row.expanded);
+            assert_eq!(row.primary, web.primary);
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn hosted_attempt_bulk_fold_does_not_hide_new_blocks_or_the_in_place_commit(
+    cx: &mut TestAppContext,
+) {
+    let (window, view, controller, _) = setup_at_size(cx, 1240., 1400.);
+    let turn_id = TurnId::new(71);
+    event(
+        &controller,
+        E::TurnStarted {
+            turn_id,
+            message: Message::user("Prompt"),
+            mode: SessionMode::Build,
+        },
+        cx,
+    );
+    event(&controller, E::ModelCallStarted { turn_id, call: 1 }, cx);
+    let item = web_response();
+    let mut attempt = zevria_transcript::restored_attempt(&item, 0).unwrap();
+    let pending = attempt.hosted_activity.split_off(1);
+    let mut later = pending[0].clone();
+    later.output_index = 0;
+    // Fit the new action immediately beside the old one without taking its ID.
+    // The interim prose at output 0 is not needed for this in-place fixture.
+    attempt
+        .presentation
+        .retain(|part| part.source.output_index != 0);
+    event(
+        &controller,
+        E::ResponseAttemptUpdated {
+            turn_id,
+            attempt: attempt.clone(),
+        },
+        cx,
+    );
+    render(window, cx);
+    focus_composer(window, &view, cx);
+    press(window, Shortcut::FOLD_OLDER.0, cx);
+    let folded = blocks(&view, cx);
+    assert!(
+        folded
+            .iter()
+            .any(|b| b.body == "Final reply" && b.summary && !b.expanded)
+    );
+    assert!(folded.iter().any(|b| matches!(&b.kind, BlockKind::Live(_))));
+    attempt.hosted_activity.push(later);
+    attempt.touch();
+    event(
+        &controller,
+        E::ResponseAttemptUpdated {
+            turn_id,
+            attempt: attempt.clone(),
+        },
+        cx,
+    );
+    render(window, cx);
+    let data = blocks(&view, cx);
+    assert!(data.iter().any(|b| b.body.contains("bees") && b.summary));
+    assert!(
+        data.iter()
+            .any(|b| b.body.contains("special-page") && b.expanded)
+    );
+    event(
+        &controller,
+        E::TurnCompleted {
+            turn_id,
+            message: item.display_message().unwrap(),
+            attempt_id: Some(attempt.id),
+        },
+        cx,
+    );
+    render(window, cx);
+    assert!(
+        blocks(&view, cx)
+            .iter()
+            .any(|b| b.body == "Final reply" && b.expanded)
+    );
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(window.try_find("answer-sources").is_some());
+    })
+    .unwrap();
 }

@@ -17,6 +17,7 @@ use std::hash::{Hash, Hasher};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use rig_core::message::Message;
+use zevria_presentation::fold::FoldMode;
 
 use crate::app::{
     ActiveSelection, EntryFolds, FoldState, HeaderTimings, HistoryEntry, Selection, SelectionScope,
@@ -69,7 +70,7 @@ struct BlockFingerprint {
     separator_before: bool,
     item_gap_before: bool,
     selected: bool,
-    folded: bool,
+    folded: FoldMode,
     reasoning_heading: bool,
     appearance: TranscriptAppearance,
     inner_width: u16,
@@ -181,8 +182,8 @@ pub(crate) struct EntryLayout {
     appearance: TranscriptAppearance,
     pub(crate) decorations: Vec<DecorationRows>,
     conversation_blocks: Option<Vec<PresentationBlockLayout>>,
-    item_folds: Vec<bool>,
-    message_folded: bool,
+    item_folds: Vec<FoldMode>,
+    message_folded: FoldMode,
     /// The entry's rendered lines. Selection geometry is cached separately.
     pub(crate) lines: Vec<Line<'static>>,
     /// Wrapped height of `lines` at `width`. The inter-entry gap row that
@@ -218,7 +219,7 @@ impl EntryLayout {
             && self.appearance == appearance
             && self.width == width
             && self.entry_selection == entry_selection
-            && self.message_folded == entry_folds.is_message_folded()
+            && self.message_folded == entry_folds.message_mode()
             && self.diagnostics_visible == diagnostics_visible
             && match entry {
                 HistoryEntry::Conversation(entry) => self.conversation_matches(
@@ -243,7 +244,7 @@ impl EntryLayout {
                             .iter()
                             .copied()
                             .eq((0..entry.selectable_upper_bound())
-                                .map(|index| entry_folds.is_item_folded(index)))
+                                .map(|index| entry_folds.item_mode(index)))
                 }
                 // Compact worker rows mutate outside the presentation model.
                 HistoryEntry::Ensemble(_) => false,
@@ -318,7 +319,7 @@ impl EntryLayout {
         let plural = if count == 1 { "" } else { "s" };
         let line = Line::from(vec![
             Span::styled("▸ ", muted),
-            Span::raw(format!("{count} earlier message{plural}")),
+            Span::raw(format!("{count} folded message{plural}")),
             Span::styled(format!(" · {hidden_rows} more rows"), muted),
         ]);
         // Unlike a body fold, a span always occupies exactly one row, even in
@@ -384,7 +385,7 @@ impl EntryLayout {
         timings: &HeaderTimings,
     ) -> (Self, usize) {
         let mut lines = Vec::new();
-        let message_folded = entry_folds.is_message_folded();
+        let message_folded = entry_folds.message_mode();
         let mut rebuilt_blocks = 0;
         let (items, conversation_blocks) = match entry {
             HistoryEntry::Conversation(entry) => {
@@ -401,7 +402,9 @@ impl EntryLayout {
                     timings,
                 );
                 rebuilt_blocks = rebuilt;
-                let items = if message_folded && let Some(first) = blocks.first() {
+                let items = if message_folded.is_folded()
+                    && let Some(first) = blocks.first()
+                {
                     let prefix_len = first.body_line_start;
                     let card = appearance == TranscriptAppearance::Acp
                         && first.fingerprint.prompt_group.is_some();
@@ -416,6 +419,7 @@ impl EntryLayout {
                         } else {
                             None
                         },
+                        message_folded,
                     );
                     let rows = RowRange::from_start_len(
                         wrapped_height(&lines[..prefix_len], width),
@@ -440,7 +444,11 @@ impl EntryLayout {
                         &mut lines,
                         width,
                         entry_selection.single_item(),
-                        message_folded || entry_folds.is_item_folded(0),
+                        if message_folded.is_folded() {
+                            message_folded
+                        } else {
+                            entry_folds.item_mode(0)
+                        },
                     ),
                 )],
                 None,
@@ -454,7 +462,11 @@ impl EntryLayout {
                         &mut lines,
                         width,
                         entry_selection.single_item(),
-                        message_folded || entry_folds.is_item_folded(0),
+                        if message_folded.is_folded() {
+                            message_folded
+                        } else {
+                            entry_folds.item_mode(0)
+                        },
                     ),
                 )],
                 None,
@@ -468,7 +480,11 @@ impl EntryLayout {
                         &mut lines,
                         width,
                         entry_selection.single_item(),
-                        message_folded || entry_folds.is_item_folded(0),
+                        if message_folded.is_folded() {
+                            message_folded
+                        } else {
+                            entry_folds.item_mode(0)
+                        },
                     ),
                 )],
                 None,
@@ -496,16 +512,20 @@ impl EntryLayout {
                     error,
                     &mut lines,
                     width,
-                    message_folded || entry_folds.is_item_folded(0),
+                    if message_folded.is_folded() {
+                        message_folded
+                    } else {
+                        entry_folds.item_mode(0)
+                    },
                 );
-                let start = if message_folded {
+                let start = if message_folded.is_folded() {
                     wrapped_height(&lines[..1], width)
                 } else {
                     0
                 };
                 let rows = RowRange::new(start, wrapped_height(&lines, width));
                 if entry_selection.includes(0) {
-                    for line in &mut lines[usize::from(message_folded)..] {
+                    for line in &mut lines[usize::from(message_folded.is_folded())..] {
                         style_selected_line(line);
                     }
                 }
@@ -517,7 +537,7 @@ impl EntryLayout {
         let decorations = conversation_blocks
             .as_ref()
             .map_or_else(Vec::new, |blocks| {
-                if message_folded {
+                if message_folded.is_folded() {
                     return blocks
                         .first()
                         .map(|block| DecorationRows {
@@ -567,7 +587,7 @@ impl EntryLayout {
                     Vec::new()
                 } else {
                     (0..entry.selectable_upper_bound())
-                        .map(|index| entry_folds.is_item_folded(index))
+                        .map(|index| entry_folds.item_mode(index))
                         .collect()
                 },
                 conversation_blocks,
@@ -664,7 +684,7 @@ fn conversation_fingerprints<'a>(
                 separator_before,
                 item_gap_before,
                 selected: !entry_folds.is_message_folded() && selection.includes(index),
-                folded: entry_folds.is_block_folded(block.id),
+                folded: entry_folds.block_mode(block.id),
                 reasoning_heading: reasoning && !previous_reasoning,
                 appearance,
                 inner_width: effective_width(block, appearance, width),
@@ -928,7 +948,7 @@ impl ConversationCache {
         if let Some(id) = target.block {
             let blocks = real.conversation_blocks.as_ref()?;
             let block = blocks.iter().find(|block| block.fingerprint.id == id)?;
-            if real.message_folded {
+            if real.message_folded.is_folded() {
                 within = blocks.first()?.decoration.start();
             } else {
                 within = blocks
@@ -968,7 +988,7 @@ impl ConversationCache {
             }
             let mut block_offset = offset;
             if let Some(blocks) = &entry.conversation_blocks {
-                if entry.message_folded {
+                if entry.message_folded.is_folded() {
                     if offset <= top && top < offset.saturating_add(entry.height) {
                         return blocks
                             .first()
@@ -1017,7 +1037,7 @@ impl ConversationCache {
             .map(EntryLayout::extent)
             .sum::<usize>();
         let blocks = entry.conversation_blocks.as_ref()?;
-        if entry.message_folded {
+        if entry.message_folded.is_folded() {
             return blocks
                 .iter()
                 .any(|block| block.fingerprint.id == id)
@@ -1081,6 +1101,7 @@ impl ConversationCache {
         streaming: Option<&Message>,
         header: Option<NativeHeader>,
         width: u16,
+        entry_folds: EntryFolds<'_>,
     ) {
         let elapsed_seconds = header_elapsed_seconds(header, &self.header_timings);
         let entry = streaming.and_then(|message| {
@@ -1128,7 +1149,7 @@ impl ConversationCache {
             &mut lines,
             self.tail_reasoning,
             TranscriptAppearance::Native,
-            EntryFolds::none(),
+            entry_folds,
             &self.header_timings,
         );
         #[cfg(test)]
@@ -1183,7 +1204,7 @@ fn streaming_block_revision(block: &PresentationBlock) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{EnsembleHistory, TurnFold};
+    use crate::app::{EnsembleHistory, FoldKey};
     use rig_core::message::AssistantContent;
     use zevria_foundation::TurnId;
     use zevria_workflow::EnsembleRunId;
@@ -1544,7 +1565,7 @@ mod tests {
         cache.refresh(&history, None, 80, false, &folds);
         let rows = cache.entries[..2].iter().map(|e| e.height).sum::<usize>();
         let rebuilt = cache.block_rebuilds;
-        folds.fold_turns(&history, false, TurnFold::FinalExpanded);
+        folds.fold(FoldKey::Span { start: 0, end: 1 });
         cache.refresh(&history, None, 80, false, &folds);
         assert_eq!(cache.block_rebuilds, rebuilt);
         assert_eq!(cache.covered.len(), 2);
@@ -1620,7 +1641,7 @@ mod tests {
                 .any(|line| line.to_string().contains("replacement"))
         );
         assert!(
-            cache.entries[0].message_folded,
+            cache.entries[0].message_folded.is_folded(),
             "inner Message intent survives"
         );
         cache.invalidate_from(0);
@@ -1644,7 +1665,7 @@ mod tests {
         ];
         let mut cache = ConversationCache::default();
         let mut folds = FoldState::default();
-        folds.fold_turns(&history, false, TurnFold::FinalExpanded);
+        folds.fold(FoldKey::Span { start: 0, end: 2 });
         for diagnostics in [false, true, false] {
             cache.refresh(&history, None, 80, diagnostics, &folds);
             let rows = (0..3).map(|i| cache.covered[&i].height).sum::<usize>();
@@ -1673,7 +1694,7 @@ mod tests {
         let history = [entry, conversation_entry()];
         let mut cache = ConversationCache::default();
         let mut folds = FoldState::default();
-        folds.fold_turns(&history, false, TurnFold::FinalExpanded);
+        folds.fold(FoldKey::Span { start: 0, end: 0 });
         for width in [80, 40, 12, 4, 2, 1, 80] {
             cache.refresh(&history, None, width, false, &folds);
             let entry = &cache.entries[0];
@@ -1683,7 +1704,7 @@ mod tests {
             if width >= 40 {
                 assert_eq!(
                     entry.lines[0].to_string(),
-                    "▸ 1 earlier message · 1 more rows"
+                    "▸ 1 folded message · 1 more rows"
                 );
             }
         }
@@ -1714,7 +1735,7 @@ mod tests {
         assert!(
             blocks[1].fingerprint
                 == BlockFingerprint {
-                    folded: true,
+                    folded: FoldMode::Preview,
                     ..fingerprints[1]
                 }
         );
@@ -1771,6 +1792,7 @@ mod tests {
             Some(&Message::assistant("ephemeral tail\n".repeat(8))),
             None,
             24,
+            EntryFolds::none(),
         );
         let (_, tail_height) = cache.streaming().expect("streamed tail");
         assert!(tail_height > 0);

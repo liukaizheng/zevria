@@ -495,7 +495,7 @@ impl DesktopWindow {
                     ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.with_transcript(cx, |view, cx| {
-                            view.fold_turns(TurnFold::FinalExpanded, window, cx)
+                            view.fold_turns(TurnFold::AllFinals, window, cx)
                         });
                     })),
             );
@@ -655,14 +655,14 @@ impl Render for DesktopWindow {
             .on_action(
                 cx.listener(|this, _: &actions::FoldEarlierContent, window, cx| {
                     this.with_transcript(cx, |view, cx| {
-                        view.fold_turns(TurnFold::FinalExpanded, window, cx)
+                        view.fold_turns(TurnFold::AllFinals, window, cx)
                     });
                 }),
             )
             .on_action(
                 cx.listener(|this, _: &actions::FoldOlderTurns, window, cx| {
                     this.with_transcript(cx, |view, cx| {
-                        view.fold_turns(TurnFold::OlderFinalFolded, window, cx)
+                        view.fold_turns(TurnFold::LastFinal, window, cx)
                     });
                 }),
             )

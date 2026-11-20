@@ -563,7 +563,20 @@ impl AgentTranscriptReducer {
                 self.observe_review_removal(&plan_id);
                 self.remove_plan(conversation, &plan_id);
             }
+            AgentRunEvent::Status { status, .. } if status.is_terminal() => {
+                if let Some(index) = self.current_entry {
+                    if status == zevria_workflow::AgentRunStatus::Completed {
+                        conversation.complete_agent_entry(index);
+                    } else {
+                        conversation.mark_agent_entry_incomplete(index);
+                    }
+                }
+                self.append_diagnostic(conversation, diagnostic_for_event(&event));
+            }
             AgentRunEvent::Failure { error } => {
+                if let Some(index) = self.current_entry {
+                    conversation.mark_agent_entry_incomplete(index);
+                }
                 self.observe_provider_failure(conversation, &error);
                 self.fence();
                 self.append_block(
@@ -807,6 +820,7 @@ impl AgentTranscriptReducer {
                 blocks: Vec::new(),
             }));
         self.current_entry = Some(history_index);
+        conversation.set_agent_entry(history_index);
         if !continuation {
             self.current_plan = None;
             self.current_plan_markdown = None;
@@ -934,6 +948,13 @@ impl AgentTranscriptReducer {
         update: SegmentUpdate,
     ) {
         self.apply_segment_raw(conversation, kind, message_id.clone(), text.clone(), update);
+        if kind == SegmentKind::Agent
+            && matches!(update, SegmentUpdate::Replace)
+            && let Some(target) = &self.segment
+        {
+            conversation
+                .mark_agent_preview(target.location.history_index, target.location.block_id);
+        }
         if kind != SegmentKind::User
             && let Some(message_id) = message_id
             && let Some(target) = &self.segment
@@ -1677,6 +1698,7 @@ impl AgentTranscriptReducer {
             blocks: Vec::new(),
         }));
         self.current_entry = Some(index);
+        conversation.set_agent_entry(index);
         index
     }
 

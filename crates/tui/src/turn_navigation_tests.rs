@@ -372,7 +372,7 @@ fn folded_acp_groups_share_one_stop_but_keep_the_original_semantic_alignment() {
     assert_first_row(&mut app, 60, 15, "You");
     jump(&mut app, 'z');
     jump(&mut app, 'm');
-    assert_first_row(&mut app, 60, 15, "earlier message");
+    assert_first_row(&mut app, 60, 15, "folded message");
     assert_eq!(
         positions(&mut app).len(),
         2,

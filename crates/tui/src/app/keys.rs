@@ -568,15 +568,11 @@ impl App {
     pub(super) fn handle_fold_action(&mut self, action: Action) -> bool {
         match action {
             Action::UnfoldAll => self.apply_fold(|folds, _, _| folds.unfold_all()),
-            Action::FoldTurns => self.apply_fold(|folds, conversation, diagnostics| {
-                folds.fold_turns(conversation.history(), diagnostics, TurnFold::FinalExpanded);
+            Action::FoldTurns => self.apply_fold(|folds, model, diagnostics| {
+                model.fold_transcript(folds, diagnostics, TurnFold::AllFinals);
             }),
-            Action::FoldOlder => self.apply_fold(|folds, conversation, diagnostics| {
-                folds.fold_turns(
-                    conversation.history(),
-                    diagnostics,
-                    TurnFold::OlderFinalFolded,
-                );
+            Action::FoldOlder => self.apply_fold(|folds, model, diagnostics| {
+                model.fold_transcript(folds, diagnostics, TurnFold::LastFinal);
             }),
             Action::FoldToggle | Action::FoldClose | Action::FoldOpen
                 if self.interaction.is_selecting() =>
@@ -608,11 +604,11 @@ impl App {
         true
     }
 
-    pub(super) fn apply_fold(&mut self, f: impl FnOnce(&mut FoldState, &ConversationState, bool)) {
+    pub(super) fn apply_fold(&mut self, f: impl FnOnce(&mut FoldState, &SessionModel, bool)) {
         self.view.capture_conversation_anchor();
         f(
             &mut self.folds,
-            &self.model.conversation,
+            &self.model,
             self.pane.diagnostics_visible(),
         );
         self.view.invalidate_rendered_geometry();

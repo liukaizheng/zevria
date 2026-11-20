@@ -124,6 +124,7 @@ impl App {
                     .assistant_header
                     .filter(|_| streaming.is_some() || parts.pending_header),
                 wrap_width,
+                parts.stream_folds,
             );
         }
 

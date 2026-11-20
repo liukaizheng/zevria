@@ -217,7 +217,7 @@ fn item_spacing_preserves_authored_whitespace_and_grouped_internals() {
                 separator_before: false,
                 item_gap_before: false,
                 selected: false,
-                folded: false,
+                folded: zevria_presentation::fold::FoldMode::Expanded,
                 reasoning_heading: matches!(block.kind, PresentationBlockKind::Reasoning { .. }),
                 appearance: TranscriptAppearance::Native,
             },
@@ -537,7 +537,7 @@ fn streaming_item_growth_reuses_completed_blocks_and_matches_committed_spacing()
             }
             let message = assistant_message(content.clone());
             let rebuilt = cache.block_rebuilds;
-            cache.refresh_streaming(Some(&message), None, width);
+            cache.refresh_streaming(Some(&message), None, width, crate::app::EntryFolds::none());
             assert_eq!(
                 cache.block_rebuilds - rebuilt,
                 1,
@@ -548,13 +548,13 @@ fn streaming_item_growth_reuses_completed_blocks_and_matches_committed_spacing()
             AssistantContent::text("tail grows over multiple wrapped rows");
         let message = assistant_message(content);
         let rebuilt = cache.block_rebuilds;
-        cache.refresh_streaming(Some(&message), None, width);
+        cache.refresh_streaming(Some(&message), None, width, crate::app::EntryFolds::none());
         assert_eq!(
             cache.block_rebuilds - rebuilt,
             1,
             "completed items retain their measured gaps"
         );
-        cache.refresh_streaming(Some(&message), None, width);
+        cache.refresh_streaming(Some(&message), None, width, crate::app::EntryFolds::none());
         assert_eq!(
             cache.block_rebuilds - rebuilt,
             1,

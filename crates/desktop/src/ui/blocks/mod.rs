@@ -146,7 +146,9 @@ pub struct BlockData {
     pub plain: bool,
     pub row: usize,
     pub target: Option<FoldKey>,
+    pub(super) grouped_targets: Vec<FoldKey>,
     pub(super) message: Option<MessageDisclosure>,
+    pub(super) summary: bool,
     pub primary: String,
     pub secondary: Option<String>,
     pub subtask: Option<zevria_foundation::SubtaskId>,
@@ -178,7 +180,9 @@ impl BlockData {
             plain,
             row: 0,
             target: None,
+            grouped_targets: Vec::new(),
             message: None,
+            summary: false,
             secondary: None,
             subtask: None,
             image: None,
@@ -199,7 +203,7 @@ impl BlockData {
             true,
         );
         data.body = format!(
-            "{count} earlier message{}",
+            "{count} folded message{}",
             if count == 1 { "" } else { "s" }
         );
         data.target = Some(FoldKey::Span { start, end });
@@ -207,6 +211,10 @@ impl BlockData {
         data.expanded = false;
         data
     }
+    pub(super) fn represents(&self, target: FoldKey) -> bool {
+        self.target == Some(target) || self.grouped_targets.contains(&target)
+    }
+
     pub fn speaker(&self) -> Speaker {
         if let Gutter::Label(speaker) = self.gutter {
             return speaker;
@@ -414,6 +422,8 @@ impl BlockData {
         data
     }
 }
+pub(super) use web::coalesce as coalesce_web_rows;
+
 pub fn entry(
     epoch: &str,
     index: usize,
@@ -472,7 +482,7 @@ pub fn entry(
                     }
                 }
             }
-            web::coalesce(blocks)
+            blocks
         }
         HistoryEntry::PlanArtifact(a) => vec![BlockData::new(
             key,
@@ -758,6 +768,7 @@ impl BlockView {
             cx.notify();
         }
         let metadata_changed = data.expanded != self.data.expanded
+            || data.summary != self.data.summary
             || data.phase != self.data.phase
             || data.key != self.data.key
             || data.gutter != self.data.gutter
@@ -1009,6 +1020,8 @@ impl BlockView {
             })
             .child(
                 div()
+                    .id("text-body")
+                    .test_support()
                     .flex_1()
                     .min_w_0()
                     .pt(px(3.))
@@ -1082,6 +1095,65 @@ impl BlockView {
                         .child(format!("{} blocks", message.blocks)),
                 )
             })
+            .child(self.actions(window, cx))
+    }
+
+    fn summary_row(&self, ink: Hsla, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (label, status) = match &self.data.kind {
+            BlockKind::Prose {
+                role: PresentationRole::User,
+                ..
+            } => ("Prompt folded", None),
+            BlockKind::Reasoning => (
+                "Thinking",
+                (self.data.phase == Phase::Live).then_some(StatusIcon::Running),
+            ),
+            BlockKind::Tool { name, status, .. } => (tool_label(name), Some(*status)),
+            BlockKind::Subtask { status, .. } => ("Subtask", Some(*status)),
+            BlockKind::Document {
+                kind: DocumentKind::Handoff,
+                ..
+            } => ("Approved Plan handoff", None),
+            BlockKind::Document { .. } => ("Plan artifact", None),
+            BlockKind::Ensemble => ("Ensemble folded", None),
+            BlockKind::Notice { .. } => ("Notice folded", None),
+            BlockKind::Image { .. } => ("Image", None),
+            BlockKind::Web(web) => (web.label(), Some(web.status())),
+            _ => ("Message folded", None),
+        };
+        let message = self.data.message.filter(|message| message.folded);
+        div()
+            .id("bulk-summary")
+            .test_support()
+            .group("log-block")
+            .min_h(px(28.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .when(message.is_none(), |row| {
+                row.children(self.block_disclosure(label, window, cx))
+            })
+            .child(
+                style::meta()
+                    .text_color(palette(cx).text.muted)
+                    .min_w_0()
+                    .truncate()
+                    .child(label.to_owned()),
+            )
+            .when_some(status, |row, status| {
+                row.child(style::status_glyph(status, ink, cx))
+            })
+            .when_some(
+                message.filter(|message| message.blocks > 1),
+                |row, message| {
+                    row.child(
+                        style::meta()
+                            .text_color(palette(cx).text.muted)
+                            .child(format!("{} blocks", message.blocks)),
+                    )
+                },
+            )
+            .child(div().flex_1())
             .child(self.actions(window, cx))
     }
 
@@ -1224,6 +1296,13 @@ impl Render for BlockView {
             BlockKind::Prose { .. } | BlockKind::Notice { .. } | BlockKind::Ensemble
         );
         match &self.data.kind {
+            _ if self.data.summary
+                && (folded_message.is_some() || !matches!(self.data.kind, BlockKind::Web(_))) =>
+            {
+                content = content
+                    .max_w(px(style::PROSE))
+                    .child(self.summary_row(ink, window, cx));
+            }
             _ if folded_message.is_some() && !text_like => {
                 content = content.max_w(px(style::PROSE)).child(self.message_preview(
                     folded_message.unwrap(),

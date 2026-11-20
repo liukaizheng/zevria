@@ -92,20 +92,23 @@ impl WebRow {
     }
 }
 
-/// Coalesce only consecutive visible blocks in this entry. Keep the first
-/// block's address and revision; non-first changes are detected from the row's
-/// joined body and the structured actions in BlockView::sync.
-pub(super) fn coalesce(blocks: Vec<BlockData>) -> Vec<BlockData> {
+/// Coalesce consecutive web blocks with the same bulk visibility. In-place
+/// attempts can gain new blocks which must stay open alongside a folded run.
+pub(in crate::ui) fn coalesce(blocks: Vec<BlockData>) -> Vec<BlockData> {
     let mut rows: Vec<BlockData> = Vec::with_capacity(blocks.len());
     for mut data in blocks {
         if let Some(BlockData {
             kind: BlockKind::Web(prior),
+            grouped_targets,
+            summary,
             ..
         }) = rows.last_mut()
+            && *summary == data.summary
             && let BlockKind::Web(current) = &mut data.kind
         {
             prior.actions.append(&mut current.actions);
             prior.copies.append(&mut current.copies);
+            grouped_targets.extend(data.target);
         } else {
             rows.push(data);
         }
@@ -287,9 +290,15 @@ fn address(action: &WebActionPresentation, expanded: bool, cx: &App) -> Option<D
     Some(row)
 }
 
-fn action_summary(action: &WebActionPresentation, expanded: bool, cx: &App) -> Div {
+fn action_summary(action: &WebActionPresentation, expanded: bool, cx: &App) -> impl IntoElement {
     let t = palette(cx);
-    let mut summary = div().flex_1().min_w_0().flex().flex_col();
+    let mut summary = div()
+        .id("web-detail")
+        .test_support()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col();
     let mut line = div().min_w_0().flex().items_start().gap(px(6.));
     if let Some(first) = action.queries.first() {
         line = line.child(summary_text(quoted(first), t.text.primary, expanded));
@@ -473,7 +482,9 @@ pub(super) fn render_row(
             .items_start()
             .gap(px(8.))
             .child(label)
-            .child(action_summary(action, expanded, cx))
+            .when(!view.data.summary, |row| {
+                row.child(action_summary(action, expanded, cx))
+            })
             .child(status_words([action.status], cx).pt(px(3.))),
         None => div()
             .flex()

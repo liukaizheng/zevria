@@ -307,12 +307,17 @@ impl RoleTelemetry {
     }
 }
 
+/// Identifies only the current message-only preview, not a persisted output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamSnapshotId(u64);
+
 /// Session activity plus durable response/accounting health.
 #[derive(Debug)]
 pub struct SessionState {
     observed_at: Instant,
     next_mode: SessionMode,
     activity: SessionActivity,
+    stream_revision: u64,
     quiescent: bool,
     telemetry: [RoleTelemetry; ModelRole::COUNT],
     reasoning: [Option<zevria_foundation::ReasoningLevel>; ModelRole::COUNT],
@@ -326,6 +331,7 @@ impl Default for SessionState {
             observed_at: Instant::now(),
             next_mode: SessionMode::Build,
             activity: SessionActivity::Idle,
+            stream_revision: 0,
             quiescent: true,
             telemetry: std::array::from_fn(|_| RoleTelemetry::default()),
             reasoning: [None; ModelRole::COUNT],
@@ -904,7 +910,22 @@ impl SessionState {
     }
 
     pub fn stream(&mut self, id: TurnId, message: Message) -> bool {
-        self.set_tail(id, TurnTail::Streaming(message))
+        if !self.set_tail(id, TurnTail::Streaming(message)) {
+            return false;
+        }
+        self.stream_revision += 1;
+        true
+    }
+
+    pub fn stream_snapshot(&self) -> Option<StreamSnapshotId> {
+        matches!(
+            self.activity,
+            SessionActivity::Active(ActiveOperation {
+                phase: ActivePhase::Running(TurnTail::Streaming(_)),
+                ..
+            })
+        )
+        .then_some(StreamSnapshotId(self.stream_revision))
     }
 
     pub fn retry(

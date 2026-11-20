@@ -1257,7 +1257,12 @@ fn missing_authoritative_call_metadata_leaves_assistant_unnumbered() {
 fn pending_geometry_and_identical_stream_content_cache_include_header_identity() {
     let mut cache = ConversationCache::default();
     for width in [1, 2, 8, 20, 40] {
-        cache.refresh_streaming(None, Some(assistant(123456, 987654)), width);
+        cache.refresh_streaming(
+            None,
+            Some(assistant(123456, 987654)),
+            width,
+            crate::app::EntryFolds::none(),
+        );
         let (lines, height) = cache.streaming().unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "● Assistant · #(123456 - 987654)");
@@ -1270,11 +1275,26 @@ fn pending_geometry_and_identical_stream_content_cache_include_header_identity()
         AssistantContent::text("same"),
         AssistantContent::text("other block"),
     ]);
-    cache.refresh_streaming(Some(&message), Some(assistant(1, 1)), 40);
+    cache.refresh_streaming(
+        Some(&message),
+        Some(assistant(1, 1)),
+        40,
+        crate::app::EntryFolds::none(),
+    );
     let rebuilt = cache.block_rebuilds;
-    cache.refresh_streaming(Some(&message), Some(assistant(1, 1)), 40);
+    cache.refresh_streaming(
+        Some(&message),
+        Some(assistant(1, 1)),
+        40,
+        crate::app::EntryFolds::none(),
+    );
     assert_eq!(cache.block_rebuilds, rebuilt);
-    cache.refresh_streaming(Some(&message), Some(assistant(1, 2)), 40);
+    cache.refresh_streaming(
+        Some(&message),
+        Some(assistant(1, 2)),
+        40,
+        crate::app::EntryFolds::none(),
+    );
     assert_eq!(
         cache.block_rebuilds,
         rebuilt + 1,
@@ -1284,7 +1304,7 @@ fn pending_geometry_and_identical_stream_content_cache_include_header_identity()
         line_text(&cache.streaming().unwrap().0[0]),
         "● Assistant · #(1 - 2)"
     );
-    cache.refresh_streaming(None, None, 40);
+    cache.refresh_streaming(None, None, 40, crate::app::EntryFolds::none());
     assert!(cache.streaming().is_none());
 
     let mut app = App::new();

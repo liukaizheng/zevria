@@ -214,7 +214,7 @@ fn prompt_phase_badges_use_icons_and_keep_attempts_colors_and_copy() {
                 separator_before: false,
                 item_gap_before: false,
                 selected: false,
-                folded: false,
+                folded: zevria_presentation::fold::FoldMode::Expanded,
                 reasoning_heading: false,
                 appearance: TranscriptAppearance::Acp,
             },

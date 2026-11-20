@@ -246,7 +246,7 @@ fn turn_folds_show_prompt_on_first_frame_when_content_fits() {
         for (width, height) in [(40, 20), (80, 30), (120, 40)] {
             let mut app = scrolled_turns_with_short_finals(1, width, height);
             let first = conversation_frame_text(&first_fold_frame(&mut app, suffix, width, height));
-            let summary = "▸ turn 1 prompt · 6 more rows";
+            let summary = "▸ Folded";
             assert!(laid_out_transcript_text(&app).contains(summary));
             assert!(
                 first.contains(summary),
@@ -302,13 +302,13 @@ fn z_m_shows_multi_turn_prompts_on_first_frame_and_keeps_latest_final_expanded()
         let first = conversation_frame_text(&first_fold_frame(&mut app, 'M', width, height));
         let cached = laid_out_transcript_text(&app);
         for turn in 1..=2 {
-            let summary = format!("▸ turn {turn} prompt · 6 more rows");
-            assert!(cached.contains(&summary));
-            assert!(first.contains(&summary), "{width}x{height}: {first}");
+            let header = format!("You · #{turn}");
+            assert!(cached.contains(&header));
+            assert!(first.contains(&header), "{width}x{height}: {first}");
         }
-        assert!(message_folded(&app, 3));
-        assert!(!message_folded(&app, 7));
-        assert!(first.contains("▸ final 1"));
+        assert_eq!(app.folds().span_containing(3), Some((1, 3)));
+        assert!(app.folds().span_containing(7).is_none());
+        assert!(!first.contains("final 1"));
         assert!(!first.contains("finished 1"));
         assert!(first.contains("final 2") && first.contains("finished 2"));
         assert!(!first.contains("▸ final 2"));
@@ -345,13 +345,9 @@ fn z_m_preserves_follow_and_selection_navigation_at_different_sizes() {
         assert_eq!(app.selection(), cursor(7, 0));
         assert!(!app.view_follow());
         for (event, selected, visible) in [
-            (
-                key(KeyCode::Char('k')),
-                cursor(5, 0),
-                "▸ 2 earlier messages",
-            ),
-            (key(KeyCode::Char('k')), cursor(4, 0), "▸ turn 2 prompt"),
-            (ctrl('u'), cursor(0, 0), "▸ turn 1 prompt"),
+            (key(KeyCode::Char('k')), cursor(5, 0), "▸ 2 folded messages"),
+            (key(KeyCode::Char('k')), cursor(4, 0), "▸ Folded"),
+            (ctrl('u'), cursor(0, 0), "▸ Folded"),
         ] {
             app.handle_event(event);
             assert_eq!(app.selection(), selected);
@@ -395,7 +391,7 @@ fn zm_keeps_prompt_rows_and_collapses_earlier_calls_leaving_the_last_expanded() 
         chord(&mut app, 'm');
         let text = rendered_text(&mut app, 100, 50);
         assert_eq!(
-            text.matches(&format!("▸ 2 earlier messages · {rows} more rows"))
+            text.matches(&format!("▸ 2 folded messages · {rows} more rows"))
                 .count(),
             1,
             "{text}"
@@ -404,10 +400,10 @@ fn zm_keeps_prompt_rows_and_collapses_earlier_calls_leaving_the_last_expanded() 
         assert!(text.contains("Assistant · #(2 - 1)"));
         for turn in [1, 2] {
             assert!(text.contains(&format!("You · #{turn}")));
-            assert!(text.contains(&format!("▸ turn {turn} prompt · 6 more rows")));
+            assert!(!text.contains(&format!("turn {turn} prompt")));
         }
         assert!(!text.contains("▸ 1 message"));
-        assert!(!text.contains("▸ 1 earlier message"));
+        assert!(!text.contains("▸ 1 folded message"));
         for hidden in ["#(1 - 1)", "#(1 - 2)"] {
             assert!(!text.contains(hidden), "{hidden}");
         }
@@ -491,10 +487,7 @@ fn both_turn_chords_fold_latest_thoughts_but_not_the_answer_or_later_output() {
             assert!(!message_folded(&app, 3));
             rendered_text(&mut app, 100, 50);
             let text = laid_out_transcript_text(&app);
-            assert!(
-                text.contains("▸ reasoning") && text.contains("▸ Checked the tests"),
-                "{text}"
-            );
+            assert!(text.matches("▸ Thinking").count() >= 2, "{text}");
             assert!(text.contains("Full answer detail"));
             assert!(
                 !text.contains("First thought detail") && !text.contains("Second thought detail")
@@ -546,57 +539,47 @@ fn turn_folds_preserve_final_entry_policy_in_normal_and_both_select_scopes() {
             }
             rendered_text(&mut app, 100, 50);
             let text = laid_out_transcript_text(&app);
-            assert_eq!(text.matches("▸ 2 earlier messages ·").count(), 3);
+            let older_hidden = suffix == 'M';
+            assert_eq!(
+                text.matches("▸ 2 folded messages ·").count(),
+                if older_hidden { 1 } else { 3 }
+            );
             for (turn, prompt) in [(1, 0), (2, 4), (3, 8)] {
                 assert!(text.contains(&format!("You · #{turn}")));
-                assert!(text.contains(&format!("▸ turn {turn} prompt · 6 more rows")));
+                assert!(!text.contains(&format!("turn {turn} prompt")));
                 assert!(message_folded(&app, prompt));
                 assert_eq!(app.folds().span_containing(prompt), None);
+                let hidden = older_hidden && turn < 3;
                 assert_eq!(
                     app.folds().span_containing(prompt + 1),
-                    Some((prompt + 1, prompt + 2))
+                    Some((prompt + 1, prompt + if hidden { 3 } else { 2 }))
                 );
                 assert_eq!(app.view_cache().entries()[prompt + 1].height, 1);
                 assert_eq!(app.view_cache().entries()[prompt + 2].height, 0);
-                let final_index = prompt + 3;
-                assert_eq!(app.folds().span_containing(final_index), None);
-                let fold_final = suffix == 'M' && turn < 3;
-                assert_eq!(message_folded(&app, final_index), fold_final);
-                let final_entry = &app.view_cache().entries()[final_index];
-                let final_text = final_entry
-                    .lines
-                    .iter()
-                    .map(line_text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(final_text.contains(&format!("Assistant · #({turn} - 3)")));
-                if fold_final {
-                    assert!(final_text.contains(&format!("▸ call {turn}-3 · 2 blocks ·")));
-                    assert!(final_entry.items.iter().all(|(_, rows)| rows.len() == 1));
-                    assert!(!final_text.contains("row 5"));
-                } else {
-                    assert!(!final_text.contains('▸'));
-                    assert!(final_text.contains("row 5"));
-                    assert!(final_entry.items[0].1.len() > 1);
-                }
+                assert_eq!(
+                    text.contains(&format!("Assistant · #({turn} - 3)")),
+                    !hidden
+                );
             }
             let rebuilds = (app.view_cache().rebuilds, app.view_cache().block_rebuilds);
             let intent = fold_keys(&app);
-            assert_eq!(intent.len(), if suffix == 'M' { 8 } else { 6 });
-            for repeat in [suffix, 'm'] {
-                chord(&mut app, repeat);
-                assert_eq!(fold_keys(&app), intent);
-                rendered_text(&mut app, 100, 50);
-                assert_eq!(laid_out_transcript_text(&app), text);
-                assert_eq!(
-                    (app.view_cache().rebuilds, app.view_cache().block_rebuilds),
-                    rebuilds
-                );
-                for index in [3, 7] {
-                    assert_eq!(message_folded(&app, index), suffix == 'M');
-                }
-                assert!(!message_folded(&app, 11));
+            assert_eq!(intent.len(), 6);
+            chord(&mut app, suffix);
+            assert_eq!(fold_keys(&app), intent);
+            rendered_text(&mut app, 100, 50);
+            assert_eq!(laid_out_transcript_text(&app), text);
+            assert_eq!(
+                (app.view_cache().rebuilds, app.view_cache().block_rebuilds),
+                rebuilds
+            );
+            chord(&mut app, 'm');
+            rendered_text(&mut app, 100, 50);
+            let restored = laid_out_transcript_text(&app);
+            for index in [3, 7, 11] {
+                assert!(app.folds().span_containing(index).is_none());
             }
+            assert!(restored.contains("call 1-3") && restored.contains("call 2-3"));
+            assert!(!restored.contains("call 1-2"));
             chord(&mut app, 'R');
             rendered_text(&mut app, 100, 50);
             assert_eq!(laid_out_transcript_text(&app), expanded);
@@ -621,15 +604,15 @@ fn turn_folds_preserve_final_entry_policy_in_normal_and_both_select_scopes() {
             chord(&mut app, suffix);
             rendered_text(&mut app, 100, 50);
             assert_eq!(
-                message_folded(&app, 11),
-                suffix == 'M',
+                app.folds().span_containing(11),
+                (suffix == 'M').then_some((9, 11)),
                 "only another zM folds the older final"
             );
             assert!(message_folded(&app, 12));
             assert_eq!(app.folds().span_containing(13), Some((13, 14)));
             assert!(!message_folded(&app, 15));
             let text = laid_out_transcript_text(&app);
-            assert_eq!(text.contains("▸ call 3-3 · 2 blocks ·"), suffix == 'M');
+            assert_eq!(text.contains("call 3-3"), suffix == 'm');
             assert!(text.contains("Assistant · #(4 - 3)"));
             assert!(!text.contains("▸ call 4-3"));
         }
@@ -641,7 +624,7 @@ fn turn_folds_respect_leading_headerless_run_dividers_and_acp_panes() {
     for suffix in ['m', 'M'] {
         let mut app = App::new();
         for text in ["leading first", "leading middle", "leading last"] {
-            app.seed_history_entry(history_message(Message::user(text)));
+            app.seed_history_entry(history_message(Message::assistant(text)));
         }
         start_span_turn(&mut app, 1, "numbered prompt");
         span_call(&mut app, 1, 1, Message::assistant("first call"), false);
@@ -651,7 +634,7 @@ fn turn_folds_respect_leading_headerless_run_dividers_and_acp_panes() {
         span_call(&mut app, 1, 2, Message::assistant("last call"), true);
         chord(&mut app, suffix);
         rendered_text(&mut app, 100, 35);
-        for (start, end) in [(0, 1), (4, 4), (6, 7)] {
+        for (start, end) in [(0, if suffix == 'M' { 2 } else { 1 }), (4, 4), (7, 8)] {
             assert_eq!(app.folds().span_containing(start), Some((start, end)));
             assert_eq!(app.view_cache().entries()[start].height, 1);
         }
@@ -663,13 +646,10 @@ fn turn_folds_respect_leading_headerless_run_dividers_and_acp_panes() {
             "divider never folds"
         );
         let text = laid_out_transcript_text(&app);
-        assert_eq!(text.matches("▸ 2 earlier messages ·").count(), 2);
-        assert_eq!(text.matches("▸ 1 earlier message ·").count(), 1);
-        assert!(text.contains("You · #1") && text.contains("numbered prompt"));
-        assert!(text.contains("leading last"));
-        assert!(text.contains("last call"));
-        assert_eq!(message_folded(&app, 2), suffix == 'M');
-        assert!(!message_folded(&app, 8));
+        assert!(text.contains("You · #1") && !text.contains("numbered prompt"));
+        assert_eq!(text.contains("leading last"), suffix == 'm');
+        assert!(!text.contains("last call"));
+        assert!(text.contains("Plan artifact"));
         let special_offset = app.view_cache().entries()[..6]
             .iter()
             .map(|e| e.extent())
@@ -707,9 +687,9 @@ fn turn_folds_respect_leading_headerless_run_dividers_and_acp_panes() {
             rendered_text(&mut app, 100, 25);
             assert_eq!(app.folds().span_containing(0), Some((0, 1)));
             let text = laid_out_transcript_text(&app);
-            assert!(text.contains("▸ 2 earlier messages ·"));
+            assert!(text.contains("▸ 2 folded messages ·"));
             assert!(!text.contains("cycle 0") && !text.contains("cycle 1"));
-            assert!(text.contains("cycle 2") && text.contains("answer 2"));
+            assert!(!text.contains("cycle 2") && text.contains("answer 2"));
             assert!(app.view_cache().entries()[0].decorations.is_empty());
             assert!(
                 app.view_cache().entries()[0]
@@ -720,7 +700,13 @@ fn turn_folds_respect_leading_headerless_run_dividers_and_acp_panes() {
             let intent = fold_keys(&app);
             assert_eq!(
                 intent,
-                std::collections::HashSet::from([FoldKey::Span { start: 0, end: 1 }])
+                std::collections::HashSet::from([
+                    FoldKey::Span { start: 0, end: 1 },
+                    FoldKey::Block {
+                        history_index: 2,
+                        id: semantic_id(&app, 2, 0)
+                    },
+                ])
             );
             chord(&mut app, suffix);
             assert_eq!(fold_keys(&app), intent);
@@ -763,7 +749,7 @@ fn span_summary_selection_navigation_enter_and_yank() {
     assert_eq!(app.selection_scope(), Some(SelectionScope::Message));
     let buffer = rendered_buffer(&mut app, 100, 35);
     let summary_y = (0..buffer.area.height)
-        .find(|&y| buffer_row_text(&buffer, y).contains("▸ 2 earlier messages"))
+        .find(|&y| buffer_row_text(&buffer, y).contains("▸ 2 folded messages"))
         .unwrap();
     let selection_bg = crate::chrome::selection_style().bg.unwrap();
     for y in 0..buffer.area.height {
@@ -868,30 +854,33 @@ fn zm_keeps_new_entries_expanded_and_survives_edits() {
     chord(&mut app, 'm');
     rendered_text(&mut app, 100, 25);
     assert!(message_folded(&app, 0));
-    assert_eq!(app.folds().span_containing(1), Some((1, 1)));
+    assert_eq!(app.folds().span_containing(1), Some((1, 2)));
     span_call(&mut app, 1, 3, Message::assistant("new call"), true);
     span_turn(&mut app, 2, 1);
     rendered_text(&mut app, 100, 25);
     let before = line_text(&app.view_cache().entries()[1].lines[0]);
-    assert_eq!(app.folds().span_containing(1), Some((1, 1)));
-    for index in 2..6 {
+    assert_eq!(app.folds().span_containing(1), Some((1, 2)));
+    for index in 3..6 {
         assert!(app.view_cache().entries()[index].height > 1);
         assert_eq!(app.folds().span_containing(index), None);
     }
     rendered_text(&mut app, 60, 25);
     let after = line_text(&app.view_cache().entries()[1].lines[0]);
     assert_ne!(before, after, "width changes recount covered wrapped rows");
-    assert_eq!(app.folds().span_containing(1), Some((1, 1)));
+    assert_eq!(app.folds().span_containing(1), Some((1, 2)));
     app.select_message_for_test(cursor(1, 0));
     chord(&mut app, 'o');
     rendered_text(&mut app, 60, 25);
-    let rows = app.view_cache().entries()[1].height;
-    assert_eq!(after, format!("▸ 1 earlier message · {rows} more rows"));
+    let rows = app.view_cache().entries()[1..=2]
+        .iter()
+        .map(|entry| entry.height)
+        .sum::<usize>();
+    assert_eq!(after, format!("▸ 2 folded messages · {rows} more rows"));
     chord(&mut app, 'm');
     assert_eq!(
         app.folds().span_containing(1),
         Some((1, 2)),
-        "only another zm extends the span"
+        "the new final stays outside the recomputed span"
     );
     rendered_text(&mut app, 60, 25);
     let change = app.conversation_projection_mut().commit_edit(2, false);
@@ -926,7 +915,7 @@ fn zm_keeps_the_top_row_anchored() {
             );
         }
         rendered_text(&mut app, 80, 10);
-        let offset = app.view_cache().entries()[..2]
+        let expanded_offset = app.view_cache().entries()[..2]
             .iter()
             .map(|e| e.extent())
             .sum::<usize>();
@@ -941,6 +930,10 @@ fn zm_keeps_the_top_row_anchored() {
         assert_eq!(app.view_scroll(), top);
         chord(&mut app, 'm');
         rendered_text(&mut app, 80, 10);
+        let offset = app.view_cache().entries()[..2]
+            .iter()
+            .map(|entry| entry.extent())
+            .sum::<usize>();
         assert_eq!(app.view_scroll(), offset);
         assert!(!app.view_follow());
         assert!(message_folded(&app, 1));
@@ -961,7 +954,7 @@ fn zm_keeps_the_top_row_anchored() {
         );
         chord(&mut app, 'R');
         rendered_text(&mut app, 80, 10);
-        assert_eq!(app.view_scroll(), offset);
+        assert_eq!(app.view_scroll(), expanded_offset);
         app.handle_event(key(KeyCode::Char('G')));
         for suffix in ['m', 'R'] {
             chord(&mut app, suffix);
@@ -1520,32 +1513,101 @@ fn zr_does_not_trigger_a_pending_fresh_plan_retry() {
 }
 
 #[test]
-fn streamed_tail_is_never_folded() {
+fn bulk_fold_hides_only_the_current_streaming_snapshot() {
     let mut app = App::new();
-    app.seed_history_entry(history_message(Message::user(numbered_lines(6))));
-    start_empty_turn(&mut app, TEST_TURN_ID, SessionMode::Build);
-    app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: TEST_TURN_ID,
-        snapshot: (Message::assistant("first\n\nsecond\n\nthird")).into(),
-    });
-    fold_messages(&mut app, [0]);
-    rendered_text(&mut app, 80, 24);
+    start_span_turn(&mut app, 1, "prompt");
+    let turn_id = TurnId::new(1);
+    app.reduce_without_effects(SessionEvent::ModelCallStarted { turn_id, call: 1 });
+    let snapshot = |text| SessionEvent::AssistantStreamUpdated {
+        turn_id,
+        snapshot: Message::assistant(text).into(),
+    };
+    app.reduce_without_effects(snapshot("provisional body"));
+    assert!(rendered_text(&mut app, 80, 24).contains("provisional body"));
+    chord(&mut app, 'm');
     assert!(message_folded(&app, 0));
-    let (lines, height) = app.view_cache().streaming().unwrap();
-    let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-    assert!(height > 2);
-    assert!(text.contains("third"));
-    assert!(!text.contains('▸'));
+    let text = rendered_text(&mut app, 80, 24);
+    assert!(!text.contains("provisional body"));
+    assert!(
+        text.contains("streaming ·"),
+        "the progress row stays visible"
+    );
+    app.reduce_without_effects(snapshot("fresh snapshot"));
+    assert!(rendered_text(&mut app, 80, 24).contains("fresh snapshot"));
+    chord(&mut app, 'M');
+    assert!(!rendered_text(&mut app, 80, 24).contains("fresh snapshot"));
+    chord(&mut app, 'R');
+    assert!(rendered_text(&mut app, 80, 24).contains("fresh snapshot"));
+    chord(&mut app, 'm');
     app.reduce_without_effects(SessionEvent::TurnCompleted {
-        turn_id: TEST_TURN_ID,
-        message: Message::assistant("first\n\nsecond\n\nthird"),
+        turn_id,
+        message: Message::assistant("fresh snapshot"),
         attempt_id: None,
     });
-    rendered_text(&mut app, 80, 24);
-    assert!(
-        !message_folded(&app, 1),
-        "committed tail is a new, expanded item"
+    assert!(rendered_text(&mut app, 80, 24).contains("fresh snapshot"));
+    assert!(app.view_cache().streaming().is_none());
+}
+
+#[test]
+fn bulk_folds_hide_short_web_details_but_keep_answers_and_sources() {
+    let replay = zevria_model::ProviderReplay::openai_responses(
+        ModelProfileRef::new("fixture", "model"),
+        vec![
+            json!({"type":"message","id":"interim","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Interim prose"}]}),
+            json!({"type":"web_search_call","id":"s","status":"completed","action":{"type":"search","query":"bees"}}),
+            json!({"type":"message","id":"final","role":"assistant","status":"completed","content":[
+                {"type":"output_text","text":"Final reply"},
+                {"type":"output_text","text":"More context","annotations":[{"type":"url_citation","title":"Cited study","url":"https://example.org/study","start_index":0,"end_index":12}]}
+            ]}),
+            json!({"type":"web_search_call","id":"o","status":"completed","action":{"type":"open_page","url":"https://example.net/special-page"}}),
+            json!({"type":"web_search_call","id":"f","status":"completed","action":{"type":"find_in_page","url":"https://example.net/special-page","pattern":"needle"}}),
+        ],
     );
+    let details = [
+        "bees",
+        "example.net",
+        "needle",
+        "Interim prose",
+        "trailing notice",
+    ];
+    for width in [38, 108] {
+        for scope in [
+            None,
+            Some(SelectionScope::Message),
+            Some(SelectionScope::Block),
+        ] {
+            let mut app = App::new();
+            app.restore(vec![
+                TranscriptItem::Message(Message::user("first prompt")),
+                TranscriptItem::Message(Message::assistant("Older reply")),
+                TranscriptItem::Message(Message::user("second prompt")),
+                TranscriptItem::provider_message(replay.clone()).unwrap(),
+                TranscriptItem::Error {
+                    error: "trailing notice".into(),
+                },
+            ]);
+            select_scope(&mut app, scope, cursor(3, 2));
+            let expanded = conversation_frame_text(&rendered_buffer(&mut app, width, 60));
+            for needle in details {
+                assert!(expanded.contains(needle), "expected {needle}: {expanded}");
+            }
+            let original = laid_out_transcript_text(&app);
+            for suffix in ['m', 'M', 'm'] {
+                chord(&mut app, suffix);
+                let frame = conversation_frame_text(&rendered_buffer(&mut app, width, 60));
+                for needle in details {
+                    assert!(!frame.contains(needle), "unexpected {needle}: {frame}");
+                }
+                for needle in ["Final reply", "More context", "Cited study"] {
+                    assert!(frame.contains(needle), "expected {needle}: {frame}");
+                }
+                assert_eq!(frame.contains("Older reply"), suffix == 'm');
+            }
+            chord(&mut app, 'R');
+            rendered_buffer(&mut app, width, 60);
+            assert_eq!(laid_out_transcript_text(&app), original);
+        }
+    }
 }
 
 #[test]
@@ -1739,7 +1801,8 @@ fn z_r_clears_all_four_fold_key_types_including_hidden_intent() {
         chord(&mut app, 'c');
         fold_messages(&mut app, [1, 4]);
         let expected = std::collections::HashSet::from([
-            FoldKey::Span { start: 1, end: 3 },
+            FoldKey::Span { start: 1, end: 2 },
+            FoldKey::Span { start: 4, end: 4 },
             FoldKey::Message { history_index: 0 },
             FoldKey::Message { history_index: 1 },
             FoldKey::Message { history_index: 4 },
@@ -1795,7 +1858,7 @@ fn turn_folds_drop_block_scope_only_when_the_selected_entry_is_folded() {
 
         app.select_for_test(cursor(1, 1));
         chord(&mut app, suffix);
-        assert_eq!(message_folded(&app, 1), suffix == 'M');
+        assert_eq!(app.folds().span_containing(1).is_some(), suffix == 'M');
         assert_eq!(
             app.selection_scope(),
             Some(if suffix == 'M' {

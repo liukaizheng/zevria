@@ -23,7 +23,8 @@ use zevria_presentation::{
     ConversationTail,
     blocks::PresentationBlockId,
     conversation::{HistoryEntry, ToolCallStatus},
-    fold::{FoldKey, FoldState, SpanRole, TurnFold},
+    fold::{FoldKey, FoldMode, FoldState, SpanRole, TurnFold},
+    session::StreamSnapshotId,
 };
 
 struct RetainedBlock {
@@ -53,6 +54,7 @@ struct PaneView {
     fingerprints: Vec<u64>,
     row_data: HashMap<usize, (u64, Vec<BlockData>)>,
     tail_data: Vec<BlockData>,
+    stream_snapshot: Option<StreamSnapshotId>,
     blocks: HashMap<String, RetainedBlock>,
     folds: FoldState,
     // A covered row/target can be restored when its representative reopens.
@@ -72,6 +74,7 @@ impl PaneView {
             fingerprints: Vec::new(),
             row_data: HashMap::new(),
             tail_data: Vec::new(),
+            stream_snapshot: None,
             blocks: HashMap::new(),
             folds: FoldState::default(),
             scroll_return: None,
@@ -100,15 +103,47 @@ impl PaneView {
             || matches!(target, FoldKey::Span { .. })
         {
             FoldKey::Message { history_index: row }
+        } else if self
+            .source(row)
+            .iter()
+            .any(|block| block.target == Some(target) && matches!(block.kind, BlockKind::Web(_)))
+        {
+            self.data(row)
+                .iter()
+                .find(|block| block.represents(target))
+                .and_then(|block| block.target)
+                .unwrap_or(target)
         } else {
             target
         }
+    }
+    fn local_targets(&self, target: FoldKey) -> Vec<FoldKey> {
+        let mut targets = vec![target];
+        if matches!(target, FoldKey::Block { .. })
+            && let Some(block) = self
+                .data(fold_row(target))
+                .into_iter()
+                .find(|block| block.target == Some(target))
+            && block.summary
+        {
+            targets.extend(block.grouped_targets);
+        }
+        targets
     }
     /// Visibility order is range, message, then individual block/item. The
     /// canonical row data and its retained renderers are never replaced by a preview.
     fn data(&self, index: usize) -> Vec<BlockData> {
         let Some((_, blocks)) = self.row_data.get(&index) else {
-            return self.tail_data.clone();
+            let mut tail = self.tail_data.clone();
+            if self.folds.stream_is_folded(self.stream_snapshot) {
+                for block in &mut tail {
+                    if !matches!(block.kind, BlockKind::Live(_)) {
+                        block.summary = true;
+                        block.expanded = false;
+                    }
+                }
+            }
+            return tail;
         };
         let folds = self.folds.entry(index);
         match folds.span() {
@@ -121,12 +156,18 @@ impl PaneView {
             }
             None => {}
         }
-        let folded = folds.is_message_folded();
-        let mut data = if folded {
-            blocks.first().cloned().into_iter().collect()
-        } else {
-            blocks.clone()
-        };
+        let message_mode = folds.message_mode();
+        let folded = message_mode.is_folded();
+        let limit = if folded { 1 } else { blocks.len() };
+        let mut data = blocks.iter().take(limit).cloned().collect::<Vec<_>>();
+        for block in &mut data {
+            let mode = block
+                .target
+                .map_or(FoldMode::Expanded, |target| self.folds.mode(target));
+            block.summary = message_mode == FoldMode::Summary || mode == FoldMode::Summary;
+            block.expanded = !mode.is_folded();
+        }
+        let mut data = blocks::coalesce_web_rows(data);
         if let Some(first) = data.first_mut().filter(|first| first.target.is_some()) {
             first.message = Some(MessageDisclosure {
                 key: FoldKey::Message {
@@ -140,11 +181,6 @@ impl PaneView {
                 blocks: blocks.len(),
                 speaker: first.speaker(),
             });
-        }
-        for block in &mut data {
-            block.expanded = !block
-                .target
-                .is_some_and(|target| self.folds.contains(target));
         }
         data
     }
@@ -421,7 +457,7 @@ impl TranscriptView {
                 }
             }
         }
-        let prior_folds = history_changed.then(|| self.pane.folds.clone());
+        let prior_folds = (!replaced).then(|| self.pane.folds.clone());
         if replaced {
             self.pane.blocks.clear();
             self.pane.folds.clear();
@@ -431,9 +467,11 @@ impl TranscriptView {
                 .values()
                 .flat_map(|(_, data)| data.iter().map(|b| b.key.clone()))
                 .collect();
-        } else if history_changed {
+        } else {
+            // A preview can commit in place without changing any rendered data.
             self.pane.folds.reconcile(&model.conversation);
         }
+        self.pane.stream_snapshot = model.session.stream_snapshot();
         self.pane.epoch = epoch;
         // Never attach a retained parser to an ambiguous repeated tail block.
         let mut counts = HashMap::new();
@@ -554,7 +592,8 @@ impl TranscriptView {
                 if visible != top.item_ix
                     || (top.offset_in_item > px(0.)
                         && (before.entry(visible).span() != pane.folds.entry(visible).span()
-                            || (!before.entry(visible).is_message_folded()
+                            || (before.entry(visible).message_mode()
+                                != pane.folds.entry(visible).message_mode()
                                 && pane.folds.entry(visible).is_message_folded())))
                 {
                     list.scroll_to_item(visible, cx);
@@ -567,14 +606,25 @@ impl TranscriptView {
                 let new = pane.folds.entry(row);
                 if old.span() != new.span()
                     || (new.span().is_none()
-                        && (old.is_message_folded() != new.is_message_folded()
-                            || (!new.is_message_folded()
-                                && blocks.iter().filter_map(|b| b.target).any(|target| {
-                                    before.contains(target) != pane.folds.contains(target)
-                                }))))
+                        && (old.message_mode() != new.message_mode()
+                            || blocks
+                                .iter()
+                                .take(if new.is_message_folded() {
+                                    1
+                                } else {
+                                    blocks.len()
+                                })
+                                .filter_map(|b| b.target)
+                                .any(|target| before.mode(target) != pane.folds.mode(target))))
                 {
                     list.remeasure_items(row..row + 1, cx);
                 }
+            }
+            if before.stream_is_folded(pane.stream_snapshot)
+                != pane.folds.stream_is_folded(pane.stream_snapshot)
+            {
+                let tail = pane.row_data.len();
+                list.remeasure_items(tail..tail + 1, cx);
             }
         });
     }
@@ -632,12 +682,26 @@ impl TranscriptView {
         cx: &mut Context<Self>,
     ) {
         if let Some(target) = self.focused_target(window, cx) {
-            self.apply_folds(window, cx, |folds| match action {
-                LocalFold::Toggle => folds.toggle(target),
-                LocalFold::Close => folds.fold(target),
-                LocalFold::Open => folds.unfold(target),
-            });
+            self.set_local_fold(target, action, window, cx);
         }
+    }
+    fn set_local_fold(
+        &mut self,
+        target: FoldKey,
+        action: LocalFold,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.pane.local_targets(target);
+        self.apply_folds(window, cx, |folds| match action {
+            LocalFold::Toggle if !folds.contains(target) => folds.fold(target),
+            LocalFold::Close => folds.fold(target),
+            LocalFold::Toggle | LocalFold::Open => {
+                for key in targets {
+                    folds.unfold(key);
+                }
+            }
+        });
     }
     pub(super) fn fold_turns(
         &mut self,
@@ -647,11 +711,11 @@ impl TranscriptView {
     ) {
         let controller = self.controller.clone();
         self.update_folds(window, cx, |folds, cx| {
-            folds.fold_turns(
-                controller.read(cx).model.visible().conversation.history(),
-                false,
-                action,
-            );
+            controller
+                .read(cx)
+                .model
+                .visible()
+                .fold_transcript(folds, false, action);
         });
     }
     pub(super) fn unfold_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -796,13 +860,16 @@ impl TranscriptView {
                     return;
                 }
                 if this.pane.representative(event.target) == event.target {
-                    this.apply_folds(window, cx, |folds| {
+                    this.set_local_fold(
+                        event.target,
                         if event.expanded {
-                            folds.unfold(event.target);
+                            LocalFold::Open
                         } else {
-                            folds.fold(event.target);
-                        }
-                    });
+                            LocalFold::Close
+                        },
+                        window,
+                        cx,
+                    );
                 }
             },
         );

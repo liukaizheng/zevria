@@ -1,7 +1,10 @@
 //! Committed conversation projection, correlation indexes, and selection.
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionScope {
@@ -362,6 +365,27 @@ impl HistoryEntry {
     }
 }
 
+/// A turn's result, as opposed to all of the activity sharing its entry.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FinalOutput {
+    Answer(Vec<PresentationBlockId>),
+    PlanArtifact,
+}
+
+fn assistant_answer(block: &PresentationBlock) -> bool {
+    block.role == Some(PresentationRole::Assistant)
+        && match &block.kind {
+            PresentationBlockKind::Text { text, .. } => !text.trim().is_empty(),
+            PresentationBlockKind::Image { .. } => true,
+            PresentationBlockKind::Placeholder(text) => text == "[image]",
+            _ => false,
+        }
+}
+
+fn tool_call_round(message: &Message) -> bool {
+    matches!(message, Message::Assistant(assistant) if assistant.content.iter().any(|part| matches!(part, AssistantContent::ToolCall(_))))
+}
+
 pub fn without_tool_calls(message: Message) -> Option<Message> {
     match message {
         Message::Assistant(mut assistant) => {
@@ -526,6 +550,35 @@ struct HostedAttempt {
     canonical: Option<Message>,
     acp_tools: HashMap<String, PresentationBlockKind>,
     tool_status: ToolCallStatus,
+    final_answer: bool,
+    projected: bool,
+}
+
+impl HostedAttempt {
+    fn answer_item(&self) -> Option<u64> {
+        use zevria_content::AssistantPresentationContent as Content;
+        self.attempt
+            .presentation
+            .iter()
+            .filter(|part| matches!(&part.content, Content::Answer { text, .. } if !text.trim().is_empty()))
+            .map(|part| part.source.output_index)
+            .max()
+    }
+
+    fn projected_answer_item(&self) -> Option<u64> {
+        use zevria_content::{AssistantPresentationContent as Content, ResponseAttemptOutcome};
+        if !self.projected
+            || self.attempt.outcome != ResponseAttemptOutcome::Completed
+            || self
+                .attempt
+                .presentation
+                .iter()
+                .any(|part| matches!(part.content, Content::NativeTool { .. }))
+        {
+            return None;
+        }
+        self.answer_item()
+    }
 }
 
 /// TUI-observed assistant work (generation and its tools), never provider telemetry
@@ -562,6 +615,12 @@ pub struct ConversationState {
     headers: Vec<HeaderObservation>,
     executing_tool_calls: HashMap<String, Vec<ToolCallLocation>>,
     hosted_attempts: HashMap<String, HostedAttempt>,
+    // An empty set of parts is explicit evidence of a non-final native round.
+    // Keep IDs, not content ordinals: an ordered attempt can insert web rows.
+    response_answers: HashMap<usize, Vec<PresentationBlockId>>,
+    agent_entry: Option<usize>,
+    agent_previews: HashMap<usize, HashSet<PresentationBlockId>>,
+    incomplete_agent_entries: HashSet<usize>,
     identity_aliases: HashMap<(usize, PresentationBlockId), (usize, PresentationBlockId)>,
     pending_subtasks: HashMap<String, Vec<(usize, SubtaskDescriptor)>>,
     subtask_statuses: HashMap<SubtaskId, SubtaskStatus>,
@@ -720,6 +779,127 @@ impl ConversationState {
         }
     }
 
+    pub(crate) fn final_output(
+        &self,
+        group: Range<usize>,
+        diagnostics_visible: bool,
+    ) -> Option<(usize, FinalOutput)> {
+        let visible = |block: &PresentationBlock| block.visible(diagnostics_visible);
+        // A submitted/published Plan is the result, even if the terminal prose
+        // and publication arrived in the opposite order.
+        if let Some(index) = group
+            .clone()
+            .rev()
+            .find(|&index| matches!(self.history[index], HistoryEntry::PlanArtifact(_)))
+        {
+            return Some((index, FinalOutput::PlanArtifact));
+        }
+        let headerless = !self.history.get(group.start)?.has_prompt_header();
+        // Uncommitted attempts and earlier parts of indexed ACP responses are
+        // not eligible for the headerless fallback.
+        let mut excluded = HashSet::new();
+        if headerless {
+            for state in self
+                .hosted_attempts
+                .values()
+                .filter(|state| group.contains(&state.history_index))
+            {
+                let answer_item = state.projected_answer_item();
+                excluded.extend(state.ids.iter().filter_map(|(key, id)| match key {
+                    AttemptBlockKey::Part(output, _) if Some(*output) != answer_item => Some(*id),
+                    _ => None,
+                }));
+            }
+        }
+        group.rev().find_map(|index| {
+            let HistoryEntry::Conversation(entry) = &self.history[index] else {
+                return None;
+            };
+            if let Some(ids) = self.response_answers.get(&index) {
+                let parts: Vec<_> = entry
+                    .blocks
+                    .iter()
+                    .filter(|block| visible(block) && ids.contains(&block.id))
+                    .map(|block| block.id)
+                    .collect();
+                return (!parts.is_empty()).then_some((index, FinalOutput::Answer(parts)));
+            }
+            if !headerless
+                || entry.header.is_some()
+                || self.incomplete_agent_entries.contains(&index)
+            {
+                return None;
+            }
+            let previews = self.agent_previews.get(&index);
+            let mut parts = Vec::new();
+            let mut next_group = false;
+            for block in entry.blocks.iter().filter(|block| visible(block)) {
+                if assistant_answer(block)
+                    && !excluded.contains(&block.id)
+                    && !previews.is_some_and(|ids| ids.contains(&block.id))
+                {
+                    if next_group {
+                        parts.clear();
+                        next_group = false;
+                    }
+                    parts.push(block.id);
+                } else if matches!(block.kind, PresentationBlockKind::Tool(_))
+                    || block.role == Some(PresentationRole::User)
+                {
+                    parts.clear();
+                } else if matches!(block.kind, PresentationBlockKind::Reasoning { .. }) {
+                    next_group = true;
+                }
+            }
+            (!parts.is_empty()).then_some((index, FinalOutput::Answer(parts)))
+        })
+    }
+
+    pub(crate) fn is_committed_answer(&self, index: usize, id: PresentationBlockId) -> bool {
+        if let Some(parts) = self.response_answers.get(&index) {
+            return parts.contains(&id);
+        }
+        self.agent_entry == Some(index) && !self.incomplete_agent_entries.contains(&index)
+            && self.hosted_attempts.values().any(|state| {
+                state.history_index == index && state.projected && state.ids.iter().any(|(key, &part)| {
+                    part == id && matches!(key, AttemptBlockKey::Part(output, _) if Some(*output) == state.projected_answer_item())
+                })
+            })
+    }
+
+    pub(crate) fn growing_entries(&self) -> HashSet<usize> {
+        use zevria_content::ResponseAttemptOutcome::*;
+        self.agent_entry
+            .into_iter()
+            .chain(self.hosted_attempts.values().filter_map(|state| {
+                (state.canonical.is_none()
+                    && matches!(state.attempt.outcome, InProgress | Completed))
+                .then_some(state.history_index)
+            }))
+            .collect()
+    }
+
+    pub(crate) fn set_agent_entry(&mut self, index: usize) {
+        self.agent_entry = Some(index);
+    }
+
+    pub(crate) fn mark_agent_preview(&mut self, index: usize, id: PresentationBlockId) {
+        self.agent_previews.entry(index).or_default().insert(id);
+    }
+
+    pub(crate) fn complete_agent_entry(&mut self, index: usize) {
+        self.agent_previews.remove(&index);
+        self.incomplete_agent_entries.remove(&index);
+        if let Some((_, FinalOutput::Answer(parts))) = self.final_output(index..index + 1, true) {
+            self.response_answers.insert(index, parts);
+        }
+    }
+
+    pub(crate) fn mark_agent_entry_incomplete(&mut self, index: usize) {
+        self.response_answers.remove(&index);
+        self.incomplete_agent_entries.insert(index);
+    }
+
     pub fn entry_mut(&mut self, index: usize) -> Option<&mut HistoryEntry> {
         self.history.get_mut(index)
     }
@@ -819,6 +999,8 @@ impl ConversationState {
                     canonical: None,
                     acp_tools: HashMap::new(),
                     tool_status: ToolCallStatus::Finished,
+                    final_answer: false,
+                    projected,
                 },
             );
         }
@@ -832,19 +1014,57 @@ impl ConversationState {
         status: ToolCallStatus,
         header: Option<NativeHeader>,
     ) {
+        self.project_response(message, id, status, header, false);
+    }
+
+    pub fn complete_response(
+        &mut self,
+        message: Message,
+        id: Option<&str>,
+        header: Option<NativeHeader>,
+    ) {
+        let final_answer = !tool_call_round(&message);
+        self.project_response(message, id, ToolCallStatus::Finished, header, final_answer);
+    }
+
+    fn project_response(
+        &mut self,
+        message: Message,
+        id: Option<&str>,
+        status: ToolCallStatus,
+        header: Option<NativeHeader>,
+        final_answer: bool,
+    ) -> Option<usize> {
         if let Some(id) = id {
             self.bind_attempt_header(id, header);
         }
-        if let Some(id) = id
+        let index = if let Some(id) = id
             && let Some(attempt) = self.hosted_attempts.get_mut(id)
         {
             attempt.canonical = Some(message);
             attempt.tool_status = status;
+            attempt.final_answer = final_answer;
+            let index = attempt.history_index;
             self.reconcile_attempt(id);
+            Some(index)
+        } else if let Some(index) = self.push_numbered_message(message, status, header) {
+            if let HistoryEntry::Conversation(entry) = &self.history[index] {
+                self.response_answers.insert(
+                    index,
+                    entry
+                        .blocks
+                        .iter()
+                        .filter(|block| final_answer && assistant_answer(block))
+                        .map(|block| block.id)
+                        .collect(),
+                );
+            }
+            Some(index)
         } else {
-            self.push_numbered_message(message, status, header);
-        }
+            None
+        };
         self.attach_pending_subtasks();
+        index
     }
 
     fn reconcile_attempt(&mut self, id: &str) {
@@ -999,6 +1219,22 @@ impl ConversationState {
             entry.blocks.push(block);
         }
         entry.blocks.extend(after);
+        if state.canonical.is_some() {
+            use zevria_content::ResponseAttemptOutcome::{Failed, Interrupted};
+            let answer_item = (state.final_answer
+                && !matches!(attempt.outcome, Failed | Interrupted))
+            .then(|| state.answer_item())
+            .flatten();
+            let parts = state
+                .ids
+                .iter()
+                .filter_map(|(key, id)| match key {
+                    AttemptBlockKey::Part(output, _) if Some(*output) == answer_item => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            self.response_answers.insert(state.history_index, parts);
+        }
         let launch_blocks: Vec<_> = entry
             .blocks
             .iter()
@@ -1196,10 +1432,8 @@ impl ConversationState {
         message: Message,
         status: ToolCallStatus,
         header: Option<NativeHeader>,
-    ) {
-        let Some(mut entry) = HistoryEntry::from_message(message, status) else {
-            return;
-        };
+    ) -> Option<usize> {
+        let mut entry = HistoryEntry::from_message(message, status)?;
         if let HistoryEntry::Conversation(conversation) = &mut entry {
             conversation.header = header;
         }
@@ -1219,6 +1453,7 @@ impl ConversationState {
                 }
             }
         }
+        Some(history_index)
     }
 
     pub fn has_executing_tool_calls(&self) -> bool {
@@ -1759,6 +1994,12 @@ impl ConversationState {
         }
         self.executing_tool_calls.clear();
         self.hosted_attempts.clear();
+        self.response_answers
+            .retain(|&index, _| index < target_index);
+        self.agent_entry = self.agent_entry.filter(|&index| index < target_index);
+        self.agent_previews.retain(|&index, _| index < target_index);
+        self.incomplete_agent_entries
+            .retain(|&index| index < target_index);
         self.identity_aliases.clear();
         self.pending_subtasks.clear();
         self.subtask_statuses.clear();
@@ -2080,6 +2321,23 @@ impl ConversationState {
         }
     }
 
+    // A terminal failure record can rule out an inferred answer. Ordinary
+    // notices (and other incomplete attempts) do not supply this evidence.
+    fn discard_inferred_turn_answer(&mut self) {
+        let start = self
+            .history
+            .iter()
+            .rposition(HistoryEntry::has_prompt_header)
+            .unwrap_or(0);
+        for (_, parts) in self
+            .response_answers
+            .iter_mut()
+            .filter(|(index, _)| **index >= start)
+        {
+            parts.clear();
+        }
+    }
+
     /// Rebuild the pane from persisted transcript items.
     pub fn restore(&mut self, items: Vec<TranscriptItem>) {
         let review_projection = zevria_transcript::project_worker_reviews(&items);
@@ -2106,6 +2364,7 @@ impl ConversationState {
             .collect();
         *self = Self::default();
         let mut current_turn = None;
+        let mut last_response = None;
         for (index, item) in items.into_iter().enumerate() {
             let restored = zevria_transcript::restored_attempt(&item, index);
             match item {
@@ -2141,18 +2400,42 @@ impl ConversationState {
                         self.update_attempt(attempt, false);
                     }
                     let _ = self.finish_tool_results(&message, &[]);
-                    self.commit_response(
+                    let assistant = matches!(message, Message::Assistant(_));
+                    let final_answer = assistant
+                        && !tool_call_round(&message)
+                        && !provider.provider_replay().is_some_and(|replay| {
+                            replay
+                                .tool_call_handles()
+                                .iter()
+                                .any(|(_, external)| *external)
+                        });
+                    let index = self.project_response(
                         message,
                         attempt_id.as_deref(),
                         ToolCallStatus::Executing,
                         header,
+                        final_answer,
                     );
+                    if assistant {
+                        last_response = index;
+                    } else if matches!(header, Some(NativeHeader::Prompt(_))) {
+                        last_response = None;
+                    }
                 }
                 TranscriptItem::ToolResults {
                     message, metadata, ..
                 } => {
                     let _ = self.finish_tool_results(&message, &metadata);
                     self.push_message(message, ToolCallStatus::Executing);
+                }
+                TranscriptItem::RequestDirective(directive)
+                    if directive.kind == zevria_instructions::RequestDirectiveKind::Correction =>
+                {
+                    // The preceding no-tool response was an orchestration
+                    // round, not a successful answer to the request.
+                    if let Some(index) = last_response.take() {
+                        self.response_answers.insert(index, Vec::new());
+                    }
                 }
                 TranscriptItem::SessionModels(_)
                 | TranscriptItem::SessionMode(_)
@@ -2213,9 +2496,21 @@ impl ConversationState {
                         }
                     }
                     EnsembleRecord::Cancelled { run_id } => {
+                        if self
+                            .ensemble_turn(&run_id)
+                            .is_some_and(|turn| Some(turn) == current_turn)
+                        {
+                            self.discard_inferred_turn_answer();
+                        }
                         self.update_unfinished_ensemble_workers(&run_id, AgentRunStatus::Cancelled);
                     }
                     EnsembleRecord::Failed { run_id, .. } => {
+                        if self
+                            .ensemble_turn(&run_id)
+                            .is_some_and(|turn| Some(turn) == current_turn)
+                        {
+                            self.discard_inferred_turn_answer();
+                        }
                         self.update_unfinished_ensemble_workers(
                             &run_id,
                             AgentRunStatus::Interrupted,
@@ -2256,7 +2551,12 @@ impl ConversationState {
                 TranscriptItem::Compaction(_) => {
                     self.history.push(HistoryEntry::CompactionDivider);
                 }
-                TranscriptItem::Error { error } => self.history.push(HistoryEntry::Error(error)),
+                TranscriptItem::Error { error } => {
+                    if error == crate::blocks::TURN_CANCELLED {
+                        self.discard_inferred_turn_answer();
+                    }
+                    self.push_error(error);
+                }
             }
         }
         if let Ok(runs) = review_projection {

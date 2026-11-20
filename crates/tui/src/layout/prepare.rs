@@ -27,6 +27,7 @@ use zevria_foundation::{
     QuestionResponse, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, RECONCILE_REPORTS_TOOL_NAME,
     SKILL_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
 };
+use zevria_presentation::fold::FoldMode;
 use zevria_workflow::{AgentRunStatus, EnsembleWorkflow, PlanArtifact, PlanHandoff};
 
 use zevria_foundation::{COMMAND_TOOL_NAME, DELETE_TOOL_NAME, EDIT_TOOL_NAME, WRITE_TOOL_NAME};
@@ -59,7 +60,7 @@ pub(crate) fn render_error(
     error: &str,
     lines: &mut Vec<Line<'static>>,
     wrap_width: u16,
-    folded: bool,
+    folded: FoldMode,
 ) {
     lines.push(role_header("Error", theme().feedback.error));
     let content_start = lines.len();
@@ -69,9 +70,7 @@ pub(crate) fn render_error(
             Style::default().fg(theme().feedback.error),
         ));
     }
-    if folded {
-        fold_body_rows(lines, content_start, wrap_width, None, None, None);
-    }
+    fold_body_rows(lines, content_start, wrap_width, None, None, None, folded);
 }
 
 pub(crate) fn render_compaction_divider(lines: &mut Vec<Line<'static>>) {
@@ -86,7 +85,7 @@ pub(crate) fn render_plan_artifact(
     lines: &mut Vec<Line<'static>>,
     wrap_width: u16,
     selected_content: Option<usize>,
-    folded: bool,
+    folded: FoldMode,
 ) -> RowRange {
     render_plan_block(
         &format!("Plan artifact · revision {}", artifact.version.revision),
@@ -106,7 +105,7 @@ pub(crate) fn render_plan_handoff(
     lines: &mut Vec<Line<'static>>,
     wrap_width: u16,
     selected_content: Option<usize>,
-    folded: bool,
+    folded: FoldMode,
 ) -> RowRange {
     render_plan_block(
         "Approved Plan handoff",
@@ -129,7 +128,7 @@ pub(crate) fn render_job_notice(
     lines: &mut Vec<Line<'static>>,
     wrap_width: u16,
     selected_content: Option<usize>,
-    folded: bool,
+    folded: FoldMode,
 ) -> RowRange {
     let mut title = role_header("Background jobs finished", theme().roles.system);
     append_native_header(&mut title, header);
@@ -138,9 +137,7 @@ pub(crate) fn render_job_notice(
     for line in zevria_presentation::jobs::display_notice_lines(notice) {
         lines.push(Line::styled(line, Style::default().fg(theme().text.muted)));
     }
-    if folded {
-        fold_body_rows(lines, start, wrap_width, None, None, None);
-    }
+    fold_body_rows(lines, start, wrap_width, None, None, None, folded);
     if selected_content == Some(0) {
         for line in &mut lines[start..] {
             style_selected_line(line);
@@ -185,7 +182,7 @@ pub(crate) fn render_ensemble(
     wrap_width: u16,
     selection: EntrySelection,
     entry_folds: &EntryFolds<'_>,
-    message_folded: bool,
+    message_folded: FoldMode,
 ) -> Vec<RowRange> {
     let entry_start = lines.len();
     let workflow_color = match ensemble.workflow {
@@ -203,9 +200,15 @@ pub(crate) fn render_ensemble(
         lines,
     );
     ensure_content_line(lines, prompt_start);
-    if entry_folds.is_item_folded(0) {
-        fold_body_rows(lines, prompt_start, wrap_width, None, None, None);
-    }
+    fold_body_rows(
+        lines,
+        prompt_start,
+        wrap_width,
+        None,
+        None,
+        None,
+        entry_folds.item_mode(0),
+    );
     ranges.push((prompt_start, lines.len()));
     if ensemble.workflow == EnsembleWorkflow::Plan {
         let confirmed = ensemble
@@ -275,12 +278,18 @@ pub(crate) fn render_ensemble(
                 Style::default().fg(color),
             ));
         }
-        if entry_folds.is_item_folded(index + 1) {
-            fold_body_rows(lines, row_start, wrap_width, None, None, None);
-        }
+        fold_body_rows(
+            lines,
+            row_start,
+            wrap_width,
+            None,
+            None,
+            None,
+            entry_folds.item_mode(index + 1),
+        );
         ranges.push((row_start, lines.len()));
     }
-    if message_folded {
+    if message_folded.is_folded() {
         fold_body_rows(
             lines,
             prompt_start,
@@ -288,6 +297,7 @@ pub(crate) fn render_ensemble(
             None,
             Some(ranges.len()),
             None,
+            message_folded,
         );
         if selection != EntrySelection::None {
             for line in &mut lines[prompt_start..] {
@@ -333,7 +343,7 @@ pub(crate) struct ConversationBlockContext {
     pub(crate) separator_before: bool,
     pub(crate) item_gap_before: bool,
     pub(crate) selected: bool,
-    pub(crate) folded: bool,
+    pub(crate) folded: FoldMode,
     pub(crate) reasoning_heading: bool,
     pub(crate) appearance: TranscriptAppearance,
 }
@@ -457,7 +467,7 @@ impl FoldHeader {
         let available = width.saturating_sub(4 + spans_width(&status) + separator);
         let label = single_line_label(&self.label);
         let suffix = format!(" · {hidden_rows} more rows");
-        let show_count = label.width() + display_width(&suffix) <= available;
+        let show_count = hidden_rows > 0 && label.width() + display_width(&suffix) <= available;
         let label_budget = available.saturating_sub(if show_count {
             display_width(&suffix)
         } else {
@@ -655,7 +665,19 @@ pub(crate) fn render_conversation_block(
     }
     let content_start = lines.len();
     let fold_header;
-    if card {
+    if folded == FoldMode::Summary {
+        let (label, header) = bulk_block_summary(block);
+        fold_header = header;
+        push_fold_summary(
+            lines,
+            content_start,
+            wrap_width,
+            card.then_some((inner_width, inset)),
+            label,
+            None,
+            fold_header.as_ref(),
+        );
+    } else if card {
         let mut body = Vec::new();
         if let PresentationBlockKind::Text {
             text,
@@ -676,7 +698,7 @@ pub(crate) fn render_conversation_block(
         fold_header = render_presentation_block(block, lines, wrap_width, reasoning_heading);
     }
     ensure_content_line(lines, content_start);
-    if folded {
+    if folded == FoldMode::Preview {
         fold_body_rows(
             lines,
             content_start,
@@ -684,6 +706,7 @@ pub(crate) fn render_conversation_block(
             card.then_some((inner_width, inset)),
             None,
             fold_header.as_ref(),
+            folded,
         );
     }
     if selected {
@@ -737,7 +760,85 @@ fn push_card_line(line: Line<'static>, width: u16, inset: u16, lines: &mut Vec<L
     lines.push(Line::from(spans).style(line.style));
 }
 
-/// Replace a multi-row body with one summary row. No-op for one-row bodies.
+fn bulk_block_summary(block: &PresentationBlock) -> (&'static str, Option<FoldHeader>) {
+    let web = |activity: &WebActivityPresentation| FoldHeader {
+        label: Line::raw(format!("Web actions · {}", activity.members.len())),
+        outcomes: activity
+            .outcomes
+            .iter()
+            .map(|&(icon, count)| (icon, Some(count)))
+            .collect(),
+        counted: true,
+    };
+    use PresentationBlockKind as Kind;
+    match &block.kind {
+        Kind::WebActivity(activity) => ("Web activity", Some(web(activity))),
+        Kind::Tool(PresentedTool::Acp(tool)) => (
+            "Tool call",
+            Some(tool.hosted_activity().as_ref().map(web).unwrap_or_else(|| {
+                FoldHeader::single("Tool call".into(), tool.presented_status().icon())
+            })),
+        ),
+        Kind::Tool(PresentedTool::Native { call, state }) => (
+            "Tool call",
+            Some(FoldHeader::single(
+                call.function.name.to_string(),
+                native_header_status(call, state),
+            )),
+        ),
+        Kind::Subtask { descriptor, .. } => (
+            "Subtask",
+            Some(FoldHeader::single(
+                "Subtask".into(),
+                subtask_icon(descriptor.status),
+            )),
+        ),
+        Kind::Reasoning { .. } => ("Thinking", None),
+        Kind::Image { .. } => ("Image", None),
+        Kind::Error(_) | Kind::Diagnostic(_) => ("Notice", None),
+        _ if block.role == Some(PresentationRole::User) => ("Prompt folded", None),
+        _ => ("Message folded", None),
+    }
+}
+
+fn push_fold_summary(
+    lines: &mut Vec<Line<'static>>,
+    start: usize,
+    width: u16,
+    card: Option<(u16, u16)>,
+    label: &str,
+    blocks: Option<usize>,
+    header: Option<&FoldHeader>,
+) {
+    lines.truncate(start);
+    if width == 0 {
+        return;
+    }
+    let budget = usize::from(card.map_or(width, |(width, _)| width));
+    let summary = header.map_or_else(
+        || {
+            let label = blocks.filter(|&count| count > 1).map_or_else(
+                || label.to_owned(),
+                |count| format!("{label} · {count} blocks"),
+            );
+            Line::from(truncate_line_to_width(
+                &Line::styled(
+                    format!("▸ {label}"),
+                    Style::default().fg(theme().text.muted),
+                ),
+                budget,
+            ))
+        },
+        |header| header.folded(budget, 0),
+    );
+    if let Some((width, inset)) = card {
+        push_card_line(summary, width, inset, lines);
+    } else {
+        lines.push(summary);
+    }
+}
+
+/// Local folds keep a preview; a bulk fold replaces even a one-line body.
 pub(crate) fn fold_body_rows(
     lines: &mut Vec<Line<'static>>,
     content_start: usize,
@@ -745,7 +846,24 @@ pub(crate) fn fold_body_rows(
     card: Option<(u16, u16)>,
     blocks: Option<usize>,
     header: Option<&FoldHeader>,
+    mode: FoldMode,
 ) {
+    match mode {
+        FoldMode::Expanded => return,
+        FoldMode::Summary => {
+            push_fold_summary(
+                lines,
+                content_start,
+                wrap_width,
+                card,
+                "Folded",
+                blocks,
+                None,
+            );
+            return;
+        }
+        FoldMode::Preview => {}
+    }
     if wrap_width == 0 {
         lines.truncate(content_start);
         return;
@@ -1052,7 +1170,7 @@ fn render_plan_block(
     lines: &mut Vec<Line<'static>>,
     wrap_width: u16,
     selected_content: Option<usize>,
-    folded: bool,
+    folded: FoldMode,
 ) -> RowRange {
     let start = lines.len();
     let mut header = role_header(label, theme().workflow.plan);
@@ -1068,9 +1186,7 @@ fn render_plan_block(
         Style::default(),
         usize::from(wrap_width),
     ));
-    if folded {
-        fold_body_rows(lines, content_start, wrap_width, None, None, None);
-    }
+    fold_body_rows(lines, content_start, wrap_width, None, None, None, folded);
     if selected_content == Some(0) {
         for line in &mut lines[start..] {
             style_selected_line(line);

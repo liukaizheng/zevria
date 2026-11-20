@@ -672,7 +672,7 @@ fn worker_abandonment_restores_from_root_without_creating_a_missing_sidecar_pane
             100,
             crate::layout::EntrySelection::Block(1),
             &crate::app::EntryFolds::none(),
-            false,
+            zevria_presentation::fold::FoldMode::Expanded,
         );
         assert_eq!(items.len(), ensemble.workers.len() + 1);
         assert!(!items[1].is_empty(), "excluded rows stay selectable");

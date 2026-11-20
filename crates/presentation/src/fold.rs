@@ -1,10 +1,11 @@
 //! Pane-local, explicit folding intent. No fold state enters the transcript.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
-    blocks::{PresentationBlockId, PresentationBlockKind},
-    conversation::{ConversationState, HistoryEntry, Selection, SelectionScope},
+    blocks::PresentationBlockId,
+    conversation::{ConversationState, FinalOutput, HistoryEntry, Selection, SelectionScope},
+    session::StreamSnapshotId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -64,10 +65,33 @@ pub enum SpanRole {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnFold {
-    /// `zm`: fold prompts and earlier-message spans without adding final-entry folds.
-    FinalExpanded,
-    /// `zM`: older turns also message-fold their final eligible entry.
-    OlderFinalFolded,
+    /// `zm`: show each turn's final output.
+    AllFinals,
+    /// `zM`: show only the last turn's final output, if it has one.
+    LastFinal,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FoldMode {
+    #[default]
+    Expanded,
+    /// Ordinary local fold: keep a one-line preview of the body.
+    Preview,
+    /// Bulk fold: show the disclosure summary, never the body.
+    Summary,
+}
+
+impl FoldMode {
+    pub fn is_folded(self) -> bool {
+        self != Self::Expanded
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BulkFold {
+    Summary,
+    /// Remove this intent if a folded preview becomes a committed answer.
+    Provisional,
 }
 
 /// Membership records user intent, even when a body currently fits one row.
@@ -75,6 +99,8 @@ pub enum TurnFold {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FoldState {
     folded: HashSet<FoldKey>,
+    bulk: HashMap<FoldKey, BulkFold>,
+    stream: Option<StreamSnapshotId>,
     // Non-overlapping inclusive ranges, keyed by start. Rendering and turn
     // navigation can find a row's representative without scanning other folds.
     spans: BTreeMap<usize, usize>,
@@ -84,7 +110,19 @@ impl FoldState {
     pub fn contains(&self, key: FoldKey) -> bool {
         match key {
             FoldKey::Span { start, end } => self.spans.get(&start) == Some(&end),
-            _ => self.folded.contains(&key),
+            _ => self.mode(key).is_folded(),
+        }
+    }
+
+    pub fn mode(&self, key: FoldKey) -> FoldMode {
+        if self.bulk.contains_key(&key)
+            || matches!(key, FoldKey::Span { start, end } if self.spans.get(&start) == Some(&end))
+        {
+            FoldMode::Summary
+        } else if self.folded.contains(&key) {
+            FoldMode::Preview
+        } else {
+            FoldMode::Expanded
         }
     }
 
@@ -111,7 +149,7 @@ impl FoldState {
                 self.spans.remove(&old_start);
             }
             self.spans.insert(start, end);
-        } else {
+        } else if !self.contains(key) {
             self.folded.insert(key);
         }
     }
@@ -125,102 +163,122 @@ impl FoldState {
             }
             _ => {
                 self.folded.remove(&key);
+                self.bulk.remove(&key);
             }
         }
     }
 
-    /// Fold each display turn's prompt separately from its earlier-message spans.
-    /// Headerless entries join the current turn; a leading headerless run is its
-    /// own turn and has no prompt row. Existing Message folds are never removed.
-    /// Both actions also fold visible thoughts in the newest turn's final eligible entry.
+    /// Replace the bulk result for the current snapshot, without resetting
+    /// unrelated manual folds. A leading headerless run is its own display turn.
     pub fn fold_turns(
         &mut self,
-        history: &[HistoryEntry],
+        conversation: &ConversationState,
         diagnostics_visible: bool,
         fold: TurnFold,
     ) {
-        let mut groups = Vec::new();
-        let mut start = 0;
-        for (index, entry) in history.iter().enumerate() {
-            if entry.has_prompt_header() {
-                if start < index {
-                    groups.push(start..index);
+        self.spans.clear();
+        self.bulk.clear();
+        self.stream = None;
+        let history = conversation.history();
+        let growing = conversation.growing_entries();
+        let starts = std::iter::once(0)
+            .chain((1..history.len()).filter(|&index| history[index].has_prompt_header()));
+        let mut groups = starts.chain(std::iter::once(history.len())).peekable();
+        while let Some(start) = groups.next()
+            && let Some(&end) = groups.peek()
+            && start < end
+        {
+            let group = start..end;
+            let output = (fold == TurnFold::AllFinals || end == history.len())
+                .then(|| conversation.final_output(group.clone(), diagnostics_visible))
+                .flatten();
+            let mut span = None;
+            for index in group {
+                let entry = &history[index];
+                let protected = output
+                    .as_ref()
+                    .filter(|(at, _)| *at == index)
+                    .map(|(_, output)| output);
+                let in_place = growing.contains(&index);
+                if protected.is_some()
+                    || in_place
+                    || matches!(entry, HistoryEntry::CompactionDivider)
+                {
+                    self.finish_span(&mut span);
                 }
-                start = index;
-            }
-        }
-        if start < history.len() {
-            groups.push(start..history.len());
-        }
-        let latest = groups.len().saturating_sub(1);
-        for (index, group) in groups.into_iter().enumerate() {
-            let Some(last) = group
-                .clone()
-                .rev()
-                .find(|&index| history[index].message_fold_eligible(diagnostics_visible))
-            else {
-                continue;
-            };
-            self.fold_turn_group(
-                history,
-                group.start,
-                last,
-                diagnostics_visible,
-                fold == TurnFold::OlderFinalFolded && index < latest,
-            );
-            if index == latest
-                && let HistoryEntry::Conversation(entry) = &history[last]
-            {
-                for block in &entry.blocks {
-                    if block.visible(diagnostics_visible)
-                        && matches!(block.kind, PresentationBlockKind::Reasoning { .. })
+                if !entry.message_fold_eligible(diagnostics_visible) {
+                    continue;
+                }
+                let message = FoldKey::Message {
+                    history_index: index,
+                };
+                if protected.is_some() {
+                    self.unfold(message);
+                }
+                match (protected, entry) {
+                    (Some(FinalOutput::PlanArtifact), _) => self.unfold(FoldKey::Item {
+                        history_index: index,
+                        content_index: 0,
+                    }),
+                    (protected, HistoryEntry::Conversation(conversation_entry))
+                        if protected.is_some() || in_place =>
                     {
-                        self.fold(FoldKey::Block {
-                            history_index: last,
-                            id: block.id,
-                        });
+                        for (content_index, block) in conversation_entry.blocks.iter().enumerate() {
+                            let key = FoldKey::Block {
+                                history_index: index,
+                                id: block.id,
+                            };
+                            if matches!(protected, Some(FinalOutput::Answer(ids)) if ids.contains(&block.id))
+                            {
+                                self.unfold(key);
+                                self.unfold(FoldKey::Item {
+                                    history_index: index,
+                                    content_index,
+                                });
+                            } else if block.visible(diagnostics_visible) {
+                                let intent = if in_place
+                                    && !conversation.is_committed_answer(index, block.id)
+                                {
+                                    BulkFold::Provisional
+                                } else {
+                                    BulkFold::Summary
+                                };
+                                self.bulk.insert(key, intent);
+                            }
+                        }
+                    }
+                    _ if entry.has_prompt_header() => {
+                        self.finish_span(&mut span);
+                        self.bulk.insert(message, BulkFold::Summary);
+                    }
+                    _ => {
+                        let (_, end) = span.get_or_insert((index, index));
+                        *end = index;
                     }
                 }
             }
+            self.finish_span(&mut span);
         }
     }
 
-    fn fold_turn_group(
-        &mut self,
-        history: &[HistoryEntry],
-        start: usize,
-        last: usize,
-        diagnostics_visible: bool,
-        fold_final: bool,
-    ) {
-        let prompt = history[start].has_prompt_header().then_some(start);
-        if let Some(index) = prompt
-            && index != last
-            && history[index].message_fold_eligible(diagnostics_visible)
-        {
-            self.fold(FoldKey::Message {
-                history_index: index,
-            });
+    fn finish_span(&mut self, span: &mut Option<(usize, usize)>) {
+        if let Some((start, end)) = span.take() {
+            self.spans.insert(start, end);
         }
-        if fold_final {
-            self.fold(FoldKey::Message {
-                history_index: last,
-            });
-        }
-        let earlier_start = prompt.map_or(start, |index| index + 1);
-        let mut span = None;
-        for (index, entry) in history.iter().enumerate().take(last).skip(earlier_start) {
-            if matches!(entry, HistoryEntry::CompactionDivider) {
-                if let Some((start, end)) = span.take() {
-                    self.fold(FoldKey::Span { start, end });
-                }
-            } else if entry.message_fold_eligible(diagnostics_visible) {
-                let (_, end) = span.get_or_insert((index, index));
-                *end = index;
-            }
-        }
-        if let Some((start, end)) = span {
-            self.fold(FoldKey::Span { start, end });
+    }
+
+    pub(crate) fn fold_stream(&mut self, snapshot: Option<StreamSnapshotId>) {
+        self.stream = snapshot;
+    }
+
+    pub fn stream_is_folded(&self, snapshot: Option<StreamSnapshotId>) -> bool {
+        snapshot.is_some() && snapshot == self.stream
+    }
+
+    pub fn stream_folds(&self, snapshot: Option<StreamSnapshotId>) -> EntryFolds<'_> {
+        EntryFolds {
+            stream_summary: self.stream_is_folded(snapshot),
+            ..EntryFolds::none()
         }
     }
 
@@ -237,6 +295,7 @@ impl FoldState {
         EntryFolds {
             state: Some(self),
             history_index,
+            stream_summary: false,
         }
     }
 
@@ -252,45 +311,59 @@ impl FoldState {
                         .any(|entry| matches!(entry, HistoryEntry::CompactionDivider))
             })
         });
-        self.folded = self
-            .folded
+        let resolve = |key| match key {
+            FoldKey::Span { .. } => unreachable!("only local folds are stored here"),
+            FoldKey::Message { history_index } => conversation
+                .entry(history_index)
+                .is_some_and(|entry| entry.selectable_upper_bound() > 0)
+                .then_some(key),
+            FoldKey::Block { history_index, id } => {
+                let (history_index, id) = conversation.resolved_identity((history_index, id));
+                conversation
+                    .selection_for_identity(history_index, id)
+                    .is_some()
+                    .then_some(FoldKey::Block { history_index, id })
+            }
+            FoldKey::Item {
+                history_index,
+                content_index,
+            } => conversation
+                .entry(history_index)
+                .is_some_and(|entry| {
+                    !matches!(entry, HistoryEntry::Conversation(_))
+                        && content_index < entry.selectable_upper_bound()
+                })
+                .then_some(key),
+        };
+        self.folded = self.folded.drain().filter_map(resolve).collect();
+        self.bulk = self
+            .bulk
             .drain()
-            .filter_map(|key| match key {
-                FoldKey::Span { .. } => unreachable!("only local folds are stored here"),
-                FoldKey::Message { history_index } => conversation
-                    .entry(history_index)
-                    .is_some_and(|entry| entry.selectable_upper_bound() > 0)
-                    .then_some(key),
-                FoldKey::Block { history_index, id } => {
-                    let (history_index, id) = conversation.resolved_identity((history_index, id));
-                    conversation
-                        .selection_for_identity(history_index, id)
-                        .is_some()
-                        .then_some(FoldKey::Block { history_index, id })
+            .filter_map(|(key, intent)| {
+                let key = resolve(key)?;
+                if intent == BulkFold::Provisional
+                    && let FoldKey::Block { history_index, id } = key
+                    && conversation.is_committed_answer(history_index, id)
+                {
+                    return None;
                 }
-                FoldKey::Item {
-                    history_index,
-                    content_index,
-                } => conversation
-                    .entry(history_index)
-                    .is_some_and(|entry| {
-                        !matches!(entry, HistoryEntry::Conversation(_))
-                            && content_index < entry.selectable_upper_bound()
-                    })
-                    .then_some(key),
+                Some((key, intent))
             })
             .collect();
     }
 
     pub fn clear(&mut self) {
         self.folded.clear();
+        self.bulk.clear();
         self.spans.clear();
+        self.stream = None;
     }
 
     #[cfg(test)]
     fn keys(&self) -> HashSet<FoldKey> {
         self.folded
             .iter()
+            .chain(self.bulk.keys())
             .copied()
             .chain(
                 self.spans
@@ -301,11 +374,12 @@ impl FoldState {
     }
 }
 
-/// An entry-scoped read-only view; the streamed tail always uses `none()`.
+/// Read-only fold modes for one history entry or an ephemeral tail snapshot.
 #[derive(Clone, Copy)]
 pub struct EntryFolds<'a> {
     state: Option<&'a FoldState>,
     history_index: usize,
+    stream_summary: bool,
 }
 
 impl EntryFolds<'_> {
@@ -313,6 +387,7 @@ impl EntryFolds<'_> {
         Self {
             state: None,
             history_index: 0,
+            stream_summary: false,
         }
     }
 
@@ -326,29 +401,44 @@ impl EntryFolds<'_> {
     }
 
     pub fn is_message_folded(self) -> bool {
-        self.state.is_some_and(|state| {
-            state.contains(FoldKey::Message {
-                history_index: self.history_index,
-            })
+        self.message_mode().is_folded()
+    }
+
+    pub fn message_mode(self) -> FoldMode {
+        self.mode(FoldKey::Message {
+            history_index: self.history_index,
         })
     }
 
     pub fn is_block_folded(self, id: PresentationBlockId) -> bool {
-        self.state.is_some_and(|state| {
-            state.contains(FoldKey::Block {
+        self.block_mode(id).is_folded()
+    }
+
+    pub fn block_mode(self, id: PresentationBlockId) -> FoldMode {
+        if self.stream_summary {
+            FoldMode::Summary
+        } else {
+            self.mode(FoldKey::Block {
                 history_index: self.history_index,
                 id,
             })
-        })
+        }
     }
 
     pub fn is_item_folded(self, content_index: usize) -> bool {
-        self.state.is_some_and(|state| {
-            state.contains(FoldKey::Item {
-                history_index: self.history_index,
-                content_index,
-            })
+        self.item_mode(content_index).is_folded()
+    }
+
+    pub fn item_mode(self, content_index: usize) -> FoldMode {
+        self.mode(FoldKey::Item {
+            history_index: self.history_index,
+            content_index,
         })
+    }
+
+    fn mode(self, key: FoldKey) -> FoldMode {
+        self.state
+            .map_or(FoldMode::Expanded, |state| state.mode(key))
     }
 }
 
@@ -478,12 +568,172 @@ mod tests {
         HistoryEntry::Conversation(entry)
     }
 
+    fn state(entries: impl IntoIterator<Item = HistoryEntry>) -> ConversationState {
+        let mut conversation = ConversationState::default();
+        for entry in entries {
+            conversation.push_entry(entry);
+        }
+        conversation
+    }
+
+    fn block_key(conversation: &ConversationState, row: usize, part: usize) -> FoldKey {
+        FoldKey::for_selection(
+            conversation,
+            selection(row, part),
+            SelectionScope::Block,
+            true,
+        )
+        .unwrap()
+    }
+
+    fn indexed_response() -> zevria_transcript::TranscriptItem {
+        use serde_json::json;
+        zevria_transcript::TranscriptItem::provider_message(zevria_model::ProviderReplay::openai_responses(
+            zevria_foundation::ModelProfileRef::new("fixture", "model"),
+            vec![
+                json!({"type":"message","role":"assistant","status":"completed","id":"commentary","content":[{"type":"output_text","text":"Interim prose"}]}),
+                json!({"type":"web_search_call","id":"search","status":"completed","action":{"type":"search","query":"cats"}}),
+                json!({"type":"message","role":"assistant","status":"completed","id":"final","content":[
+                    {"type":"output_text","text":"First part"},
+                    {"type":"output_text","text":"Second part","annotations":[{"type":"url_citation","url":"https://example.com/reference","title":"Reference","start_index":0,"end_index":6}]}
+                ]}),
+                json!({"type":"web_search_call","id":"open","status":"completed","action":{"type":"open_page","url":"https://example.net/page"}}),
+                json!({"type":"web_search_call","id":"find","status":"completed","action":{"type":"find_in_page","url":"https://example.net/page","pattern":"needle"}}),
+            ],
+        )).unwrap()
+    }
+
+    fn tool_round() -> Message {
+        use rig_core::message::{AssistantContent, CallId, ToolCall, ToolFunction, ToolName};
+        Message::from(vec![
+            AssistantContent::text("Tool preamble"),
+            AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call"),
+                ToolFunction::new(ToolName::new("tool").unwrap(), serde_json::json!({})),
+            )),
+        ])
+    }
+
     #[test]
-    fn fold_turns_group_prompt_headers_and_split_at_dividers() {
+    fn bulk_folds_set_final_answer_visibility_for_live_and_restored_turns() {
+        use crate::session_model::SessionModel;
+        use zevria_content::ResponseAttemptOutcome;
+        use zevria_foundation::{SessionMode, TurnId};
+        use zevria_session_api::SessionEvent as E;
+        use zevria_transcript::{IncompleteResponse, TranscriptItem, restored_attempt};
+
+        let item = indexed_response();
+        let canonical = item.display_message().unwrap();
+        let mut live = SessionModel::default();
+        let mut saved = Vec::new();
+        for i in 1..=2 {
+            let turn_id = TurnId::new(i);
+            let prompt = Message::user(format!("turn {i}"));
+            let mut attempt = restored_attempt(&item, i as usize).unwrap();
+            let mut trailing = attempt.clone();
+            trailing.id = format!("interrupted-{i}");
+            trailing.close_uncommitted(ResponseAttemptOutcome::Interrupted);
+            live.reduce(E::TurnStarted {
+                turn_id,
+                message: prompt.clone(),
+                mode: SessionMode::Build,
+            });
+            live.reduce(E::ModelCallStarted { turn_id, call: 1 });
+            live.reduce(E::Intermediate {
+                turn_id,
+                message: tool_round(),
+                attempt_id: None,
+            });
+            live.reduce(E::ModelCallStarted { turn_id, call: 2 });
+            attempt.touch();
+            live.reduce(E::ResponseAttemptUpdated {
+                turn_id,
+                attempt: attempt.clone(),
+            });
+            live.reduce(E::TurnCompleted {
+                turn_id,
+                message: canonical.clone(),
+                attempt_id: Some(attempt.id),
+            });
+            live.conversation.update_response_attempt(trailing.clone());
+            live.conversation.push_error("trailing notice".into());
+            live.conversation.push_compaction_divider();
+            saved.extend([
+                TranscriptItem::Message(prompt),
+                TranscriptItem::Message(tool_round()),
+                item.clone(),
+                TranscriptItem::IncompleteResponse(
+                    IncompleteResponse::from_attempt(&trailing)
+                        .unwrap()
+                        .unwrap(),
+                ),
+                TranscriptItem::Error {
+                    error: "trailing notice".into(),
+                },
+            ]);
+        }
+        let mut restored = ConversationState::default();
+        restored.restore(saved);
+        for (conversation, final_rows) in [(&live.conversation, [2, 8]), (&restored, [2, 7])] {
+            let mut folds = FoldState::default();
+            for row in final_rows {
+                for key in [
+                    FoldKey::Message { history_index: row },
+                    block_key(conversation, row, 2),
+                    block_key(conversation, row, 3),
+                ] {
+                    folds.fold(key);
+                }
+            }
+            let manual_tool = block_key(conversation, 1, 1);
+            folds.fold(manual_tool);
+            for action in [
+                TurnFold::AllFinals,
+                TurnFold::LastFinal,
+                TurnFold::AllFinals,
+            ] {
+                folds.fold_turns(conversation, false, action);
+                for (i, row) in final_rows.into_iter().enumerate() {
+                    if i == 0 && action == TurnFold::LastFinal {
+                        assert_eq!(folds.span_containing(row), Some((row - 1, row + 2)));
+                        continue;
+                    }
+                    assert_eq!(folds.entry(row).span(), None);
+                    assert!(!folds.entry(row).is_message_folded());
+                    for part in [2, 3] {
+                        assert_eq!(
+                            folds.mode(block_key(conversation, row, part)),
+                            FoldMode::Expanded
+                        );
+                    }
+                    for part in [0, 1, 4, 5] {
+                        assert_eq!(
+                            folds.mode(block_key(conversation, row, part)),
+                            FoldMode::Summary
+                        );
+                    }
+                    assert_eq!(folds.span_containing(row + 1), Some((row + 1, row + 2)));
+                }
+                assert_eq!(folds.mode(manual_tool), FoldMode::Preview);
+                let before = folds.clone();
+                folds.fold_turns(conversation, false, action);
+                assert_eq!(folds, before);
+            }
+            let web = block_key(conversation, final_rows[1], 1);
+            folds.toggle(web);
+            assert_eq!(folds.mode(web), FoldMode::Expanded);
+            folds.fold(web);
+            assert_eq!(folds.mode(web), FoldMode::Preview);
+            folds.unfold_all();
+            assert_eq!(folds, FoldState::default());
+        }
+    }
+
+    #[test]
+    fn display_boundaries_keep_plan_outputs_and_dividers_but_not_prompt_only_turns() {
         use zevria_workflow::{
             EnsembleRunId, EnsembleWorkflow, PlanArtifact, PlanHandoff, PlanId, PlanVersion,
         };
-
         let artifact = PlanArtifact {
             version: PlanVersion {
                 id: PlanId::new(),
@@ -493,250 +743,193 @@ mod tests {
             markdown: "Plan body".into(),
             source_turn_id: zevria_foundation::TurnId::new(1),
         };
-        let mut assistant =
-            HistoryEntry::from_message(Message::assistant("call"), ToolCallStatus::Finished)
-                .unwrap();
-        if let HistoryEntry::Conversation(entry) = &mut assistant {
-            entry.header = Some(NativeHeader::Assistant {
-                turn: DisplayTurn(1),
-                call: 1,
-            });
-        }
-        let history = [
-            message("leading"),
-            HistoryEntry::Error("leading error".into()),
-            message("leading last"),
+        let mut conversation = state([
+            message("leading prompt"),
+            HistoryEntry::from_message(
+                Message::assistant("leading output"),
+                ToolCallStatus::Finished,
+            )
+            .unwrap(),
             prompt("first", 1),
-            assistant,
-            HistoryEntry::Error("error".into()),
             HistoryEntry::PlanArtifact(artifact.clone()),
             HistoryEntry::CompactionDivider,
-            message("after divider"),
-            message("last call"),
-            HistoryEntry::Ensemble(EnsembleHistory {
-                header: Some(NativeHeader::Prompt(DisplayTurn(2))),
-                run_id: EnsembleRunId::from_string("span-ensemble"),
-                workflow: EnsembleWorkflow::Review,
-                prompt: "review".into(),
-                workers: Vec::new(),
-                baseline: None,
-            }),
-            message("ensemble last"),
-            HistoryEntry::PlanHandoff(
-                PlanHandoff::new(artifact, "source"),
-                Some(NativeHeader::Prompt(DisplayTurn(3))),
-            ),
-            message("handoff last"),
-            prompt("only entry", 4),
-        ];
-        let mut expected = HashSet::from([
-            FoldKey::Span { start: 0, end: 1 },
-            FoldKey::Message { history_index: 3 },
-            FoldKey::Span { start: 4, end: 6 },
-            FoldKey::Span { start: 8, end: 8 },
-            FoldKey::Message { history_index: 10 },
-            FoldKey::Message { history_index: 12 },
         ]);
+        conversation.complete_response(Message::assistant("Plan prose"), None, None);
+        conversation.push_entry(HistoryEntry::PlanHandoff(
+            PlanHandoff::new(artifact, "source"),
+            Some(NativeHeader::Prompt(DisplayTurn(2))),
+        ));
+        conversation.complete_response(Message::assistant("handoff answer"), None, None);
+        conversation.push_entry(HistoryEntry::Ensemble(EnsembleHistory {
+            header: Some(NativeHeader::Prompt(DisplayTurn(3))),
+            run_id: EnsembleRunId::from_string("span-ensemble"),
+            workflow: EnsembleWorkflow::Review,
+            prompt: "review".into(),
+            workers: Vec::new(),
+            baseline: None,
+        }));
         let mut folds = FoldState::default();
-        for _ in 0..2 {
-            folds.fold_turns(&history, false, TurnFold::FinalExpanded);
-            assert_eq!(folds.keys(), expected);
-        }
-        assert!(folds.entry(3).is_message_folded());
-        assert_eq!(folds.entry(4).span(), Some(SpanRole::Summary { end: 6 }));
-        assert_eq!(folds.entry(5).span(), Some(SpanRole::Hidden { start: 4 }));
-        for index in [2, 3, 7, 9, 10, 11, 12, 13, 14] {
-            assert_eq!(folds.span_containing(index), None);
-        }
-        assert_eq!(EntryFolds::none().span(), None);
-
-        expected.extend([2, 9, 11, 13].map(|history_index| FoldKey::Message { history_index }));
-        for _ in 0..2 {
-            folds.fold_turns(&history, false, TurnFold::OlderFinalFolded);
-            assert_eq!(folds.keys(), expected);
-        }
-        assert!(!folds.entry(14).is_message_folded());
-        folds.fold_turns(&history, false, TurnFold::FinalExpanded);
-        assert_eq!(
-            folds.keys(),
-            expected,
-            "zm never re-expands zM's final entries"
-        );
-    }
-
-    fn with_thoughts() -> HistoryEntry {
-        let mut entry =
-            HistoryEntry::from_message(Message::assistant("answer"), ToolCallStatus::Finished)
-                .unwrap();
-        let HistoryEntry::Conversation(entry) = &mut entry else {
-            unreachable!()
+        let manual_plan = FoldKey::Item {
+            history_index: 3,
+            content_index: 0,
         };
-        for (id, visibility) in [
-            (1, BlockVisibility::Always),
-            (2, BlockVisibility::Always),
-            (3, BlockVisibility::Diagnostics),
-        ] {
-            let mut thought = entry.blocks[0].clone();
-            thought.id = PresentationBlockId(id);
-            thought.visibility = visibility;
-            thought.kind = PresentationBlockKind::Reasoning {
-                parts: vec![format!("thought {id}")],
-            };
-            entry.blocks.push(thought);
+        folds.fold(manual_plan);
+        folds.fold_turns(&conversation, false, TurnFold::AllFinals);
+        assert!(!folds.contains(manual_plan));
+        for row in [1, 3, 4, 7] {
+            assert_eq!(folds.entry(row).span(), None);
+            assert!(!folds.entry(row).is_message_folded());
         }
-        HistoryEntry::Conversation(entry.clone())
-    }
-
-    #[test]
-    fn both_bulk_actions_only_fold_visible_thoughts_in_the_latest_final_entry() {
-        for diagnostics in [false, true] {
-            for action in [TurnFold::FinalExpanded, TurnFold::OlderFinalFolded] {
-                let mut history = vec![
-                    prompt("old", 1),
-                    with_thoughts(),
-                    prompt("new", 2),
-                    with_thoughts(),
-                    with_thoughts(),
-                ];
-                let mut folds = FoldState::default();
-                folds.fold_turns(&history, diagnostics, action);
-                let mut expected = HashSet::from([
-                    FoldKey::Message { history_index: 0 },
-                    FoldKey::Message { history_index: 2 },
-                    FoldKey::Span { start: 3, end: 3 },
-                ]);
-                if action == TurnFold::OlderFinalFolded {
-                    expected.insert(FoldKey::Message { history_index: 1 });
-                }
-                for id in 1..=if diagnostics { 3 } else { 2 } {
-                    expected.insert(FoldKey::Block {
-                        history_index: 4,
-                        id: PresentationBlockId(id),
-                    });
-                }
-                assert_eq!(folds.keys(), expected);
-                folds.fold_turns(&history, diagnostics, action);
-                assert_eq!(folds.keys(), expected, "a repeated action is idempotent");
-
-                history.push(message("latest without thoughts"));
-                assert!(folds.entry(5).span().is_none());
-                assert!(!folds.entry(5).is_message_folded());
-                let mut fresh = FoldState::default();
-                fresh.fold_turns(&history, diagnostics, action);
-                expected.retain(|key| !matches!(key, FoldKey::Block { .. } | FoldKey::Span { .. }));
-                expected.insert(FoldKey::Span { start: 3, end: 4 });
-                assert_eq!(fresh.keys(), expected, "do not look backward for reasoning");
-
-                history.push(prompt("new prompt alone", 3));
-                let mut fresh = FoldState::default();
-                fresh.fold_turns(&history, diagnostics, action);
-                assert!(
-                    !fresh
-                        .keys()
-                        .iter()
-                        .any(|key| matches!(key, FoldKey::Block { .. }))
-                );
-                assert!(!fresh.entry(6).is_message_folded());
-            }
-        }
-    }
-
-    #[test]
-    fn fold_turns_headerless_history_trims_hidden_entries_and_keeps_new_cycles_open() {
-        fn diagnostic() -> HistoryEntry {
-            let mut entry = message("diagnostic");
-            if let HistoryEntry::Conversation(entry) = &mut entry {
-                entry.blocks[0].visibility = BlockVisibility::Diagnostics;
-            }
-            entry
-        }
-        let mut history = vec![
-            diagnostic(),
-            message("first cycle"),
-            diagnostic(),
-            message("last cycle"),
-            diagnostic(),
-        ];
-        let mut folds = FoldState::default();
-        folds.fold_turns(&history, false, TurnFold::FinalExpanded);
+        assert_eq!(folds.span_containing(0), Some((0, 0)));
         assert_eq!(
-            folds.keys(),
-            HashSet::from([FoldKey::Span { start: 1, end: 1 }])
+            folds.span_containing(5),
+            Some((5, 5)),
+            "Plan, not closing prose"
         );
-        folds.fold_turns(&history, true, TurnFold::FinalExpanded);
-        assert_eq!(
-            folds.keys(),
-            HashSet::from([FoldKey::Span { start: 0, end: 3 }])
-        );
-        history.push(message("new cycle"));
-        assert_eq!(folds.span_containing(4), None);
-        assert_eq!(folds.span_containing(5), None);
-        folds.fold_turns(&history, false, TurnFold::FinalExpanded);
-        assert_eq!(
-            folds.keys(),
-            HashSet::from([FoldKey::Span { start: 1, end: 3 }])
-        );
-    }
-
-    #[test]
-    fn fold_turns_skip_hidden_prompts_and_never_span_them() {
-        let mut hidden_prompt = prompt("diagnostic prompt", 1);
-        let HistoryEntry::Conversation(entry) = &mut hidden_prompt else {
-            unreachable!()
-        };
-        for block in &mut entry.blocks {
-            block.visibility = BlockVisibility::Diagnostics;
+        for row in [2, 6, 8] {
+            assert_eq!(folds.entry(row).message_mode(), FoldMode::Summary);
         }
-        let history = [
-            hidden_prompt,
-            message("first call"),
-            message("middle call"),
-            message("last call"),
-        ];
-        for fold in [TurnFold::FinalExpanded, TurnFold::OlderFinalFolded] {
-            let mut folds = FoldState::default();
-            folds.fold_turns(&history, false, fold);
-            assert_eq!(
-                folds.keys(),
-                HashSet::from([FoldKey::Span { start: 1, end: 2 }])
+        folds.fold_turns(&conversation, false, TurnFold::LastFinal);
+        for row in [1, 3, 7] {
+            assert!(
+                folds.span_containing(row).is_some(),
+                "no previous answer fallback"
             );
-            folds.fold_turns(&history, true, fold);
-            let expected = HashSet::from([
-                FoldKey::Message { history_index: 0 },
-                FoldKey::Span { start: 1, end: 2 },
-            ]);
-            assert_eq!(folds.keys(), expected);
-            folds.fold_turns(&history, false, fold);
-            assert_eq!(folds.keys(), expected, "hidden Message intent survives");
         }
+        assert_eq!(folds.span_containing(4), None);
+        assert!(folds.entry(8).is_message_folded());
     }
 
     #[test]
-    fn fold_turns_prompt_only_turns_keep_the_latest_open_even_when_ineligible() {
-        let mut history = [
-            prompt("older prompt only", 1),
-            prompt("latest prompt only", 2),
-        ];
-        let HistoryEntry::Conversation(entry) = &mut history[1] else {
+    fn in_place_previews_fold_by_id_and_open_on_commit_not_on_revision() {
+        use zevria_transcript::restored_attempt;
+        let item = indexed_response();
+        let mut attempt = restored_attempt(&item, 0).unwrap();
+        let later = attempt.presentation.split_off(2);
+        let mut conversation = state([prompt("prompt", 1)]);
+        conversation.update_response_attempt(attempt.clone());
+        let first = block_key(&conversation, 1, 2);
+        let mut folds = FoldState::default();
+        let old_web = block_key(&conversation, 1, 1);
+        folds.fold(old_web);
+        folds.fold_turns(&conversation, false, TurnFold::LastFinal);
+        assert_eq!(folds.mode(first), FoldMode::Summary);
+        assert!(!folds.entry(1).is_message_folded() && folds.entry(1).span().is_none());
+        attempt.presentation.extend(later);
+        attempt.touch();
+        conversation.update_response_attempt(attempt.clone());
+        folds.reconcile(&conversation);
+        let second = block_key(&conversation, 1, 3);
+        assert_eq!(folds.mode(second), FoldMode::Expanded);
+        assert_eq!(folds.mode(first), FoldMode::Summary);
+        conversation.complete_response(item.display_message().unwrap(), Some(&attempt.id), None);
+        folds.reconcile(&conversation);
+        assert_eq!(folds.mode(first), FoldMode::Expanded);
+        assert_eq!(folds.mode(old_web), FoldMode::Summary);
+        folds.unfold_all();
+        assert_eq!(folds, FoldState::default());
+    }
+
+    #[test]
+    fn latest_failed_or_interim_turn_has_no_final_output() {
+        let mut conversation = state([prompt("completed", 1)]);
+        conversation.complete_response(Message::assistant("older answer"), None, None);
+        conversation.push_entry(prompt("unfinished", 2));
+        conversation.commit_response(
+            Message::assistant("interim without tool"),
+            None,
+            ToolCallStatus::Executing,
+            None,
+        );
+        conversation.push_error("failure".into());
+        let mut folds = FoldState::default();
+        folds.fold_turns(&conversation, false, TurnFold::LastFinal);
+        assert_eq!(folds.span_containing(1), Some((1, 1)));
+        assert!(folds.entry(2).is_message_folded());
+        assert_eq!(folds.span_containing(3), Some((3, 4)));
+        folds.fold_turns(&conversation, false, TurnFold::AllFinals);
+        assert_eq!(folds.span_containing(1), None);
+        assert_eq!(folds.span_containing(3), Some((3, 4)));
+
+        use zevria_transcript::TranscriptItem;
+        conversation.restore(vec![
+            TranscriptItem::Message(Message::user("completed")),
+            TranscriptItem::Message(Message::assistant("older answer")),
+            TranscriptItem::Message(Message::user("cancelled")),
+            TranscriptItem::Message(Message::assistant("retained partial body")),
+            TranscriptItem::Message(tool_round()),
+            TranscriptItem::Error {
+                error: crate::blocks::TURN_CANCELLED.into(),
+            },
+        ]);
+        folds.fold_turns(&conversation, false, TurnFold::AllFinals);
+        assert!(folds.span_containing(1).is_none());
+        assert_eq!(folds.span_containing(3), Some((3, 5)));
+    }
+
+    #[test]
+    fn lossy_headerless_preview_is_provisional_until_completed() {
+        use crate::agent_transcript::AgentTranscriptReducer;
+        use zevria_workflow::{AgentRunEvent, AgentRunStatus};
+        let mut reducer = AgentTranscriptReducer::default();
+        let mut conversation = ConversationState::default();
+        reducer.apply_event(
+            &mut conversation,
+            AgentRunEvent::Prompt {
+                text: "prompt".into(),
+                continuation: false,
+                repair: None,
+            },
+        );
+        reducer.apply_preview(
+            &mut conversation,
+            AgentRunEvent::AgentMessage {
+                text: "provisional answer".into(),
+                message_id: Some("preview".into()),
+            },
+        );
+        let answer = block_key(&conversation, 0, 1);
+        let mut folds = FoldState::default();
+        folds.fold_turns(&conversation, false, TurnFold::LastFinal);
+        assert_eq!(folds.mode(answer), FoldMode::Summary);
+        reducer.apply_event(
+            &mut conversation,
+            AgentRunEvent::Status {
+                status: AgentRunStatus::Completed,
+                detail: None,
+            },
+        );
+        folds.reconcile(&conversation);
+        assert_eq!(folds.mode(answer), FoldMode::Expanded);
+        assert_eq!(
+            folds.mode(block_key(&conversation, 0, 0)),
+            FoldMode::Summary
+        );
+    }
+
+    #[test]
+    fn headerless_fallback_ignores_diagnostics_and_incomplete_attempts() {
+        use zevria_content::ResponseAttemptOutcome;
+        let mut diagnostic = message("hidden diagnostic");
+        let HistoryEntry::Conversation(entry) = &mut diagnostic else {
             unreachable!()
         };
-        for block in &mut entry.blocks {
-            block.visibility = BlockVisibility::Diagnostics;
+        entry.blocks[0].visibility = BlockVisibility::Diagnostics;
+        let mut conversation = state([diagnostic, message("old ACP prompt")]);
+        conversation.push_message(Message::assistant("ACP answer"), ToolCallStatus::Finished);
+        conversation.push_entry(HistoryEntry::Error("trailing notice".into()));
+        let mut incomplete = zevria_transcript::restored_attempt(&indexed_response(), 0).unwrap();
+        incomplete.close_uncommitted(ResponseAttemptOutcome::Failed);
+        conversation.update_response_attempt(incomplete);
+        let mut folds = FoldState::default();
+        for (visible, start) in [(false, 1), (true, 0)] {
+            folds.fold_turns(&conversation, visible, TurnFold::AllFinals);
+            assert_eq!(folds.span_containing(1), Some((start, 1)));
+            assert_eq!(folds.entry(2).span(), None);
+            assert_eq!(folds.span_containing(4), Some((3, 4)));
         }
-        for diagnostics in [false, true] {
-            let mut folds = FoldState::default();
-            for fold in [TurnFold::FinalExpanded, TurnFold::OlderFinalFolded] {
-                folds.fold_turns(&[], diagnostics, fold);
-                assert!(folds.keys().is_empty());
-            }
-            folds.fold_turns(&history, diagnostics, TurnFold::FinalExpanded);
-            assert!(folds.keys().is_empty());
-            folds.fold_turns(&history, diagnostics, TurnFold::OlderFinalFolded);
-            let expected = HashSet::from([FoldKey::Message { history_index: 0 }]);
-            assert_eq!(folds.keys(), expected);
-            folds.fold_turns(&history, diagnostics, TurnFold::FinalExpanded);
-            assert_eq!(folds.keys(), expected);
-        }
+        conversation.push_entry(message("new cycle"));
+        assert_eq!(folds.span_containing(5), None);
     }
 
     #[test]
@@ -762,18 +955,13 @@ mod tests {
     #[test]
     fn fold_turns_reconcile_prunes_truncation_and_empty_ranges() {
         for truncate in [false, true] {
-            let mut conversation = ConversationState::default();
-            for entry in [
-                prompt("first", 1),
-                message("last"),
-                prompt("next", 2),
-                message("middle"),
-                message("last"),
-            ] {
-                conversation.push_entry(entry);
-            }
+            let mut conversation = state([prompt("first", 1)]);
+            conversation.complete_response(Message::assistant("last"), None, None);
+            conversation.push_entry(prompt("next", 2));
+            conversation.push_entry(message("middle"));
+            conversation.complete_response(Message::assistant("last"), None, None);
             let mut folds = FoldState::default();
-            folds.fold_turns(conversation.history(), false, TurnFold::FinalExpanded);
+            folds.fold_turns(&conversation, false, TurnFold::AllFinals);
             assert_eq!(
                 folds.keys(),
                 HashSet::from([
@@ -824,11 +1012,12 @@ mod tests {
     #[test]
     fn reconcile_never_hides_a_new_compaction_divider_at_a_reused_position() {
         let mut conversation = ConversationState::default();
-        for entry in [message("first"), message("to edit"), message("last")] {
+        for entry in [message("first"), message("to edit")] {
             conversation.push_entry(entry);
         }
+        conversation.complete_response(Message::assistant("last"), None, None);
         let mut folds = FoldState::default();
-        folds.fold_turns(conversation.history(), false, TurnFold::FinalExpanded);
+        folds.fold_turns(&conversation, false, TurnFold::AllFinals);
         assert_eq!(folds.span_containing(1), Some((0, 1)));
         conversation.commit_edit(1, true);
         assert!(matches!(
@@ -929,39 +1118,34 @@ mod tests {
     }
 
     #[test]
-    fn fold_turns_preserve_manual_message_block_and_item_intent() {
-        let history = [
+    fn bulk_reopens_output_but_preserves_unrelated_manual_intent() {
+        let mut conversation = state([
             prompt("prompt", 1),
             message("earlier message"),
             HistoryEntry::Error("error".into()),
-            message("final message"),
-        ];
+        ]);
+        conversation.complete_response(Message::assistant("final message"), None, None);
         let manual = [
-            FoldKey::Message { history_index: 3 },
-            FoldKey::Block {
-                history_index: 1,
-                id: PresentationBlockId(0),
-            },
-            FoldKey::Item {
-                history_index: 2,
-                content_index: 0,
-            },
+            block_key(&conversation, 1, 0),
+            block_key(&conversation, 2, 0),
         ];
         let mut folds = FoldState::default();
-        for key in manual {
+        for key in manual.into_iter().chain([
+            FoldKey::Message { history_index: 3 },
+            block_key(&conversation, 3, 0),
+        ]) {
             folds.fold(key);
         }
-        let expected = HashSet::from_iter(manual.into_iter().chain([
-            FoldKey::Message { history_index: 0 },
-            FoldKey::Span { start: 1, end: 2 },
-        ]));
-        for fold in [
-            TurnFold::FinalExpanded,
-            TurnFold::OlderFinalFolded,
-            TurnFold::FinalExpanded,
-        ] {
-            folds.fold_turns(&history, false, fold);
-            assert_eq!(folds.keys(), expected);
+        for action in [TurnFold::AllFinals, TurnFold::LastFinal] {
+            folds.fold_turns(&conversation, false, action);
+            assert!(!folds.entry(3).is_message_folded());
+            assert_eq!(
+                folds.mode(block_key(&conversation, 3, 0)),
+                FoldMode::Expanded
+            );
+            for key in manual {
+                assert_eq!(folds.mode(key), FoldMode::Preview);
+            }
         }
     }
 }

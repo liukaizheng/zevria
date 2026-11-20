@@ -226,9 +226,9 @@ opens a menu of page-title links. **Show all N sources** reveals domains beyond
 the first eight. The footer hides when the answer or message is folded; inline
 links and answer copy are unchanged.
 
-Grouping is desktop-only; the TUI keeps its existing rows. The group keeps the
-first member's identity and fold as it grows. If that member is absent at
-commit, the new group starts expanded. Sources come only from Responses
+Grouping is desktop-only; the TUI keeps its existing rows. Groups keep their
+first member's identity, but split where a bulk summary meets an expanded row
+so that new activity remains visible. Sources come only from Responses
 `url_citation` annotations (including indexed ACP display when present); no
 provider result lists are requested. Host labels use lowercase ASCII/punycode
 and omit a leading `www.`.
@@ -246,30 +246,34 @@ Folds do not edit the draft or affect what's saved or sent to the model.
 | --- | --- | --- |
 | `za` | **Toggle fold** (or click/Enter/Space on the disclosure) | Toggle the focused message, block/item, or folded range. |
 | `zc` / `zo` | **Fold** / **Unfold** (⌥⌘← / ⌥⌘→) | Set that fold without disturbing any nested folds. |
-| `zm` | **Fold earlier content** (⇧⌘R) | Fold non-final prompts and group earlier eligible entries; don't message-fold a turn's final eligible entry. |
-| `zM` | **Fold older turns** (⌥⇧⌘R) | Also message-fold the final eligible entries of older turns. |
+| `zm` | **Fold earlier content** (⇧⌘R) | Show each turn’s final output and collapse the rest. |
+| `zM` | **Fold older turns** (⌥⇧⌘R) | Show only the last turn’s final output, if it has one. |
 | `zR` | **Unfold all** (⌥⌘R) | Clear every fold in the current pane. |
 
-Both bulk fold actions collapse the visible Thinking blocks in the newest
-turn's final eligible entry, without folding the answer or looking backward
-for thinking. These actions are additive: **Fold earlier content** won't undo
-an earlier **Fold older turns** or a manual fold. Use bulk actions from the
-composer as well. **Expand all thinking** and **Collapse all thinking** change
-just the individual Thinking folds in the pane, including in folded messages.
+Both bulk actions reopen the final outputs they protect, including a manually
+folded answer or submitted Plan. **Fold earlier content** after **Fold older
+turns** restores older answers without unfolding their activity. The composer
+also accepts these shortcuts. **Expand all thinking** and **Collapse all
+thinking** change just the individual Thinking folds, including in folded
+messages.
 
 Desktop and the TUI group folding by numbered prompt headers, including Plan
 handoffs, job continuations, and ensemble prompts. Headerless entries join the
-current turn, or form a leading turn if there's no prompt yet. The last visible,
-selectable entry determines the end of the turn's earlier content, even if that
-entry is a notice rather than an answer. Compaction dividers split ranges and
-stay visible. Hidden diagnostics aren't fold targets.
+current turn, or form a leading turn if there's no prompt yet. A trailing
+notice does not displace a final answer. If the last turn has no final output,
+**Fold older turns** leaves no answer expanded. Compaction dividers split
+ranges and stay visible. Hidden diagnostics aren't fold targets. Bulk folds
+hide the current provisional bodies without hiding live progress or stop
+controls; new snapshots and newly committed answers are not folded by them.
 
 The chevron in the speaker gutter controls the whole message. Chevrons in the
 content column control individual blocks and items. A folded range takes one
-line, labeled **N earlier messages**; opening it restores the rows and their
+line, labeled **N folded messages**; opening it restores the rows and their
 nested folds. If a fold covers the focused target or the reader's anchor, that
-location moves to the visible representative. Previews use the available
-width, and Copy uses the original content rather than the preview.
+location moves to the visible representative. Local folds keep a short preview;
+bulk-folded rows show only a summary, not web queries, page details or cards.
+An expanded answer retains its Sources chips. Copy always uses the original
+content rather than the summary or preview.
 
 **Previous turn** (⌥⌘↑) goes to the nearest start strictly above the live viewport
 top, or the current start if the top is mid-turn/mid-prompt. **Next turn** (⌥⌘↓)

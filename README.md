@@ -330,16 +330,19 @@ On Desktop, focus the corresponding disclosure or use the View menu.
 | --- | --- | --- |
 | `za` | **Toggle fold**, or click/Enter/Space on a disclosure | Toggle the focused message, block/item, or folded range. |
 | `zc` / `zo` | **Fold** / **Unfold** (⌥⌘← / ⌥⌘→) | Set the target's fold without changing any folds inside it. |
-| `zm` | **Fold earlier content** (⇧⌘R, also in the title strip) | Fold non-final prompts and group earlier entries in each turn. |
-| `zM` | **Fold older turns** (⌥⇧⌘R) | Do the same and fold the final eligible entry in each older turn. |
+| `zm` | **Fold earlier content** (⇧⌘R, also in the title strip) | Show each turn’s final output and collapse the rest. |
+| `zM` | **Fold older turns** (⌥⇧⌘R) | Show only the last turn’s final output, if it has one. |
 | `zR` | **Unfold all** (⌥⌘R) | Clear every fold in the active pane. |
 
 `zm`, `zM`, and `zR` also work in TUI Normal mode and from the Desktop composer.
-Both bulk fold actions collapse the thoughts of the newest turn's final eligible
-entry, without folding its answer or looking back for earlier thoughts. They do
-not undo any existing folds. New and restored content starts expanded, and
-streaming previews stay open. Folding only changes your view: it does not edit
-the transcript or change what Zevria sends to the model.
+A final output is a completed answer (including its sources) or a submitted Plan.
+Prompts, thoughts, tool results, and web activity collapse to summaries, even
+when they share a response with the answer. Both commands reopen any final
+output they protect: `zm` after `zM` restores older answers without reopening
+their activity. If the last turn has no final output, `zM` does not fall back
+to an earlier answer. These commands act on the current pane and content only;
+new output arrives expanded. Folding does not edit the transcript or change
+what Zevria sends to the model.
 
 ### A short practice run
 

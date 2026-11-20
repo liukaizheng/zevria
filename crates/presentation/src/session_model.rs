@@ -95,6 +95,16 @@ pub struct RestorationInput {
 }
 
 impl SessionModel {
+    pub fn fold_transcript(
+        &self,
+        folds: &mut crate::fold::FoldState,
+        diagnostics_visible: bool,
+        action: crate::fold::TurnFold,
+    ) {
+        folds.fold_turns(&self.conversation, diagnostics_visible, action);
+        folds.fold_stream(self.session.stream_snapshot());
+    }
+
     pub fn jobs(&self) -> &crate::jobs::CommandJobsState {
         &self.jobs
     }
@@ -376,7 +386,7 @@ impl SessionModel {
                 effects.settled = Some((_kind, Settlement::Completed));
                 self.conversation.interrupt_executing_tool_calls();
                 self.conversation
-                    .commit_response(message, attempt_id.as_deref(), ToolCallStatus::Finished, header);
+                    .complete_response(message, attempt_id.as_deref(), header);
             }
             SessionEvent::TurnRecovered { turn_id, .. } => {
                 let Some((_kind, _)) = self.finish_turn(turn_id) else {

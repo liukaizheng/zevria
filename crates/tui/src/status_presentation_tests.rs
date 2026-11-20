@@ -71,7 +71,11 @@ fn render(
             separator_before: false,
             item_gap_before: false,
             selected,
-            folded,
+            folded: if folded {
+                zevria_presentation::fold::FoldMode::Preview
+            } else {
+                zevria_presentation::fold::FoldMode::Expanded
+            },
             reasoning_heading: false,
             appearance: crate::presentation::TranscriptAppearance::Native,
         },
