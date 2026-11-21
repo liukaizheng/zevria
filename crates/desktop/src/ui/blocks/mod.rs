@@ -23,7 +23,7 @@ use zevria_foundation::{CommandJobId, CommandJobSnapshot, CommandJobStatus};
 use zevria_presentation::{
     blocks::*,
     conversation::HistoryEntry,
-    fold::FoldKey,
+    fold::{ActivityDigest, FoldKey, SpanSummary, preview_line},
     jobs::{JobRow, JobsInspector, job_status_icon, notice_rows},
     shell::{self, ShellToken},
     status_icon::StatusIcon,
@@ -119,6 +119,7 @@ pub enum BlockKind {
         plain: bool,
     },
     Reasoning,
+    Activity,
     RangeSummary,
     Tool {
         status: StatusIcon,
@@ -175,6 +176,7 @@ pub struct BlockData {
     pub(super) grouped_targets: Vec<FoldKey>,
     pub(super) message: Option<MessageDisclosure>,
     pub(super) summary: bool,
+    pub(super) digest: ActivityDigest,
     pub primary: String,
     pub secondary: Option<String>,
     pub subtask: Option<zevria_foundation::SubtaskId>,
@@ -209,6 +211,7 @@ impl BlockData {
             grouped_targets: Vec::new(),
             message: None,
             summary: false,
+            digest: ActivityDigest::default(),
             secondary: None,
             subtask: None,
             image: None,
@@ -220,18 +223,20 @@ impl BlockData {
             header: None,
         }
     }
-    pub fn range(epoch: &str, start: usize, end: usize, count: usize) -> Self {
+    pub fn range(epoch: &str, start: usize, end: usize, summary: SpanSummary) -> Self {
+        let gutter = if summary.answer.is_some() {
+            Gutter::Label(Speaker::Zevria)
+        } else {
+            summary.digest.status.map_or(Gutter::None, Gutter::Glyph)
+        };
         let mut data = Self::new(
             format!("{epoch}-range-{start}"),
             BlockKind::RangeSummary,
-            Gutter::None,
-            String::new(),
+            gutter,
+            summary.answer.unwrap_or_else(|| summary.digest.label()),
             true,
         );
-        data.body = format!(
-            "{count} folded message{}",
-            if count == 1 { "" } else { "s" }
-        );
+        data.digest = summary.digest;
         data.target = Some(FoldKey::Span { start, end });
         data.row = start;
         data.expanded = false;
@@ -266,6 +271,7 @@ impl BlockData {
             false,
         );
         data.revision = block.revision;
+        data.digest.add_block(block);
         data.source = Some(block.id);
         data.secondary = block.secondary_copy();
         match &block.kind {
@@ -450,7 +456,7 @@ impl BlockData {
         data
     }
 }
-pub(super) use web::coalesce as coalesce_web_rows;
+pub(super) use web::coalesce as coalesce_rows;
 
 pub fn entry(
     epoch: &str,
@@ -626,7 +632,8 @@ pub fn entry(
 impl BlockData {
     pub fn tail_kind(&self) -> Option<TailKind> {
         match self.kind {
-            BlockKind::RangeSummary
+            BlockKind::Activity
+            | BlockKind::RangeSummary
             | BlockKind::Tool { .. }
             | BlockKind::Subtask { .. }
             | BlockKind::Web(_)
@@ -793,6 +800,8 @@ impl BlockView {
         }
         let metadata_changed = data.expanded != self.data.expanded
             || data.summary != self.data.summary
+            || data.digest != self.data.digest
+            || data.grouped_targets != self.data.grouped_targets
             || data.phase != self.data.phase
             || data.key != self.data.key
             || data.gutter != self.data.gutter
@@ -950,6 +959,7 @@ impl BlockView {
     }
     fn copy_primary(
         scope: Option<FoldKey>,
+        grouped_targets: &[FoldKey],
         primary: &str,
         controller: &Entity<SessionController>,
         cx: &mut App,
@@ -963,6 +973,17 @@ impl BlockView {
             let conversation = &controller.read(cx).model.visible().conversation;
             (start..=end)
                 .filter_map(|i| conversation.selected_message_text(i, false))
+                .chain(
+                    grouped_targets
+                        .iter()
+                        .filter_map(|target| match *target {
+                            FoldKey::Block { history_index, id } => conversation
+                                .selection_for_identity(history_index, id)
+                                .and_then(|selection| conversation.selected_plain_text(selection)),
+                            _ => None,
+                        })
+                        .filter(|_| matches!(scope, FoldKey::Span { .. })),
+                )
                 .collect::<Vec<_>>()
                 .join("\n\n")
         } else {
@@ -973,6 +994,7 @@ impl BlockView {
     fn actions(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let primary = self.data.primary.clone();
         let scope = self.copy_scope();
+        let grouped_targets = self.data.grouped_targets.clone();
         let controller = self.controller.clone();
         let focused = self.action_focus.iter().any(|f| f.is_focused(window));
         let mut actions = div()
@@ -990,13 +1012,21 @@ impl BlockView {
                         Some(FoldKey::Message { .. }) => "Copy message",
                         _ if matches!(self.data.kind, BlockKind::Tool { .. }) => "Copy input",
                         _ if matches!(self.data.kind, BlockKind::Web(_)) => "Copy web activity",
+                        _ if matches!(self.data.kind, BlockKind::Activity) => "Copy activity",
                         _ => "Copy text",
                     },
                 )
                 .track_focus(&self.action_focus[0])
-                .on_click(move |_, _, cx| Self::copy_primary(scope, &primary, &controller, cx)),
+                .on_click(move |_, _, cx| {
+                    Self::copy_primary(scope, &grouped_targets, &primary, &controller, cx)
+                }),
             );
-        if let Some(output) = self.data.secondary.clone().filter(|_| scope.is_none()) {
+        if let Some(output) = self
+            .data
+            .secondary
+            .clone()
+            .filter(|_| scope.is_none() && !self.data.summary)
+        {
             actions = actions.child(
                 style::icon_button("copy-output", IconName::Copy, "Copy output")
                     .track_focus(&self.action_focus[1])
@@ -1005,7 +1035,12 @@ impl BlockView {
                     }),
             );
         }
-        if let Some(id) = self.data.subtask.clone().filter(|_| scope.is_none()) {
+        if let Some(id) = self
+            .data
+            .subtask
+            .clone()
+            .filter(|_| scope.is_none() && !self.data.summary)
+        {
             let controller = self.controller.clone();
             actions = actions.child(
                 style::icon_button("inspect", IconName::Eye, "Inspect subtask")
@@ -1056,6 +1091,12 @@ impl BlockView {
     ) -> Div {
         let message = self.data.message.filter(|m| m.folded);
         let folded = message.is_some() || !self.data.expanded;
+        let preview = if folded {
+            preview_line(&self.data.body)
+        } else {
+            String::new()
+        };
+        let label = if preview.is_empty() { label } else { &preview };
         div()
             .relative()
             .group("log-block")
@@ -1094,13 +1135,8 @@ impl BlockView {
             )
     }
 
-    fn message_preview(
-        &self,
-        message: MessageDisclosure,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let text = match &self.data.kind {
+    fn message_preview_text(&self) -> String {
+        match &self.data.kind {
             BlockKind::Tool { name, summary, .. } if summary.is_empty() => {
                 tool_label(name).to_owned()
             }
@@ -1108,8 +1144,17 @@ impl BlockView {
             BlockKind::Subtask { title, .. } | BlockKind::Document { title, .. } => title.clone(),
             BlockKind::Image { label } => label.clone(),
             BlockKind::Web(row) => row.preview(),
-            _ => crate::disclosure::preview(&self.data.body),
-        };
+            _ => preview_line(&self.data.body),
+        }
+    }
+
+    fn message_preview(
+        &self,
+        message: MessageDisclosure,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let text = self.message_preview_text();
         let t = palette(cx);
         let thinking = matches!(self.data.kind, BlockKind::Reasoning);
         div()
@@ -1147,62 +1192,76 @@ impl BlockView {
             .child(self.actions(window, cx))
     }
 
-    fn summary_row(&self, ink: Hsla, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, status) = match &self.data.kind {
-            BlockKind::Prose {
-                role: PresentationRole::User,
-                ..
-            } => ("Prompt folded", None),
-            BlockKind::Reasoning => (
-                "Thinking",
-                (self.data.phase == Phase::Live).then_some(StatusIcon::Running),
-            ),
-            BlockKind::Tool { name, status, .. } => (tool_label(name), Some(*status)),
-            BlockKind::Subtask { status, .. } => ("Subtask", Some(*status)),
-            BlockKind::Document {
-                kind: DocumentKind::Handoff,
-                ..
-            } => ("Approved Plan handoff", None),
-            BlockKind::Document { .. } => ("Plan artifact", None),
-            BlockKind::Ensemble => ("Ensemble folded", None),
-            BlockKind::Notice { .. } => ("Notice folded", None),
-            BlockKind::Image { .. } => ("Image", None),
-            BlockKind::Web(web) => (web.label(), Some(web.status())),
-            _ => ("Message folded", None),
+    fn digest_row(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let range = matches!(self.data.kind, BlockKind::RangeSummary);
+        let answer = (range && self.data.gutter == Gutter::Label(Speaker::Zevria))
+            .then_some(self.data.body.as_str());
+        let counts = self.data.digest.label();
+        let label = match answer {
+            Some(answer) if !counts.is_empty() => format!("{answer}  {counts}"),
+            Some(answer) => answer.to_owned(),
+            None => counts.clone(),
         };
-        let message = self.data.message.filter(|message| message.folded);
-        div()
-            .id("bulk-summary")
-            .test_support()
-            .group("log-block")
-            .min_h(px(28.))
+        let t = palette(cx);
+        let contents = div()
+            .flex_1()
+            .min_w_0()
             .flex()
             .items_center()
             .gap(px(8.))
-            .when(message.is_none(), |row| {
-                row.children(self.block_disclosure(label, window, cx))
+            .when_some(answer, |row, answer| {
+                row.child(style::body().min_w_0().truncate().child(answer.to_owned()))
             })
-            .child(
-                style::meta()
-                    .text_color(palette(cx).text.muted)
-                    .min_w_0()
-                    .truncate()
-                    .child(label.to_owned()),
-            )
-            .when_some(status, |row, status| {
-                row.child(style::status_glyph(status, ink, cx))
-            })
-            .when_some(
-                message.filter(|message| message.blocks > 1),
-                |row, message| {
-                    row.child(
-                        style::meta()
-                            .text_color(palette(cx).text.muted)
-                            .child(format!("{} blocks", message.blocks)),
-                    )
+            .when(!counts.is_empty(), |row| {
+                row.child(
+                    style::meta()
+                        .min_w_0()
+                        .when(answer.is_some(), |counts| counts.max_w(relative(0.35)))
+                        .truncate()
+                        .text_color(t.text.muted)
+                        .child(counts),
+                )
+            });
+        let header = if let Some(target) = self.data.target {
+            self.disclosure(
+                if range {
+                    "range-disclosure"
+                } else {
+                    "block-disclosure"
                 },
+                target,
+                false,
+                label,
+                window,
+                cx,
             )
-            .child(div().flex_1())
+            .min_w_0()
+            .flex_1()
+            .child(
+                div()
+                    .w(px(28.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .child(chevron(false).text_color(t.text.muted)),
+            )
+            .child(contents)
+            .into_any_element()
+        } else {
+            contents.pl(px(28.)).min_h(px(28.)).into_any_element()
+        };
+        div()
+            .id(if range {
+                "range-summary"
+            } else {
+                "activity-summary"
+            })
+            .test_support()
+            .group("log-block")
+            .flex()
+            .min_w_0()
+            .items_center()
+            .child(header)
             .child(self.actions(window, cx))
     }
 
@@ -1296,7 +1355,16 @@ impl Render for BlockView {
                     "message-disclosure",
                     message.key,
                     !message.folded,
-                    format!("{} message", message.speaker.label()),
+                    if message.folded {
+                        let preview = self.message_preview_text();
+                        if preview.is_empty() {
+                            format!("{} message", message.speaker.label())
+                        } else {
+                            preview
+                        }
+                    } else {
+                        format!("{} message", message.speaker.label())
+                    },
                     window,
                     cx,
                 )
@@ -1345,13 +1413,6 @@ impl Render for BlockView {
             BlockKind::Prose { .. } | BlockKind::Notice { .. } | BlockKind::Ensemble
         );
         match &self.data.kind {
-            _ if self.data.summary
-                && (folded_message.is_some() || !matches!(self.data.kind, BlockKind::Web(_))) =>
-            {
-                content = content
-                    .max_w(px(style::PROSE))
-                    .child(self.summary_row(ink, window, cx));
-            }
             _ if folded_message.is_some() && !text_like => {
                 content = content.max_w(px(style::PROSE)).child(self.message_preview(
                     folded_message.unwrap(),
@@ -1388,40 +1449,13 @@ impl Render for BlockView {
                     content = content.children(web::sources_footer(self, cx));
                 }
             }
-            BlockKind::RangeSummary => {
-                let title = self.data.body.clone();
-                let summary = self
-                    .disclosure(
-                        "range-disclosure",
-                        self.data.target.unwrap(),
-                        false,
-                        title.clone(),
-                        window,
-                        cx,
-                    )
-                    .min_w_0()
-                    .flex_1()
-                    .child(
-                        div()
-                            .w(px(28.))
-                            .flex_shrink_0()
-                            .flex()
-                            .justify_center()
-                            .child(chevron(false).text_color(t.text.muted)),
-                    )
-                    .child(style::label().truncate().child(title));
-                content = content.max_w(px(style::PROSE)).child(
-                    div()
-                        .group("log-block")
-                        .flex()
-                        .min_w_0()
-                        .items_center()
-                        .child(summary)
-                        .child(self.actions(window, cx)),
-                );
+            BlockKind::Activity | BlockKind::RangeSummary => {
+                content = content
+                    .max_w(px(style::PROSE))
+                    .child(self.digest_row(window, cx));
             }
             BlockKind::Reasoning => {
-                let preview = crate::disclosure::preview(&self.data.body);
+                let preview = preview_line(&self.data.body);
                 let mut label = div()
                     .flex()
                     .w_full()
@@ -1987,6 +2021,7 @@ impl Render for BlockView {
                     {
                         Self::copy_primary(
                             this.copy_scope(),
+                            &this.data.grouped_targets,
                             &this.data.primary,
                             &this.controller,
                             cx,

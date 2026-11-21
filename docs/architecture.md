@@ -1130,10 +1130,12 @@ unfold the selected **message** in Message scope, or the selected **block/item**
 in Block scope. Normal and both Select scopes support:
 
 - `zR`: clear every Span, Message, Block, and Item key and transient preview fold;
-- `zm`: reopen each display turn's final output and collapse everything else;
-- `zM`: reopen only the last display turn's final output. If that turn has no
-  final output, no answer is expanded. `zm` after `zM` restores older final
-  outputs, not the rest of their turns.
+- `zm`: reopen each display turn's final output, preview prompts, and summarize
+  adjacent activity in one row;
+- `zM`: reopen only the last display turn's final output and preview older final
+  outputs alongside their activity counts. If the last turn has no final output,
+  no answer is expanded. `zm` after `zM` restores older final outputs, not the
+  rest of their turns.
 
 Display turns start at native Prompt headers, including ensemble prompts, Plan
 handoffs, and job continuations. Headerless entries join the current turn (a
@@ -1148,16 +1150,21 @@ incomplete attempts, errors, and trailing notices are not final output.
 
 The actions recompute Span keys around protected output, standalone prompt
 Message folds, and compaction dividers. A shared entry stays open, with bulk
-summaries keyed to each visible non-answer block. Protecting an answer or Plan
-clears only folds that would hide it. Span keys sit above Message keys, which sit
-above inner block/item folds: Message-scope `zo` or `za` on a range opens only
-that range, preserving nested folds; `zc` is a no-op there. Otherwise those
-chords act on the Message key. When a selection becomes covered, it returns to
-Message scope and snaps to the span's representative (its first entry). Message
-navigation treats each summary as one stop. Prompt jumps use the representative
-if the prompt itself is covered. Compaction dividers and hidden diagnostics
-are not fold targets. Any intervening key disarms the `z` prefix; in Insert,
-`z` is ordinary text.
+intent keyed to each visible non-answer block. Protecting an answer or Plan
+clears only folds that would hide it. Rendering derives activity runs from
+adjacent visible bulk-folded blocks. The run's first block owns the row, unless
+it immediately follows a span and leads the next entry: then the span absorbs
+that run. Hidden diagnostics do not split a run and are not counted.
+
+Span keys sit above Message keys, which sit above inner block/item folds. `zo`
+or `za` on a summary opens its whole group: a span and any absorbed blocks, or
+all members of a standalone run. Nested manual folds inside a span or message
+are preserved; `zc` is a no-op on a summary. A covered selection snaps to its
+visible representative, entering Message scope if represented by a span or
+folded message. Block navigation skips merged members. Prompt jumps use the
+representative if the prompt itself is covered. Compaction dividers and hidden
+diagnostics are not fold targets. Any intervening key disarms the `z` prefix;
+in Insert, `z` is ordinary text.
 
 Bulk intent applies to a snapshot, not to future content. An attempt that can
 grow in place is folded only by block identity; a bulk-only preview fold on an
@@ -1165,19 +1172,21 @@ answer is released at commit. A message-only tail fold expires with its latest
 snapshot, without hiding progress controls. New entries arrive expanded and
 previously expanded final answers aren't folded on starting another turn.
 
-A span summary is `▸ N folded messages · M more rows` (`1 folded message` for
-a singleton). Numbered prompt headers remain visible with their own disclosure. N counts eligible entries, excluding entries
-whose only blocks are hidden diagnostics. M sums the covered entries' wrapped
-content rows at the current width, honoring inner Message, Block, and Item folds
-but excluding inter-entry gaps. The summary always occupies one row, clipped in narrow panes; covered
-entries render no lines or gaps. `ConversationCache::entries()` remains the
-rendered view, while a separate covered-layout cache retains and refreshes the
-real layouts (including the representative), reusing semantic blocks on
-expansion. Every selectable representative item maps to the summary row, and
-only that row is selected even when the selection originated inside the span.
-In Message scope, `Enter` on a summary expands only that span and stays in
-Message scope on its first entry. `y` copies the hidden entries' full message
-texts, joined by blank lines, with the usual visibility and primary-copy rules;
+Both clients use the same semantic counts, for example `2 thoughts · 3 searches
+· 1 page ✓`. Counts describe work, not history entries or wrapped rows. A span
+with an older final output stores the first answer block's stable identity (or
+the Plan entry) and previews its first non-empty line without Markdown markers.
+Final answer parts aren't counted as interim prose. The preview takes priority
+over muted counts in a narrow pane. A span without a final output shows counts
+and an aggregate status glyph when applicable. Numbered prompts keep their
+header and first line.
+
+The summary always takes one row; covered entries render no lines or gaps.
+`ConversationCache::entries()` remains the rendered view, while a separate
+covered-layout cache keeps the real layouts for reuse on expansion. A standalone
+run's items share the lead's row range. `Enter` opens the selected summary; when
+opening a span, it stays in Message scope on the span's first entry. `y` copies
+all represented content with the usual visibility and primary-copy rules;
 `Ctrl-E` recalls only the representative entry, not the whole span.
 
 A message folded locally keeps its first visible block's role/native header
@@ -1193,16 +1202,15 @@ single-block message folds instead retain a typed logical header with resolved
 status/outcomes in the layout cache: `▸ ◆ label… <status> · M more rows` when space
 permits. No status is recovered by scanning strings or assuming the first body
 line contains it: multiline commands keep their actual outcome even though expanded
-rendering appends it to the last command line. Multi-block messages and span summaries remain aggregate views with no invented
-lifecycle status. Ordinary local folds leave a one-row body alone. Bulk folds
-instead render a compact disclosure even when the body fit on one row; a web
-summary retains status and counts but omits queries, page details, and cards.
+rendering appends it to the last command line. Message folds leave a single-row
+text body alone. Bulk activity rows use the worst available member status in the
+shared web-status ordering and omit details like web queries and page cards.
 
 Summaries use terminal display width and grapheme-safe truncation and stay within
 one physical row. Status space is reserved first; optional row counts and labels
 yield space. At widths too small for the standard prefix and outcome, a status-only
-fallback is used; zero-width areas render nothing. Grouped web outcomes retain the
-complete ordered counts when they fit. Otherwise they prioritize Failed, Denied,
+fallback is used for local tool folds; zero-width areas render nothing. Grouped
+web outcomes in local folds retain the complete ordered counts when they fit. Otherwise they prioritize Failed, Denied,
 Interrupted, Running, Pending, Updated, Dismissed, then Done, with an omission
 indicator when possible—mixed outcomes never degrade to a misleading lone `✓`.
 Expanded rendering and copying keep every outcome/count. Partial-launch folds stay

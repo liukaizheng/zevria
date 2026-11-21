@@ -427,7 +427,8 @@ impl App {
                         .conversation
                         .next_user_message(selection, diagnostics),
                 };
-                if let Some(target) = target.map(|target| self.span_representative(target))
+                if let Some(target) =
+                    target.map(|target| self.span_representative(target, SelectionScope::Message).0)
                     && let Some(state) = self.interaction.selection_state_mut()
                 {
                     state.set_selection(target);
@@ -442,35 +443,17 @@ impl App {
             }
             Action::Down | Action::Up => {
                 let next = action == Action::Down;
-                let target = match (scope, next) {
-                    (SelectionScope::Message, _) => {
-                        let from = self.span_boundary(selection, next);
-                        let target = if next {
-                            self.model
-                                .conversation
-                                .next_entry_selection(from, diagnostics)
-                        } else {
-                            self.model
-                                .conversation
-                                .previous_entry_selection(from, diagnostics)
-                        };
-                        self.span_representative(target)
-                    }
-                    (SelectionScope::Block, true) => self
-                        .model
-                        .conversation
-                        .next_block_selection(selection, diagnostics),
-                    (SelectionScope::Block, false) => self
-                        .model
-                        .conversation
-                        .previous_block_selection(selection, diagnostics),
-                };
+                let (target, target_scope) =
+                    self.adjacent_visible_selection(selection, scope, next);
                 // Boundary Up preserves reveal intent; Down can reveal a clipped last item.
                 if !next && target == selection {
                     return None;
                 }
                 if let Some(state) = self.interaction.selection_state_mut() {
                     state.set_selection(target);
+                    if target_scope == SelectionScope::Message && scope == SelectionScope::Block {
+                        state.enter_message_scope();
+                    }
                     state.request_reveal();
                 }
                 None
@@ -502,17 +485,49 @@ impl App {
                 None
             }
             Action::Confirm if scope == SelectionScope::Message => {
-                let history_index = selection.history_index;
-                if let Some((start, end)) = self.folds.span_containing(history_index) {
-                    self.apply_fold(|folds, _, _| folds.unfold(FoldKey::Span { start, end }));
-                    return None;
+                if let Some(key) = self.selection_fold_key(selection, scope)
+                    && self.folds.contains(key)
+                {
+                    self.apply_fold(|folds, model, diagnostics| {
+                        folds.open(model.conversation.history(), key, diagnostics)
+                    });
+                    if matches!(key, FoldKey::Span { .. }) {
+                        return None;
+                    }
                 }
-                if self.folds.entry(history_index).is_message_folded() {
-                    self.apply_fold(|folds, _, _| folds.unfold(FoldKey::Message { history_index }));
+                // The raw first block of an answer entry might be on the
+                // preceding span's row. Start block selection in this entry.
+                let mut target = selection;
+                while let Some(FoldKey::Span { .. }) =
+                    self.selection_fold_key(target, SelectionScope::Block)
+                {
+                    let next = self
+                        .model
+                        .conversation
+                        .next_block_selection(target, diagnostics);
+                    if next == target {
+                        return None;
+                    }
+                    target = next;
                 }
+                let (target, _) = self.span_representative(target, SelectionScope::Block);
                 if let Some(state) = self.interaction.selection_state_mut() {
                     state.enter_block_scope();
+                    state.set_selection(target);
                 }
+                None
+            }
+            Action::Confirm
+                if self
+                    .selection_fold_key(selection, scope)
+                    .is_some_and(|key| {
+                        self.folds.mode(key) == zevria_presentation::fold::FoldMode::Summary
+                    }) =>
+            {
+                let key = self.selection_fold_key(selection, scope).unwrap();
+                self.apply_fold(|folds, model, diagnostics| {
+                    folds.open(model.conversation.history(), key, diagnostics)
+                });
                 None
             }
             Action::Confirm => self
@@ -531,30 +546,118 @@ impl App {
     }
 
     pub(super) fn span_boundary(&self, selection: Selection, forward: bool) -> Selection {
-        self.folds
-            .span_containing(selection.history_index)
-            .map_or(selection, |(start, end)| Selection {
+        if let Some(FoldKey::Span { start, end }) =
+            self.selection_fold_key(selection, SelectionScope::Message)
+        {
+            Selection {
                 history_index: if forward { end } else { start },
                 ..selection
-            })
+            }
+        } else {
+            selection
+        }
     }
 
-    pub(super) fn span_representative(&self, selection: Selection) -> Selection {
-        let Some((start, _)) = self.folds.span_containing(selection.history_index) else {
-            return selection;
-        };
-        let representative = Selection {
-            history_index: start,
-            content_index: 0,
-        };
-        self.model
-            .conversation
-            .reconcile_selection(
-                representative,
+    fn selection_fold_key(&self, selection: Selection, scope: SelectionScope) -> Option<FoldKey> {
+        let conversation = &self.model.conversation;
+        let diagnostics = self.pane.diagnostics_visible();
+        let key = FoldKey::for_selection(conversation, selection, scope, diagnostics)?;
+        Some(
+            self.folds
+                .representative(conversation.history(), key, diagnostics),
+        )
+    }
+
+    fn fold_key_selection(&self, key: FoldKey) -> Option<Selection> {
+        let conversation = &self.model.conversation;
+        match key {
+            FoldKey::Block { history_index, id } => {
+                conversation.selection_for_identity(history_index, id)
+            }
+            FoldKey::Item {
+                history_index,
+                content_index,
+            } => Some(Selection {
+                history_index,
+                content_index,
+            }),
+            FoldKey::Span { .. } | FoldKey::Message { .. } => conversation.reconcile_selection(
+                Selection {
+                    history_index: key.history_index(),
+                    content_index: 0,
+                },
                 SelectionScope::Message,
                 self.pane.diagnostics_visible(),
-            )
-            .unwrap_or(representative)
+            ),
+        }
+    }
+
+    fn span_representative(
+        &self,
+        selection: Selection,
+        scope: SelectionScope,
+    ) -> (Selection, SelectionScope) {
+        let Some(key) = self.selection_fold_key(selection, scope) else {
+            return (selection, scope);
+        };
+        match key {
+            FoldKey::Span { .. } => (
+                self.fold_key_selection(key).unwrap_or(selection),
+                SelectionScope::Message,
+            ),
+            FoldKey::Message { .. } => (selection, SelectionScope::Message),
+            _ => (self.fold_key_selection(key).unwrap_or(selection), scope),
+        }
+    }
+
+    fn adjacent_visible_selection(
+        &self,
+        selection: Selection,
+        scope: SelectionScope,
+        forward: bool,
+    ) -> (Selection, SelectionScope) {
+        let conversation = &self.model.conversation;
+        let diagnostics = self.pane.diagnostics_visible();
+        let current = self.selection_fold_key(selection, scope);
+        let mut from = if scope == SelectionScope::Message {
+            self.span_boundary(selection, forward)
+        } else if forward
+            && let Some(key @ FoldKey::Block { .. }) = current
+            && self.folds.mode(key) == zevria_presentation::fold::FoldMode::Summary
+        {
+            self.folds
+                .group(conversation.history(), key, diagnostics)
+                .last()
+                .and_then(|&member| self.fold_key_selection(member))
+                .unwrap_or(selection)
+        } else {
+            selection
+        };
+        loop {
+            let next = match (scope, forward) {
+                (SelectionScope::Message, true) => {
+                    conversation.next_entry_selection(from, diagnostics)
+                }
+                (SelectionScope::Message, false) => {
+                    conversation.previous_entry_selection(from, diagnostics)
+                }
+                (SelectionScope::Block, true) => {
+                    conversation.next_block_selection(from, diagnostics)
+                }
+                (SelectionScope::Block, false) => {
+                    conversation.previous_block_selection(from, diagnostics)
+                }
+            };
+            if next == from {
+                return (selection, scope);
+            }
+            if self.selection_fold_key(next, scope) != current {
+                return self.span_representative(next, scope);
+            }
+            // Advance past hidden members of the current disclosure, not to
+            // its representative again. Block navigation stays entry-local.
+            from = next;
+        }
     }
 
     pub(super) fn user_entry_selection(
@@ -563,7 +666,9 @@ impl App {
         forward: bool,
         diagnostics: bool,
     ) -> Option<Selection> {
-        let current = self.span_representative(selection);
+        let current = self
+            .span_representative(selection, SelectionScope::Message)
+            .0;
         let mut from = self.span_boundary(selection, forward);
         loop {
             let target = if forward {
@@ -573,7 +678,7 @@ impl App {
                     .conversation
                     .previous_user_entry(from, diagnostics)?
             };
-            let representative = self.span_representative(target);
+            let representative = self.span_representative(target, SelectionScope::Message).0;
             if representative != current {
                 return Some(representative);
             }
@@ -593,24 +698,17 @@ impl App {
             Action::FoldToggle | Action::FoldClose | Action::FoldOpen
                 if self.interaction.is_selecting() =>
             {
-                if let Some(key) = self.interaction.active_selection().and_then(|active| {
-                    if active.scope == SelectionScope::Message
-                        && let Some((start, end)) =
-                            self.folds.span_containing(active.selection.history_index)
-                    {
-                        return Some(FoldKey::Span { start, end });
-                    }
-                    FoldKey::for_selection(
-                        &self.model.conversation,
-                        active.selection,
-                        active.scope,
-                        self.pane.diagnostics_visible(),
-                    )
-                }) {
-                    self.apply_fold(|folds, _, _| match action {
-                        Action::FoldToggle => folds.toggle(key),
+                if let Some(key) = self
+                    .interaction
+                    .active_selection()
+                    .and_then(|active| self.selection_fold_key(active.selection, active.scope))
+                {
+                    self.apply_fold(|folds, model, diagnostics| match action {
+                        Action::FoldToggle if !folds.contains(key) => folds.fold(key),
                         Action::FoldClose => folds.fold(key),
-                        Action::FoldOpen => folds.unfold(key),
+                        Action::FoldToggle | Action::FoldOpen => {
+                            folds.open(model.conversation.history(), key, diagnostics)
+                        }
                         _ => unreachable!(),
                     });
                 }
@@ -628,46 +726,62 @@ impl App {
             self.pane.diagnostics_visible(),
         );
         self.view.invalidate_rendered_geometry();
-        let representative = self.interaction.active_selection().and_then(|active| {
-            self.folds
-                .span_containing(active.selection.history_index)
-                .map(|_| self.span_representative(active.selection))
-        });
-        if let Some(selection) = self.interaction.selection_state_mut() {
-            if let Some(representative) = representative {
-                selection.set_selection(representative);
-                selection.enter_message_scope();
-                selection.request_reveal();
-            } else if selection.scope() == SelectionScope::Block
-                && self
-                    .folds
-                    .entry(selection.selection().history_index)
-                    .is_message_folded()
-            {
-                selection.enter_message_scope();
-            } else {
-                selection.request_reveal();
-            }
+        let changed_scope = self.reconcile_fold_selection();
+        if let Some(selection) = self.interaction.selection_state_mut()
+            // Keep the viewport on an in-place message preview; a span can
+            // move the selection to an entirely different history entry.
+            && (!changed_scope || self.folds.span_containing(selection.selection().history_index).is_some())
+        {
+            selection.request_reveal();
         }
     }
 
+    /// Snap to the rendered disclosure. Returns whether Block scope was dropped.
+    pub(super) fn reconcile_fold_selection(&mut self) -> bool {
+        let Some(active) = self.interaction.active_selection() else {
+            return false;
+        };
+        let (target, scope) = self.span_representative(active.selection, active.scope);
+        let changed_scope = scope != active.scope;
+        if let Some(state) = self.interaction.selection_state_mut() {
+            if changed_scope {
+                state.enter_message_scope();
+            }
+            if target != active.selection {
+                state.set_selection(target);
+            }
+        }
+        changed_scope
+    }
+
     pub(super) fn handle_yank(&mut self, selection: Selection, now: Instant) -> Option<UiAction> {
-        if self.interaction.selection_scope() == Some(SelectionScope::Message) {
-            self.interaction.clear_yank();
-            let (start, end) = self
-                .folds
-                .span_containing(selection.history_index)
-                .unwrap_or((selection.history_index, selection.history_index));
-            let texts = (start..=end)
-                .filter_map(|index| {
-                    self.model
-                        .conversation
-                        .selected_message_text(index, self.pane.diagnostics_visible())
-                })
-                .collect::<Vec<_>>();
-            return (!texts.is_empty()).then(|| UiAction::Copy {
-                text: texts.join("\n\n"),
-            });
+        let scope = self.interaction.selection_scope()?;
+        let conversation = &self.model.conversation;
+        if let Some(key) = self.selection_fold_key(selection, scope) {
+            let diagnostics = self.pane.diagnostics_visible();
+            let group = self.folds.group(conversation.history(), key, diagnostics);
+            if scope == SelectionScope::Message || group.len() > 1 {
+                self.interaction.clear_yank();
+                let mut texts = Vec::new();
+                for member in group {
+                    match member {
+                        FoldKey::Span { start, end } => {
+                            texts.extend((start..=end).filter_map(|row| {
+                                conversation.selected_message_text(row, diagnostics)
+                            }))
+                        }
+                        FoldKey::Message { history_index } => texts
+                            .extend(conversation.selected_message_text(history_index, diagnostics)),
+                        _ => texts.extend(
+                            self.fold_key_selection(member)
+                                .and_then(|target| conversation.selected_plain_text(target)),
+                        ),
+                    }
+                }
+                return (!texts.is_empty()).then(|| UiAction::Copy {
+                    text: texts.join("\n\n"),
+                });
+            }
         }
         if !self.model.conversation.selection_is_tool(selection) {
             self.interaction.clear_yank();

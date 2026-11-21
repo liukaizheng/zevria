@@ -167,8 +167,8 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
     .unwrap();
     cx.run_until_parked();
     let transcript = view.read_with(cx, |v, _| v.transcript.clone());
-    let before = transcript.read_with(cx, |v, _| {
-        v.test_data()
+    let before = transcript.read_with(cx, |v, cx| {
+        v.test_data(cx)
             .iter()
             .map(|b| (b.key.clone(), b.expanded))
             .collect::<Vec<_>>()
@@ -181,8 +181,8 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
     cx.run_until_parked();
     let (id, scope) = list(&mut receiver);
     assert_eq!(
-        transcript.read_with(cx, |v, _| v
-            .test_data()
+        transcript.read_with(cx, |v, cx| v
+            .test_data(cx)
             .iter()
             .map(|b| (b.key.clone(), b.expanded))
             .collect::<Vec<_>>()),
@@ -247,8 +247,8 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
         "é draft\nkept across selection"
     );
     assert_eq!(
-        transcript.read_with(cx, |v, _| v
-            .test_data()
+        transcript.read_with(cx, |v, cx| v
+            .test_data(cx)
             .iter()
             .map(|b| (b.key.clone(), b.expanded))
             .collect::<Vec<_>>()),

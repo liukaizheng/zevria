@@ -245,9 +245,9 @@ Folds do not edit the draft or affect what's saved or sent to the model.
 | TUI | Desktop View action | Effect |
 | --- | --- | --- |
 | `za` | **Toggle fold** (or click/Enter/Space on the disclosure) | Toggle the focused message, block/item, or folded range. |
-| `zc` / `zo` | **Fold** / **Unfold** (⌥⌘← / ⌥⌘→) | Set that fold without disturbing any nested folds. |
-| `zm` | **Fold earlier content** (⇧⌘R) | Show each turn’s final output and collapse the rest. |
-| `zM` | **Fold older turns** (⌥⇧⌘R) | Show only the last turn’s final output, if it has one. |
+| `zc` / `zo` | **Fold** / **Unfold** (⌥⌘← / ⌥⌘→) | Fold the target or open the whole summary, preserving nested folds. |
+| `zm` | **Fold earlier content** (⇧⌘R) | Preview prompts and summarize activity; keep each final output expanded. |
+| `zM` | **Fold older turns** (⌥⇧⌘R) | Preview older prompts and answers with activity counts; keep only the last final output expanded. |
 | `zR` | **Unfold all** (⌥⌘R) | Clear every fold in the current pane. |
 
 Both bulk actions reopen the final outputs they protect, including a manually
@@ -266,14 +266,18 @@ ranges and stay visible. Hidden diagnostics aren't fold targets. Bulk folds
 hide the current provisional bodies without hiding live progress or stop
 controls; new snapshots and newly committed answers are not folded by them.
 
-The chevron in the speaker gutter controls the whole message. Chevrons in the
-content column control individual blocks and items. A folded range takes one
-line, labeled **N folded messages**; opening it restores the rows and their
-nested folds. If a fold covers the focused target or the reader's anchor, that
-location moves to the visible representative. Local folds keep a short preview;
-bulk-folded rows show only a summary, not web queries, page details or cards.
-An expanded answer retains its Sources chips. Copy always uses the original
-content rather than the summary or preview.
+The chevron in the speaker gutter controls the whole message. A folded prompt
+shows its first line, just like a local fold. Chevrons in the content column
+control blocks, activity rows, and ranges. Adjacent folded activity uses one row,
+such as **2 thoughts · 3 searches · 1 page** with a status glyph, even across the
+boundary between earlier calls and the answer. An older turn's range previews
+the answer's first line alongside muted counts, or just counts if it has no
+final output. Web queries, page details, and cards stay hidden until opened.
+
+Opening a summary restores all the content it represents without clearing
+nested manual folds. If a fold covers the focused target or the reader's anchor,
+that location moves to the visible representative. An expanded answer retains
+its Sources chips. Copy uses the original content, not the summary or preview.
 
 **Previous turn** (⌥⌘↑) goes to the nearest start strictly above the live viewport
 top, or the current start if the top is mid-turn/mid-prompt. **Next turn** (⌥⌘↓)

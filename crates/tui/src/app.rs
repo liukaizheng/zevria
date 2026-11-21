@@ -1153,6 +1153,7 @@ impl App {
             self.folds.clear();
             self.view.reset_conversation();
         }
+        self.reconcile_fold_selection();
         let removed = change.take_removed_ensemble_runs();
         if removed.is_empty() {
             Vec::new()

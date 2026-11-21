@@ -50,7 +50,7 @@ fn stream(
     );
 }
 fn data(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
-    view.read_with(cx, |view, cx| view.transcript.read(cx).test_data())
+    view.read_with(cx, |view, cx| view.transcript.read(cx).test_data(cx))
 }
 fn thoughts(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
     data(view, cx)

@@ -39,53 +39,10 @@ pub fn can_commit(tail: TailIdentity, committed: TailIdentity, before: &str, aft
     tail == committed && (after.starts_with(before) || before.starts_with(after))
 }
 
-/// First supplied non-empty line, without Markdown presentation markers.
-pub fn preview(text: &str) -> String {
-    let line = text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .trim();
-    let line = line.trim_start_matches(['#', '>', '-', '+', '*', ' ']);
-    let mut result = String::new();
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '`' | '*' | '_' | '~' | '[' | ']' => {
-                if ch == ']' && chars.peek() == Some(&'(') {
-                    chars.next();
-                    let mut depth = 1;
-                    for ch in chars.by_ref() {
-                        if ch == '(' {
-                            depth += 1;
-                        }
-                        if ch == ')' {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            _ => result.push(ch),
-        }
-    }
-    result.trim().to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use zevria_presentation::blocks::DisplayTurn;
-    #[test]
-    fn preview_uses_only_provider_text() {
-        assert_eq!(
-            preview("\n\n### **Trace** the [source](file.rs) with `rg`\nnext line"),
-            "Trace the source with rg"
-        );
-        assert_eq!(preview(" \n "), "");
-    }
     #[test]
     fn tail_commit_transfer_matches_only_the_same_call_and_content() {
         let a = TailIdentity {

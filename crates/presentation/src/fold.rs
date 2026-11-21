@@ -1,11 +1,20 @@
 //! Pane-local, explicit folding intent. No fold state enters the transcript.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    ops::{AddAssign, RangeInclusive},
+};
 
 use crate::{
-    blocks::PresentationBlockId,
+    blocks::{
+        ConversationEntry, DiagnosticTone, PresentationBlock, PresentationBlockId,
+        PresentationBlockKind, PresentationRole, PresentedTool, TURN_CANCELLED, WebActionKind,
+        WebActivityPresentation, aggregate_web_status, incomplete_response_outcome,
+        native_header_status, subtask_icon,
+    },
     conversation::{ConversationState, FinalOutput, HistoryEntry, Selection, SelectionScope},
     session::StreamSnapshotId,
+    status_icon::StatusIcon,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -28,6 +37,15 @@ pub enum FoldKey {
 }
 
 impl FoldKey {
+    pub fn history_index(self) -> usize {
+        match self {
+            Self::Span { start, .. } => start,
+            Self::Message { history_index }
+            | Self::Block { history_index, .. }
+            | Self::Item { history_index, .. } => history_index,
+        }
+    }
+
     pub fn for_selection(
         conversation: &ConversationState,
         selection: Selection,
@@ -77,7 +95,7 @@ pub enum FoldMode {
     Expanded,
     /// Ordinary local fold: keep a one-line preview of the body.
     Preview,
-    /// Bulk fold: show the disclosure summary, never the body.
+    /// Bulk intent: derive a preview or a grouped summary from the content.
     Summary,
 }
 
@@ -85,6 +103,248 @@ impl FoldMode {
     pub fn is_folded(self) -> bool {
         self != Self::Expanded
     }
+}
+
+/// Counts of semantic work, not rendered rows, provider calls, or history entries.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ActivityDigest {
+    pub thoughts: usize,
+    pub tool_calls: usize,
+    pub searches: usize,
+    pub pages: usize,
+    pub web_other: usize,
+    pub subtasks: usize,
+    pub notes: usize,
+    pub notices: usize,
+    pub images: usize,
+    pub status: Option<StatusIcon>,
+}
+
+impl ActivityDigest {
+    fn add_status(&mut self, status: StatusIcon) {
+        self.status = Some(aggregate_web_status(
+            self.status.into_iter().chain([status]),
+        ));
+    }
+
+    fn add_web(&mut self, activity: &WebActivityPresentation) {
+        for action in &activity.actions {
+            match action.kind {
+                WebActionKind::Search => self.searches += 1,
+                WebActionKind::OpenPage => self.pages += 1,
+                WebActionKind::FindInPage | WebActionKind::Other => self.web_other += 1,
+            }
+        }
+        if activity.actions.is_empty() {
+            self.web_other += activity.members.len().max(1);
+        }
+        self.add_status(activity.status());
+    }
+
+    pub fn add_block(&mut self, block: &PresentationBlock) {
+        use PresentationBlockKind as Kind;
+        match &block.kind {
+            Kind::Reasoning { .. } => self.thoughts += 1,
+            Kind::WebActivity(activity) => self.add_web(activity),
+            Kind::Tool(PresentedTool::Acp(tool)) => {
+                if let Some(activity) = tool.hosted_activity() {
+                    self.add_web(&activity);
+                } else {
+                    self.tool_calls += 1;
+                    self.add_status(tool.presented_status().icon());
+                }
+            }
+            Kind::Tool(PresentedTool::Native { call, state }) => {
+                self.tool_calls += 1;
+                self.add_status(native_header_status(call, state));
+            }
+            Kind::Subtask { descriptor, .. } => {
+                self.subtasks += 1;
+                self.add_status(subtask_icon(descriptor.status));
+            }
+            Kind::Image { .. } => self.images += 1,
+            Kind::Placeholder(label) if label == "[image]" => self.images += 1,
+            Kind::Placeholder(_) => {
+                if let Some(outcome) = incomplete_response_outcome(&block.kind) {
+                    self.notices += 1;
+                    self.add_status(
+                        if outcome == zevria_content::ResponseAttemptOutcome::Interrupted {
+                            StatusIcon::Interrupted
+                        } else {
+                            StatusIcon::Failed
+                        },
+                    );
+                } else {
+                    self.notes += 1;
+                }
+            }
+            Kind::Diagnostic(diagnostic) => {
+                self.notices += 1;
+                self.add_status(if diagnostic.tone == DiagnosticTone::Error {
+                    StatusIcon::Failed
+                } else {
+                    StatusIcon::Denied
+                });
+            }
+            Kind::Error(_) => {
+                self.notices += 1;
+                self.add_status(StatusIcon::Failed);
+            }
+            Kind::Text { .. } | Kind::Plan(_) => self.notes += 1,
+        }
+    }
+
+    pub fn add_entry(&mut self, entry: &HistoryEntry, diagnostics_visible: bool) {
+        match entry {
+            HistoryEntry::Conversation(entry) => {
+                for block in &entry.blocks {
+                    if block.visible(diagnostics_visible) {
+                        self.add_block(block);
+                    }
+                }
+            }
+            HistoryEntry::Ensemble(ensemble) => {
+                self.notes += 1;
+                self.subtasks += ensemble.workers.len();
+                for worker in &ensemble.workers {
+                    self.add_status(StatusIcon::agent(worker.status));
+                }
+            }
+            HistoryEntry::Error(error) => {
+                self.notices += 1;
+                self.add_status(if error == TURN_CANCELLED {
+                    StatusIcon::Interrupted
+                } else {
+                    StatusIcon::Failed
+                });
+            }
+            HistoryEntry::JobNotice(..) => self.notices += 1,
+            HistoryEntry::PlanArtifact(_) | HistoryEntry::PlanHandoff(..) => self.notes += 1,
+            HistoryEntry::CompactionDivider => {}
+        }
+    }
+
+    pub fn label(self) -> String {
+        [
+            (self.thoughts, "thought", "thoughts"),
+            (self.tool_calls, "tool call", "tool calls"),
+            (self.searches, "search", "searches"),
+            (self.pages, "page", "pages"),
+            (self.web_other, "web action", "web actions"),
+            (self.subtasks, "subtask", "subtasks"),
+            (self.notes, "note", "notes"),
+            (self.notices, "notice", "notices"),
+            (self.images, "image", "images"),
+        ]
+        .into_iter()
+        .filter(|(count, ..)| *count > 0)
+        .map(|(count, one, many)| format!("{count} {}", if count == 1 { one } else { many }))
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
+}
+
+impl AddAssign for ActivityDigest {
+    fn add_assign(&mut self, rhs: Self) {
+        self.thoughts += rhs.thoughts;
+        self.tool_calls += rhs.tool_calls;
+        self.searches += rhs.searches;
+        self.pages += rhs.pages;
+        self.web_other += rhs.web_other;
+        self.subtasks += rhs.subtasks;
+        self.notes += rhs.notes;
+        self.notices += rhs.notices;
+        self.images += rhs.images;
+        if let Some(status) = rhs.status {
+            self.add_status(status);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BlockFold {
+    #[default]
+    Expanded,
+    Preview,
+    Activity(ActivityDigest),
+    Merged,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SpanSummary {
+    pub digest: ActivityDigest,
+    pub answer: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SpanAnswer {
+    // The first part supplies the preview. Keep the remaining identities so
+    // that no part of the final answer is counted as interim prose.
+    Answer(Vec<(usize, PresentationBlockId)>),
+    Plan(usize),
+}
+
+impl SpanAnswer {
+    fn reconcile(
+        self,
+        conversation: &ConversationState,
+        range: RangeInclusive<usize>,
+    ) -> Option<Self> {
+        match self {
+            Self::Answer(ids) => {
+                let mut resolved = ids.into_iter().map(|identity| {
+                    let (row, id) = conversation.resolved_identity(identity);
+                    (range.contains(&row) && conversation.selection_for_identity(row, id).is_some())
+                        .then_some((row, id))
+                });
+                let first = resolved.next()??;
+                Some(Self::Answer(
+                    std::iter::once(first).chain(resolved.flatten()).collect(),
+                ))
+            }
+            Self::Plan(row) => {
+                matches!(conversation.entry(row), Some(HistoryEntry::PlanArtifact(_)))
+                    .then_some(Self::Plan(row))
+            }
+        }
+    }
+
+    fn preview(&self, history: &[HistoryEntry], diagnostics_visible: bool) -> Option<String> {
+        let text = match *self {
+            Self::Answer(ref ids) => {
+                let &(row, id) = ids.first()?;
+                let HistoryEntry::Conversation(entry) = history.get(row)? else {
+                    return None;
+                };
+                let block = entry
+                    .blocks
+                    .iter()
+                    .find(|block| block.id == id && block.visible(diagnostics_visible))?;
+                match &block.kind {
+                    PresentationBlockKind::Text { text, .. } => preview_line(text),
+                    _ => preview_line(&block.primary_copy()),
+                }
+            }
+            Self::Plan(row) => {
+                let HistoryEntry::PlanArtifact(plan) = history.get(row)? else {
+                    return None;
+                };
+                let line = preview_line(&plan.markdown);
+                if line.is_empty() {
+                    preview_line(&plan.title)
+                } else {
+                    line
+                }
+            }
+        };
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SpanFold {
+    end: usize,
+    answer: Option<SpanAnswer>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,20 +363,22 @@ pub struct FoldState {
     stream: Option<StreamSnapshotId>,
     // Non-overlapping inclusive ranges, keyed by start. Rendering and turn
     // navigation can find a row's representative without scanning other folds.
-    spans: BTreeMap<usize, usize>,
+    spans: BTreeMap<usize, SpanFold>,
 }
 
 impl FoldState {
     pub fn contains(&self, key: FoldKey) -> bool {
         match key {
-            FoldKey::Span { start, end } => self.spans.get(&start) == Some(&end),
+            FoldKey::Span { start, end } => {
+                self.spans.get(&start).is_some_and(|span| span.end == end)
+            }
             _ => self.mode(key).is_folded(),
         }
     }
 
     pub fn mode(&self, key: FoldKey) -> FoldMode {
         if self.bulk.contains_key(&key)
-            || matches!(key, FoldKey::Span { start, end } if self.spans.get(&start) == Some(&end))
+            || matches!(key, FoldKey::Span { start, end } if self.spans.get(&start).is_some_and(|span| span.end == end))
         {
             FoldMode::Summary
         } else if self.folded.contains(&key) {
@@ -137,18 +399,21 @@ impl FoldState {
     pub fn fold(&mut self, key: FoldKey) {
         if let FoldKey::Span { start, end } = key {
             debug_assert!(start <= end);
+            if self.contains(key) {
+                return;
+            }
             // Supersede only overlapping spans; no nested folds are affected.
             let overlaps = self
                 .spans
                 .range(..=end)
                 .rev()
-                .take_while(|(_, old_end)| **old_end >= start)
+                .take_while(|(_, span)| span.end >= start)
                 .map(|(&old_start, _)| old_start)
                 .collect::<Vec<_>>();
             for old_start in overlaps {
                 self.spans.remove(&old_start);
             }
-            self.spans.insert(start, end);
+            self.spans.insert(start, SpanFold { end, answer: None });
         } else if !self.contains(key) {
             self.folded.insert(key);
         }
@@ -156,8 +421,8 @@ impl FoldState {
 
     pub fn unfold(&mut self, key: FoldKey) {
         match key {
-            FoldKey::Span { start, end } => {
-                if self.spans.get(&start) == Some(&end) {
+            FoldKey::Span { start, .. } => {
+                if self.contains(key) {
                     self.spans.remove(&start);
                 }
             }
@@ -189,16 +454,16 @@ impl FoldState {
             && start < end
         {
             let group = start..end;
-            let output = (fold == TurnFold::AllFinals || end == history.len())
-                .then(|| conversation.final_output(group.clone(), diagnostics_visible))
-                .flatten();
+            let output = conversation.final_output(group.clone(), diagnostics_visible);
+            let protect_output = fold == TurnFold::AllFinals || end == history.len();
             let mut span = None;
             for index in group {
                 let entry = &history[index];
-                let protected = output
+                let result = output
                     .as_ref()
                     .filter(|(at, _)| *at == index)
                     .map(|(_, output)| output);
+                let protected = result.filter(|_| protect_output);
                 let in_place = growing.contains(&index);
                 if protected.is_some()
                     || in_place
@@ -252,8 +517,22 @@ impl FoldState {
                         self.bulk.insert(message, BulkFold::Summary);
                     }
                     _ => {
-                        let (_, end) = span.get_or_insert((index, index));
-                        *end = index;
+                        let (_, span) = span.get_or_insert((
+                            index,
+                            SpanFold {
+                                end: index,
+                                answer: None,
+                            },
+                        ));
+                        span.end = index;
+                        if let Some(result) = result {
+                            span.answer = Some(match result {
+                                FinalOutput::Answer(ids) => {
+                                    SpanAnswer::Answer(ids.iter().map(|&id| (index, id)).collect())
+                                }
+                                FinalOutput::PlanArtifact => SpanAnswer::Plan(index),
+                            });
+                        }
                     }
                 }
             }
@@ -261,9 +540,9 @@ impl FoldState {
         }
     }
 
-    fn finish_span(&mut self, span: &mut Option<(usize, usize)>) {
-        if let Some((start, end)) = span.take() {
-            self.spans.insert(start, end);
+    fn finish_span(&mut self, span: &mut Option<(usize, SpanFold)>) {
+        if let Some((start, span)) = span.take() {
+            self.spans.insert(start, span);
         }
     }
 
@@ -283,8 +562,152 @@ impl FoldState {
     }
 
     pub fn span_containing(&self, history_index: usize) -> Option<(usize, usize)> {
-        let (&start, &end) = self.spans.range(..=history_index).next_back()?;
-        (history_index <= end).then_some((start, end))
+        let (&start, span) = self.spans.range(..=history_index).next_back()?;
+        (history_index <= span.end).then_some((start, span.end))
+    }
+
+    pub fn span_summary(
+        &self,
+        history: &[HistoryEntry],
+        start: usize,
+        diagnostics_visible: bool,
+    ) -> SpanSummary {
+        let Some(span) = self.spans.get(&start) else {
+            return SpanSummary::default();
+        };
+        let answer = span
+            .answer
+            .as_ref()
+            .and_then(|answer| answer.preview(history, diagnostics_visible));
+        let answer_parts = span.answer.as_ref().filter(|_| answer.is_some());
+        let mut digest = ActivityDigest::default();
+        for (row, entry) in history.iter().enumerate().take(span.end + 1).skip(start) {
+            match (answer_parts, entry) {
+                (Some(SpanAnswer::Answer(ids)), HistoryEntry::Conversation(entry)) => {
+                    for block in &entry.blocks {
+                        if block.visible(diagnostics_visible) && !ids.contains(&(row, block.id)) {
+                            digest.add_block(block);
+                        }
+                    }
+                }
+                (Some(SpanAnswer::Plan(plan)), HistoryEntry::PlanArtifact(_)) if *plan == row => {}
+                _ => digest.add_entry(entry, diagnostics_visible),
+            }
+        }
+        for block in self.absorbed_blocks(history, span.end, diagnostics_visible) {
+            digest.add_block(block);
+        }
+        SpanSummary { digest, answer }
+    }
+
+    fn absorbed_blocks<'a>(
+        &self,
+        history: &'a [HistoryEntry],
+        end: usize,
+        diagnostics_visible: bool,
+    ) -> impl Iterator<Item = &'a PresentationBlock> {
+        let row = end + 1;
+        let folds = self.entry(row);
+        history
+            .get(row)
+            .into_iter()
+            .flat_map(move |entry| match entry {
+                HistoryEntry::Conversation(entry) if folds.absorbing_span().is_some() => {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .flat_map(move |entry| folds.visible_modes(entry, diagnostics_visible))
+            .take_while(|&(_, _, mode)| mode == FoldMode::Summary)
+            .map(|(_, block, _)| block)
+    }
+
+    /// Return the target of the visible disclosure for a semantic key.
+    pub fn representative(
+        &self,
+        history: &[HistoryEntry],
+        key: FoldKey,
+        diagnostics_visible: bool,
+    ) -> FoldKey {
+        let history_index = key.history_index();
+        if let Some((start, end)) = self.span_containing(history_index) {
+            return FoldKey::Span { start, end };
+        }
+        let folds = self.entry(history_index);
+        if folds.is_message_folded() || matches!(key, FoldKey::Span { .. }) {
+            return FoldKey::Message { history_index };
+        }
+        if let Some(HistoryEntry::Conversation(entry)) = history.get(history_index) {
+            match key {
+                FoldKey::Message { .. } => {
+                    if let Some((start, end)) = folds.absorbing_span()
+                        && folds
+                            .visible_modes(entry, diagnostics_visible)
+                            .all(|(_, _, mode)| mode == FoldMode::Summary)
+                    {
+                        return FoldKey::Span { start, end };
+                    }
+                }
+                FoldKey::Block { id, .. } => {
+                    if let Some((lead, absorbed)) = folds.run_lead(entry, id, diagnostics_visible) {
+                        return if let Some((start, end)) = absorbed {
+                            FoldKey::Span { start, end }
+                        } else {
+                            FoldKey::Block {
+                                history_index,
+                                id: entry.blocks[lead].id,
+                            }
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        key
+    }
+
+    /// Members of one visual disclosure, in transcript order. Folds nested
+    /// inside a range or message keep their independent intent when it opens.
+    pub fn group(
+        &self,
+        history: &[HistoryEntry],
+        key: FoldKey,
+        diagnostics_visible: bool,
+    ) -> Vec<FoldKey> {
+        let key = self.representative(history, key, diagnostics_visible);
+        match key {
+            FoldKey::Span { end, .. } => std::iter::once(key)
+                .chain(
+                    self.absorbed_blocks(history, end, diagnostics_visible)
+                        .map(|block| FoldKey::Block {
+                            history_index: end + 1,
+                            id: block.id,
+                        }),
+                )
+                .collect(),
+            FoldKey::Block { history_index, id }
+                if let Some(HistoryEntry::Conversation(entry)) = history.get(history_index) =>
+            {
+                let group: Vec<_> = self
+                    .entry(history_index)
+                    .visible_modes(entry, diagnostics_visible)
+                    .skip_while(|(_, block, _)| block.id != id)
+                    .take_while(|&(_, _, mode)| mode == FoldMode::Summary)
+                    .map(|(_, block, _)| FoldKey::Block {
+                        history_index,
+                        id: block.id,
+                    })
+                    .collect();
+                if group.is_empty() { vec![key] } else { group }
+            }
+            _ => vec![key],
+        }
+    }
+
+    pub fn open(&mut self, history: &[HistoryEntry], key: FoldKey, diagnostics_visible: bool) {
+        for member in self.group(history, key, diagnostics_visible) {
+            self.unfold(member);
+        }
     }
 
     pub fn unfold_all(&mut self) {
@@ -301,8 +724,11 @@ impl FoldState {
 
     pub fn reconcile(&mut self, conversation: &ConversationState) {
         let history = conversation.history();
-        self.spans.retain(|&start, end| {
-            history.get(start..=*end).is_some_and(|entries| {
+        self.spans.retain(|&start, span| {
+            if let Some(answer) = span.answer.take() {
+                span.answer = answer.reconcile(conversation, start..=span.end);
+            }
+            history.get(start..=span.end).is_some_and(|entries| {
                 entries
                     .iter()
                     .any(|entry| entry.selectable_upper_bound() > 0)
@@ -365,11 +791,10 @@ impl FoldState {
             .iter()
             .chain(self.bulk.keys())
             .copied()
-            .chain(
-                self.spans
-                    .iter()
-                    .map(|(&start, &end)| FoldKey::Span { start, end }),
-            )
+            .chain(self.spans.iter().map(|(&start, span)| FoldKey::Span {
+                start,
+                end: span.end,
+            }))
             .collect()
     }
 }
@@ -425,6 +850,123 @@ impl EntryFolds<'_> {
         }
     }
 
+    /// A span can absorb this entry's leading activity run, but cannot reach
+    /// through another span or a (bulk or manual) message preview.
+    pub fn absorbing_span(self) -> Option<(usize, usize)> {
+        let previous = self.history_index.checked_sub(1)?;
+        let state = self.state?;
+        if self.is_message_folded() || self.span().is_some() {
+            return None;
+        }
+        state
+            .span_containing(previous)
+            .filter(|&(_, end)| end == previous)
+    }
+
+    fn visible_modes(
+        self,
+        entry: &ConversationEntry,
+        diagnostics_visible: bool,
+    ) -> impl Iterator<Item = (usize, &PresentationBlock, FoldMode)> {
+        entry
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, block)| {
+                block.visible(diagnostics_visible).then(|| {
+                    let mode = self.block_mode(block.id);
+                    // ACP can keep the prompt and response in one entry. A prompt
+                    // folded by block still reads like a prompt, not an activity.
+                    let mode = if mode == FoldMode::Summary
+                        && block.role == Some(PresentationRole::User)
+                    {
+                        FoldMode::Preview
+                    } else {
+                        mode
+                    };
+                    (index, block, mode)
+                })
+            })
+    }
+
+    /// One mode per original block index. Invisible blocks do not break a run
+    /// and have an unused `Expanded` slot to preserve those indices.
+    pub fn block_folds(
+        self,
+        entry: &ConversationEntry,
+        diagnostics_visible: bool,
+    ) -> Vec<BlockFold> {
+        let mut modes = vec![BlockFold::Expanded; entry.blocks.len()];
+        if !self.stream_summary
+            && self
+                .state
+                .is_none_or(|state| state.bulk.is_empty() && state.folded.is_empty())
+        {
+            return modes;
+        }
+        if self.is_message_folded() {
+            // Local previews still shape the message body's hidden row count.
+            for (index, block) in entry.blocks.iter().enumerate() {
+                if self.block_mode(block.id) == FoldMode::Preview {
+                    modes[index] = BlockFold::Preview;
+                }
+            }
+            return modes;
+        }
+        let mut absorbed = self.absorbing_span().is_some();
+        let mut lead = None;
+        for (index, block, mode) in self.visible_modes(entry, diagnostics_visible) {
+            match mode {
+                FoldMode::Summary if absorbed => modes[index] = BlockFold::Merged,
+                FoldMode::Summary => {
+                    let lead = *lead.get_or_insert_with(|| {
+                        modes[index] = BlockFold::Activity(ActivityDigest::default());
+                        index
+                    });
+                    if let BlockFold::Activity(digest) = &mut modes[lead] {
+                        digest.add_block(block);
+                    }
+                    if lead != index {
+                        modes[index] = BlockFold::Merged;
+                    }
+                }
+                FoldMode::Expanded | FoldMode::Preview => {
+                    absorbed = false;
+                    lead = None;
+                    if mode == FoldMode::Preview {
+                        modes[index] = BlockFold::Preview;
+                    }
+                }
+            }
+        }
+        modes
+    }
+
+    fn run_lead(
+        self,
+        entry: &ConversationEntry,
+        id: PresentationBlockId,
+        diagnostics_visible: bool,
+    ) -> Option<(usize, Option<(usize, usize)>)> {
+        if self.block_mode(id) != FoldMode::Summary {
+            return None;
+        }
+        let mut lead = None;
+        let mut absorbed = self.absorbing_span();
+        for (index, block, mode) in self.visible_modes(entry, diagnostics_visible) {
+            if mode == FoldMode::Summary {
+                lead.get_or_insert(index);
+            } else {
+                lead = None;
+                absorbed = None;
+            }
+            if block.id == id {
+                return Some((lead?, absorbed));
+            }
+        }
+        None
+    }
+
     pub fn is_item_folded(self, content_index: usize) -> bool {
         self.item_mode(content_index).is_folded()
     }
@@ -442,6 +984,41 @@ impl EntryFolds<'_> {
     }
 }
 
+/// First supplied non-empty line, without Markdown presentation markers.
+pub fn preview_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .trim();
+    let line = line.trim_start_matches(['#', '>', '-', '+', '*', ' ']);
+    let mut result = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '`' | '*' | '_' | '~' | '[' | ']' => {
+                if ch == ']' && chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut depth = 1;
+                    for ch in chars.by_ref() {
+                        if ch == '(' {
+                            depth += 1;
+                        }
+                        if ch == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => result.push(ch),
+        }
+    }
+    result.trim().to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +1026,14 @@ mod tests {
     use crate::conversation::{EnsembleHistory, ToolCallStatus};
     use rig_core::message::Message;
 
+    #[test]
+    fn preview_uses_only_provider_text() {
+        assert_eq!(
+            preview_line("\n\n### **Trace** the [source](file.rs) with `rg`\nnext line"),
+            "Trace the source with rg"
+        );
+        assert_eq!(preview_line(" \n "), "");
+    }
     fn message(text: &str) -> HistoryEntry {
         HistoryEntry::from_message(Message::user(text), ToolCallStatus::Finished).unwrap()
     }
@@ -612,6 +1197,191 @@ mod tests {
                 ToolFunction::new(ToolName::new("tool").unwrap(), serde_json::json!({})),
             )),
         ])
+    }
+
+    #[test]
+    fn digests_pluralize_and_aggregate_status_without_a_default_glyph() {
+        let mut digest = ActivityDigest::default();
+        assert_eq!(digest.label(), "");
+        digest += ActivityDigest {
+            thoughts: 1,
+            searches: 2,
+            status: Some(StatusIcon::Done),
+            ..ActivityDigest::default()
+        };
+        digest += ActivityDigest {
+            pages: 1,
+            web_other: 2,
+            notices: 1,
+            status: Some(StatusIcon::Failed),
+            ..ActivityDigest::default()
+        };
+        digest += ActivityDigest {
+            notes: 2,
+            images: 1,
+            ..ActivityDigest::default()
+        };
+        assert_eq!(
+            digest.label(),
+            "1 thought · 2 searches · 1 page · 2 web actions · 2 notes · 1 notice · 1 image"
+        );
+        assert_eq!(digest.status, Some(StatusIcon::Failed));
+    }
+
+    #[test]
+    fn visible_runs_skip_hidden_diagnostics_and_stop_at_answer_parts() {
+        use zevria_transcript::TranscriptItem;
+        let mut conversation = ConversationState::default();
+        conversation.restore(vec![
+            TranscriptItem::Message(Message::user("prompt")),
+            indexed_response(),
+        ]);
+        let HistoryEntry::Conversation(entry) = conversation.entry_mut(1).unwrap() else {
+            unreachable!()
+        };
+        let mut hidden = entry.blocks[0].clone();
+        hidden.id = PresentationBlockId(u64::MAX);
+        hidden.visibility = BlockVisibility::Diagnostics;
+        hidden.kind = PresentationBlockKind::Error("hidden diagnostic".into());
+        entry.blocks.insert(1, hidden);
+        let mut folds = FoldState::default();
+        folds.fold_turns(&conversation, false, TurnFold::AllFinals);
+        let HistoryEntry::Conversation(entry) = conversation.entry(1).unwrap() else {
+            unreachable!()
+        };
+        let modes = folds.entry(1).block_folds(entry, false);
+        assert!(
+            matches!(modes[0], BlockFold::Activity(d) if d.notes == 1 && d.searches == 1 && d.notices == 0)
+        );
+        assert_eq!(
+            modes[1..5],
+            [
+                BlockFold::Expanded,
+                BlockFold::Merged,
+                BlockFold::Expanded,
+                BlockFold::Expanded
+            ]
+        );
+        assert!(matches!(modes[5], BlockFold::Activity(d) if d.pages == 1 && d.web_other == 1));
+        assert_eq!(modes[6], BlockFold::Merged);
+        let first = block_key(&conversation, 1, 0);
+        let search = block_key(&conversation, 1, 2);
+        assert_eq!(
+            folds.representative(conversation.history(), search, false),
+            first
+        );
+        assert_eq!(
+            folds.group(conversation.history(), search, false),
+            [first, search]
+        );
+        folds.open(conversation.history(), first, false);
+        assert!(!folds.contains(first) && !folds.contains(search));
+        assert!(folds.contains(block_key(&conversation, 1, 5)));
+    }
+
+    #[test]
+    fn stream_snapshot_uses_one_activity_run() {
+        let HistoryEntry::Conversation(entry) =
+            HistoryEntry::from_message(tool_round(), ToolCallStatus::Executing).unwrap()
+        else {
+            unreachable!()
+        };
+        let modes = EntryFolds {
+            stream_summary: true,
+            ..EntryFolds::none()
+        }
+        .block_folds(&entry, false);
+        assert!(matches!(modes[0], BlockFold::Activity(d) if d.notes == 1 && d.tool_calls == 1));
+        assert_eq!(modes[1], BlockFold::Merged);
+    }
+
+    #[test]
+    fn span_absorbs_leading_activity_and_opens_it_without_touching_nested_folds() {
+        use zevria_transcript::TranscriptItem;
+        let mut conversation = ConversationState::default();
+        conversation.restore(vec![
+            TranscriptItem::Message(Message::user("prompt")),
+            TranscriptItem::Message(tool_round()),
+            indexed_response(),
+        ]);
+        let mut folds = FoldState::default();
+        let nested = block_key(&conversation, 1, 0);
+        folds.fold(nested);
+        folds.fold_turns(&conversation, false, TurnFold::AllFinals);
+        let history = conversation.history();
+        let span = FoldKey::Span { start: 1, end: 1 };
+        let lead = block_key(&conversation, 2, 0);
+        let search = block_key(&conversation, 2, 1);
+        let HistoryEntry::Conversation(entry) = &history[2] else {
+            unreachable!()
+        };
+        let modes = folds.entry(2).block_folds(entry, false);
+        assert_eq!(
+            modes[..3],
+            [BlockFold::Merged, BlockFold::Merged, BlockFold::Expanded]
+        );
+        assert_eq!(folds.representative(history, search, false), span);
+        assert_eq!(folds.group(history, span, false), [span, lead, search]);
+        let summary = folds.span_summary(history, 1, false);
+        assert_eq!(summary.answer, None);
+        assert_eq!(summary.digest.label(), "1 tool call · 1 search · 2 notes");
+        folds.open(history, span, false);
+        assert!(
+            [span, lead, search]
+                .into_iter()
+                .all(|key| !folds.contains(key))
+        );
+        assert_eq!(folds.mode(nested), FoldMode::Preview);
+        assert!(folds.contains(block_key(&conversation, 2, 4)));
+    }
+
+    #[test]
+    fn older_answer_preview_excludes_all_final_parts_and_reconciles_the_first_identity() {
+        use zevria_transcript::restored_attempt;
+        let item = indexed_response();
+        let attempt = restored_attempt(&item, 0).unwrap();
+        let mut conversation = state([prompt("first prompt", 1)]);
+        conversation.update_response_attempt(attempt.clone());
+        conversation.complete_response(item.display_message().unwrap(), Some(&attempt.id), None);
+        conversation.push_entry(prompt("second prompt", 2));
+        let mut folds = FoldState::default();
+        folds.fold_turns(&conversation, false, TurnFold::LastFinal);
+        let summary = folds.span_summary(conversation.history(), 1, false);
+        assert_eq!(summary.answer.as_deref(), Some("First part"));
+        assert_eq!(
+            summary.digest.label(),
+            "1 search · 1 page · 1 web action · 1 note"
+        );
+        let source = &attempt.presentation.last().unwrap().source;
+        let HistoryEntry::Conversation(entry) = conversation.entry_mut(1).unwrap() else {
+            unreachable!()
+        };
+        let first = entry
+            .blocks
+            .iter()
+            .position(|block| block.primary_copy() == "First part")
+            .unwrap();
+        let old = entry.blocks.remove(first).id;
+        conversation.alias_attempt_part((1, old), &attempt.id, source);
+        let (_, new) = conversation.resolved_identity((1, old));
+        assert_ne!(old, new);
+        folds.reconcile(&conversation);
+        assert!(
+            folds
+                .span_summary(conversation.history(), 1, false)
+                .answer
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Second"))
+        );
+        let HistoryEntry::Conversation(entry) = conversation.entry_mut(1).unwrap() else {
+            unreachable!()
+        };
+        entry.blocks.retain(|block| block.id != new);
+        folds.reconcile(&conversation);
+        assert_eq!(
+            folds.span_summary(conversation.history(), 1, false).answer,
+            None
+        );
     }
 
     #[test]
@@ -797,6 +1567,13 @@ mod tests {
             );
         }
         assert_eq!(folds.span_containing(4), None);
+        assert_eq!(
+            folds.span_summary(conversation.history(), 3, false),
+            SpanSummary {
+                digest: ActivityDigest::default(),
+                answer: Some("Plan body".into()),
+            }
+        );
         assert!(folds.entry(8).is_message_folded());
     }
 

@@ -102,7 +102,7 @@ fn frame(window: Window, cx: &mut TestAppContext) {
 }
 
 fn rows(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
-    view.read_with(cx, |view, cx| view.transcript.read(cx).test_data())
+    view.read_with(cx, |view, cx| view.transcript.read(cx).test_data(cx))
 }
 
 fn web_rows(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {

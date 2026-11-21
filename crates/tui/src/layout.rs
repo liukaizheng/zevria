@@ -14,10 +14,9 @@ pub(crate) mod prepare;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use rig_core::message::Message;
-use zevria_presentation::fold::FoldMode;
+use zevria_presentation::fold::{BlockFold, FoldMode, SpanSummary};
 
 use crate::app::{
     ActiveSelection, EntryFolds, FoldState, HeaderTimings, HistoryEntry, Selection, SelectionScope,
@@ -27,7 +26,7 @@ use crate::chrome::style_selected_line;
 use crate::layout::prepare::{
     ConversationBlockContext, FoldHeader, card_inset, fold_body_rows, render_compaction_divider,
     render_conversation_block, render_ensemble, render_error, render_job_notice,
-    render_plan_artifact, render_plan_handoff, truncate_line_to_width, wrapped_height,
+    render_plan_artifact, render_plan_handoff, span_summary_line, wrapped_height,
 };
 use crate::presentation::{
     ConversationEntry, NativeHeader, PresentationBlock, PresentationBlockId, PresentationBlockKind,
@@ -70,7 +69,8 @@ struct BlockFingerprint {
     separator_before: bool,
     item_gap_before: bool,
     selected: bool,
-    folded: FoldMode,
+    folded: BlockFold,
+    reasoning: bool,
     reasoning_heading: bool,
     appearance: TranscriptAppearance,
     inner_width: u16,
@@ -176,7 +176,8 @@ pub(crate) struct EntryLayout {
     width: u16,
     pub(crate) span: Option<SpanRole>,
     /// Summary-only fingerprint; covered entries retain their real layouts.
-    span_counts: Option<(usize, usize)>,
+    span_summary: Option<SpanSummary>,
+    absorbing_span: Option<usize>,
     entry_selection: EntrySelection,
     diagnostics_visible: bool,
     appearance: TranscriptAppearance,
@@ -221,6 +222,7 @@ impl EntryLayout {
             && self.entry_selection == entry_selection
             && self.message_folded == entry_folds.message_mode()
             && self.diagnostics_visible == diagnostics_visible
+            && self.absorbing_span == entry_folds.absorbing_span().map(|(start, _)| start)
             && match entry {
                 HistoryEntry::Conversation(entry) => self.conversation_matches(
                     entry,
@@ -306,25 +308,16 @@ impl EntryLayout {
         }
     }
 
-    fn refresh_summary(&mut self, hidden_rows: usize, count: usize, selected: bool) -> bool {
+    fn refresh_summary(&mut self, summary: SpanSummary, selected: bool) -> bool {
         let selection = if selected {
             EntrySelection::Message
         } else {
             EntrySelection::None
         };
-        if self.span_counts == Some((hidden_rows, count)) && self.entry_selection == selection {
+        if self.span_summary.as_ref() == Some(&summary) && self.entry_selection == selection {
             return false;
         }
-        let muted = Style::default().fg(crate::theme::theme().text.muted);
-        let plural = if count == 1 { "" } else { "s" };
-        let line = Line::from(vec![
-            Span::styled("▸ ", muted),
-            Span::raw(format!("{count} folded message{plural}")),
-            Span::styled(format!(" · {hidden_rows} more rows"), muted),
-        ]);
-        // Unlike a body fold, a span always occupies exactly one row, even in
-        // a very narrow pane or when it covers just one one-row entry.
-        let mut line = Line::from(truncate_line_to_width(&line, usize::from(self.width)));
+        let mut line = span_summary_line(&summary, self.width);
         if selected {
             style_selected_line(&mut line);
         }
@@ -332,7 +325,7 @@ impl EntryLayout {
         self.height = 1;
         self.entry_selection = selection;
         self.selection = selected.then_some(RowRange::new(0, 1));
-        self.span_counts = Some((hidden_rows, count));
+        self.span_summary = Some(summary);
         true
     }
 
@@ -577,7 +570,8 @@ impl EntryLayout {
             Self {
                 width,
                 span: None,
-                span_counts: None,
+                span_summary: None,
+                absorbing_span: entry_folds.absorbing_span().map(|(start, _)| start),
                 entry_selection,
                 diagnostics_visible,
                 appearance,
@@ -657,6 +651,7 @@ fn conversation_fingerprints<'a>(
 ) -> impl Iterator<Item = (usize, &'a PresentationBlock, BlockFingerprint)> + 'a {
     let mut current_role = None;
     let mut previous_item = None;
+    let folds = entry_folds.block_folds(entry, diagnostics_visible);
     entry
         .blocks
         .iter()
@@ -669,13 +664,20 @@ fn conversation_fingerprints<'a>(
                 PresentationBlockKind::Subtask { parent, .. } => parent,
                 _ => block.id,
             };
-            let item_gap_before = previous_item.is_some_and(|previous| previous != item);
-            previous_item = Some(item);
-            let (header_role, separator_before) = block_header(block, current_role, appearance);
-            if let Some(role) = block.role {
-                current_role = Some(role);
-            }
-            let reasoning = matches!(block.kind, PresentationBlockKind::Reasoning { .. });
+            let folded = folds[index];
+            let (header_role, separator_before, item_gap_before) = if folded == BlockFold::Merged {
+                (None, false, false)
+            } else {
+                let gap = previous_item.is_some_and(|previous| previous != item);
+                previous_item = Some(item);
+                let (role, separator) = block_header(block, current_role, appearance);
+                if let Some(role) = block.role {
+                    current_role = Some(role);
+                }
+                (role, separator, gap)
+            };
+            let reasoning = matches!(folded, BlockFold::Expanded | BlockFold::Preview)
+                && matches!(block.kind, PresentationBlockKind::Reasoning { .. });
             let fingerprint = BlockFingerprint {
                 id: block.id,
                 revision: block.revision,
@@ -684,13 +686,16 @@ fn conversation_fingerprints<'a>(
                 separator_before,
                 item_gap_before,
                 selected: !entry_folds.is_message_folded() && selection.includes(index),
-                folded: entry_folds.block_mode(block.id),
+                folded,
+                reasoning,
                 reasoning_heading: reasoning && !previous_reasoning,
                 appearance,
                 inner_width: effective_width(block, appearance, width),
                 prompt_group: block.prompt_group,
             };
-            previous_reasoning = reasoning;
+            if folded != BlockFold::Merged {
+                previous_reasoning = reasoning;
+            }
             (index, block, fingerprint)
         })
 }
@@ -714,6 +719,7 @@ fn build_conversation_blocks(
         .collect::<HashMap<_, _>>();
     let mut blocks = Vec::new();
     let mut prefix_height = 0_usize;
+    let mut activity_rows = None;
     let mut items = Vec::new();
     let mut rebuilt = 0;
     for (index, block, fingerprint) in conversation_fingerprints(
@@ -733,7 +739,24 @@ fn build_conversation_blocks(
             }
         };
         layout.refresh_header(timings);
-        items.push((index, layout.rows.shifted(prefix_height)));
+        let rows = layout.rows.shifted(prefix_height);
+        match fingerprint.folded {
+            BlockFold::Activity(_) => {
+                activity_rows = Some(rows);
+                items.push((index, rows));
+            }
+            BlockFold::Merged => {
+                // Absorbed blocks have no item geometry in this entry; their
+                // disclosure lives in the preceding span.
+                if let Some(rows) = activity_rows {
+                    items.push((index, rows));
+                }
+            }
+            _ => {
+                activity_rows = None;
+                items.push((index, rows));
+            }
+        }
         prefix_height = prefix_height.saturating_add(layout.height);
         lines.extend(layout.lines.iter().cloned());
         blocks.push(layout);
@@ -811,17 +834,6 @@ impl ConversationCache {
                     SelectionScope::Block => EntrySelection::Block(active.selection.content_index),
                 });
             let entry_previous_reasoning = previous_reasoning;
-            previous_reasoning = match entry {
-                HistoryEntry::Conversation(entry) => entry
-                    .blocks
-                    .iter()
-                    .rev()
-                    .find(|block| block.visible(diagnostics_visible))
-                    .map_or(previous_reasoning, |block| {
-                        matches!(block.kind, PresentationBlockKind::Reasoning { .. })
-                    }),
-                _ => false,
-            };
             let mut rendered = self.entries.get_mut(index).map(std::mem::take);
             let mut real = self.covered.remove(&index).or_else(|| {
                 if rendered
@@ -852,6 +864,21 @@ impl ConversationCache {
                 self.block_rebuilds += blocks;
             }
             let real = real.expect("ensured layout");
+            previous_reasoning = if role.is_none() {
+                real.conversation_blocks.as_ref().is_some_and(|blocks| {
+                    let last = if real.message_folded.is_folded() {
+                        blocks.first()
+                    } else {
+                        blocks
+                            .iter()
+                            .rev()
+                            .find(|block| block.fingerprint.folded != BlockFold::Merged)
+                    };
+                    last.map_or(previous_reasoning, |block| block.fingerprint.reasoning)
+                })
+            } else {
+                false
+            };
             let layout = if let Some(role) = role {
                 self.covered.insert(index, real);
                 rendered
@@ -869,14 +896,12 @@ impl ConversationCache {
             let Some(SpanRole::Summary { end }) = layout.span else {
                 continue;
             };
-            let hidden_rows = (start..=end).map(|index| self.covered[&index].height).sum();
-            let count = history[start..=end]
-                .iter()
-                .filter(|entry| entry.message_fold_eligible(diagnostics_visible))
-                .count();
             let selected = selected
                 .is_some_and(|active| (start..=end).contains(&active.selection.history_index));
-            let rebuilt = layout.refresh_summary(hidden_rows, count, selected);
+            let rebuilt = layout.refresh_summary(
+                folds.span_summary(history, start, diagnostics_visible),
+                selected,
+            );
             #[cfg(not(test))]
             let _ = rebuilt;
             #[cfg(test)]
@@ -1043,8 +1068,22 @@ impl ConversationCache {
                 .any(|block| block.fingerprint.id == id)
                 .then(|| offset.saturating_add(within.min(entry.height.saturating_sub(1))));
         }
+        let mut activity = None;
         for block in blocks {
+            match block.fingerprint.folded {
+                BlockFold::Activity(_) => activity = Some((offset, block.height)),
+                BlockFold::Merged => {}
+                _ => activity = None,
+            }
             if block.fingerprint.id == id {
+                if block.fingerprint.folded == BlockFold::Merged {
+                    if let Some((lead, height)) = activity {
+                        return Some(lead.saturating_add(within.min(height.saturating_sub(1))));
+                    }
+                    return entry
+                        .absorbing_span
+                        .map(|start| self.entries[..start].iter().map(EntryLayout::extent).sum());
+                }
                 return Some(offset.saturating_add(within.min(block.height.saturating_sub(1))));
             }
             offset = offset.saturating_add(block.height);
@@ -1563,13 +1602,12 @@ mod tests {
         let mut cache = ConversationCache::default();
         let mut folds = FoldState::default();
         cache.refresh(&history, None, 80, false, &folds);
-        let rows = cache.entries[..2].iter().map(|e| e.height).sum::<usize>();
         let rebuilt = cache.block_rebuilds;
         folds.fold(FoldKey::Span { start: 0, end: 1 });
         cache.refresh(&history, None, 80, false, &folds);
         assert_eq!(cache.block_rebuilds, rebuilt);
         assert_eq!(cache.covered.len(), 2);
-        assert_eq!(cache.entries[0].span_counts, Some((rows, 2)));
+        assert_eq!(cache.entries[0].lines[0].to_string(), "▸ 4 notes");
         assert_eq!(cache.entries[1].span, Some(SpanRole::Hidden { start: 0 }));
         assert_eq!(
             cache.selection_at_bottom(RowRange::new(0, 1)),
@@ -1602,12 +1640,9 @@ mod tests {
         });
         cache.refresh(&history, selected, 80, false, &folds);
         assert_eq!(cache.block_rebuilds, rebuilt + 1);
-        let inner_fold_rows = cache.entries[0].span_counts.unwrap().0;
-        assert!(inner_fold_rows < rows);
         folds.fold(FoldKey::Message { history_index: 0 });
         cache.refresh(&history, selected, 80, false, &folds);
-        assert!(cache.entries[0].span_counts.unwrap().0 < inner_fold_rows);
-        let before = cache.entries[0].span_counts;
+        let before = cache.entries[0].span_summary.clone();
         let HistoryEntry::Conversation(entry) = &mut history[1] else {
             unreachable!()
         };
@@ -1617,7 +1652,10 @@ mod tests {
         *text = "new wrapped content ".repeat(100);
         entry.blocks[1].touch();
         cache.refresh(&history, selected, 80, false, &folds);
-        assert_ne!(cache.entries[0].span_counts, before);
+        assert_eq!(
+            cache.entries[0].span_summary, before,
+            "wrapping does not change the digest"
+        );
         assert_eq!(
             cache.block_rebuilds,
             rebuilt + 2,
@@ -1631,6 +1669,11 @@ mod tests {
         assert!(!cache.covered.contains_key(&1));
         cache.refresh(&history, None, 80, false, &folds);
         assert!(cache.covered[&1].conversation_blocks.is_none());
+        assert!(
+            cache.entries[0].lines[0]
+                .to_string()
+                .contains("2 notes · 1 notice")
+        );
         folds.unfold(FoldKey::Span { start: 0, end: 1 });
         cache.refresh(&history, None, 80, false, &folds);
         assert!(cache.covered.is_empty());
@@ -1649,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn span_fold_counts_only_eligible_messages_and_recounts_diagnostics() {
+    fn span_fold_counts_only_visible_blocks_and_recounts_diagnostics() {
         let mut diagnostic = conversation_entry();
         let HistoryEntry::Conversation(entry) = &mut diagnostic else {
             unreachable!()
@@ -1668,10 +1711,9 @@ mod tests {
         folds.fold(FoldKey::Span { start: 0, end: 2 });
         for diagnostics in [false, true, false] {
             cache.refresh(&history, None, 80, diagnostics, &folds);
-            let rows = (0..3).map(|i| cache.covered[&i].height).sum::<usize>();
             assert_eq!(
-                cache.entries[0].span_counts,
-                Some((rows, if diagnostics { 3 } else { 2 }))
+                cache.entries[0].span_summary.as_ref().unwrap().digest.notes,
+                if diagnostics { 6 } else { 4 }
             );
             assert_eq!(cache.covered[&1].height > 0, diagnostics);
             assert_eq!(cache.entries[1].extent(), 0);
@@ -1702,10 +1744,7 @@ mod tests {
             assert_eq!(wrapped_height(&entry.lines, width), 1);
             assert_eq!(entry.span, Some(SpanRole::Summary { end: 0 }));
             if width >= 40 {
-                assert_eq!(
-                    entry.lines[0].to_string(),
-                    "▸ 1 folded message · 1 more rows"
-                );
+                assert_eq!(entry.lines[0].to_string(), "▸ 1 note");
             }
         }
     }
@@ -1735,7 +1774,7 @@ mod tests {
         assert!(
             blocks[1].fingerprint
                 == BlockFingerprint {
-                    folded: FoldMode::Preview,
+                    folded: BlockFold::Preview,
                     ..fingerprints[1]
                 }
         );

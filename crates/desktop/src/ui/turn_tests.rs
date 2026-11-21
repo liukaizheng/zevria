@@ -84,7 +84,7 @@ fn press(window: Window, key: &str, cx: &mut TestAppContext) {
     render(window, cx);
 }
 fn blocks(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
-    view.read_with(cx, |view, cx| view.transcript.read(cx).test_data())
+    view.read_with(cx, |view, cx| view.transcript.read(cx).test_data(cx))
 }
 fn summaries(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
     blocks(view, cx)
@@ -169,7 +169,11 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
     let runs = summaries(&view, cx);
     assert_eq!(
         runs.iter().map(|b| b.body.as_str()).collect::<Vec<_>>(),
-        ["3 folded messages", "1 folded message", "2 folded messages"]
+        [
+            "3 thoughts · 1 tool call · 1 note",
+            "1 note",
+            "3 thoughts · 1 note"
+        ]
     );
     let data = blocks(&view, cx);
     for index in [0, 5] {
@@ -178,12 +182,22 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
                 .any(|b| b.row == index && b.message.is_some_and(|m| m.folded))
         );
     }
-    let thoughts = data
-        .iter()
-        .filter(|b| b.row == 4 && matches!(b.kind, BlockKind::Reasoning))
-        .collect::<Vec<_>>();
-    assert_eq!(thoughts.len(), 2);
-    assert!(thoughts.iter().all(|b| b.summary && !b.expanded));
+    assert_eq!(
+        runs[0].grouped_targets.len(),
+        2,
+        "both thoughts belong to the range"
+    );
+    assert_eq!(data.iter().filter(|b| b.row == 4).count(), 1);
+    for (row, prompt) in [(0, "First prompt"), (5, "Second prompt")] {
+        let block = data.iter().find(|b| b.row == row).unwrap();
+        assert_eq!(block.body, prompt);
+        cx.update_window(window.into(), |_, window, _| {
+            let row = window.within(block.key.clone());
+            assert!(row.try_find("text-body").is_some());
+            assert_eq!(row.find("message-disclosure").label(), Some(prompt));
+        })
+        .unwrap();
+    }
     assert!(
         data.iter()
             .any(|b| b.body == "First final answer" && b.expanded)
@@ -228,8 +242,25 @@ fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAp
         );
     })
     .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window
+            .within(runs[0].key.clone())
+            .click("range-disclosure", cx);
+    })
+    .unwrap();
+    render(window, cx);
+    assert_eq!(
+        blocks(&view, cx)
+            .iter()
+            .filter(|b| b.row == 4 && b.expanded && matches!(b.kind, BlockKind::Reasoning))
+            .count(),
+        2
+    );
     press(window, Shortcut::FOLD_OLDER.0, cx);
     assert!(!blocks(&view, cx).iter().any(|b| b.row == 4));
+    let older = summaries(&view, cx).remove(0);
+    assert_eq!(older.body, "First final answer");
+    assert_eq!(older.digest.label(), "3 thoughts · 1 tool call · 1 note");
     dispatch(window, actions::FoldEarlierContent, cx);
     assert!(
         blocks(&view, cx)
@@ -377,7 +408,7 @@ fn range_restores_the_covered_anchor_and_focus_and_keeps_nested_folds(cx: &mut T
     let range = summaries(&view, cx).remove(0);
     cx.update_window(window.into(), |_, window, cx| {
         let summary = window.within(range.key.clone()).find("range-disclosure");
-        assert_eq!(summary.label(), Some("2 folded messages"));
+        assert_eq!(summary.label(), Some("1 thought · 1 note"));
         assert_eq!(summary.role(), Some(Role::Button));
         assert_eq!(summary.expanded(), Some(false));
         assert_eq!(summary.bounds().size.height, px(28.));
@@ -657,8 +688,13 @@ fn acp_history_uses_stable_block_folds_and_no_native_header_is_required(cx: &mut
     let data = blocks(&view, cx);
     let thought = data
         .iter()
-        .find(|b| matches!(b.kind, BlockKind::Reasoning))
+        .find(|b| matches!(b.kind, BlockKind::Activity))
         .unwrap();
+    assert_eq!(thought.digest.label(), "1 thought");
+    assert!(
+        data.iter()
+            .any(|b| b.body == "Check the test" && !b.expanded)
+    );
     assert!(matches!(thought.target, Some(FoldKey::Block { .. })));
     assert!(!thought.expanded);
     assert!(
@@ -858,10 +894,11 @@ fn bulk_shortcuts_and_title_action_hide_web_details_not_answers_or_sources(
         let assert_rendered = |cx: &mut TestAppContext, expanded_web, expanded_older| {
             cx.update_window(window.into(), |_, window, _| {
                 assert_eq!(
-                    window
-                        .within(search.key.clone())
-                        .try_find("web-detail")
-                        .is_some(),
+                    window.try_find(search.key.clone()).is_some()
+                        && window
+                            .within(search.key.clone())
+                            .try_find("web-detail")
+                            .is_some(),
                     expanded_web
                 );
                 assert_eq!(
@@ -904,6 +941,25 @@ fn bulk_shortcuts_and_title_action_hide_web_details_not_answers_or_sources(
         focus_composer(window, &view, cx);
         press(window, Shortcut::FOLD_EARLIER.0, cx);
         assert_rendered(cx, false, true);
+        let activities: Vec<_> = blocks(&view, cx)
+            .into_iter()
+            .filter(|row| matches!(row.kind, BlockKind::Activity))
+            .collect();
+        assert_eq!(activities.len(), 2, "the answer separates the runs");
+        assert_eq!(activities[0].digest.label(), "1 search · 1 note");
+        assert_eq!(activities[0].grouped_targets, [search.target.unwrap()]);
+        assert!(
+            activities[0].primary.contains("Interim prose")
+                && activities[0].primary.contains("bees")
+        );
+        cx.update_window(window.into(), |_, window, _| {
+            let button = window
+                .within(activities[0].key.clone())
+                .find("block-disclosure");
+            assert_eq!(button.label(), Some("1 search · 1 note"));
+            assert_eq!(button.expanded(), Some(false));
+        })
+        .unwrap();
         assert!(
             blocks(&view, cx)
                 .iter()
@@ -911,12 +967,43 @@ fn bulk_shortcuts_and_title_action_hide_web_details_not_answers_or_sources(
         );
         press(window, Shortcut::FOLD_OLDER.0, cx);
         assert_rendered(cx, false, false);
+        let older_summary = summaries(&view, cx)
+            .into_iter()
+            .find(|row| row.body == "Older reply")
+            .unwrap();
+        cx.update_window(window.into(), |_, window, _| {
+            let button = window
+                .within(older_summary.key.clone())
+                .find("range-disclosure");
+            assert_eq!(button.label(), Some("Older reply"));
+            assert_eq!(button.bounds().size.height, px(28.));
+        })
+        .unwrap();
         cx.update_window(window.into(), |_, window, cx| {
             window.click("fold-earlier-content", cx)
         })
         .unwrap();
         render(window, cx);
         assert_rendered(cx, false, true);
+        cx.update_window(window.into(), |_, window, cx| {
+            window
+                .within(activities[0].key.clone())
+                .click("block-disclosure", cx);
+        })
+        .unwrap();
+        render(window, cx);
+        let reopened = blocks(&view, cx);
+        assert!(
+            reopened
+                .iter()
+                .any(|row| row.body == "Interim prose" && row.expanded)
+        );
+        assert!(
+            reopened
+                .iter()
+                .any(|row| row.target == search.target && row.expanded)
+        );
+        press(window, Shortcut::FOLD_EARLIER.0, cx);
         focus(window, &view, open_find, open_find.target.unwrap(), cx);
         press(window, Shortcut::UNFOLD.0, cx);
         cx.update_window(window.into(), |_, window, _| {
@@ -926,12 +1013,7 @@ fn bulk_shortcuts_and_title_action_hide_web_details_not_answers_or_sources(
                     .try_find("web-action-list")
                     .is_some()
             );
-            assert!(
-                window
-                    .within(search.key.clone())
-                    .try_find("web-detail")
-                    .is_none()
-            );
+            assert!(window.try_find(search.key.clone()).is_none());
         })
         .unwrap();
         press(window, Shortcut::UNFOLD_ALL.0, cx);
@@ -986,7 +1068,7 @@ fn hosted_attempt_bulk_fold_does_not_hide_new_blocks_or_the_in_place_commit(
     assert!(
         folded
             .iter()
-            .any(|b| b.body == "Final reply" && b.summary && !b.expanded)
+            .any(|b| matches!(b.kind, BlockKind::Activity) && b.digest.notes == 2 && !b.expanded)
     );
     assert!(folded.iter().any(|b| matches!(&b.kind, BlockKind::Live(_))));
     attempt.hosted_activity.push(later);

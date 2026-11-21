@@ -1210,7 +1210,7 @@ fn user_message_surfaces_include_body_folds_but_not_aggregate_fold_summaries() {
     app.handle_event(key(KeyCode::Char('m')));
     let buffer = rendered_buffer(&mut app, 80, 20);
     let content = conversation_content_area(&buffer, false);
-    assert!(buffer_row_text(&buffer, content.y).contains("▸ 2 folded messages"));
+    assert!(buffer_row_text(&buffer, content.y).contains("▸ 2 notes"));
     assert!(app.view_cache().entries()[0].decorations.is_empty());
     for y in content.y..content.bottom() {
         assert_conversation_row_background(&buffer, content, y, ZEVRIA_DARK.surfaces.canvas);

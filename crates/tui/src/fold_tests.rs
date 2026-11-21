@@ -246,7 +246,7 @@ fn turn_folds_show_prompt_on_first_frame_when_content_fits() {
         for (width, height) in [(40, 20), (80, 30), (120, 40)] {
             let mut app = scrolled_turns_with_short_finals(1, width, height);
             let first = conversation_frame_text(&first_fold_frame(&mut app, suffix, width, height));
-            let summary = "▸ Folded";
+            let summary = "▸ turn 1 prompt";
             assert!(laid_out_transcript_text(&app).contains(summary));
             assert!(
                 first.contains(summary),
@@ -308,7 +308,7 @@ fn z_m_shows_multi_turn_prompts_on_first_frame_and_keeps_latest_final_expanded()
         }
         assert_eq!(app.folds().span_containing(3), Some((1, 3)));
         assert!(app.folds().span_containing(7).is_none());
-        assert!(!first.contains("final 1"));
+        assert!(first.contains("▸ final 1"));
         assert!(!first.contains("finished 1"));
         assert!(first.contains("final 2") && first.contains("finished 2"));
         assert!(!first.contains("▸ final 2"));
@@ -345,9 +345,9 @@ fn z_m_preserves_follow_and_selection_navigation_at_different_sizes() {
         assert_eq!(app.selection(), cursor(7, 0));
         assert!(!app.view_follow());
         for (event, selected, visible) in [
-            (key(KeyCode::Char('k')), cursor(5, 0), "▸ 2 folded messages"),
-            (key(KeyCode::Char('k')), cursor(4, 0), "▸ Folded"),
-            (ctrl('u'), cursor(0, 0), "▸ Folded"),
+            (key(KeyCode::Char('k')), cursor(5, 0), "▸ 2 notes"),
+            (key(KeyCode::Char('k')), cursor(4, 0), "▸ turn 2 prompt"),
+            (ctrl('u'), cursor(0, 0), "▸ turn 1 prompt"),
         ] {
             app.handle_event(event);
             assert_eq!(app.selection(), selected);
@@ -390,20 +390,13 @@ fn zm_keeps_prompt_rows_and_collapses_earlier_calls_leaving_the_last_expanded() 
         let rebuilt = app.view_cache().block_rebuilds;
         chord(&mut app, 'm');
         let text = rendered_text(&mut app, 100, 50);
-        assert_eq!(
-            text.matches(&format!("▸ 2 folded messages · {rows} more rows"))
-                .count(),
-            1,
-            "{text}"
-        );
+        assert_eq!(text.matches("▸ 4 notes").count(), 1, "{text}");
         assert!(text.contains("Assistant · #(1 - 3)"));
         assert!(text.contains("Assistant · #(2 - 1)"));
         for turn in [1, 2] {
             assert!(text.contains(&format!("You · #{turn}")));
-            assert!(!text.contains(&format!("turn {turn} prompt")));
+            assert!(text.contains(&format!("turn {turn} prompt")));
         }
-        assert!(!text.contains("▸ 1 message"));
-        assert!(!text.contains("▸ 1 folded message"));
         for hidden in ["#(1 - 1)", "#(1 - 2)"] {
             assert!(!text.contains(hidden), "{hidden}");
         }
@@ -487,7 +480,7 @@ fn both_turn_chords_fold_latest_thoughts_but_not_the_answer_or_later_output() {
             assert!(!message_folded(&app, 3));
             rendered_text(&mut app, 100, 50);
             let text = laid_out_transcript_text(&app);
-            assert!(text.matches("▸ Thinking").count() >= 2, "{text}");
+            assert_eq!(text.matches("▸ 2 thoughts").count(), 1, "{text}");
             assert!(text.contains("Full answer detail"));
             assert!(
                 !text.contains("First thought detail") && !text.contains("Second thought detail")
@@ -496,7 +489,7 @@ fn both_turn_chords_fold_latest_thoughts_but_not_the_answer_or_later_output() {
             app.select_for_test(cursor(3, 0));
             chord(&mut app, 'o');
             assert!(!folded(&app, 3, 0));
-            assert!(folded(&app, 3, 1));
+            assert!(!folded(&app, 3, 1));
             start_span_turn(&mut app, 3, "New prompt");
             span_call(&mut app, 3, 1, response(), true);
             assert!(!(0..3).any(|content| folded(&app, 5, content)));
@@ -541,15 +534,16 @@ fn turn_folds_preserve_final_entry_policy_in_normal_and_both_select_scopes() {
             let text = laid_out_transcript_text(&app);
             let older_hidden = suffix == 'M';
             assert_eq!(
-                text.matches("▸ 2 folded messages ·").count(),
+                text.matches("▸ 4 notes").count(),
                 if older_hidden { 1 } else { 3 }
             );
             for (turn, prompt) in [(1, 0), (2, 4), (3, 8)] {
                 assert!(text.contains(&format!("You · #{turn}")));
-                assert!(!text.contains(&format!("turn {turn} prompt")));
+                assert!(text.contains(&format!("turn {turn} prompt")));
                 assert!(message_folded(&app, prompt));
                 assert_eq!(app.folds().span_containing(prompt), None);
                 let hidden = older_hidden && turn < 3;
+                assert_eq!(text.contains(&format!("▸ call {turn}-3")), hidden);
                 assert_eq!(
                     app.folds().span_containing(prompt + 1),
                     Some((prompt + 1, prompt + if hidden { 3 } else { 2 }))
@@ -612,7 +606,8 @@ fn turn_folds_preserve_final_entry_policy_in_normal_and_both_select_scopes() {
             assert_eq!(app.folds().span_containing(13), Some((13, 14)));
             assert!(!message_folded(&app, 15));
             let text = laid_out_transcript_text(&app);
-            assert_eq!(text.contains("call 3-3"), suffix == 'm');
+            assert!(text.contains("call 3-3"));
+            assert_eq!(text.contains("▸ call 3-3"), suffix == 'M');
             assert!(text.contains("Assistant · #(4 - 3)"));
             assert!(!text.contains("▸ call 4-3"));
         }
@@ -646,8 +641,9 @@ fn turn_folds_respect_leading_headerless_run_dividers_and_acp_panes() {
             "divider never folds"
         );
         let text = laid_out_transcript_text(&app);
-        assert!(text.contains("You · #1") && !text.contains("numbered prompt"));
-        assert_eq!(text.contains("leading last"), suffix == 'm');
+        assert!(text.contains("You · #1") && text.contains("numbered prompt"));
+        assert!(text.contains("leading last"));
+        assert_eq!(text.contains("▸ leading last"), suffix == 'M');
         assert!(!text.contains("last call"));
         assert!(text.contains("Plan artifact"));
         let special_offset = app.view_cache().entries()[..6]
@@ -687,9 +683,9 @@ fn turn_folds_respect_leading_headerless_run_dividers_and_acp_panes() {
             rendered_text(&mut app, 100, 25);
             assert_eq!(app.folds().span_containing(0), Some((0, 1)));
             let text = laid_out_transcript_text(&app);
-            assert!(text.contains("▸ 2 folded messages ·"));
+            assert!(text.contains("▸ 4 notes"));
             assert!(!text.contains("cycle 0") && !text.contains("cycle 1"));
-            assert!(!text.contains("cycle 2") && text.contains("answer 2"));
+            assert!(text.contains("cycle 2") && text.contains("answer 2"));
             assert!(app.view_cache().entries()[0].decorations.is_empty());
             assert!(
                 app.view_cache().entries()[0]
@@ -749,7 +745,7 @@ fn span_summary_selection_navigation_enter_and_yank() {
     assert_eq!(app.selection_scope(), Some(SelectionScope::Message));
     let buffer = rendered_buffer(&mut app, 100, 35);
     let summary_y = (0..buffer.area.height)
-        .find(|&y| buffer_row_text(&buffer, y).contains("▸ 2 folded messages"))
+        .find(|&y| buffer_row_text(&buffer, y).contains("▸ 4 notes"))
         .unwrap();
     let selection_bg = crate::chrome::selection_style().bg.unwrap();
     for y in 0..buffer.area.height {
@@ -866,16 +862,12 @@ fn zm_keeps_new_entries_expanded_and_survives_edits() {
     }
     rendered_text(&mut app, 60, 25);
     let after = line_text(&app.view_cache().entries()[1].lines[0]);
-    assert_ne!(before, after, "width changes recount covered wrapped rows");
+    assert_eq!(before, after, "digests count blocks, not wrapped rows");
     assert_eq!(app.folds().span_containing(1), Some((1, 2)));
     app.select_message_for_test(cursor(1, 0));
     chord(&mut app, 'o');
     rendered_text(&mut app, 60, 25);
-    let rows = app.view_cache().entries()[1..=2]
-        .iter()
-        .map(|entry| entry.height)
-        .sum::<usize>();
-    assert_eq!(after, format!("▸ 2 folded messages · {rows} more rows"));
+    assert_eq!(after, "▸ 2 notes");
     chord(&mut app, 'm');
     assert_eq!(
         app.folds().span_containing(1),
@@ -1548,6 +1540,122 @@ fn bulk_fold_hides_only_the_current_streaming_snapshot() {
     assert!(app.view_cache().streaming().is_none());
 }
 
+fn foldable_web_reply() -> TranscriptItem {
+    TranscriptItem::provider_message(zevria_model::ProviderReplay::openai_responses(
+        ModelProfileRef::new("fixture", "model"),
+        vec![
+            json!({"type":"reasoning","id":"t1","summary":[{"type":"summary_text","text":"First thought detail"}]}),
+            json!({"type":"web_search_call","id":"s","status":"completed","action":{"type":"search","query":"bees"}}),
+            json!({"type":"reasoning","id":"t2","summary":[{"type":"summary_text","text":"Second thought detail"}]}),
+            json!({"type":"web_search_call","id":"p","status":"completed","action":{"type":"open_page","url":"https://example.org/bees"}}),
+            json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":"### Field notes\n\nAnswer details"}]}),
+        ],
+    )).unwrap()
+}
+
+#[test]
+fn bulk_web_run_is_one_row_and_one_block_navigation_stop() {
+    for width in [40, 80, 120] {
+        let mut app = App::new();
+        app.restore(vec![
+            TranscriptItem::Message(Message::user("What did you find?")),
+            foldable_web_reply(),
+        ]);
+        chord(&mut app, 'm');
+        let frame = conversation_frame_text(&rendered_buffer(&mut app, width, 40));
+        assert_eq!(frame.matches('▸').count(), 1, "{frame}");
+        assert!(frame.contains("What did you find?"));
+        let activity = frame.lines().find(|line| line.contains('▸')).unwrap();
+        assert!(
+            activity.contains("▸ 2 thoughts · 1 search") && activity.contains('✓'),
+            "{frame}"
+        );
+        if width > 40 {
+            assert!(activity.contains("1 page ✓"));
+        }
+        assert!(frame.contains("Answer details"));
+        let items = &app.view_cache().entries()[1].items;
+        assert!(items[..4].iter().all(|(_, rows)| *rows == items[0].1));
+        assert_ne!(items[4].1, items[0].1);
+        let anchor = (1, semantic_id(&app, 1, 3), 0);
+        let lead = (1, semantic_id(&app, 1, 0), 0);
+        assert_eq!(
+            app.view_cache().anchor_row(anchor),
+            app.view_cache().anchor_row(lead)
+        );
+
+        app.select_for_test(cursor(1, 0));
+        app.handle_event(key(KeyCode::Char('j')));
+        assert_eq!(app.selection(), cursor(1, 4));
+        app.handle_event(key(KeyCode::Char('k')));
+        assert_eq!(app.selection(), cursor(1, 0));
+        let Some(UiAction::Copy { text }) = app.handle_event(key(KeyCode::Char('y'))) else {
+            panic!("copy activity")
+        };
+        for member in [
+            "First thought detail",
+            "bees",
+            "Second thought detail",
+            "example.org/bees",
+        ] {
+            assert!(text.contains(member), "missing {member}: {text}");
+        }
+        assert!(!text.contains("Answer details"));
+        chord(&mut app, 'o');
+        assert!((0..4).all(|index| !folded(&app, 1, index)));
+        let frame = conversation_frame_text(&rendered_buffer(&mut app, width, 40));
+        assert!(frame.contains("First thought detail") && frame.contains("Second thought detail"));
+    }
+}
+
+#[test]
+fn bulk_turn_span_absorbs_answer_entry_activity_and_opens_from_the_span() {
+    let mut app = App::new();
+    app.restore(vec![
+        TranscriptItem::Message(Message::user("What did you find?")),
+        TranscriptItem::Message(assistant_message(vec![AssistantContent::Reasoning(
+            zevria_content::reasoning::summaries(vec!["Earlier thought".into()]),
+        )])),
+        foldable_web_reply(),
+    ]);
+    chord(&mut app, 'm');
+    let frame = conversation_frame_text(&rendered_buffer(&mut app, 80, 40));
+    assert_eq!(frame.matches('▸').count(), 1, "{frame}");
+    assert!(frame.contains("▸ 3 thoughts · 1 search · 1 page ✓"));
+    assert!(frame.find("What did you find?").unwrap() < frame.find("▸ 3 thoughts").unwrap());
+    assert!(frame.find("▸ 3 thoughts").unwrap() < frame.find("Field notes").unwrap());
+    let absorbed = (2, semantic_id(&app, 2, 2), 0);
+    assert_eq!(
+        app.view_cache().anchor_row(absorbed),
+        Some(app.view_cache().entries()[0].extent())
+    );
+    assert!(
+        app.view_cache().entries()[2].lines[0]
+            .to_string()
+            .contains("Assistant")
+    );
+
+    app.select_message_for_test(cursor(0, 0));
+    app.handle_event(key(KeyCode::Char('j')));
+    assert_eq!(app.selection(), cursor(1, 0));
+    app.handle_event(key(KeyCode::Char('j')));
+    assert_eq!(app.selection(), cursor(2, 0));
+    app.handle_event(key(KeyCode::Enter));
+    assert_eq!(app.selection_scope(), Some(SelectionScope::Block));
+    assert_eq!(app.selection(), cursor(2, 4));
+    app.handle_event(key(KeyCode::Char('k')));
+    assert_eq!(app.selection(), cursor(1, 0));
+    assert_eq!(app.selection_scope(), Some(SelectionScope::Message));
+    let Some(UiAction::Copy { text }) = app.handle_event(key(KeyCode::Char('y'))) else {
+        panic!("copy span")
+    };
+    assert!(text.contains("Earlier thought") && text.contains("Second thought detail"));
+    assert!(!text.contains("Answer details"));
+    app.handle_event(key(KeyCode::Enter));
+    assert!(app.folds().span_containing(1).is_none());
+    assert!((0..4).all(|index| !folded(&app, 2, index)));
+}
+
 #[test]
 fn bulk_folds_hide_short_web_details_but_keep_answers_and_sources() {
     let replay = zevria_model::ProviderReplay::openai_responses(
@@ -1579,7 +1687,7 @@ fn bulk_folds_hide_short_web_details_but_keep_answers_and_sources() {
             let mut app = App::new();
             app.restore(vec![
                 TranscriptItem::Message(Message::user("first prompt")),
-                TranscriptItem::Message(Message::assistant("Older reply")),
+                TranscriptItem::Message(Message::assistant("### Older reply\n\nThe longer answer")),
                 TranscriptItem::Message(Message::user("second prompt")),
                 TranscriptItem::provider_message(replay.clone()).unwrap(),
                 TranscriptItem::Error {
@@ -1601,7 +1709,9 @@ fn bulk_folds_hide_short_web_details_but_keep_answers_and_sources() {
                 for needle in ["Final reply", "More context", "Cited study"] {
                     assert!(frame.contains(needle), "expected {needle}: {frame}");
                 }
-                assert_eq!(frame.contains("Older reply"), suffix == 'm');
+                assert!(frame.contains("Older reply"));
+                assert_eq!(frame.contains("▸ Older reply"), suffix == 'M');
+                assert_eq!(frame.contains("The longer answer"), suffix == 'm');
             }
             chord(&mut app, 'R');
             rendered_buffer(&mut app, width, 60);

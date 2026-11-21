@@ -27,7 +27,7 @@ use zevria_foundation::{
     QuestionResponse, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, RECONCILE_REPORTS_TOOL_NAME,
     SKILL_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
 };
-use zevria_presentation::fold::FoldMode;
+use zevria_presentation::fold::{ActivityDigest, BlockFold, FoldMode, SpanSummary};
 use zevria_workflow::{AgentRunStatus, EnsembleWorkflow, PlanArtifact, PlanHandoff};
 
 use zevria_foundation::{COMMAND_TOOL_NAME, DELETE_TOOL_NAME, EDIT_TOOL_NAME, WRITE_TOOL_NAME};
@@ -359,7 +359,7 @@ pub(crate) struct ConversationBlockContext {
     pub(crate) separator_before: bool,
     pub(crate) item_gap_before: bool,
     pub(crate) selected: bool,
-    pub(crate) folded: FoldMode,
+    pub(crate) folded: BlockFold,
     pub(crate) reasoning_heading: bool,
     pub(crate) appearance: TranscriptAppearance,
 }
@@ -609,6 +609,15 @@ pub(crate) fn render_conversation_block(
         reasoning_heading,
         appearance,
     } = context;
+    if folded == BlockFold::Merged {
+        return RenderedBlockRows {
+            assistant_header_line: None,
+            fold_header: None,
+            content_line_start: 0,
+            body: RowRange::new(0, 0),
+            decoration: RowRange::new(0, 0),
+        };
+    }
     let acp = appearance == TranscriptAppearance::Acp;
     let card = acp && block.prompt_group.is_some();
     let inset = if card { card_inset(wrap_width) } else { 0 };
@@ -681,17 +690,13 @@ pub(crate) fn render_conversation_block(
     }
     let content_start = lines.len();
     let fold_header;
-    if folded == FoldMode::Summary {
-        let (label, header) = bulk_block_summary(block);
-        fold_header = header;
+    if let BlockFold::Activity(digest) = folded {
+        fold_header = None;
         push_fold_summary(
             lines,
-            content_start,
             wrap_width,
             card.then_some((inner_width, inset)),
-            label,
-            None,
-            fold_header.as_ref(),
+            digest,
         );
     } else if card {
         let mut body = Vec::new();
@@ -714,7 +719,7 @@ pub(crate) fn render_conversation_block(
         fold_header = render_presentation_block(block, lines, wrap_width, reasoning_heading);
     }
     ensure_content_line(lines, content_start);
-    if folded == FoldMode::Preview {
+    if folded == BlockFold::Preview {
         fold_body_rows(
             lines,
             content_start,
@@ -722,7 +727,7 @@ pub(crate) fn render_conversation_block(
             card.then_some((inner_width, inset)),
             None,
             fold_header.as_ref(),
-            folded,
+            FoldMode::Preview,
         );
     }
     if selected {
@@ -776,85 +781,53 @@ fn push_card_line(line: Line<'static>, width: u16, inset: u16, lines: &mut Vec<L
     lines.push(Line::from(spans).style(line.style));
 }
 
-fn bulk_block_summary(block: &PresentationBlock) -> (&'static str, Option<FoldHeader>) {
-    let web = |activity: &WebActivityPresentation| FoldHeader {
-        label: Line::raw(format!("Web actions · {}", activity.members.len())),
-        outcomes: activity
-            .outcomes
-            .iter()
-            .map(|&(icon, count)| (icon, Some(count)))
-            .collect(),
-        counted: true,
-    };
-    use PresentationBlockKind as Kind;
-    match &block.kind {
-        Kind::WebActivity(activity) => ("Web activity", Some(web(activity))),
-        Kind::Tool(PresentedTool::Acp(tool)) => (
-            "Tool call",
-            Some(tool.hosted_activity().as_ref().map(web).unwrap_or_else(|| {
-                FoldHeader::single("Tool call".into(), tool.presented_status().icon())
-            })),
-        ),
-        Kind::Tool(PresentedTool::Native { call, state }) => (
-            "Tool call",
-            Some(FoldHeader::single(
-                call.function.name.to_string(),
-                native_header_status(call, state),
-            )),
-        ),
-        Kind::Subtask { descriptor, .. } => (
-            "Subtask",
-            Some(FoldHeader::single(
-                "Subtask".into(),
-                subtask_icon(descriptor.status),
-            )),
-        ),
-        Kind::Reasoning { .. } => ("Thinking", None),
-        Kind::Image { .. } => ("Image", None),
-        Kind::Error(_) | Kind::Diagnostic(_) => ("Notice", None),
-        _ if block.role == Some(PresentationRole::User) => ("Prompt folded", None),
-        _ => ("Message folded", None),
+fn activity_summary_line(digest: ActivityDigest, width: usize) -> Line<'static> {
+    let muted = Style::default().fg(theme().text.muted);
+    let show_status = digest.status.filter(|_| width >= 5);
+    let label_width = width.saturating_sub(if show_status.is_some() { 2 } else { 0 });
+    let label = Line::styled(format!("▸ {}", digest.label()), muted);
+    let mut spans = truncate_line_to_width(&label, label_width);
+    if let Some(status) = show_status {
+        spans.push(Span::raw(" "));
+        spans.push(status_span(status));
     }
+    Line::from(spans)
 }
 
 fn push_fold_summary(
     lines: &mut Vec<Line<'static>>,
-    start: usize,
     width: u16,
     card: Option<(u16, u16)>,
-    label: &str,
-    blocks: Option<usize>,
-    header: Option<&FoldHeader>,
+    digest: ActivityDigest,
 ) {
-    lines.truncate(start);
-    if width == 0 {
-        return;
-    }
-    let budget = usize::from(card.map_or(width, |(width, _)| width));
-    let summary = header.map_or_else(
-        || {
-            let label = blocks.filter(|&count| count > 1).map_or_else(
-                || label.to_owned(),
-                |count| format!("{label} · {count} blocks"),
-            );
-            Line::from(truncate_line_to_width(
-                &Line::styled(
-                    format!("▸ {label}"),
-                    Style::default().fg(theme().text.muted),
-                ),
-                budget,
-            ))
-        },
-        |header| header.folded(budget, 0),
-    );
     if let Some((width, inset)) = card {
-        push_card_line(summary, width, inset, lines);
+        push_card_line(
+            activity_summary_line(digest, usize::from(width)),
+            width,
+            inset,
+            lines,
+        );
     } else {
-        lines.push(summary);
+        lines.push(activity_summary_line(digest, usize::from(width)));
     }
 }
 
-/// Local folds keep a preview; a bulk fold replaces even a one-line body.
+pub(crate) fn span_summary_line(summary: &SpanSummary, width: u16) -> Line<'static> {
+    let width = usize::from(width);
+    let Some(answer) = &summary.answer else {
+        return activity_summary_line(summary.digest, width);
+    };
+    let muted = Style::default().fg(theme().text.muted);
+    let line = Line::from(vec![Span::styled("▸ ", muted), Span::raw(answer.clone())]);
+    let counts = summary.digest.label();
+    let mut spans = truncate_line_to_width(&line, width);
+    if !counts.is_empty() && line.width() + 2 + display_width(&counts) <= width {
+        spans.push(Span::styled(format!("  {counts}"), muted));
+    }
+    Line::from(spans)
+}
+
+/// Message and item folds, whether local or bulk, keep a one-row preview.
 pub(crate) fn fold_body_rows(
     lines: &mut Vec<Line<'static>>,
     content_start: usize,
@@ -864,21 +837,8 @@ pub(crate) fn fold_body_rows(
     header: Option<&FoldHeader>,
     mode: FoldMode,
 ) {
-    match mode {
-        FoldMode::Expanded => return,
-        FoldMode::Summary => {
-            push_fold_summary(
-                lines,
-                content_start,
-                wrap_width,
-                card,
-                "Folded",
-                blocks,
-                None,
-            );
-            return;
-        }
-        FoldMode::Preview => {}
+    if !mode.is_folded() {
+        return;
     }
     if wrap_width == 0 {
         lines.truncate(content_start);

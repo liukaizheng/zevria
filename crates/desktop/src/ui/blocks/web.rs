@@ -92,18 +92,26 @@ impl WebRow {
     }
 }
 
-/// Coalesce consecutive web blocks with the same bulk visibility. In-place
-/// attempts can gain new blocks which must stay open alongside a folded run.
+/// Combine adjacent bulk activity, keeping the lead's identity and retained
+/// body. Expanded web rows still coalesce independently of a folded run.
 pub(in crate::ui) fn coalesce(blocks: Vec<BlockData>) -> Vec<BlockData> {
     let mut rows: Vec<BlockData> = Vec::with_capacity(blocks.len());
     for mut data in blocks {
+        if data.summary {
+            if let Some(prior) = rows.last_mut().filter(|prior| prior.summary) {
+                prior.digest += data.digest;
+                prior.primary.push_str("\n\n");
+                prior.primary.push_str(&data.primary);
+                prior.grouped_targets.extend(data.target);
+                continue;
+            }
+            data.kind = BlockKind::Activity;
+        }
         if let Some(BlockData {
             kind: BlockKind::Web(prior),
             grouped_targets,
-            summary,
             ..
         }) = rows.last_mut()
-            && *summary == data.summary
             && let BlockKind::Web(current) = &mut data.kind
         {
             prior.actions.append(&mut current.actions);
@@ -114,7 +122,9 @@ pub(in crate::ui) fn coalesce(blocks: Vec<BlockData>) -> Vec<BlockData> {
         }
     }
     for data in &mut rows {
-        if let BlockKind::Web(row) = &data.kind
+        if data.summary {
+            data.gutter = data.digest.status.map_or(Gutter::None, Gutter::Glyph);
+        } else if let BlockKind::Web(row) = &data.kind
             && row.copies.len() > 1
         {
             data.body = row.copies.join("\n");
@@ -482,9 +492,7 @@ pub(super) fn render_row(
             .items_start()
             .gap(px(8.))
             .child(label)
-            .when(!view.data.summary, |row| {
-                row.child(action_summary(action, expanded, cx))
-            })
+            .child(action_summary(action, expanded, cx))
             .child(status_words([action.status], cx).pt(px(3.))),
         None => div()
             .flex()

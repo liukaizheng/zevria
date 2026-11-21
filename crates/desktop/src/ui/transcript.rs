@@ -23,7 +23,7 @@ use zevria_presentation::{
     ConversationTail,
     blocks::PresentationBlockId,
     conversation::{HistoryEntry, ToolCallStatus},
-    fold::{FoldKey, FoldMode, FoldState, SpanRole, TurnFold},
+    fold::{BlockFold, FoldKey, FoldState, SpanRole, TurnFold},
     session::StreamSnapshotId,
 };
 
@@ -36,15 +36,6 @@ pub(super) enum LocalFold {
     Toggle,
     Close,
     Open,
-}
-
-fn fold_row(key: FoldKey) -> usize {
-    match key {
-        FoldKey::Span { start, .. } => start,
-        FoldKey::Message { history_index }
-        | FoldKey::Block { history_index, .. }
-        | FoldKey::Item { history_index, .. } => history_index,
-    }
 }
 
 /// Each pane keeps its own rendering, fold intent, and scroll position while parked.
@@ -95,20 +86,15 @@ impl PaneView {
     fn range_key(&self, start: usize) -> String {
         format!("{}-range-{start}", self.epoch)
     }
-    fn representative(&self, target: FoldKey) -> FoldKey {
-        let row = fold_row(target);
-        if let Some((start, end)) = self.folds.span_containing(row) {
-            FoldKey::Span { start, end }
-        } else if self.folds.entry(row).is_message_folded()
-            || matches!(target, FoldKey::Span { .. })
-        {
-            FoldKey::Message { history_index: row }
-        } else if self
+    fn representative(&self, history: &[HistoryEntry], target: FoldKey) -> FoldKey {
+        let target = self.folds.representative(history, target, false);
+        let row = target.history_index();
+        if self
             .source(row)
             .iter()
             .any(|block| block.target == Some(target) && matches!(block.kind, BlockKind::Web(_)))
         {
-            self.data(row)
+            self.data(history, row)
                 .iter()
                 .find(|block| block.represents(target))
                 .and_then(|block| block.target)
@@ -117,22 +103,9 @@ impl PaneView {
             target
         }
     }
-    fn local_targets(&self, target: FoldKey) -> Vec<FoldKey> {
-        let mut targets = vec![target];
-        if matches!(target, FoldKey::Block { .. })
-            && let Some(block) = self
-                .data(fold_row(target))
-                .into_iter()
-                .find(|block| block.target == Some(target))
-            && block.summary
-        {
-            targets.extend(block.grouped_targets);
-        }
-        targets
-    }
     /// Visibility order is range, message, then individual block/item. The
     /// canonical row data and its retained renderers are never replaced by a preview.
-    fn data(&self, index: usize) -> Vec<BlockData> {
+    fn data(&self, history: &[HistoryEntry], index: usize) -> Vec<BlockData> {
         let Some((_, blocks)) = self.row_data.get(&index) else {
             let mut tail = self.tail_data.clone();
             if self.folds.stream_is_folded(self.stream_snapshot) {
@@ -142,6 +115,7 @@ impl PaneView {
                         block.expanded = false;
                     }
                 }
+                return blocks::coalesce_rows(tail);
             }
             return tail;
         };
@@ -149,25 +123,59 @@ impl PaneView {
         match folds.span() {
             Some(SpanRole::Hidden { .. }) => return Vec::new(),
             Some(SpanRole::Summary { end }) => {
-                let count = (index..=end)
-                    .filter(|&row| !self.source(row).is_empty())
-                    .count();
-                return vec![BlockData::range(&self.epoch, index, end, count)];
+                let mut row = BlockData::range(
+                    &self.epoch,
+                    index,
+                    end,
+                    self.folds.span_summary(history, index, false),
+                );
+                row.grouped_targets = self
+                    .folds
+                    .group(history, FoldKey::Span { start: index, end }, false)
+                    .into_iter()
+                    .skip(1)
+                    .collect();
+                return vec![row];
             }
             None => {}
         }
-        let message_mode = folds.message_mode();
-        let folded = message_mode.is_folded();
-        let limit = if folded { 1 } else { blocks.len() };
-        let mut data = blocks.iter().take(limit).cloned().collect::<Vec<_>>();
-        for block in &mut data {
-            let mode = block
-                .target
-                .map_or(FoldMode::Expanded, |target| self.folds.mode(target));
-            block.summary = message_mode == FoldMode::Summary || mode == FoldMode::Summary;
-            block.expanded = !mode.is_folded();
-        }
-        let mut data = blocks::coalesce_web_rows(data);
+        let folded = folds.is_message_folded();
+        let mut data = if folded {
+            blocks.first().cloned().into_iter().collect()
+        } else if let Some(HistoryEntry::Conversation(entry)) = history.get(index) {
+            let modes = folds.block_folds(entry, false);
+            let visible = entry
+                .blocks
+                .iter()
+                .zip(modes)
+                .filter_map(|(block, mode)| block.visible(false).then_some(mode));
+            blocks::coalesce_rows(
+                blocks
+                    .iter()
+                    .zip(visible)
+                    // A leading Merged block has no local activity row; the span
+                    // already carries its digest and disclosure target.
+                    .skip_while(|(_, mode)| *mode == BlockFold::Merged)
+                    .map(|(block, mode)| {
+                        let mut block = block.clone();
+                        block.summary = matches!(mode, BlockFold::Activity(_) | BlockFold::Merged);
+                        block.expanded = mode == BlockFold::Expanded;
+                        block
+                    })
+                    .collect(),
+            )
+        } else {
+            blocks
+                .iter()
+                .cloned()
+                .map(|mut block| {
+                    block.expanded = block
+                        .target
+                        .is_none_or(|target| !self.folds.contains(target));
+                    block
+                })
+                .collect()
+        };
         if let Some(first) = data.first_mut().filter(|first| first.target.is_some()) {
             first.message = Some(MessageDisclosure {
                 key: FoldKey::Message {
@@ -175,11 +183,18 @@ impl PaneView {
                 },
                 folded,
                 show_speaker: folded
+                    || blocks
+                        .first()
+                        .is_some_and(|block| matches!(block.gutter, Gutter::Label(_)))
                     || index
                         .checked_sub(1)
                         .is_some_and(|previous| self.folds.entry(previous).span().is_some()),
                 blocks: blocks.len(),
-                speaker: first.speaker(),
+                speaker: blocks
+                    .first()
+                    .filter(|block| matches!(block.gutter, Gutter::Label(_)))
+                    .unwrap_or(first)
+                    .speaker(),
             });
         }
         data
@@ -546,6 +561,14 @@ impl TranscriptView {
         });
         pane.restored.retain(|key| valid.contains(key.as_str()));
     }
+    fn history<'a>(&self, cx: &'a App) -> &'a [HistoryEntry] {
+        self.controller
+            .read(cx)
+            .model
+            .visible()
+            .conversation
+            .history()
+    }
     fn refresh_views(&mut self, cx: &mut Context<Self>) {
         for index in 0..self.pane.fingerprints.len() {
             // Do not clone long, unmaterialized history on every stream delta.
@@ -561,7 +584,8 @@ impl TranscriptView {
             {
                 continue;
             }
-            for block in self.pane.data(index) {
+            let data = self.pane.data(self.history(cx), index);
+            for block in data {
                 if let Some(retained) = self.pane.blocks.get(&block.key) {
                     retained
                         .view
@@ -574,20 +598,43 @@ impl TranscriptView {
         if before == &self.pane.folds {
             return;
         }
+        let history = self.history(cx);
+        let changed_summaries = self
+            .pane
+            .row_data
+            .keys()
+            .copied()
+            .filter(|&row| {
+                matches!(
+                    self.pane.folds.entry(row).span(),
+                    Some(SpanRole::Summary { .. })
+                ) && self.pane.folds.entry(row).span() == before.entry(row).span()
+                    && self.pane.folds.span_summary(history, row, false)
+                        != before.span_summary(history, row, false)
+            })
+            .collect::<HashSet<_>>();
+        let top = self.pane.scroller.read(cx).logical_scroll_top();
+        let origin = self
+            .pane
+            .scroll_return
+            .filter(|&(row, _)| row == top.item_ix)
+            .map_or(top.item_ix, |(_, origin)| origin);
+        let visible = self
+            .pane
+            .folds
+            .representative(
+                history,
+                FoldKey::Message {
+                    history_index: origin,
+                },
+                false,
+            )
+            .history_index();
         let pane = &mut self.pane;
         pane.scroller.update(cx, |list, cx| {
-            let top = list.logical_scroll_top();
             // The list preserves a live item anchor when remeasuring. Only
             // redirect the top when its representative changes, never unpin the tail.
             if !list.is_following_tail() {
-                let origin = pane
-                    .scroll_return
-                    .filter(|&(row, _)| row == top.item_ix)
-                    .map_or(top.item_ix, |(_, origin)| origin);
-                let visible = pane
-                    .folds
-                    .span_containing(origin)
-                    .map_or(origin, |(start, _)| start);
                 pane.scroll_return = (visible != origin).then_some((visible, origin));
                 if visible != top.item_ix
                     || (top.offset_in_item > px(0.)
@@ -605,6 +652,8 @@ impl TranscriptView {
                 let old = before.entry(row);
                 let new = pane.folds.entry(row);
                 if old.span() != new.span()
+                    || old.absorbing_span() != new.absorbing_span()
+                    || changed_summaries.contains(&row)
                     || (new.span().is_none()
                         && (old.message_mode() != new.message_mode()
                             || blocks
@@ -665,10 +714,11 @@ impl TranscriptView {
             .blocks
             .values()
             .find_map(|b| b.view.read(cx).focused_target(window, cx))
-            .filter(|&target| self.pane.representative(target) == target)
+            .filter(|&target| self.pane.representative(self.history(cx), target) == target)
     }
     fn focus_target(&mut self, target: FoldKey, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(data) = self.pane.data(fold_row(target)).into_iter().find(|b| {
+        let data = self.pane.data(self.history(cx), target.history_index());
+        if let Some(data) = data.into_iter().find(|b| {
             b.target == Some(target) || b.message.is_some_and(|message| message.key == target)
         }) {
             let view = self.retained(data, window, cx);
@@ -692,14 +742,13 @@ impl TranscriptView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let targets = self.pane.local_targets(target);
-        self.apply_folds(window, cx, |folds| match action {
+        let controller = self.controller.clone();
+        self.update_folds(window, cx, |folds, cx| match action {
             LocalFold::Toggle if !folds.contains(target) => folds.fold(target),
             LocalFold::Close => folds.fold(target),
             LocalFold::Toggle | LocalFold::Open => {
-                for key in targets {
-                    folds.unfold(key);
-                }
+                let history = controller.read(cx).model.visible().conversation.history();
+                folds.open(history, target, false);
             }
         });
     }
@@ -768,7 +817,7 @@ impl TranscriptView {
                 .take()
                 .filter(|&(representative, _)| representative == current)
                 .map_or(current, |(_, original)| original);
-            let next = self.pane.representative(preferred);
+            let next = self.pane.representative(self.history(cx), preferred);
             if next != preferred && !matches!(preferred, FoldKey::Span { .. }) {
                 self.pane.focus_return = Some((next, preferred));
             }
@@ -781,9 +830,10 @@ impl TranscriptView {
         cx.notify();
     }
     #[cfg(test)]
-    pub(super) fn test_data(&self) -> Vec<BlockData> {
+    pub(super) fn test_data(&self, cx: &App) -> Vec<BlockData> {
+        let history = self.history(cx);
         (0..self.pane.fingerprints.len())
-            .flat_map(|index| self.pane.data(index))
+            .flat_map(|index| self.pane.data(history, index))
             .collect()
     }
     #[cfg(test)]
@@ -859,7 +909,7 @@ impl TranscriptView {
                 {
                     return;
                 }
-                if this.pane.representative(event.target) == event.target {
+                if this.pane.representative(this.history(cx), event.target) == event.target {
                     this.set_local_fold(
                         event.target,
                         if event.expanded {
@@ -883,7 +933,7 @@ impl TranscriptView {
         entity
     }
     fn row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let data = self.pane.data(index);
+        let data = self.pane.data(self.history(cx), index);
         if data.is_empty() {
             return div().w_full().h_0().into_any_element();
         }
