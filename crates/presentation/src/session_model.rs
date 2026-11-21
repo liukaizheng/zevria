@@ -1,6 +1,8 @@
 //! One authoritative frontend-neutral reducer for native session panes.
 use crate::{
-    conversation::{self, ConversationChange, ConversationState, ToolCallStatus},
+    PromptPaint, PromptPreview,
+    blocks::PresentationBlockId,
+    conversation::{self, ConversationChange, ConversationState, HistoryEntry, ToolCallStatus},
     session::*,
     workflow::WorkflowState,
 };
@@ -82,6 +84,10 @@ pub struct SessionModel {
     scope: PaneScope,
     jobs: crate::jobs::CommandJobsState,
     pending_edit: Option<PendingEdit>,
+    pending_prompt: Option<PromptPreview>,
+    /// The latest local acceptance can beat the first render. Its probe belongs
+    /// to the canonical block identity, never to the prompt text.
+    accepted_prompt_paint: Option<(usize, PresentationBlockId, PromptPaint)>,
     continuation_offer: Option<SessionMode>,
 }
 pub struct RestorationInput {
@@ -152,6 +158,10 @@ impl SessionModel {
                 self.conversation.project_worker_review(&target.run_id, &target.worker_id, &state, crate::projection::ProjectionMode::Live);
             }
             SessionEvent::CompactionStarted { turn_id, trigger } => {
+                // Only pre-turn compaction can announce the ID of an unaccepted submit.
+                if self.pending_prompt.is_some() && trigger != CompactionTrigger::AutomaticPreTurn {
+                    return effects;
+                }
                 let idle_role = self
                     .scope
                     .model_role_override()
@@ -190,7 +200,18 @@ impl SessionModel {
                 }
                 let turn = self.conversation.allocate_turn();
                 self.session.bind_display_turn(turn);
+                let index = self.conversation.history().len();
                 self.conversation.push_user_turn(message, turn);
+                if start.operation() == OperationKind::Submit
+                    && let Some(preview) = self.pending_prompt.take()
+                {
+                    self.accepted_prompt_paint = preview.accept(turn_id).and_then(|paint| {
+                        let HistoryEntry::Conversation(entry) = self.conversation.history().get(index)? else {
+                            return None;
+                        };
+                        Some((index, entry.blocks.first()?.id, paint))
+                    });
+                }
             }
             SessionEvent::ModelCallStarted { turn_id, call } => {
                 let previous = self.session.call_header();
@@ -463,6 +484,9 @@ impl SessionModel {
     ) -> Option<(OperationKind, Option<crate::presentation::NativeHeader>)> {
         let header = self.session.call_header();
         let kind = self.session.finish(turn_id)?;
+        if kind == OperationKind::Submit {
+            self.pending_prompt = None;
+        }
         self.conversation
             .finish_header(header, self.session.observed_at());
         Some((kind, header))
@@ -563,6 +587,8 @@ impl SessionModel {
         self.session.reset_for_restore();
         self.workflow.reset();
         self.pending_edit = None;
+        self.pending_prompt = None;
+        self.accepted_prompt_paint = None;
         self.continuation_offer = None;
         self.conversation.restore(items);
         for job in self.jobs.iter() {
@@ -645,12 +671,11 @@ impl SessionModel {
     }
     pub fn submit(&mut self, text: UserPrompt, behavior: RequestBehavior) -> Option<TurnCommand> {
         if let Some(expected) = self.ready_revision_target() {
-            if text.is_blank() || behavior != RequestBehavior::Standard {
+            if behavior != RequestBehavior::Standard {
                 return None;
             }
-            return self
-                .begin_operation(OperationKind::Submit, SessionMode::Plan, ModelRole::Plan)
-                .then_some(TurnCommand::RevisePlanWithMessage { expected, text });
+            self.stage_prompt(&text, SessionMode::Plan)?;
+            return Some(TurnCommand::RevisePlanWithMessage { expected, text });
         }
         self.submit_in_mode(text, behavior, self.next_mode())
     }
@@ -660,15 +685,37 @@ impl SessionModel {
         behavior: RequestBehavior,
         mode: SessionMode,
     ) -> Option<TurnCommand> {
-        if !self.admits_work() || text.is_blank() {
+        if !self.admits_work() {
             return None;
         }
-        self.begin_operation(OperationKind::Submit, mode, role_for_mode(mode))
-            .then_some(TurnCommand::Submit {
-                text,
-                mode,
-                behavior,
-            })
+        self.stage_prompt(&text, mode)?;
+        Some(TurnCommand::Submit {
+            text,
+            mode,
+            behavior,
+        })
+    }
+    fn stage_prompt(&mut self, prompt: &UserPrompt, mode: SessionMode) -> Option<()> {
+        if prompt.is_blank()
+            || !self.begin_operation(OperationKind::Submit, mode, role_for_mode(mode))
+        {
+            return None;
+        }
+        self.pending_prompt = Some(PromptPreview::new(prompt));
+        Some(())
+    }
+    pub fn pending_prompt(&self) -> Option<&PromptPreview> {
+        self.pending_prompt.as_ref()
+    }
+    pub fn accepted_prompt_paint(&self) -> Option<(usize, &PromptPaint)> {
+        let (index, id, paint) = self.accepted_prompt_paint.as_ref()?;
+        if paint.is_painted() {
+            return None;
+        }
+        let HistoryEntry::Conversation(entry) = self.conversation.history().get(*index)? else {
+            return None;
+        };
+        (entry.blocks.first()?.id == *id).then_some((*index, paint))
     }
     pub fn invoke_skill(
         &mut self,

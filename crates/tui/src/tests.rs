@@ -30,6 +30,8 @@ mod item_spacing_tests;
 mod mode_tests;
 #[path = "plan_draft_tests.rs"]
 mod plan_draft_tests;
+#[path = "prompt_preview_tests.rs"]
+mod prompt_preview_tests;
 #[path = "queue_tests.rs"]
 mod queue_tests;
 #[path = "selection_tests.rs"]

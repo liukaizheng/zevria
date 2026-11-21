@@ -358,8 +358,10 @@ fn explicit_send_also_drains_a_running_queue_without_any_idle_barrier() {
     for insert in [false, true] {
         let mut app = busy();
         enqueue(&mut app, "not stranded");
+        assert!(!app.has_pending_prompt());
         complete(&mut app, TEST_TURN_ID);
         assert_eq!(app.dispatch_next_queued(), None);
+        assert!(!app.has_pending_prompt());
         assert!(context_help(&app).contains("send queued"));
         if insert {
             enter_insert(&mut app);
@@ -372,6 +374,10 @@ fn explicit_send_also_drains_a_running_queue_without_any_idle_barrier() {
         assert!(
             matches!(app.handle_event(event), Some(UiAction::Submit { text, .. }) if text == "not stranded".into())
         );
+        assert!(app.has_pending_prompt());
+        let frame = rendered_text(&mut app, 100, 24);
+        assert!(frame.contains(zevria_presentation::PREPARING_PROMPT));
+        assert_eq!(frame.matches("not stranded").count(), 1);
     }
 }
 
@@ -460,7 +466,9 @@ fn failed_and_rejected_direct_or_queued_work_pause_the_remaining_queue_and_recov
                         error: "rejected".into(),
                     }
                 };
+                assert!(app.has_pending_prompt());
                 app.reduce_without_effects(event);
+                assert!(!app.has_pending_prompt());
                 idle(&mut app);
                 assert_eq!(
                     pause_label(&app),
@@ -819,9 +827,11 @@ fn cancelled_unacknowledged_queued_drafts_use_staged_recovery_without_loss() {
             enter_insert(&mut app);
             app.handle_event(Event::Paste("newer".into()));
         }
+        assert!(app.has_pending_prompt());
         app.reduce_without_effects(SessionEvent::TurnCancelled {
             turn_id: TurnId::new(814),
         });
+        assert!(!app.has_pending_prompt());
         idle(&mut app);
         assert_eq!(app.dispatch_next_queued(), None);
         assert_eq!(pause_label(&app), Some("cancellation requested"));

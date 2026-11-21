@@ -257,12 +257,12 @@ fn selection_error_restores_exact_command_draft_and_never_overwrites_newer_input
 fn disconnect_before_acknowledgement_restores_draft_and_ignores_a_late_result() {
     let mut app = App::new();
     let (id, mode) = select_command(&mut app, "/plan");
-    app.mode_selection_disconnected();
+    app.engine_disconnected();
     assert_eq!(app.input(), "/plan");
     assert_eq!(app.next_mode(), SessionMode::Build);
     assert!(!app.is_busy());
     let history_len = app.history().len();
-    app.mode_selection_disconnected();
+    app.engine_disconnected();
     accepted(&mut app, id, mode, true);
     assert_eq!(app.next_mode(), SessionMode::Build);
     assert_eq!(app.history().len(), history_len);

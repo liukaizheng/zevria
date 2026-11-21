@@ -106,6 +106,77 @@ impl Drop for LifecycleTiming {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::session) enum PromptPhase {
+    Prepare,
+    PersistenceGate,
+    Count,
+    Compaction,
+    Commit,
+}
+
+/// Timing-only observation of prompt admission, including early exits. This
+/// cannot change the order of provider calls, persistence, or acceptance.
+pub(in crate::session) struct PromptTimings {
+    enabled: bool,
+    turn: TurnId,
+    durations: [Duration; 5],
+}
+
+impl PromptTimings {
+    pub(in crate::session) fn new(turn: TurnId) -> Self {
+        Self {
+            enabled: tracing::enabled!(target: "zevria::prompt_latency", tracing::Level::DEBUG),
+            turn,
+            durations: [Duration::ZERO; 5],
+        }
+    }
+
+    pub(in crate::session) fn phase(&mut self, phase: PromptPhase) -> PromptPhaseTimer<'_> {
+        PromptPhaseTimer {
+            duration: &mut self.durations[phase as usize],
+            started: self.enabled.then(Instant::now),
+        }
+    }
+}
+
+impl Drop for PromptTimings {
+    fn drop(&mut self) {
+        if self.enabled {
+            let [
+                prepare_us,
+                persistence_gate_us,
+                count_us,
+                compaction_us,
+                commit_us,
+            ] = self.durations.map(|elapsed| elapsed.as_micros() as u64);
+            tracing::debug!(
+                target: "zevria::prompt_latency",
+                turn_id = self.turn.get(),
+                prepare_us,
+                persistence_gate_us,
+                count_us,
+                compaction_us,
+                commit_us,
+                "engine prompt admission"
+            );
+        }
+    }
+}
+
+pub(in crate::session) struct PromptPhaseTimer<'a> {
+    duration: &'a mut Duration,
+    started: Option<Instant>,
+}
+
+impl Drop for PromptPhaseTimer<'_> {
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            *self.duration += started.elapsed();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

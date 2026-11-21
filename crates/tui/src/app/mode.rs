@@ -46,15 +46,6 @@ impl App {
         Some(UiAction::SetMode { request_id, mode })
     }
 
-    pub(crate) fn mode_selection_disconnected(&mut self) {
-        // Ordinary lifecycle disconnect handling remains in the runtime; here
-        // only a pending management command needs its terminal draft hook.
-        if self.mode_selection_pending() {
-            let reduction = self.model.disconnected();
-            self.apply_reduction(reduction);
-        }
-    }
-
     #[cfg(test)]
     pub(super) fn accept_mode_selection(&mut self, request_id: &str, result: ModeSelectionResult) {
         let reduction = self

@@ -45,6 +45,7 @@ struct PaneView {
     fingerprints: Vec<u64>,
     row_data: HashMap<usize, (u64, Vec<BlockData>)>,
     tail_data: Vec<BlockData>,
+    pending: Option<(u64, Vec<BlockData>)>,
     stream_snapshot: Option<StreamSnapshotId>,
     blocks: HashMap<String, RetainedBlock>,
     folds: FoldState,
@@ -65,6 +66,7 @@ impl PaneView {
             fingerprints: Vec::new(),
             row_data: HashMap::new(),
             tail_data: Vec::new(),
+            pending: None,
             stream_snapshot: None,
             blocks: HashMap::new(),
             folds: FoldState::default(),
@@ -115,7 +117,10 @@ impl PaneView {
                         block.expanded = false;
                     }
                 }
-                return blocks::coalesce_rows(tail);
+                tail = blocks::coalesce_rows(tail);
+            }
+            if let Some((_, pending)) = &self.pending {
+                tail.splice(..0, pending.iter().cloned());
             }
             return tail;
         };
@@ -307,16 +312,46 @@ impl TranscriptView {
         let busy = model.session.has_turn_work();
         let call = model.session.call_header();
         let revision = controller.projection_revision;
-        // The clock and draft edits must not re-fingerprint history or clone the tail.
-        if epoch == self.pane.epoch
+        let replaced = epoch != self.pane.epoch;
+        let same_projection = !replaced
             && revision == self.pane.revision
-            && busy == self.pane.busy
             && call == self.pane.call
-            && history.len() + 1 == self.pane.fingerprints.len()
-        {
+            && history.len() + 1 == self.pane.fingerprints.len();
+        let pending = model.pending_prompt();
+        let pending_changed =
+            pending.map(|p| p.id()) != self.pane.pending.as_ref().map(|(id, _)| *id);
+        // The clock and draft edits must not re-fingerprint history or clone the tail.
+        if same_projection && !pending_changed && busy == self.pane.busy {
             return;
         }
-        let replaced = epoch != self.pane.epoch;
+        if replaced || pending_changed {
+            if let Some((_, old)) = self.pane.pending.take() {
+                for block in old {
+                    self.pane.blocks.remove(&block.key);
+                }
+            }
+            self.pane.pending =
+                pending.map(|p| (p.id(), blocks::pending_prompt(&epoch, history.len(), p)));
+        }
+        if let Some((_, blocks)) = &mut self.pane.pending {
+            // A pre-turn compaction divider can move the live-tip row.
+            for (ordinal, block) in blocks.iter_mut().enumerate() {
+                block.row = history.len();
+                block.turn_boundary = ordinal == 0 && !history.is_empty();
+            }
+        }
+        if same_projection && pending_changed {
+            // Local append admission changes only the tip; history has not been touched.
+            let tip = history.len();
+            self.pane.tail_data = Self::activity_tip(controller, &epoch, tip)
+                .into_iter()
+                .collect();
+            self.pane.busy = busy;
+            self.pane
+                .scroller
+                .update(cx, |list, cx| list.remeasure_items(tip..tip + 1, cx));
+            return;
+        }
         let mut fingerprints = history
             .iter()
             .enumerate()
@@ -433,18 +468,7 @@ impl TranscriptView {
                 };
             }
         }
-        if busy {
-            let phrase = super::status::working_activity(model, controller.cancelling);
-            let mut tip = BlockData::new(
-                format!("{epoch}-tip"),
-                BlockKind::Live(LiveTail::Activity(phrase.clone())),
-                Gutter::Live,
-                phrase,
-                true,
-            );
-            tip.row = history.len();
-            tail.push(tip);
-        }
+        tail.extend(Self::activity_tip(controller, &epoch, history.len()));
         // Match message-only previews to the newly committed call, never a later call's ordinal.
         let mut transfers = Vec::new();
         if !replaced && history_changed {
@@ -541,6 +565,22 @@ impl TranscriptView {
         }
         self.refresh_views(cx);
     }
+    fn activity_tip(controller: &SessionController, epoch: &str, row: usize) -> Option<BlockData> {
+        let model = controller.model.visible();
+        if !model.session.has_turn_work() {
+            return None;
+        }
+        let phrase = super::status::working_activity(model, controller.cancelling);
+        let mut tip = BlockData::new(
+            format!("{epoch}-tip"),
+            BlockKind::Live(LiveTail::Activity(phrase.clone())),
+            Gutter::Live,
+            phrase,
+            true,
+        );
+        tip.row = row;
+        Some(tip)
+    }
     fn prune_views(&mut self, cx: &App) {
         let pane = &mut self.pane;
         let valid = pane
@@ -548,6 +588,7 @@ impl TranscriptView {
             .values()
             .flat_map(|(_, data)| data)
             .chain(&pane.tail_data)
+            .chain(pane.pending.iter().flat_map(|(_, data)| data))
             .map(|b| b.key.as_str())
             .collect::<HashSet<_>>();
         let range_prefix = format!("{}-range-", pane.epoch);
@@ -945,8 +986,37 @@ impl TranscriptView {
             .when(index + 1 < self.pane.fingerprints.len(), |row| {
                 row.pb(rems(2.))
             });
+        let model = self.controller.read(cx).model.visible();
+        let paint = if index == self.pane.row_data.len() {
+            model
+                .pending_prompt()
+                .and_then(|preview| preview.paint_probe())
+        } else {
+            model
+                .accepted_prompt_paint()
+                .filter(|(prompt_row, _)| *prompt_row == index)
+                .map(|(_, paint)| paint)
+        }
+        .cloned();
         for data in data {
             row = row.child(self.retained(data, window, cx));
+        }
+        if let Some(paint) = paint {
+            // List measurement and overscan are not visible paints.
+            row = row.relative().child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, _| {
+                        if bounds.intersects(&window.content_mask().bounds) {
+                            paint.mark_painted();
+                        }
+                    },
+                )
+                .absolute()
+                .size_full()
+                .top_0()
+                .left_0(),
+            );
         }
         row.into_any_element()
     }

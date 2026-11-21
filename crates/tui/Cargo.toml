@@ -31,6 +31,7 @@ tracing = { workspace = true }
 unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
+zevria-host = { workspace = true, features = ["test-support"] }
 zevria-content = { workspace = true, features = ["test-support"] }
 zevria-presentation = { workspace = true, features = ["test-support"] }
 diffy = { workspace = true }

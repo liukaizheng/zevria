@@ -209,7 +209,7 @@ fn draining_engine_shutdown_settles_unacknowledged_selection_but_keeps_an_accept
         assert_eq!(views.root.input(), if acknowledged { "" } else { draft });
         let errors = views.root.history().len();
         assert_eq!(errors, usize::from(!acknowledged));
-        views.root.mode_selection_disconnected();
+        views.root.engine_disconnected();
         views.apply(SessionEvent::ModeResult {
             request_id: id,
             result: ModeSelectionResult::Accepted {

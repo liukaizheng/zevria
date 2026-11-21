@@ -79,6 +79,8 @@ pub(crate) struct PlanDialogView<'a> {
 /// not need direct access to private substate fields.
 pub(crate) struct RenderParts<'a> {
     pub(crate) history: &'a [HistoryEntry],
+    pub(crate) pending_prompt: Option<&'a zevria_presentation::PromptPreview>,
+    pub(crate) accepted_prompt_paint: Option<(usize, &'a zevria_presentation::PromptPaint)>,
     pub(crate) turn_starts: Vec<super::conversation::TurnStartTarget>,
     pub(crate) folds: &'a FoldState,
     pub(crate) selected: Option<ActiveSelection>,
@@ -170,14 +172,7 @@ impl App {
         let can_recall = self.can_recall_selected();
         let queue = self.queue.view();
         let Self {
-            model:
-                SessionModel {
-                    session,
-                    workflow,
-                    conversation,
-                    model_profiles,
-                    ..
-                },
+            model,
             folds,
             composer,
             interaction,
@@ -186,6 +181,13 @@ impl App {
             view,
             ..
         } = self;
+        let SessionModel {
+            session,
+            workflow,
+            conversation,
+            model_profiles,
+            ..
+        } = &*model;
         let selected = interaction.active_selection();
         let diagnostics_visible = pane.diagnostics_visible();
         let mode = session.next_mode();
@@ -364,6 +366,8 @@ impl App {
         };
         RenderParts {
             history: conversation.history(),
+            pending_prompt: model.pending_prompt(),
+            accepted_prompt_paint: model.accepted_prompt_paint(),
             turn_starts: conversation.turn_starts(diagnostics_visible),
             folds,
             selected,

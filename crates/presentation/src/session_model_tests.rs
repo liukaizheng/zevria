@@ -536,6 +536,7 @@ fn hidden_ready_revision_uses_prompt_operations_without_restoring_review() {
                 );
             }
             assert_eq!(model.session.operation_kind(), Some(kind));
+            assert_eq!(model.pending_prompt().is_some(), !skill);
             let SessionActivity::Pending(pending) = model.session.activity() else {
                 panic!("pending")
             };
@@ -579,7 +580,123 @@ fn hidden_ready_revision_uses_prompt_operations_without_restoring_review() {
                 ));
             }
             assert!(model.workflow.dialog().is_none());
+            assert!(model.pending_prompt().is_none());
         }
+    }
+}
+
+#[test]
+fn pending_append_survives_preturn_compaction_until_the_matching_turn_starts() {
+    use zevria_model::{CompactionBackend, CompactionTrigger};
+    let mut model = SessionModel::default();
+    let trigger = CompactionTrigger::AutomaticPreTurn;
+    model
+        .submit("preview".into(), RequestBehavior::Standard)
+        .unwrap();
+    let pending_id = model.pending_prompt().unwrap().id();
+    assert!(model.conversation.history().is_empty());
+    assert!(model.conversation.turn_starts(false).is_empty());
+    model.reduce(E::EngineIdle);
+    model.reduce(E::ModeChanged {
+        mode: SessionMode::Build,
+    });
+    model.reduce(E::CompactionStarted {
+        turn_id: TURN,
+        trigger,
+    });
+    model.reduce(E::CompactionCompleted {
+        turn_id: TURN,
+        trigger,
+        backend: CompactionBackend::LocalSummary,
+    });
+    assert_eq!(model.pending_prompt().unwrap().id(), pending_id);
+    assert!(matches!(
+        model.conversation.history(),
+        [HistoryEntry::CompactionDivider]
+    ));
+    let stale = TurnId::new(TURN.get() - 1);
+    assert!(
+        model
+            .reduce(E::TurnCancelled { turn_id: stale })
+            .settled
+            .is_none()
+    );
+    assert!(
+        model
+            .reduce(E::TurnStarted {
+                turn_id: stale,
+                message: Message::user("wrong"),
+                mode: SessionMode::Build
+            })
+            .accepted
+            .is_none()
+    );
+    model.reduce(E::TurnStarted {
+        turn_id: TURN,
+        message: Message::user("canonical"),
+        mode: SessionMode::Build,
+    });
+    assert!(model.pending_prompt().is_none());
+    assert_eq!(model.conversation.turn_starts(false).len(), 1);
+    model.reduce(E::TurnFailed {
+        turn_id: TURN,
+        error: "after acceptance".into(),
+    });
+    let [
+        HistoryEntry::CompactionDivider,
+        HistoryEntry::Conversation(committed),
+        HistoryEntry::Error(_),
+    ] = model.conversation.history()
+    else {
+        panic!("committed prompt retained after failure");
+    };
+    assert_eq!(committed.blocks[0].primary_copy(), "canonical");
+}
+
+#[test]
+fn identical_submits_have_distinct_previews_and_commit_once_each() {
+    use crate::blocks::PresentationBlockKind;
+    use zevria_content::{PromptBlock, PromptImage, UserPrompt};
+    let prompt = UserPrompt::new(vec![
+        PromptBlock::Text("same\u{1b}[31m draft\u{202e}".into()),
+        PromptBlock::Image(PromptImage::from_rgba(1, 1, &[0, 0, 0, 255]).unwrap()),
+    ])
+    .unwrap();
+    let mut model = SessionModel::default();
+    let mut previous = None;
+    for id in 1..=2 {
+        model
+            .submit(prompt.clone(), RequestBehavior::Standard)
+            .unwrap();
+        let preview = model.pending_prompt().unwrap();
+        assert_ne!(Some(preview.id()), previous);
+        previous = Some(preview.id());
+        let blocks = preview.blocks();
+        assert!(
+            matches!(&blocks[0].kind, PresentationBlockKind::Text {text, editable: false, ..} if text == "same draft")
+        );
+        assert!(
+            matches!(&blocks[1].kind, PresentationBlockKind::Placeholder(label) if label == "[image 1 · png · 1×1]")
+        );
+        assert_eq!(model.conversation.history().len(), id - 1);
+        let turn_id = TurnId::new(id as u64);
+        for _ in 0..2 {
+            model.reduce(E::TurnStarted {
+                turn_id,
+                message: prompt.to_message(),
+                mode: SessionMode::Build,
+            });
+        }
+        assert!(model.pending_prompt().is_none());
+        assert_eq!(model.conversation.history().len(), id);
+        let HistoryEntry::Conversation(committed) = &model.conversation.history()[id - 1] else {
+            panic!("canonical user row");
+        };
+        assert!(matches!(
+            &committed.blocks[1].kind,
+            PresentationBlockKind::Image { ordinal: 1, .. }
+        ));
+        model.reduce(E::TurnRecovered { turn_id });
     }
 }
 

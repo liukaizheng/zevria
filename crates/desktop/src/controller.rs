@@ -64,7 +64,6 @@ pub struct SessionController {
     terminal_error: Option<String>,
     quit_requested: bool,
     pump: Option<Task<()>>,
-    exits: Option<Task<()>>,
     transition: Option<Task<()>>,
     tick: Option<Task<()>>,
     catalog: Option<Task<()>>,
@@ -82,7 +81,6 @@ impl SessionController {
         };
         let quit = cx.on_app_quit(|this, cx| {
             this.pump.take();
-            this.exits.take();
             this.tick.take();
             this.command.take();
             let job = this
@@ -118,7 +116,6 @@ impl SessionController {
             terminal_error: None,
             quit_requested: false,
             pump: None,
-            exits: None,
             transition: None,
             tick: None,
             catalog: None,
@@ -321,9 +318,13 @@ impl SessionController {
     fn stop(&mut self, cx: &mut Context<Self>) {
         // Drop the sole receiver first, unblocking bounded lifecycle sends.
         self.pump.take();
-        self.exits.take();
         self.tick.take();
         self.command.take();
+        if self.model.root.pending_prompt().is_some() {
+            let reduction = self.model.disconnected();
+            self.apply_reduction(reduction);
+            self.projection_revision = self.projection_revision.wrapping_add(1);
+        }
         self.model.models.reset();
         self.model.root.session.finish_model_management();
         let Some(running) = self.running.take() else {
@@ -378,7 +379,30 @@ impl SessionController {
         let mut receiver = running.take_event_receiver().expect("sole receiver");
         let mut exits = running.take_exit_receiver().expect("sole exit receiver");
         self.pump = Some(cx.spawn(async move |owner, cx| {
-            while let Some(first) = receiver.recv().await {
+            loop {
+                // Consume any ready acceptance before settling a disconnected runtime.
+                let next = tokio::select! {
+                    biased;
+                    update = receiver.recv() => update.ok_or_else(|| exits.try_recv().ok()),
+                    exit = exits.recv() => Err(exit),
+                };
+                let first = match next {
+                    Ok(update) => update,
+                    Err(exit) => {
+                        let detail = exit.map_or_else(
+                            || "Session runtime disconnected".into(),
+                            |exit| {
+                                format!(
+                                    "{} stopped{}",
+                                    exit.component,
+                                    exit.error.map_or_else(String::new, |e| format!(": {e}"))
+                                )
+                            },
+                        );
+                        let _ = owner.update(cx, |this, cx| this.runtime_disconnected(detail, cx));
+                        break;
+                    }
+                };
                 let mut batch = Vec::with_capacity(64);
                 batch.push(first);
                 for _ in 1..64 {
@@ -437,33 +461,21 @@ impl SessionController {
                     .await;
             }
         }));
-        self.exits = Some(cx.spawn(async move |owner, cx| {
-            let exit = exits.recv().await;
-            let _ = owner.update(cx, |this, cx| {
-                let detail = exit.map_or_else(
-                    || "Session runtime disconnected".into(),
-                    |exit| {
-                        format!(
-                            "{} stopped{}",
-                            exit.component,
-                            exit.error.map_or_else(String::new, |e| format!(": {e}"))
-                        )
-                    },
-                );
-                let reduction = this.model.disconnected();
-                this.apply_reduction(reduction);
-                this.terminal_error = Some(detail);
-                this.phase = Phase::Stopping;
-                let weak = cx.weak_entity();
-                cx.defer(move |cx| {
-                    let _ = weak.update(cx, |this, cx| {
-                        this.stop(cx);
-                        cx.notify();
-                    });
-                });
+    }
+    fn runtime_disconnected(&mut self, detail: String, cx: &mut Context<Self>) {
+        let reduction = self.model.disconnected();
+        self.apply_reduction(reduction);
+        self.projection_revision = self.projection_revision.wrapping_add(1);
+        self.terminal_error = Some(detail);
+        self.phase = Phase::Stopping;
+        let weak = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.stop(cx);
                 cx.notify();
             });
-        }));
+        });
+        cx.notify();
     }
     fn apply(
         &mut self,
@@ -695,6 +707,10 @@ impl SessionController {
         if !matches!(
             &command,
             SessionCommand::Control(ControlCommand::Command(_))
+                | SessionCommand::Turn(
+                    zevria_session_api::TurnCommand::Submit { .. }
+                        | zevria_session_api::TurnCommand::RevisePlanWithMessage { .. }
+                )
         ) {
             self.projection_revision = self.projection_revision.wrapping_add(1);
         }

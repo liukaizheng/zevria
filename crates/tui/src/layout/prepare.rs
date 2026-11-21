@@ -937,6 +937,23 @@ pub(crate) fn presentation_role(role: PresentationRole) -> (&'static str, Color)
     }
 }
 
+pub(super) fn render_pending_prompt(
+    preview: &zevria_presentation::PromptPreview,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let (label, color) = presentation_role(PresentationRole::User);
+    let mut header = role_header(label, color);
+    header.spans.push(Span::styled(
+        format!(" · {}", zevria_presentation::PREPARING_PROMPT),
+        Style::default().fg(theme().text.muted),
+    ));
+    let mut lines = vec![header];
+    for block in preview.blocks() {
+        render_presentation_block(block, &mut lines, width, false);
+    }
+    lines
+}
+
 fn render_presentation_block(
     block: &PresentationBlock,
     lines: &mut Vec<Line<'static>>,

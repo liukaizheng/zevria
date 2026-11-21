@@ -11,6 +11,7 @@ use crate::session::kernel::capacity::{
 use crate::session::kernel::records::{RecordChange, TurnAnchor};
 use crate::session::kernel::request_plan::{HistoryView, RequestPlan};
 use crate::session::kernel::state::RequestShapeFingerprint;
+use crate::session::kernel::timing::{PromptPhase, PromptTimings};
 use crate::session::turn::execution::{AcceptedKind, AcceptedTurn, Rejection};
 use crate::session::workflow::compaction::CheckpointPlacement;
 use crate::session::workflow::plan::workflow_transition_for_mode;
@@ -760,6 +761,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         events: &SessionEventSender,
         turn: &TurnContext,
     ) -> Result<AcceptedTurn, Rejection> {
+        let mut timings = PromptTimings::new(turn.id);
+        let preparation = timings.phase(PromptPhase::Prepare);
         let mut checked = self.preflight_prompt(anchor, input, mode)?;
         let prompt = match &mut checked.input {
             PromptTurnInput::Message { text, .. }
@@ -776,24 +779,36 @@ impl<P: ModelProvider> SessionEngine<P> {
             role,
             self.context_policy(role),
         );
-        self.gate_persistence(progress.events()).await?;
-        let (context, prepared) = self.prepare_prompt(checked)?;
-        let initial = self
-            .measure_prompt(&context, &prepared, None, false, progress.turn())
-            .await?;
+        drop(preparation);
+        {
+            let _phase = timings.phase(PromptPhase::PersistenceGate);
+            self.gate_persistence(progress.events()).await?;
+        }
+        let (context, prepared) = {
+            let _phase = timings.phase(PromptPhase::Prepare);
+            self.prepare_prompt(checked)?
+        };
+        let initial = {
+            let _phase = timings.phase(PromptPhase::Count);
+            self.measure_prompt(&context, &prepared, None, false, progress.turn())
+                .await?
+        };
         let due = self.context.is_armed(role) && initial.assessment.band != CapacityBand::Fits;
         // At most one checkpoint attempt. An unavailable checkpoint does not
         // change the request and must not repeat an Unsupported exact count.
-        let checkpoint = self
-            .automatic_checkpoint_for_prompt(
+        let checkpoint = {
+            let _phase = timings.phase(PromptPhase::Compaction);
+            self.automatic_checkpoint_for_prompt(
                 prepared.anchor,
                 &context.policy,
                 due,
                 progress.events(),
                 progress.turn(),
             )
-            .await?;
+            .await?
+        };
         let measurement = if checkpoint.is_some() {
+            let _phase = timings.phase(PromptPhase::Count);
             self.measure_prompt(
                 &context,
                 &prepared,
@@ -830,11 +845,15 @@ impl<P: ModelProvider> SessionEngine<P> {
         records.extend(prepared.records);
         records.extend(plan_transition.map(TranscriptItem::Plan));
         let previous = self.plan_state()?.clone();
-        match self.commit(RecordChange::anchored(
-            prepared.anchor,
-            records,
-            context.mode,
-        )) {
+        let committed = {
+            let _phase = timings.phase(PromptPhase::Commit);
+            self.commit(RecordChange::anchored(
+                prepared.anchor,
+                records,
+                context.mode,
+            ))
+        };
+        match committed {
             Ok(_) => (),
             Err(error) => {
                 let operation = match (prepared.anchor, prepared.kind) {
@@ -861,6 +880,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 source,
             };
         }
+        drop(timings);
         // Acceptance effects follow durability, in their established order.
         if let Some((trigger, backend)) = metadata {
             self.announce_compaction_completed(trigger, backend, events, turn)

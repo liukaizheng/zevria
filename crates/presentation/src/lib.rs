@@ -10,6 +10,7 @@ pub mod fold;
 pub mod jobs;
 pub mod models;
 pub mod projection;
+mod prompt_preview;
 pub mod session;
 pub mod session_model;
 #[cfg(test)]
@@ -18,6 +19,7 @@ pub mod shell;
 pub mod status_icon;
 pub mod workflow;
 pub use blocks::{TURN_CANCELLED, incomplete_response_outcome};
+pub use prompt_preview::{PREPARING_PROMPT, PromptPaint, PromptPreview};
 pub use session_model::{
     ConversationTail, PaneScope, Reduction, RestorationInput, SessionModel, Settlement,
 };

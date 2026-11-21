@@ -133,6 +133,7 @@ impl App {
                     _ => unreachable!("submit admission"),
                 };
                 self.after_admission();
+                self.view.invalidate_rendered_geometry();
                 self.stage_draft();
                 self.queue.resume();
                 Some(action)

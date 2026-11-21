@@ -27,11 +27,15 @@ mod characterization_tests;
 #[cfg(test)]
 mod composition_tests;
 
+#[cfg(any(test, feature = "test-support"))]
+mod prompt_count_fixture;
+
 /// Opt-in hooks for cross-owner lifecycle tests, never enabled by default.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support {
     pub use crate::models::{load as load_config, revision as model_revision};
+    pub use crate::prompt_count_fixture::BlockedPromptCount;
     pub use crate::session_lease::RootSessionLease;
 
     /// Compact TOML fixture notation only: production accepts models.jsonc,

@@ -111,6 +111,7 @@ impl App {
                 parts.diagnostics_visible,
                 parts.folds,
             );
+            cache.refresh_pending_prompt(parts.pending_prompt, wrap_width);
             let streaming = match parts.tail {
                 ConversationTail::Streaming { message, .. } => Some(message),
                 ConversationTail::None
@@ -129,12 +130,17 @@ impl App {
         }
 
         // Message content stays cached; timing and its boundary are layout-owned.
+        let preview_height = parts
+            .view
+            .conversation_cache()
+            .pending_prompt()
+            .map_or(0, |(_, height)| height);
         let streaming_height = parts
             .view
             .conversation_cache()
             .streaming()
             .map_or(0, |(_, height)| height);
-        let mut status_lines = operation_status_lines(&parts.tail);
+        let mut status_lines = operation_status_lines(&parts.tail, parts.pending_prompt.is_some());
         if let Some((message, warning)) = &parts.network_status {
             status_lines.push(Line::from(Span::styled(
                 message.clone(),
@@ -147,13 +153,14 @@ impl App {
         }
         status_lines.extend(queue_status_lines(&parts.queue, usize::from(wrap_width)));
         let status_height = wrapped_height(&status_lines, wrap_width);
-        // Committed entries already own a trailing gap. A streamed message or
-        // header-only tail needs a blank row before the roleless status block.
-        let status_gap = usize::from(streaming_height > 0 && status_height > 0);
-        let tail_height = streaming_height
+        // Committed entries already own a trailing gap. A render-only message
+        // needs a blank row before the roleless status block.
+        let chat_height = preview_height.saturating_add(streaming_height);
+        let status_gap = usize::from(chat_height > 0 && status_height > 0);
+        let tail_height = chat_height
             .saturating_add(status_gap)
             .saturating_add(status_height);
-        let tail_is_chat = streaming_height > 0;
+        let tail_is_chat = chat_height > 0;
         let viewport_height = usize::from(layout.conversation_content.height);
 
         let separator_after = {
@@ -184,7 +191,8 @@ impl App {
             }
             (selection_range, entries_total)
         };
-        let streaming_range = RowRange::from_start_len(entries_total, streaming_height);
+        let preview_range = RowRange::from_start_len(entries_total, preview_height);
+        let streaming_range = RowRange::from_start_len(preview_range.end(), streaming_height);
         let status_range = RowRange::from_start_len(
             streaming_range.end().saturating_add(status_gap),
             status_height,
@@ -210,6 +218,7 @@ impl App {
         let mut accent_ranges = Vec::new();
         let mut surface_ranges = Vec::new();
         let mut window_start = None;
+        let mut painted_commit = None;
         let mut offset = 0_usize;
         for (index, entry) in parts.view.conversation_cache().entries().iter().enumerate() {
             if offset >= window.end() {
@@ -221,6 +230,12 @@ impl App {
             if RowRange::new(offset, end).intersects(window) {
                 window_start.get_or_insert(offset);
                 visible.extend(entry.lines.iter().cloned());
+                if let Some((prompt_index, probe)) = parts.accepted_prompt_paint
+                    && prompt_index == index
+                    && entry_range.intersects(window)
+                {
+                    painted_commit = Some(probe);
+                }
                 if separator > 0 {
                     visible.push(
                         if separator_after[index]
@@ -258,6 +273,11 @@ impl App {
         }
         if RowRange::from_start_len(entries_total, tail_height).intersects(window) {
             window_start.get_or_insert(entries_total);
+            if let Some((lines, _)) = parts.view.conversation_cache().pending_prompt() {
+                visible.extend(lines.iter().cloned());
+                surface_ranges.push(preview_range);
+                accent_ranges.push((preview_range, theme().roles.you));
+            }
             if let Some((lines, _)) = parts.view.conversation_cache().streaming() {
                 visible.extend(lines.iter().cloned());
             }
@@ -288,6 +308,16 @@ impl App {
                 .scroll((rows_to_u16(window_scroll), 0)),
             layout.conversation_content,
         );
+        if layout.conversation_content.width > 0 && viewport_height > 0 {
+            if let Some(probe) = painted_commit {
+                probe.mark_painted();
+            }
+            if preview_range.intersects(window)
+                && let Some(probe) = parts.pending_prompt.and_then(|p| p.paint_probe())
+            {
+                probe.mark_painted();
+            }
+        }
         for (range, color) in accent_ranges {
             if let Some(rows) = project_rows(range, window, layout.conversation) {
                 paint_accent(
@@ -398,12 +428,19 @@ pub(crate) fn queue_status_lines(
 }
 
 /// Render transient status from already-observed time, never from a live clock.
-fn operation_status_lines(tail: &ConversationTail<'_>) -> Vec<Line<'static>> {
+fn operation_status_lines(tail: &ConversationTail<'_>, preparing: bool) -> Vec<Line<'static>> {
     let (elapsed, headline, color) = match tail {
         ConversationTail::None => return Vec::new(),
-        ConversationTail::Waiting { elapsed } => {
-            (elapsed, "running…".to_string(), theme().text.muted)
-        }
+        ConversationTail::Waiting { elapsed } => (
+            elapsed,
+            if preparing {
+                "Preparing prompt…"
+            } else {
+                "running…"
+            }
+            .to_string(),
+            theme().text.muted,
+        ),
         ConversationTail::Streaming { elapsed, .. } => {
             (elapsed, "streaming".to_string(), theme().text.muted)
         }

@@ -13,6 +13,20 @@ latency. Historical commands, timings, allocation counts and caveats are retaine
 below. Transcript-format results remain separate in
 [transcript-performance.md](transcript-performance.md).
 
+## Diagnosing a slow send in TUI or Desktop
+
+A newly sent root prompt appears at the transcript tail as **Preparing…** until
+it commits. This preview is local to the frontend: it is not saved, recallable,
+or sent to the provider. A queued TUI follow-up appears there only when sent.
+
+To time the admission path, launch with `RUST_LOG=info,zevria::prompt_latency=debug`.
+The frontend logs elapsed microseconds from local admission to the first visible
+paint (preview or committed row), and to acceptance. `submit_id` links the UI
+samples; acceptance also supplies the session-local `turn_id` used by the
+engine’s admission summary. That summary separates preparation, the persistence
+gate, counting (including any recount), compaction, and commit. These diagnostic
+records contain only timings and local IDs, not prompt content or provider data.
+
 ## Current benchmark boundaries
 
 The current [`AdmissionFixture`](../crates/core/src/session/benchmark.rs)

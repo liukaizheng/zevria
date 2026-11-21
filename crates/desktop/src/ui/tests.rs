@@ -3,6 +3,8 @@
 mod jobs;
 #[path = "model_tests.rs"]
 mod models;
+#[path = "prompt_preview_tests.rs"]
+mod prompt_preview;
 #[path = "turn_tests.rs"]
 mod turns;
 #[path = "web_tests.rs"]

@@ -774,6 +774,13 @@ struct StreamingLayout {
     height: usize,
 }
 
+struct PendingPromptLayout {
+    id: u64,
+    width: u16,
+    lines: Vec<Line<'static>>,
+    height: usize,
+}
+
 /// Per-frame validated cache of the conversation pane's wrapped lines.
 #[derive(Default)]
 pub(crate) struct ConversationCache {
@@ -781,6 +788,7 @@ pub(crate) struct ConversationCache {
     /// Real layouts under summaries/placeholders, including the representative.
     covered: HashMap<usize, EntryLayout>,
     streaming: Option<StreamingLayout>,
+    pending_prompt: Option<PendingPromptLayout>,
     tail_reasoning: bool,
     appearance: TranscriptAppearance,
     header_timings: HeaderTimings,
@@ -794,6 +802,38 @@ pub(crate) struct ConversationCache {
 }
 
 impl ConversationCache {
+    pub(crate) fn refresh_pending_prompt(
+        &mut self,
+        preview: Option<&zevria_presentation::PromptPreview>,
+        width: u16,
+    ) {
+        let Some(preview) = preview else {
+            self.pending_prompt = None;
+            return;
+        };
+        if self
+            .pending_prompt
+            .as_ref()
+            .is_some_and(|cached| cached.id == preview.id() && cached.width == width)
+        {
+            return;
+        }
+        let lines = prepare::render_pending_prompt(preview, width);
+        let height = wrapped_height(&lines, width);
+        self.pending_prompt = Some(PendingPromptLayout {
+            id: preview.id(),
+            width,
+            lines,
+            height,
+        });
+    }
+
+    pub(crate) fn pending_prompt(&self) -> Option<(&[Line<'static>], usize)> {
+        self.pending_prompt
+            .as_ref()
+            .map(|cached| (cached.lines.as_slice(), cached.height))
+    }
+
     pub(crate) fn set_appearance(&mut self, appearance: TranscriptAppearance) {
         self.appearance = appearance;
     }

@@ -176,6 +176,7 @@ pub struct BlockData {
     pub(super) grouped_targets: Vec<FoldKey>,
     pub(super) message: Option<MessageDisclosure>,
     pub(super) summary: bool,
+    preparing: bool,
     pub(super) digest: ActivityDigest,
     pub primary: String,
     pub secondary: Option<String>,
@@ -211,6 +212,7 @@ impl BlockData {
             grouped_targets: Vec::new(),
             message: None,
             summary: false,
+            preparing: false,
             digest: ActivityDigest::default(),
             secondary: None,
             subtask: None,
@@ -457,6 +459,30 @@ impl BlockData {
     }
 }
 pub(super) use web::coalesce as coalesce_rows;
+
+pub(super) fn pending_prompt(
+    epoch: &str,
+    row: usize,
+    preview: &zevria_presentation::PromptPreview,
+) -> Vec<BlockData> {
+    let key = format!("{epoch}-preparing-{}", preview.id());
+    preview
+        .blocks()
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let mut data = BlockData::block(&key, block);
+            data.source = None;
+            data.row = row;
+            data.preparing = true;
+            if index == 0 {
+                data.gutter = Gutter::Label(Speaker::You);
+                data.turn_boundary = row > 0;
+            }
+            data
+        })
+        .collect()
+}
 
 pub fn entry(
     epoch: &str,
@@ -738,7 +764,7 @@ impl BlockView {
         cx: &mut Context<Self>,
     ) -> Self {
         let text = cx.new(|cx| {
-            if matches!(data.kind, BlockKind::Web(_)) {
+            if data.preparing || matches!(data.kind, BlockKind::Web(_)) {
                 TextViewState::html("", cx)
             } else if data.plain {
                 TextViewState::html(&plain_html(&data.body), cx)
@@ -1422,6 +1448,15 @@ impl Render for BlockView {
             }
             BlockKind::Prose { role, .. } => {
                 let prompt = *role == PresentationRole::User;
+                if self.data.preparing && speaker == Some(Speaker::You) {
+                    content = content.child(
+                        style::meta()
+                            .id("preparing-prompt")
+                            .test_support()
+                            .text_color(t.text.secondary)
+                            .child(zevria_presentation::PREPARING_PROMPT),
+                    );
+                }
                 if self.data.phase == Phase::Unsaved {
                     content = content.child(
                         style::meta()
@@ -1429,22 +1464,36 @@ impl Render for BlockView {
                             .child("Stopped, not saved to this session"),
                     );
                 }
-                content = content.max_w(px(style::PROSE)).child(
-                    self.text_row(
-                        self.rich_text(false, cx)
-                            .when(prompt, |v| v.font_weight(FontWeight::MEDIUM))
-                            .when(*role == PresentationRole::System, |v| {
-                                style::SECONDARY.apply(v)
-                            }),
-                        if prompt {
-                            "Prompt text"
-                        } else {
-                            "Message text"
-                        },
-                        window,
-                        cx,
-                    ),
-                );
+                content = content.max_w(px(style::PROSE));
+                if self.data.preparing {
+                    // The provisional view is literal text, even for drafts larger
+                    // than the rich text renderer's synchronous parse budget.
+                    content = content.child(
+                        style::body()
+                            .id("pending-prompt-text")
+                            .test_support()
+                            .font_family(style::UI_FONT)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(SharedString::from(self.data.body.clone())),
+                    );
+                } else {
+                    content = content.child(
+                        self.text_row(
+                            self.rich_text(false, cx)
+                                .when(prompt, |v| v.font_weight(FontWeight::MEDIUM))
+                                .when(*role == PresentationRole::System, |v| {
+                                    style::SECONDARY.apply(v)
+                                }),
+                            if prompt {
+                                "Prompt text"
+                            } else {
+                                "Message text"
+                            },
+                            window,
+                            cx,
+                        ),
+                    );
+                }
                 if *role == PresentationRole::Assistant && self.shows_details() {
                     content = content.children(web::sources_footer(self, cx));
                 }

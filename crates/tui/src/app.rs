@@ -1061,6 +1061,19 @@ impl App {
         self.apply_reduction(reduction)
     }
 
+    pub(crate) fn has_pending_prompt(&self) -> bool {
+        self.model.pending_prompt().is_some()
+    }
+
+    pub(crate) fn engine_disconnected(&mut self) {
+        if self.has_pending_prompt() || self.mode_selection_pending() {
+            self.view.capture_conversation_anchor();
+            self.view.invalidate_rendered_geometry();
+            let reduction = self.model.disconnected();
+            self.apply_reduction(reduction);
+        }
+    }
+
     fn apply_reduction(&mut self, reduction: Reduction) -> Vec<AppEffect> {
         if let Some(kind) = reduction.accepted {
             if !matches!(

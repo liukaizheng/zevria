@@ -724,7 +724,7 @@ fn pending_clock_starts_at_input_lock_and_waiting_frames_derive_from_elapsed() {
     for (millis, glyph) in TIMED_FRAMES {
         app.observe_clock(now + Duration::from_millis(millis));
         let text = rendered_text(&mut app, 80, 12);
-        assert!(text.contains(&format!("{glyph} running… · {}s", millis / 1000)));
+        assert!(text.contains(&format!("{glyph} Preparing prompt… · {}s", millis / 1000)));
         assert_spinner(&text, glyph);
         assert!(!text.contains("Assistant"));
         assert_eq!(crate::text::display_width(glyph), 1);

@@ -84,6 +84,26 @@ fn send_turn_action(
         .map_err(|_| anyhow::anyhow!("the session engine stopped before accepting {operation}"))
 }
 
+pub(crate) fn dispatch_turn_action(
+    views: &mut SessionViews,
+    commands: &UnboundedSender<SessionCommand>,
+    engine_done: &mut bool,
+    action: UiAction,
+) -> anyhow::Result<()> {
+    if *engine_done && views.root.has_pending_prompt() {
+        views.root.engine_disconnected();
+        return Ok(());
+    }
+    match send_turn_action(commands, action) {
+        Err(_) if views.root.has_pending_prompt() => {
+            *engine_done = true;
+            views.root.engine_disconnected();
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 /// Workspace facts the runtime needs to execute slash commands.
 pub struct UiContext {
     /// `{workspace}/.zevria/sessions`, listed by `/resume`.
@@ -137,7 +157,7 @@ pub async fn run_ui(
 
     loop {
         if engine_done {
-            views.root.mode_selection_disconnected();
+            views.root.engine_disconnected();
         }
         views.overlays.jobs.inspector.tick(Instant::now());
         while let Some(command) = views.overlays.jobs.inspector.commands.pop_front() {
@@ -156,7 +176,7 @@ pub async fn run_ui(
                 .map_err(|_| anyhow::anyhow!("session engine stopped before skill management"))?;
         }
         if !engine_done && let Some(action) = views.dispatch_queued_root_work() {
-            send_turn_action(commands, action)?;
+            dispatch_turn_action(&mut views, commands, &mut engine_done, action)?;
         }
         files.set_request(views.file_search_request());
         views.observe_clock(Instant::now());
@@ -199,7 +219,7 @@ pub async fn run_ui(
                 }
                 None => {
                     engine_done = true;
-                    views.root.mode_selection_disconnected();
+                    views.root.engine_disconnected();
                 }
             },
             maybe_event = events.next() => match maybe_event {
@@ -225,19 +245,21 @@ pub async fn run_ui(
                             | UiAction::RevisePlanWithSkill { .. }
                             | UiAction::Compact { .. }
                             | UiAction::RunEnsemble { .. }
-                            | UiAction::ResolvePlan { .. })) => send_turn_action(commands, action)?,
+                            | UiAction::ResolvePlan { .. })) => {
+                            dispatch_turn_action(&mut views, commands, &mut engine_done, action)?;
+                        }
                         Some(UiAction::WorkerControl(control)) => {
                             commands.send(SessionCommand::Control(zevria_session_api::ControlCommand::Worker(control)))
                                 .map_err(|_| anyhow::anyhow!("the session engine stopped before accepting worker control"))?;
                         }
                         Some(UiAction::CancelTurn { turn_id }) => {
-                            commands
-                                .send(SessionCommand::Control(zevria_session_api::ControlCommand::CancelTurn { turn_id }))
-                                .map_err(|_| {
-                                    anyhow::anyhow!(
-                                        "the session engine stopped before accepting cancellation"
-                                    )
-                                })?;
+                            if commands.send(SessionCommand::Control(zevria_session_api::ControlCommand::CancelTurn { turn_id })).is_err() {
+                                if !views.root.has_pending_prompt() {
+                                    anyhow::bail!("the session engine stopped before accepting cancellation");
+                                }
+                                engine_done = true;
+                                views.root.engine_disconnected();
+                            }
                         }
                         Some(UiAction::AnswerQuestion {
                             request_id,
@@ -341,7 +363,7 @@ pub(crate) fn drain_update_burst(
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
                 *engine_done = true;
-                views.root.mode_selection_disconnected();
+                views.root.engine_disconnected();
                 break;
             }
         }
