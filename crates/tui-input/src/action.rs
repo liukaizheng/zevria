@@ -30,6 +30,7 @@ pub enum Action {
     Insert,
     ToggleMode,
     ModelPicker,
+    JobsOverlay,
     Undo,
     Redo,
     Paste,

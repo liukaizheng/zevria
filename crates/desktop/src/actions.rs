@@ -6,6 +6,7 @@ gpui_kit::actions!(
         OpenWorkspace,
         NewSession,
         ToggleSidebar,
+        ToggleJobs,
         Cancel,
         Stop,
         Submit,
@@ -52,6 +53,7 @@ impl Shortcut {
     pub const NEW_SESSION: Self = Self::platform("cmd-n", "ctrl-n");
     pub const QUIT: Self = Self::platform("cmd-q", "ctrl-q");
     pub const TOGGLE_SIDEBAR: Self = Self::platform("ctrl-cmd-s", "ctrl-shift-s");
+    pub const TOGGLE_JOBS: Self = Self::platform("shift-cmd-j", "ctrl-shift-y");
     pub const TOGGLE_MODE: Self = Self::platform("shift-cmd-m", "ctrl-shift-m");
     pub const OPEN_MODELS: Self = Self::platform("ctrl-cmd-m", "ctrl-shift-p");
     pub const STOP: Self = Self::platform("cmd-.", "ctrl-.");
@@ -95,6 +97,9 @@ fn bindings() -> impl IntoIterator<Item = KeyBinding> {
         Shortcut::OPEN_WORKSPACE.bind(OpenWorkspace, None),
         Shortcut::NEW_SESSION.bind(NewSession, None),
         Shortcut::TOGGLE_SIDEBAR.bind(ToggleSidebar, desktop),
+        Shortcut::TOGGLE_JOBS.bind(ToggleJobs, desktop),
+        Shortcut::TOGGLE_JOBS.bind(ToggleJobs, input),
+        KeyBinding::new("escape", Cancel, Some("ZevriaJobs")),
         Shortcut::STOP.bind(Stop, None),
         Shortcut::UNFOLD.bind(Unfold, transcript),
         Shortcut::FOLD.bind(Fold, transcript),
@@ -186,6 +191,7 @@ mod tests {
             (Shortcut::OPEN_WORKSPACE, "Ctrl+O"),
             (Shortcut::NEW_SESSION, "Ctrl+N"),
             (Shortcut::TOGGLE_SIDEBAR, "Ctrl+Shift+S"),
+            (Shortcut::TOGGLE_JOBS, "Ctrl+Shift+Y"),
             (Shortcut::TOGGLE_MODE, "Ctrl+Shift+M"),
             (Shortcut::OPEN_MODELS, "Ctrl+Shift+P"),
             (Shortcut::STOP, "Ctrl+."),
@@ -229,6 +235,7 @@ pub fn menus() -> Vec<Menu> {
         ]),
         Menu::new("View").items([
             MenuItem::action("Toggle sidebar", ToggleSidebar),
+            MenuItem::action("Toggle jobs panel", ToggleJobs),
             MenuItem::separator(),
             MenuItem::action("Toggle fold", ToggleFold),
             MenuItem::action("Fold", Fold),

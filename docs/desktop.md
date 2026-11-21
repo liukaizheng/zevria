@@ -304,8 +304,8 @@ text such as `echo rtk`, `./rtk` and uppercase `RTK` remain unchanged. Quoted
 strings, comments and heredoc bodies are not stripped. The lexer is tolerant of
 incomplete/streaming input; it is a presentation heuristic, not a shell parser.
 
-Desktop command headers, every TUI command row/fold header, both frontends' job
-notices, and the TUI jobs list/inspect header use the stripped display. The TUI
+Desktop command headers, every TUI command row/fold header, and both frontends'
+Jobs surfaces and notices use the stripped display. The TUI
 runs its existing Bash grammar on that text, so the real program gets function
 ink. Desktop maps shell spans onto existing semantic tokens: programs to
 `syntax.function`; flags, numbers and expansions to `syntax.constant`; strings
@@ -320,6 +320,31 @@ execution and model-facing text all retain the original bytes. ACP tool titles
 and job notices also remain exact, as do agent-supplied titles in TUI ACP worker
 rows. Native terminal mouse selection naturally copies rendered, stripped text;
 the TUI's own copy actions are the exact-source route.
+
+### Jobs: inspect and control shell commands
+
+The root status bar shows a **Jobs** chip when the session has jobs. It counts
+and marks running jobs, and stays available in compact windows. Click it, use
+**View → Toggle jobs panel**, or press `Shift+Cmd+J` on macOS (`Ctrl+Shift+Y` on
+Windows) to toggle the panel. `/jobs` opens it even during a turn and consumes
+only that slash-command draft. The panel starts closed and stays hidden during
+Plan review. It docks on the right when there is room and overlays the thread
+in narrower windows.
+
+The panel selects the first running job on open. Click a row or use the arrow
+keys to inspect another. Rows show the command, `fg`/`bg`, elapsed time, and live
+status. The detail shows the job ID and bounded stdout/stderr tails with byte
+counts. It follows new output while scrolled to the end; scroll up to read
+without jumping. **Copy output** copies the retained tails.
+
+On a running command's transcript row, **Stop command** stops just the job;
+**Move command to background** releases a foreground call so the turn can
+continue. Those controls are also available on the corresponding Jobs row on
+hover or keyboard focus. Background rows show live status and offer **Show in
+Jobs** for retained jobs. **Background jobs finished** notices summarize both
+completed and still-running jobs without showing stream output. Copying the
+notice returns the exact model-visible text. None of these controls stops the
+whole turn or restores processes when you resume a session.
 
 ### Appearance, focus and motion
 
@@ -386,7 +411,10 @@ failed/idle/empty sessions, working prose and tool loops with an expanded native
 diff, Plan review, questions, replacement confirmation and completions. Working
 scenes, thinking-live, thinking-restored, thinking-interrupted, thinking-unsaved,
 code-heavy answers, docked questions and Plan review also render under Graphite
-Light. The `web-search` and `web-search-live` scenes show grouped actions,
+Light. The `jobs` scene shows foreground and background commands, a finished
+notice, and live stdout/stderr in the open panel. It renders docked at 1240 px
+and as an overlay at 720 px, in both Graphite and Graphite Light. The
+`web-search` and `web-search-live` scenes show grouped actions,
 inline citations and Sources chips, and the running **Searching the web** tip.
 They render in Graphite at both widths and in Graphite Light at 1240×840.
 The `math` scene restores

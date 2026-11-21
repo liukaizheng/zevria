@@ -555,6 +555,7 @@ Other useful commands:
 | `/compact` | Summarize the active model context into a saved checkpoint. |
 | `/model` | Select this role's model and reasoning level; save to the session and global configuration. |
 | `/model-session` | Select this mode's model and reasoning level; retain on reset/resume without changing global defaults. |
+| `/jobs` | Inspect shell jobs and stop or background an individual command in the terminal or desktop, even during a turn. |
 | `/skills` | Inspect, enable, disable, and reload local skills. |
 | `/ensemble-review <prompt>` | Collect independent ACP reviews and synthesize a read-only review. |
 

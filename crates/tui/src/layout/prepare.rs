@@ -134,8 +134,24 @@ pub(crate) fn render_job_notice(
     append_native_header(&mut title, header);
     lines.push(title);
     let start = lines.len();
-    for line in zevria_presentation::jobs::display_notice_lines(notice) {
-        lines.push(Line::styled(line, Style::default().fg(theme().text.muted)));
+    let (finished, running) = zevria_presentation::jobs::notice_rows(notice);
+    let muted = Style::new().fg(theme().text.muted);
+    let job_line = |row: zevria_presentation::jobs::JobRow| {
+        Line::from(vec![
+            Span::styled(
+                format!("{} {}", row.icon.glyph(0), row.status),
+                Style::new().fg(crate::jobs::job_ink(row.icon)),
+            ),
+            Span::styled(format!(" · {} · {}", row.duration, row.command.text), muted),
+        ])
+    };
+    lines.extend(finished.into_iter().map(job_line));
+    if !running.is_empty() {
+        lines.push(Line::styled(
+            "Still running:",
+            Style::new().fg(theme().text.secondary),
+        ));
+        lines.extend(running.into_iter().map(job_line));
     }
     fold_body_rows(lines, start, wrap_width, None, None, None, folded);
     if selected_content == Some(0) {
@@ -1323,32 +1339,36 @@ fn render_tool_call(
                 Some("bash"),
                 Style::default().fg(theme().roles.tools),
             );
-            let badge = state
-                .metadata
-                .as_ref()
-                .and_then(|m| m.detail.as_ref())
-                .and_then(|d| d.command_job())
-                .map(|job| {
-                    let live = state
-                        .command_job
-                        .as_ref()
-                        .map(|j| format!(" · {}", j.status))
-                        .unwrap_or_default();
-                    format!(" · background · {}{live}", job.id)
-                });
-            if let Some(badge) = &badge
-                && let Some(last) = command_lines.last_mut()
+            let live = state.command_job.as_ref();
+            let id = live.map(|job| &job.id).or_else(|| {
+                state
+                    .metadata
+                    .as_ref()?
+                    .detail
+                    .as_ref()?
+                    .command_job()
+                    .map(|job| &job.id)
+            });
+            let muted = Style::new().fg(theme().text.muted);
+            let mut badge = Vec::new();
+            if state.is_background_command()
+                && let Some(id) = id
             {
-                last.spans.push(Span::styled(
-                    badge.clone(),
-                    Style::default().fg(theme().text.muted),
-                ));
+                badge.push(Span::styled(format!(" · background · {id}"), muted));
+                if let Some(job) = live {
+                    let ink = crate::jobs::job_ink(zevria_presentation::jobs::job_status_icon(
+                        &job.status,
+                    ));
+                    badge.push(Span::styled(" · ", muted));
+                    badge.push(Span::styled(job.status.to_string(), Style::new().fg(ink)));
+                }
+            }
+            if let Some(last) = command_lines.last_mut() {
+                last.spans.extend(badge.iter().cloned());
             }
             let mut label = command_lines.first().cloned().unwrap_or_default();
-            if command_lines.len() > 1
-                && let Some(badge) = badge
-            {
-                label.spans.push(Span::raw(badge));
+            if command_lines.len() > 1 {
+                label.spans.extend(badge);
             }
             let header = FoldHeader {
                 label,

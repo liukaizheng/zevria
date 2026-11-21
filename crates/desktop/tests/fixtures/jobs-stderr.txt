@@ -1,0 +1,1 @@
+warning: trace rotated; following the new release-trace.log

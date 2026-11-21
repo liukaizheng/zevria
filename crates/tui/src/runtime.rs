@@ -139,8 +139,8 @@ pub async fn run_ui(
         if engine_done {
             views.root.mode_selection_disconnected();
         }
-        views.overlays.jobs.tick(Instant::now());
-        while let Some(command) = views.overlays.jobs.commands.pop_front() {
+        views.overlays.jobs.inspector.tick(Instant::now());
+        while let Some(command) = views.overlays.jobs.inspector.commands.pop_front() {
             commands
                 .send(command)
                 .map_err(|_| anyhow::anyhow!("session engine stopped before job control"))?;
@@ -284,9 +284,10 @@ pub async fn run_ui(
                             return Ok(UiOutcome::Resume(path));
                         }
                         Some(UiAction::Quit) => return Ok(UiOutcome::Quit),
-                        // Pane switches are consumed inside the view manager.
+                        // Pane switches and job controls are consumed inside the view manager.
                         Some(UiAction::OpenSubtask { .. })
                         | Some(UiAction::OpenAgentRun { .. })
+                        | Some(UiAction::JobControl { .. })
                         | None => {}
                     }
                 }

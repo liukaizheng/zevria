@@ -2124,6 +2124,23 @@ impl ConversationState {
             .is_some()
     }
 
+    pub fn selected_command_job(
+        &self,
+        selection: Selection,
+    ) -> Option<&zevria_foundation::CommandJobSnapshot> {
+        let tool = selected_tool(
+            self.history.get(selection.history_index)?,
+            selection.content_index,
+        )?;
+        let PresentedTool::Native { call, state } = tool else {
+            return None;
+        };
+        if call.function.name != zevria_foundation::COMMAND_TOOL_NAME {
+            return None;
+        }
+        state.command_job.as_ref()
+    }
+
     pub fn selected_subtask_id(&self, selection: Selection) -> Option<SubtaskId> {
         self.history
             .get(selection.history_index)

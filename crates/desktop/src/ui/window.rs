@@ -43,6 +43,7 @@ pub struct DesktopWindow {
     pub(super) compact: bool,
     pub(super) plan_width: f32,
     pub(super) plan_overlay: bool,
+    pub(super) jobs_ui: super::jobs::JobsPanelView,
     pub(super) question_focus: FocusHandle,
     pub(super) model_ui: Option<super::models::ModelPickerView>,
     pub(super) window_focus: FocusHandle,
@@ -145,6 +146,7 @@ impl DesktopWindow {
             compact: false,
             plan_width: 400.,
             plan_overlay: false,
+            jobs_ui: super::jobs::JobsPanelView::new(cx),
             question_focus: cx.focus_handle(),
             model_ui: None,
             window_focus,
@@ -166,6 +168,7 @@ impl DesktopWindow {
         let mode = controller.model.root.next_mode();
         let live = controller.phase == Phase::Live;
         let inspecting = controller.model.selected_child.is_some();
+        let jobs_visible = live && controller.model.jobs_panel_visible();
         let plan = controller
             .model
             .root
@@ -220,6 +223,14 @@ impl DesktopWindow {
             window.focus(&self.window_focus, cx);
         }
         self.was_live = live;
+        if jobs_visible != self.jobs_ui.visible {
+            self.jobs_ui.visible = jobs_visible;
+            if jobs_visible {
+                window.focus(&self.jobs_ui.list_focus, cx);
+            } else if self.jobs_ui.focus.contains_focused(window, cx) {
+                window.focus(&self.window_focus, cx);
+            }
+        }
         if let Some((version, markdown)) = plan
             && self
                 .plan
@@ -583,10 +594,11 @@ impl Render for DesktopWindow {
             .dialog()
             .is_some();
         let main_width = width - if visible { style::SIDEBAR } else { 0. };
-        self.plan_overlay = plan_open && main_width - self.plan_width < 560.;
+        let panel_open = plan_open || self.controller.read(cx).model.jobs_panel_visible();
+        self.plan_overlay = panel_open && main_width - self.plan_width < 560.;
         self.plan_width = self.plan_width.min(main_width);
         let compact = main_width
-            - if plan_open && !self.plan_overlay {
+            - if panel_open && !self.plan_overlay {
                 self.plan_width
             } else {
                 0.
@@ -625,6 +637,10 @@ impl Render for DesktopWindow {
                 this.sidebar_override =
                     Some(!this.sidebar_visible(f32::from(window.viewport_size().width)));
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &actions::ToggleJobs, _, cx| {
+                this.controller
+                    .update(cx, |controller, cx| controller.toggle_jobs(cx));
             }))
             .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| this.cancel(cx)))
             .on_action(cx.listener(|this, _: &actions::Stop, _, cx| {
@@ -763,6 +779,8 @@ impl Render for DesktopWindow {
             body = body.child(center);
             if let Some(plan) = self.plan_panel(cx) {
                 body = body.child(plan);
+            } else if let Some(jobs) = self.jobs_panel(window, cx) {
+                body = body.child(jobs);
             }
             root = root.child(body);
         }

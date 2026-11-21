@@ -101,6 +101,10 @@ pub enum UiAction {
         mode: SessionMode,
     },
     WorkerControl(WorkerControl),
+    JobControl {
+        id: zevria_foundation::CommandJobId,
+        terminate: bool,
+    },
     SetMode {
         request_id: String,
         mode: SessionMode,
@@ -711,9 +715,21 @@ impl App {
         self.capabilities().submit_work.is_ok()
     }
 
+    fn selected_command_job(&self) -> Option<&zevria_foundation::CommandJobSnapshot> {
+        if !self.pane.is_root() || self.interaction.selection_scope() != Some(SelectionScope::Block)
+        {
+            return None;
+        }
+        self.model
+            .conversation
+            .selected_command_job(self.interaction.selection()?)
+    }
+
     pub(crate) fn hint_eligibility(&self) -> crate::hints::Eligibility {
         use crate::input::Action;
+        use zevria_presentation::jobs::JobsInspector;
         let mut hints = crate::hints::Eligibility::default();
+        let job = self.selected_command_job();
         for (available, action) in [
             (
                 self.can_submit_work()
@@ -740,6 +756,14 @@ impl App {
                 Action::ModelPicker,
             ),
             (self.can_recall_selected(), Action::Edit),
+            (
+                job.is_some_and(JobsInspector::can_terminate),
+                Action::Terminate,
+            ),
+            (
+                job.is_some_and(JobsInspector::can_background),
+                Action::MoveToBackground,
+            ),
             (
                 self.drafts.has_recovery() && self.can_edit_draft() && self.composer.is_empty(),
                 Action::RecoverDraft,

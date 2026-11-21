@@ -475,6 +475,22 @@ impl App {
                 }
                 None
             }
+            Action::Terminate | Action::MoveToBackground => {
+                use zevria_presentation::jobs::JobsInspector;
+                let terminate = action == Action::Terminate;
+                self.selected_command_job()
+                    .filter(|job| {
+                        if terminate {
+                            JobsInspector::can_terminate(job)
+                        } else {
+                            JobsInspector::can_background(job)
+                        }
+                    })
+                    .map(|job| UiAction::JobControl {
+                        id: job.id.clone(),
+                        terminate,
+                    })
+            }
             Action::Copy | Action::CopyOutput => self.handle_yank(selection, now),
             Action::CopyList if scope == SelectionScope::Block => self
                 .model

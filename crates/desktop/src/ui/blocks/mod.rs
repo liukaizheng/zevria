@@ -2,7 +2,7 @@
 mod tools;
 pub(super) mod web;
 use super::{
-    math, style,
+    jobs, math, style,
     theme::{palette, tones},
 };
 use crate::{
@@ -18,11 +18,13 @@ use gpui_kit::component::{
     text::TextViewState,
 };
 use gpui_kit::{prelude::*, *};
-use std::{ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc, time::SystemTime};
+use zevria_foundation::{CommandJobId, CommandJobSnapshot, CommandJobStatus};
 use zevria_presentation::{
     blocks::*,
     conversation::HistoryEntry,
     fold::FoldKey,
+    jobs::{JobRow, JobsInspector, job_status_icon, notice_rows},
     shell::{self, ShellToken},
     status_icon::StatusIcon,
 };
@@ -89,6 +91,26 @@ pub struct ToolMeta {
     pub added: usize,
     pub removed: usize,
     pub background: bool,
+    pub job: Option<JobMeta>,
+}
+#[derive(Clone, Debug)]
+pub struct JobMeta {
+    pub id: CommandJobId,
+    pub running: bool,
+    pub foreground: bool,
+    pub status: CommandJobStatus,
+    started_at: SystemTime,
+}
+impl From<&CommandJobSnapshot> for JobMeta {
+    fn from(job: &CommandJobSnapshot) -> Self {
+        Self {
+            id: job.id.clone(),
+            running: JobsInspector::can_terminate(job),
+            foreground: job.mode == zevria_foundation::CommandJobMode::Foreground,
+            status: job.status.clone(),
+            started_at: job.started_at,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub enum BlockKind {
@@ -116,6 +138,10 @@ pub enum BlockKind {
     Web(web::WebRow),
     Notice {
         level: NoticeLevel,
+    },
+    Jobs {
+        finished: Vec<JobRow>,
+        running: Vec<JobRow>,
     },
     Divider,
     Document {
@@ -221,6 +247,7 @@ impl BlockData {
         }
         match self.kind {
             BlockKind::Notice { .. }
+            | BlockKind::Jobs { .. }
             | BlockKind::Prose {
                 role: PresentationRole::System,
                 ..
@@ -331,6 +358,7 @@ impl BlockData {
                                 added,
                                 removed,
                                 background: state.is_background_command(),
+                                job: state.command_job.as_ref().map(JobMeta::from),
                             },
                         };
                         data.gutter = Gutter::Glyph(status);
@@ -507,17 +535,12 @@ pub fn entry(
             false,
         )],
         HistoryEntry::JobNotice(notice, header) => {
+            let (finished, running) = notice_rows(notice);
             let mut block = BlockData::new(
                 key,
-                BlockKind::Prose {
-                    role: PresentationRole::System,
-                    plain: true,
-                },
+                BlockKind::Jobs { finished, running },
                 Gutter::Label(Speaker::System),
-                format!(
-                    "Background jobs finished\n{}",
-                    zevria_presentation::jobs::display_notice_lines(notice).join("\n")
-                ),
+                "Background jobs finished".into(),
                 true,
             );
             block.primary = notice.text().to_owned();
@@ -653,7 +676,7 @@ pub struct BlockView {
     _output: Subscription,
     _clock: Subscription,
     block_focus: FocusHandle,
-    action_focus: [FocusHandle; 3],
+    action_focus: [FocusHandle; 4],
     disclosure_focus: FocusHandle,
     message_focus: FocusHandle,
     focus_subscriptions: Vec<Subscription>,
@@ -733,6 +756,7 @@ impl BlockView {
                 Gutter::Live | Gutter::Glyph(StatusIcon::Running)
             ) || (matches!(this.data.kind, BlockKind::Reasoning)
                 && this.data.phase == Phase::Live)
+                || matches!(&this.data.kind, BlockKind::Tool { meta, .. } if meta.job.as_ref().is_some_and(|job| job.running))
             {
                 cx.notify();
             }
@@ -751,7 +775,7 @@ impl BlockView {
             _output: watch_output,
             _clock: clock,
             block_focus: cx.focus_handle(),
-            action_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
+            action_focus: std::array::from_fn(|_| cx.focus_handle()),
             disclosure_focus: cx.focus_handle(),
             message_focus: cx.focus_handle(),
             focus_subscriptions: Vec::new(),
@@ -946,7 +970,7 @@ impl BlockView {
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
-    fn actions(&self, window: &Window, _cx: &mut Context<Self>) -> Div {
+    fn actions(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let primary = self.data.primary.clone();
         let scope = self.copy_scope();
         let controller = self.controller.clone();
@@ -993,6 +1017,31 @@ impl BlockView {
                         })
                     }),
             );
+        }
+        if scope.is_none()
+            && let BlockKind::Tool { meta, .. } = &self.data.kind
+            && let Some(job) = meta.job.as_ref().filter(|_| meta.background)
+        {
+            let controller = self.controller.clone();
+            let workspace = &controller.read(cx).model;
+            if workspace.root.workflow.dialog().is_none()
+                && workspace
+                    .jobs
+                    .jobs()
+                    .iter()
+                    .any(|snapshot| snapshot.id == job.id)
+            {
+                let id = job.id.clone();
+                actions = actions.child(
+                    style::icon_button("show-in-jobs", IconName::ExternalLink, "Show in Jobs")
+                        .track_focus(&self.action_focus[3])
+                        .on_click(move |_, _, cx| {
+                            controller.update(cx, |controller, cx| {
+                                controller.inspect_job(id.clone(), cx)
+                            });
+                        }),
+                );
+            }
         }
         actions
     }
@@ -1542,6 +1591,37 @@ impl Render for BlockView {
                 }
                 if meta.background {
                     row = row.child(style::tag("background", t.feedback.info, cx));
+                    if let Some(job) = &meta.job {
+                        row = row.child(
+                            style::meta()
+                                .min_w_0()
+                                .max_w(px(135.))
+                                .truncate()
+                                .text_color(style::glyph_color(
+                                    job_status_icon(&job.status),
+                                    ink,
+                                    cx,
+                                ))
+                                .child(job.status.to_string()),
+                        );
+                    }
+                }
+                if let Some(job) = meta.job.as_ref().filter(|job| job.running) {
+                    row = row
+                        .child(
+                            style::meta()
+                                .flex_shrink_0()
+                                .text_color(t.text.muted)
+                                .child(format!(
+                                    "{:.1}s",
+                                    job.started_at.elapsed().unwrap_or_default().as_secs_f64()
+                                )),
+                        )
+                        .child(jobs::control_buttons(
+                            &job.id,
+                            job.foreground,
+                            &self.controller,
+                        ));
                 }
                 match status {
                     StatusIcon::Denied => {
@@ -1771,6 +1851,32 @@ impl Render for BlockView {
                             .border_color(tones(cx).hairline),
                     );
                 }
+            }
+            BlockKind::Jobs { finished, running } => {
+                let mut notice = div().flex().flex_col().group("log-block").child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            style::label()
+                                .text_color(t.text.secondary)
+                                .child(self.data.body.clone()),
+                        )
+                        .child(self.actions(window, cx)),
+                );
+                notice = notice.children(finished.iter().map(|row| jobs::job_row(row, ink, cx)));
+                if !running.is_empty() {
+                    notice = notice
+                        .child(
+                            style::meta()
+                                .mt(px(4.))
+                                .text_color(t.text.secondary)
+                                .child("Still running:"),
+                        )
+                        .children(running.iter().map(|row| jobs::job_row(row, ink, cx)));
+                }
+                content = content.max_w(px(style::PROSE)).child(notice);
             }
             BlockKind::Divider => {
                 content = content.child(
@@ -2039,7 +2145,7 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn job_notices_map_to_system_prose_and_copy_verbatim_text() {
+    fn job_notices_map_to_structured_system_rows_and_copy_verbatim_text() {
         use zevria_foundation::*;
         let notice = CommandJobNotice::new(
             CommandJobNoticeKind::Update,
@@ -2063,18 +2169,15 @@ mod tests {
         );
         let history = HistoryEntry::JobNotice(notice.clone(), None);
         let data = entry("epoch", 1, &history, 0, false, false);
-        assert!(matches!(
-            data[0].kind,
-            BlockKind::Prose {
-                role: PresentationRole::System,
-                ..
-            }
-        ));
+        let BlockKind::Jobs { finished, running } = &data[0].kind else {
+            panic!("expected structured jobs notice");
+        };
+        assert!(running.is_empty());
+        assert_eq!(finished[0].command.text, "cargo test");
+        assert_eq!(finished[0].icon, StatusIcon::Failed);
         assert_eq!(data[0].gutter, Gutter::Label(Speaker::System));
         assert_eq!(data[0].primary, notice.text());
         assert!(!data[0].body.contains("full output"));
-        assert!(data[0].body.ends_with("cargo test"));
-        assert!(!data[0].body.contains("rtk"));
     }
     #[::core::prelude::v1::test]
     fn child_prompts_use_task_gutters_and_prompt_boundaries() {

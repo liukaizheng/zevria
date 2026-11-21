@@ -29,12 +29,16 @@ mod native {
         ui::{assets::AppAssets, theme, window::DesktopWindow},
     };
     use zevria_foundation::{
-        FileChange, FileChangeOutput, ModelProfileRef, ModelRole, QuestionOption, QuestionPrompt,
-        QuestionPromptKind, QuestionRequest, QuestionRequestId, SessionMode, ToolCallOutcome,
-        ToolResultDetail, ToolResultMetadata, TurnId,
+        CommandJobId, CommandJobMode, CommandJobNotice, CommandJobNoticeKind, CommandJobSnapshot,
+        CommandJobStatus, CommandJobView, FileChange, FileChangeOutput, ModelProfileRef, ModelRole,
+        QuestionOption, QuestionPrompt, QuestionPromptKind, QuestionRequest, QuestionRequestId,
+        SessionMode, ToolCallOutcome, ToolResultDetail, ToolResultMetadata, TurnId,
     };
     use zevria_model::{ContextTokenSnapshot, ContextTokenSource, TokenUsage};
-    use zevria_session_api::SessionEvent as E;
+    use zevria_session_api::{
+        CommandControlAction, CommandControlResult, ControlCommand, SessionCommand,
+        SessionEvent as E,
+    };
     use zevria_workflow::{PlanArtifact, PlanId, PlanVersion, PlanWorkflowState};
 
     const PLAN: &str = "# Gutter-led native redesign\n\n## Goal\n\nMake Zevria's long tool loops easy to scan without changing session behavior. The editor gutter carries speakers and status; everything around it stays quiet.\n\n## Design language\n\n- Warm graphite planes for reading, recessed wells for literal content.\n- Build mint and Plan blue appear only where the mode acts.\n- SF Pro for conversation, **Charter for documents**, Menlo for code.\n\n## Implementation\n\n1. Validate the palette and map every visible Kit slot.\n2. Align the transcript and composer on one content axis.\n3. Preserve element IDs and exercise all existing desktop flows.\n\n```rust\nlet palette = zevria_theme::ZEVRIA_GRAPHITE;\n```\n\n## Validation\n\nRun the native UI tests and render this gallery at both widths. Prompt-prefix regression tests must remain green.\n";
@@ -48,6 +52,7 @@ mod native {
         Idle,
         Empty,
         Working,
+        Jobs,
         ThinkingLive,
         ThinkingRestored,
         ThinkingInterrupted,
@@ -77,6 +82,7 @@ mod native {
                 Self::Idle => "idle",
                 Self::Empty => "empty-session",
                 Self::Working => "working",
+                Self::Jobs => "jobs",
                 Self::ThinkingLive => "thinking-live",
                 Self::ThinkingRestored => "thinking-restored",
                 Self::ThinkingInterrupted => "thinking-interrupted",
@@ -143,6 +149,7 @@ mod native {
                 Scene::Idle,
                 Scene::Empty,
                 Scene::Working,
+                Scene::Jobs,
                 Scene::WebSearch,
                 Scene::WebSearchLive,
                 Scene::ThinkingLive,
@@ -173,6 +180,7 @@ mod native {
             }
             for scene in [
                 Scene::Working,
+                Scene::Jobs,
                 Scene::ThinkingLive,
                 Scene::ThinkingRestored,
                 Scene::ThinkingInterrupted,
@@ -307,7 +315,7 @@ mod native {
             Arc::new(AppAssets),
             gpui_kit::platform::current_headless_renderer,
         );
-        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let (window,controller) = cx.update(|cx| -> anyhow::Result<_> {
             gpui_kit::init(cx); theme::apply(tokens,cx); actions::install(cx); cx.set_reduce_motion(true);
             let controller = cx.new(|cx| {
@@ -375,6 +383,7 @@ mod native {
                 });
             }
             if matches!(scene,Scene::Working | Scene::Question | Scene::Confirm) { working(&controller,cx); }
+            if scene == Scene::Jobs { jobs_scene(&controller, &mut receiver, cx)?; }
             if matches!(scene, Scene::WebSearch | Scene::WebSearchLive) {
                 web_scene(&controller, scene == Scene::WebSearchLive, cx)?;
             }
@@ -427,6 +436,13 @@ mod native {
             Ok((window,controller))
         })?;
         settle(&mut cx, window)?;
+        if scene == Scene::Jobs && width == 1240. {
+            // Show a docked inspector at 1240 px and an overlay at 720 px.
+            cx.update_window(window, |_, window, cx| {
+                window.dispatch_action(Box::new(actions::ToggleSidebar), cx);
+            })?;
+            settle(&mut cx, window)?;
+        }
         if matches!(
             scene,
             Scene::ThinkingLive | Scene::ThinkingInterrupted | Scene::ThinkingUnsaved
@@ -645,6 +661,60 @@ mod native {
             })?;
         }
         Ok(())
+    }
+
+    fn jobs_scene(
+        controller: &Entity<SessionController>,
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<SessionCommand>,
+        cx: &mut gpui_kit::App,
+    ) -> anyhow::Result<()> {
+        controller.update(cx, |c, cx| {
+            let turn_id = TurnId::new(8);
+            c.fixture_event(E::TurnStarted { turn_id, mode: SessionMode::Build,
+                message: Message::user("Run the release checks and watch the trace while the tests finish.") }, cx);
+            c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
+            c.fixture_event(E::Intermediate { turn_id,
+                message: Message::assistant("The UI bundle built successfully. The release tests and trace are still running."), attempt_id: None }, cx);
+            let now = SystemTime::now();
+            let mut snapshots = Vec::new();
+            for (key, command, age, mode, finished) in [
+                ("517cd1", "npm run build", 57, CommandJobMode::Background, true),
+                ("5b9ef6", "tail -f /tmp/release-trace.log", 44, CommandJobMode::Background, false),
+                ("db03c8", "rtk cargo test --release -p zevria-presentation", 42, CommandJobMode::Foreground, false),
+            ] {
+                let started_at = now - Duration::from_secs(age);
+                let status = if finished { CommandJobStatus::Exited { code: Some(0), success: true, signal: None } } else { CommandJobStatus::Running };
+                let call_id = format!("call-{key}");
+                let snapshot = CommandJobSnapshot { id: CommandJobId::new(format!("job-{key}")),
+                    call_id: Some(call_id.clone()), command: command.into(), mode, status, started_at,
+                    finished_at: finished.then(|| started_at + Duration::from_millis(8300)),
+                    stdout_bytes: if key == "5b9ef6" { 12_850 } else { 567 }, stderr_bytes: 82,
+                };
+                let call = ToolCall::new(CallId::from_wire(&call_id), ToolFunction::new(ToolName::new("command").unwrap(),
+                    serde_json::json!({"command": command, "background": mode == CommandJobMode::Background})));
+                c.fixture_event(E::Intermediate { turn_id, message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(call)])), attempt_id: None }, cx);
+                c.fixture_event(E::CommandJobUpdated { job: snapshot.clone() }, cx);
+                snapshots.push(snapshot);
+            }
+            c.fixture_event(E::CommandJobsReported { turn_id, notice: CommandJobNotice::new(CommandJobNoticeKind::Update,
+                vec![snapshots[0].clone()], snapshots[1..].to_vec(), "The UI build finished successfully.".into()) }, cx);
+            c.toggle_jobs(cx);
+            for _ in 0..2 {
+                let SessionCommand::Control(ControlCommand::Command(request)) = receiver.try_recv()? else {
+                    anyhow::bail!("expected a job inspector request");
+                };
+                let CommandControlAction::Inspect { id } = request.action else {
+                    anyhow::bail!("expected to inspect jobs");
+                };
+                let views = snapshots.iter().filter(|job| id.as_ref().is_none_or(|id| id == &job.id)).map(|snapshot| CommandJobView {
+                    snapshot: snapshot.clone(),
+                    stdout_tail: id.as_ref().map_or_else(String::new, |_| include_str!("fixtures/jobs-stdout.txt").into()),
+                    stderr_tail: id.as_ref().map_or_else(String::new, |_| include_str!("fixtures/jobs-stderr.txt").into()),
+                }).collect();
+                c.fixture_event(E::CommandControlResult { request_id: request.request_id, result: CommandControlResult::Inspected(views) }, cx);
+            }
+            Ok(())
+        })
     }
 
     fn working(controller: &Entity<SessionController>, cx: &mut gpui_kit::App) {

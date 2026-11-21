@@ -6,13 +6,17 @@ use super::{
 };
 use crate::actions::Shortcut;
 use gpui_kit::component::{
-    Disableable, Sizable,
+    Disableable, Selectable, Sizable,
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{prelude::*, *};
 use std::time::Instant;
 use zevria_foundation::ModelRole;
-use zevria_presentation::{ConversationTail, SessionModel, status_icon::StatusIcon};
+use zevria_presentation::{
+    ConversationTail, SessionModel, jobs::JobsInspector, status_icon::StatusIcon,
+};
+
+pub(super) const HEIGHT: f32 = 28.;
 
 #[derive(Debug, PartialEq)]
 pub struct ContextGauge {
@@ -294,7 +298,7 @@ impl DesktopWindow {
         let mut row = div()
             .id("status-bar")
             .test_support()
-            .h(px(28.))
+            .h(px(HEIGHT))
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -367,6 +371,53 @@ impl DesktopWindow {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.open_models(cx))),
             );
+            let jobs = controller.model.jobs.jobs();
+            if !jobs.is_empty() {
+                let running = jobs
+                    .iter()
+                    .filter(|job| JobsInspector::can_terminate(job))
+                    .count();
+                let label = if running == 0 {
+                    "Jobs".to_owned()
+                } else if running == 1 {
+                    "1 job".to_owned()
+                } else {
+                    format!("{running} jobs")
+                };
+                let selected = controller.model.jobs_panel_visible();
+                let action = if selected { "Hide jobs" } else { "Show jobs" };
+                row = row.child(
+                    Button::new("status-jobs")
+                        .ghost()
+                        .small()
+                        .h(px(22.))
+                        .flex_shrink_0()
+                        .selected(selected)
+                        .disabled(controller.model.root.workflow.dialog().is_some())
+                        .tooltip(format!("{action} ({})", Shortcut::TOGGLE_JOBS.label()))
+                        .accessibility_label(format!("{action}: {label}"))
+                        .when(running != 0, |button| {
+                            button.child(style::status_glyph(
+                                StatusIcon::Running,
+                                accent(model, cx),
+                                cx,
+                            ))
+                        })
+                        .child(
+                            div()
+                                .text_color(if running == 0 {
+                                    t.text.muted
+                                } else {
+                                    t.text.secondary
+                                })
+                                .child(label),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.controller
+                                .update(cx, |controller, cx| controller.toggle_jobs(cx));
+                        })),
+                );
+            }
         } else {
             row = row.child(
                 div()

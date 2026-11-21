@@ -283,6 +283,16 @@ const MODELS: &[Binding] = &[b!(
         ..key(Char('m'))
     }
 )];
+const OPEN_JOBS: &[Binding] = &[b!(
+    JobsOverlay,
+    "jobs",
+    0,
+    "Session",
+    Key {
+        modifiers: KeyModifiers::ALT,
+        ..key(Char('j'))
+    }
+)];
 const COMPLETION: &[Binding] = &[
     b!(AcceptCompletion, "accept/run", 1, "Completion", key(Enter)),
     b!(
@@ -340,6 +350,8 @@ const SELECTION: &[Binding] = &[
     b!(Copy, "copy/params", 1, "Selection", key(Char('y'))),
     b!(CopyOutput, "output", 0, "Selection", chord('y', 'y')),
     b!(CopyList, "list", 0, "Selection", key(Char('Y'))),
+    JOB_TERMINATE,
+    JOB_BACKGROUND,
     b!(Edit, "edit", 3, "Selection", ctrl(Char('e'))),
     b!(
         Confirm,
@@ -388,25 +400,35 @@ const TEXT: &[Binding] = &[
     b!(Home, "start", 0, "Text entry", key(Home)),
     b!(End, "end", 0, "Text entry", key(End)),
 ];
-const JOBS: &[Binding] = &[
-    b!(Terminate, "terminate", 2, "Jobs", key(Char('x'))),
-    b!(MoveToBackground, "background", 3, "Jobs", key(Char('m'))),
-];
+const JOB_TERMINATE: Binding = b!(Terminate, "terminate", 2, "Jobs", key(Char('x')));
+const JOB_BACKGROUND: Binding = b!(MoveToBackground, "background", 3, "Jobs", key(Char('m')));
+const JOBS: &[Binding] = &[JOB_TERMINATE, JOB_BACKGROUND];
 const HELP: &[Binding] = &[b!(Help, "help", 5, "Help", key(Char('?')))];
 const HELP_CLOSE: &[Binding] = &[b!(Help, "close", 5, "Help", key(Char('?')))];
 
 pub fn bindings(context: KeyContext) -> impl Iterator<Item = &'static Binding> {
     use KeyContext::*;
     let groups: &[&[Binding]] = match context {
-        Composer => &[EDITOR, MODE, MODELS, PANES, GLOBAL],
-        Completion => &[COMPLETION, EDITOR, MODE, MODELS, &PANES[..1], GLOBAL],
-        Transcript => &[NORMAL, TRANSCRIPT, PAGES, MODE, MODELS, PANES, GLOBAL, HELP],
+        Composer => &[EDITOR, MODE, MODELS, OPEN_JOBS, PANES, GLOBAL],
+        Completion => &[
+            COMPLETION,
+            EDITOR,
+            MODE,
+            MODELS,
+            OPEN_JOBS,
+            &PANES[..1],
+            GLOBAL,
+        ],
+        Transcript => &[
+            NORMAL, TRANSCRIPT, PAGES, MODE, MODELS, OPEN_JOBS, PANES, GLOBAL, HELP,
+        ],
         BlockNav => &[
             SELECTION,
             TRANSCRIPT,
             PHYSICAL_PAGES,
             USER_JUMPS,
             MODELS,
+            OPEN_JOBS,
             PANES,
             GLOBAL,
             HELP,

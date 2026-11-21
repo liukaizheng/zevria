@@ -343,7 +343,11 @@ fn jobs_overlay_is_global_captures_input_and_dismisses_without_cancelling_busy_r
         message: Message::user("work"),
         mode: SessionMode::Build,
     });
-    views.overlays.show_jobs();
+    assert_eq!(
+        views.handle_event(modified_key(KeyCode::Char('j'), KeyModifiers::ALT)),
+        None
+    );
+    assert!(views.overlays.jobs.is_open());
     views.apply(SessionEvent::CommandJobUpdated {
         job: zevria_foundation::CommandJobSnapshot {
             id: zevria_foundation::CommandJobId::new("job-test01"),
@@ -359,21 +363,32 @@ fn jobs_overlay_is_global_captures_input_and_dismisses_without_cancelling_busy_r
     });
     let text = rendered_views_text(&mut views, 120, 28);
     assert!(text.contains("Jobs"));
-    assert!(text.contains("job-test01"));
+    assert!(text.contains("sleep 600"));
+    assert!(!text.contains("job-test01"));
     assert!(text.contains("1 job"));
     assert!(!text.contains("1 jobs"));
     views.handle_event(Event::Paste("ignored overlay paste".into()));
     assert_eq!(views.root.input(), "saved draft");
     assert_eq!(views.handle_event(key(KeyCode::Char('x'))), None);
-    assert!(views.overlays.jobs.commands.iter().any(|c| matches!(
-        c,
-        zevria_session_api::SessionCommand::Control(zevria_session_api::ControlCommand::Command(
-            zevria_session_api::CommandControl {
-                action: zevria_session_api::CommandControlAction::Terminate { .. },
-                ..
-            }
-        ))
-    )));
+    assert!(
+        views
+            .overlays
+            .jobs
+            .inspector
+            .commands
+            .iter()
+            .any(|c| matches!(
+                c,
+                zevria_session_api::SessionCommand::Control(
+                    zevria_session_api::ControlCommand::Command(
+                        zevria_session_api::CommandControl {
+                            action: zevria_session_api::CommandControlAction::Terminate { .. },
+                            ..
+                        }
+                    )
+                )
+            ))
+    );
     assert_eq!(
         views.handle_event(modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         None
@@ -381,6 +396,101 @@ fn jobs_overlay_is_global_captures_input_and_dismisses_without_cancelling_busy_r
     assert!(!views.overlays.jobs.is_open());
     assert!(views.root.is_busy());
     assert_eq!(views.root.input(), "saved draft");
+}
+
+#[test]
+fn selected_running_command_controls_stay_correlated_with_jobs_overlay_closed() {
+    use zevria_foundation::{CommandJobId, CommandJobMode, CommandJobSnapshot, CommandJobStatus};
+    use zevria_session_api::{
+        CommandControlAction as Request, CommandControlResult as Reply, ControlCommand,
+        SessionCommand,
+    };
+    let mut views = test_session_views(App::new());
+    views.apply(SessionEvent::TurnStarted {
+        turn_id: TEST_TURN_ID,
+        message: Message::user("Run a command"),
+        mode: SessionMode::Build,
+    });
+    views.apply(SessionEvent::ModelCallStarted {
+        turn_id: TEST_TURN_ID,
+        call: 1,
+    });
+    views.apply(SessionEvent::Intermediate {
+        turn_id: TEST_TURN_ID,
+        message: assistant_message(vec![tool_call(
+            "job-call",
+            None,
+            "command",
+            json!({"command": "sleep 60"}),
+        )]),
+        attempt_id: None,
+    });
+    let mut job = CommandJobSnapshot {
+        id: CommandJobId::new("job-inline"),
+        call_id: Some("job-call".into()),
+        command: "sleep 60".into(),
+        mode: CommandJobMode::Foreground,
+        status: CommandJobStatus::Running,
+        started_at: SystemTime::now(),
+        finished_at: None,
+        stdout_bytes: 0,
+        stderr_bytes: 0,
+    };
+    views.apply(SessionEvent::CommandJobUpdated { job: job.clone() });
+    let selection = cursor(views.root.history().len() - 1, 0);
+    views.root.select_message_for_test(selection);
+    views.handle_event(key(KeyCode::Char('x')));
+    assert!(views.overlays.jobs.inspector.commands.is_empty());
+    views.root.select_for_test(selection);
+    let eligible = views.root.hint_eligibility();
+    assert!(!eligible.disabled.contains(&crate::input::Action::Terminate));
+    assert!(
+        !eligible
+            .disabled
+            .contains(&crate::input::Action::MoveToBackground)
+    );
+    views.handle_event(key(KeyCode::Char('m')));
+    let Some(SessionCommand::Control(ControlCommand::Command(background))) =
+        views.overlays.jobs.inspector.commands.pop_front()
+    else {
+        panic!("expected job background request");
+    };
+    assert_eq!(
+        background.action,
+        Request::MoveToBackground { id: job.id.clone() }
+    );
+    job.mode = CommandJobMode::Background;
+    views.apply(SessionEvent::CommandControlResult {
+        request_id: background.request_id,
+        result: Reply::Accepted(job.clone()),
+    });
+    views.apply(SessionEvent::CommandJobUpdated { job: job.clone() });
+    assert!(
+        views
+            .root
+            .hint_eligibility()
+            .disabled
+            .contains(&crate::input::Action::MoveToBackground)
+    );
+    assert!(views.overlays.jobs.inspector.commands.is_empty());
+    views.handle_event(key(KeyCode::Char('x')));
+    let Some(SessionCommand::Control(ControlCommand::Command(stop))) =
+        views.overlays.jobs.inspector.commands.pop_front()
+    else {
+        panic!("expected job stop request");
+    };
+    assert_eq!(stop.action, Request::Terminate { id: job.id });
+    views.apply(SessionEvent::CommandControlResult {
+        request_id: stop.request_id,
+        result: Reply::Rejected {
+            message: "The job just finished.".into(),
+        },
+    });
+    assert!(!views.overlays.jobs.is_open());
+    assert!(views.root.is_busy());
+    assert!(views.root.history().iter().any(
+        |entry| matches!(entry, HistoryEntry::Error(text) if text == "The job just finished.")
+    ));
 }
 
 #[test]

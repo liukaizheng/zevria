@@ -8,6 +8,7 @@ use zevria_foundation::{
 };
 use zevria_host::RestoredSession;
 use zevria_presentation::command::{ClassifiedInput, CommandRegistry, SlashCommand};
+use zevria_presentation::jobs::JobsInspector;
 use zevria_presentation::{PaneScope, Reduction, RestorationInput, SessionModel};
 use zevria_session_api::{SessionCommand, SessionEvent, SessionUpdate};
 use zevria_workflow::PlanHandoff;
@@ -25,6 +26,7 @@ pub struct WorkspaceModel {
     pub children: Vec<ChildPane>,
     pub question: Option<QuestionForm>,
     pub models: zevria_presentation::models::ModelPicker,
+    pub jobs: JobsInspector,
     pub registry: CommandRegistry,
     pub session_id: String,
     pub transcript_path: PathBuf,
@@ -40,6 +42,7 @@ pub enum InputRoute {
     New,
     Resume,
     Models(zevria_model::models::ModelSelectionScope),
+    Jobs,
     Notice(String),
     Retained,
 }
@@ -50,6 +53,7 @@ impl Default for WorkspaceModel {
             children: Vec::new(),
             question: None,
             models: Default::default(),
+            jobs: JobsInspector::new("desktop.jobs."),
             registry: CommandRegistry::default(),
             session_id: String::new(),
             transcript_path: PathBuf::new(),
@@ -186,6 +190,19 @@ impl WorkspaceModel {
                     }
                     return WorkspaceReduction::default();
                 }
+                if matches!(
+                    event,
+                    SessionEvent::CommandJobUpdated { .. }
+                        | SessionEvent::CommandControlResult { .. }
+                ) {
+                    if let Some(notice) = self.jobs.event(&event) {
+                        self.root.conversation.push_error(notice);
+                    }
+                    self.select_default_job();
+                    if matches!(event, SessionEvent::CommandControlResult { .. }) {
+                        return WorkspaceReduction::default();
+                    }
+                }
                 let mut fresh = None;
                 match &mut event {
                     SessionEvent::QuestionAsked { turn_id, request }
@@ -271,9 +288,27 @@ impl WorkspaceModel {
             child.model.observe_clock(now);
         }
     }
+    pub fn jobs_panel_visible(&self) -> bool {
+        self.jobs.is_open()
+            && self.selected_child.is_none()
+            && self.root.workflow.dialog().is_none()
+    }
+    pub fn select_default_job(&mut self) {
+        if self.jobs.is_open() && self.jobs.inspected().is_none() {
+            let jobs = self.jobs.jobs();
+            if let Some(job) = jobs
+                .iter()
+                .find(|job| JobsInspector::can_terminate(job))
+                .or_else(|| jobs.first())
+            {
+                self.jobs.inspect(job.id.clone());
+            }
+        }
+    }
     pub fn disconnected(&mut self) -> Reduction {
         self.question = None;
         self.models.reset();
+        self.jobs = JobsInspector::new("desktop.jobs.");
         self.root.disconnected()
     }
     pub fn model_selection_available(&self) -> Result<(), &'static str> {
@@ -311,13 +346,16 @@ impl WorkspaceModel {
         self.models.show(mode, scope)
     }
     pub fn route_input(&mut self, input: &str, orchestrate: bool) -> InputRoute {
+        let classified = self
+            .registry
+            .classify_prompt(&zevria_content::UserPrompt::from_text(input));
+        if matches!(classified, Ok(ClassifiedInput::Builtin(SlashCommand::Jobs))) {
+            return InputRoute::Jobs;
+        }
         if self.root.is_busy() {
             return InputRoute::Retained;
         }
-        let classified = match self
-            .registry
-            .classify_prompt(&zevria_content::UserPrompt::from_text(input))
-        {
+        let classified = match classified {
             Ok(value) => value,
             Err(error) => return InputRoute::Notice(error.to_string()),
         };

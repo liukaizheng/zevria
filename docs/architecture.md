@@ -2435,10 +2435,12 @@ registry. Every root command is a job: foreground calls wait as before, while
 `command { command, background: true }` returns a short random `job-xxxxxx` ID.
 `command_status` lists model-owned jobs or reads incremental stdout/stderr for
 one ID, optionally waiting without stopping it. `command_terminate` stops just
-that process tree. A user can inspect running foreground commands through
-`/jobs`, terminate one without cancelling the turn, or move it to the background
-and release the blocked tool call immediately. Turn cancellation terminates
-only the foreground command it is waiting on; background jobs survive turn
+that process tree. Desktop and TUI share the presentation-only `JobsInspector`
+for correlated controls and non-consuming tail inspection. `/jobs` opens the
+frontend's Jobs surface. Either surface or a live transcript command row lets a
+user terminate a single job without cancelling the turn, or move a foreground
+job to the background and release the blocked tool call immediately. Turn
+cancellation terminates only the foreground command it is waiting on; background jobs survive turn
 completion and Ctrl+C. Listing acknowledges only finished jobs with no unread
 output. A finished job with unread stdout/stderr remains pending (or keeps its
 promised-unread pin after a status-only notice), so listing cannot suppress its
@@ -2588,24 +2590,17 @@ if final installation fails and reports any surviving mutation as a typed
 
 The following larger features remain deliberately unimplemented:
 
-1. **Desktop job controls:** add the running-job count, ID/live status badges,
-   list/tail inspection, termination, and foreground-to-background controls.
-   Move correlated-request, generation, and overlay retention bookkeeping into
-   `zevria-presentation` first, rather than duplicating the TUI implementation.
-2. **ACP lifecycle/control parity:** surface `CommandJobUpdated` and
+1. **ACP lifecycle/control parity:** surface `CommandJobUpdated` and
    `CommandControlResult` and let editor clients stop runaway jobs.
-3. **Child command visibility and background work:** expose child foreground
+2. **Child command visibility and background work:** expose child foreground
    commands to `/jobs` and support long-lived jobs in Build children instead of
    private foreground-only registries capped by the foreground timeout.
-4. **Recoverable large logs:** consider opt-in per-job log spills for the
+3. **Recoverable large logs:** consider opt-in per-job log spills for the
    irrecoverable middle of head/tail capture, with explicit disk/privacy limits.
-5. **Status ergonomics:** wait for any job, re-read retained output, and offer
+4. **Status ergonomics:** wait for any job, re-read retained output, and offer
    line-tail limits in addition to the current per-job unread cursor.
-6. **Restart awareness:** provide a one-time notice about unreported jobs from
+5. **Restart awareness:** provide a one-time notice about unreported jobs from
    the previous process, without restoring or implying that they still run.
-7. **TUI discoverability and confirmation:** consider a muted `/jobs to
-   background or stop` hint after about ten seconds and press-twice termination
-   confirmation. These are separate UX choices, not part of the current controls.
 
 ## Subtasks: independent Explore and Build subsessions
 

@@ -1,4 +1,6 @@
 //! Headless tests exercise real native controls and production window content.
+#[path = "job_tests.rs"]
+mod jobs;
 #[path = "model_tests.rs"]
 mod models;
 #[path = "turn_tests.rs"]

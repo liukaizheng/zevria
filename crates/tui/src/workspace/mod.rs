@@ -818,7 +818,9 @@ impl SessionViews {
     }
 
     fn apply_event(&mut self, event: SessionEvent) {
-        self.overlays.jobs.event(&event);
+        if let Some(notice) = self.overlays.jobs.event(&event) {
+            self.show_root_error(notice);
+        }
         if matches!(event, SessionEvent::CommandControlResult { .. }) {
             return;
         }
@@ -1279,6 +1281,10 @@ impl SessionViews {
                     self.open_model_picker(ModelSelectionScope::SessionOnly);
                     return None;
                 }
+                Some(Action::JobsOverlay) => {
+                    self.overlays.show_jobs();
+                    return None;
+                }
                 Some(Action::ReturnRoot) => {
                     self.set_visible(None);
                     return None;
@@ -1300,6 +1306,18 @@ impl SessionViews {
             }
             Some(UiAction::OpenAgentRun { id }) => {
                 self.open_agent(&id);
+                None
+            }
+            Some(UiAction::JobControl { id, terminate }) => {
+                let inspector = &mut self.overlays.jobs.inspector;
+                let notice = if terminate {
+                    inspector.terminate(id)
+                } else {
+                    inspector.move_to_background(id)
+                };
+                if let Some(notice) = notice {
+                    self.show_root_error(notice);
+                }
                 None
             }
             action => action,

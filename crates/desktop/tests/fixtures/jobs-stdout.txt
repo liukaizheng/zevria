@@ -1,0 +1,6 @@
+18:47:11  build-ui       bundled 196 modules
+18:47:13  build-ui       wrote dist/index.html
+18:47:18  release-check  compiling zevria-presentation
+18:47:24  release-check  checking command notices
+18:47:29  release-check  passed terminal_tails_strip_escapes
+18:47:33  release-check  waiting for restore round-trip

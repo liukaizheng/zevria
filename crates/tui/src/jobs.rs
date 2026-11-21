@@ -1,82 +1,93 @@
-//! Global, frontend-only shell job controls. Inspection never consumes model output.
+//! Global shell-job overlay. The shared inspector owns the command lifecycle.
 use crate::{
     hints::{Eligibility, hint_line},
     input::{Action, ChordState, KeyContext},
+    status_icon::StatusIcon,
+    text::{display_width, truncate_display_width},
+    theme::theme,
 };
 use ratatui::{
     Frame,
     crossterm::event::KeyEvent,
     layout::Rect,
-    text::Line,
+    style::{Color, Style},
+    text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
-use std::{
-    collections::{HashMap, VecDeque},
-    time::{Duration, Instant},
+use std::time::Instant;
+use zevria_foundation::CommandJobSnapshot;
+use zevria_presentation::jobs::{
+    JobRow, JobsInspector, JobsMessage, summary_title, tail_byte_label, terminal_tail_text,
 };
-use zevria_foundation::{
-    COMMAND_JOB_FRONTEND_TAIL_BYTES, CommandJobId, CommandJobMode, CommandJobSnapshot,
-    CommandJobView, RETAINED_FINISHED_COMMAND_JOBS, command_job_duration,
-};
-use zevria_presentation::jobs::{byte_label, terminal_tail_text};
-use zevria_session_api::{
-    CommandControl, CommandControlAction as Request, CommandControlResult as Reply, ControlCommand,
-    SessionCommand, SessionEvent,
-};
+use zevria_session_api::SessionEvent;
 use zevria_tui_widgets::overlay::{ListAction, ListNav, modal};
-#[derive(Clone)]
-enum Purpose {
-    Inspect(Option<CommandJobId>, u64),
-    Control(u64),
+
+pub(crate) fn job_ink(icon: StatusIcon) -> Color {
+    match icon {
+        StatusIcon::Running => theme().feedback.info,
+        StatusIcon::Done => theme().feedback.success,
+        StatusIcon::Failed => theme().feedback.error,
+        StatusIcon::Interrupted => theme().feedback.warning,
+        _ => theme().text.muted,
+    }
 }
-#[derive(Default)]
+
 pub(crate) struct JobsOverlay {
-    open: bool,
-    jobs: Vec<CommandJobSnapshot>,
-    inspect: Option<CommandJobId>,
-    detail: Option<CommandJobView>,
+    pub inspector: JobsInspector,
     follow: bool,
     nav: ListNav,
     keys: ChordState,
-    pending: HashMap<String, Purpose>,
-    next_id: u64,
-    generation: u64,
-    last_refresh: Option<Instant>,
-    refresh_again: bool,
-    message: String,
-    pub commands: VecDeque<SessionCommand>,
+    opened_at: Instant,
 }
+
+impl Default for JobsOverlay {
+    fn default() -> Self {
+        Self {
+            inspector: JobsInspector::new("tui.jobs."),
+            follow: false,
+            nav: ListNav::default(),
+            keys: ChordState::default(),
+            opened_at: Instant::now(),
+        }
+    }
+}
+
 impl JobsOverlay {
     pub fn is_open(&self) -> bool {
-        self.open
+        self.inspector.is_open()
     }
+
     pub fn show(&mut self) {
-        self.open = true;
-        self.follow = false;
-        self.inspect = None;
-        self.detail = None;
-        self.message.clear();
-        self.nav.request_reveal();
-        self.invalidate_geometry();
-        self.refresh();
+        if !self.is_open() {
+            self.opened_at = Instant::now();
+            self.follow = false;
+            self.keys.clear();
+            self.nav.request_reveal();
+            self.invalidate_geometry();
+            self.inspector.show();
+        }
     }
+
     pub fn invalidate_geometry(&mut self) {
         self.nav.invalidate_geometry();
     }
+
     fn selected(&self) -> Option<&CommandJobSnapshot> {
-        if let Some(id) = &self.inspect {
-            self.jobs.iter().find(|j| &j.id == id)
+        if let Some(id) = self.inspector.inspected() {
+            self.inspector.jobs().iter().find(|job| &job.id == id)
         } else {
-            self.jobs.get(self.nav.selected)
+            self.inspector.jobs().get(self.nav.selected)
         }
     }
+
     pub fn context(&self) -> KeyContext {
-        if self.inspect.is_some() {
+        if self.inspector.inspected().is_some() {
             KeyContext::JobsInspect
         } else {
             KeyContext::JobsList
         }
     }
+
     pub fn hint_eligibility(&self) -> Eligibility {
         let mut hints = Eligibility::default();
         hints
@@ -86,145 +97,50 @@ impl JobsOverlay {
         if job.is_none() {
             hints.disabled.push(Action::Confirm);
         }
-        if job.is_none_or(|j| j.status.is_terminal()) {
+        if !job.is_some_and(JobsInspector::can_terminate) {
             hints.disabled.push(Action::Terminate);
         }
-        if job.is_none_or(|j| j.status.is_terminal() || j.mode != CommandJobMode::Foreground) {
+        if !job.is_some_and(JobsInspector::can_background) {
             hints.disabled.push(Action::MoveToBackground);
         }
         hints
     }
-    fn send(&mut self, action: Request, purpose: Purpose) {
-        if self.pending.len() >= 32 {
-            self.message = "Too many pending job controls; wait for their results".into();
-            return;
+
+    pub fn event(&mut self, event: &SessionEvent) -> Option<String> {
+        if !matches!(
+            event,
+            SessionEvent::CommandJobUpdated { .. } | SessionEvent::CommandControlResult { .. }
+        ) {
+            return None;
         }
-        self.next_id += 1;
-        let request_id = format!("tui.jobs.{}", self.next_id);
-        self.pending.insert(request_id.clone(), purpose);
-        self.commands
-            .push_back(SessionCommand::Control(ControlCommand::Command(
-                CommandControl { request_id, action },
-            )));
-    }
-    fn refresh(&mut self) {
-        if !self.open {
-            return;
-        }
-        if self
-            .pending
-            .values()
-            .any(|p| matches!(p, Purpose::Inspect(..)))
-        {
-            self.refresh_again = true;
-            return;
-        }
-        self.last_refresh = Some(Instant::now());
-        self.send(
-            Request::Inspect {
-                id: self.inspect.clone(),
-            },
-            Purpose::Inspect(self.inspect.clone(), self.generation),
-        );
-    }
-    pub fn tick(&mut self, now: Instant) {
-        if self.open
-            && self
-                .last_refresh
-                .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(1))
-        {
-            self.refresh();
-        }
-    }
-    fn update(&mut self, job: CommandJobSnapshot) {
-        let selected = self.jobs.get(self.nav.selected).map(|j| j.id.clone());
-        if let Some(old) = self.jobs.iter_mut().find(|j| j.id == job.id) {
-            if old.status.is_terminal() && !job.status.is_terminal() {
-                return;
+        let inspecting = self.inspector.inspected().is_some();
+        let selected = self.selected().map(|job| job.id.clone());
+        let notice = self.inspector.event(event);
+        if self.inspector.inspected().is_none() {
+            if inspecting {
+                self.return_to_list();
             }
-            *old = job;
-        } else {
-            self.jobs.push(job);
+            if let Some(id) = selected
+                && let Some(index) = self.inspector.jobs().iter().position(|job| job.id == id)
+                && index != self.nav.selected
+            {
+                self.nav.selected = index;
+                self.nav.request_reveal();
+            }
+            self.nav.selected = self
+                .nav
+                .selected
+                .min(self.inspector.jobs().len().saturating_sub(1));
         }
-        self.jobs.sort_by_key(|j| j.started_at);
-        let mut finished = self
-            .jobs
-            .iter()
-            .filter(|j| j.mode == CommandJobMode::Background && j.status.is_terminal())
-            .count();
-        self.jobs.retain(|j| {
-            if j.mode == CommandJobMode::Foreground && j.status.is_terminal() {
-                return self.inspect.as_ref() == Some(&j.id);
-            }
-            if j.status.is_terminal() && finished > RETAINED_FINISHED_COMMAND_JOBS {
-                finished -= 1;
-                return false;
-            }
-            true
-        });
-        self.nav.selected = selected
-            .and_then(|id| self.jobs.iter().position(|j| j.id == id))
-            .unwrap_or(self.nav.selected.min(self.jobs.len().saturating_sub(1)));
-        self.invalidate_geometry();
+        notice
     }
-    pub fn event(&mut self, event: &SessionEvent) {
-        match event {
-            SessionEvent::CommandJobUpdated { job } => {
-                self.generation = self.generation.wrapping_add(1);
-                self.update(job.clone());
-                self.refresh();
-            }
-            SessionEvent::CommandControlResult { request_id, result } => {
-                let Some(purpose) = self.pending.remove(request_id) else {
-                    return;
-                };
-                match (purpose.clone(), result) {
-                    (Purpose::Inspect(id, generation), Reply::Inspected(views))
-                        if generation == self.generation =>
-                    {
-                        let selected = self.jobs.get(self.nav.selected).map(|j| j.id.clone());
-                        if id.is_none() {
-                            self.jobs
-                                .retain(|j| views.iter().any(|v| v.snapshot.id == j.id));
-                        }
-                        for view in views {
-                            self.update(view.snapshot.clone());
-                        }
-                        self.nav.selected = selected
-                            .and_then(|id| self.jobs.iter().position(|j| j.id == id))
-                            .unwrap_or(self.nav.selected.min(self.jobs.len().saturating_sub(1)));
-                        if id == self.inspect && self.open {
-                            self.detail = id
-                                .and_then(|id| views.iter().find(|v| v.snapshot.id == id).cloned());
-                        }
-                    }
-                    (Purpose::Inspect(..), Reply::Inspected(_)) => {
-                        self.refresh_again = true;
-                    }
-                    (Purpose::Control(generation), Reply::Accepted(job)) => {
-                        if generation == self.generation {
-                            self.generation = self.generation.wrapping_add(1);
-                            self.update(job.clone());
-                        }
-                        self.message = "Control accepted".into();
-                        self.refresh_again = true;
-                    }
-                    (_, Reply::Rejected { message }) => {
-                        self.message = message.clone();
-                    }
-                    _ => {}
-                }
-                if matches!(purpose, Purpose::Inspect(..))
-                    && std::mem::take(&mut self.refresh_again)
-                {
-                    self.refresh();
-                } else if matches!(purpose, Purpose::Control(_)) {
-                    self.refresh();
-                }
-            }
-            _ => {}
-        }
+
+    fn return_to_list(&mut self) {
+        self.follow = false;
+        self.nav.viewport.jump_start();
+        self.nav.request_reveal();
     }
+
     pub fn handle_input(&mut self, key: KeyEvent) {
         let Some(action) = self.keys.resolve(self.context(), key) else {
             return;
@@ -233,537 +149,262 @@ impl JobsOverlay {
             return;
         }
         match action {
-            Action::Cancel | Action::Close => self.open = false,
+            Action::Cancel | Action::Close => self.inspector.close(),
             Action::Back => {
-                self.follow = false;
-                self.inspect = None;
-                self.detail = None;
-                self.jobs
-                    .retain(|j| j.mode == CommandJobMode::Background || !j.status.is_terminal());
-                self.nav.selected = self.nav.selected.min(self.jobs.len().saturating_sub(1));
-                self.nav.viewport.jump_start();
-                self.nav.request_reveal();
-                self.refresh();
+                self.inspector.back();
+                self.return_to_list();
             }
-            Action::Confirm if self.inspect.is_none() => {
-                self.inspect = self.selected().map(|j| j.id.clone());
-                self.detail = None;
-                self.follow = true;
-                self.refresh();
+            Action::Confirm if self.inspector.inspected().is_none() => {
+                if let Some(job) = self.selected() {
+                    self.inspector.inspect(job.id.clone());
+                    self.follow = true;
+                }
             }
             Action::Terminate | Action::MoveToBackground => {
                 if let Some(job) = self.selected() {
                     let id = job.id.clone();
-                    self.send(
-                        if action == Action::Terminate {
-                            Request::Terminate { id }
-                        } else {
-                            Request::MoveToBackground { id }
-                        },
-                        Purpose::Control(self.generation),
-                    );
+                    if action == Action::Terminate {
+                        self.inspector.terminate(id);
+                    } else {
+                        self.inspector.move_to_background(id);
+                    }
                 }
             }
             _ => {
                 if let Some(action) = action.list_action() {
-                    if self.inspect.is_some() {
+                    if self.inspector.inspected().is_some() {
                         self.nav.pan(action);
                         self.follow = action == ListAction::End
                             || self.nav.viewport.top() >= self.nav.viewport.max_top();
                     } else {
-                        self.nav.handle(action, self.jobs.len());
+                        self.nav.handle(action, self.inspector.jobs().len());
                     }
                 }
             }
         }
     }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let mut lines = Vec::new();
-        let mut entries = Vec::new();
-        if let Some(id) = &self.inspect {
-            lines.push(Line::from(format!("Inspect {id}")));
-            if let Some(detail) = &self.detail {
-                let job = &detail.snapshot;
-                lines.push(Line::from(format!(
-                    "{} · {} · {} · {}",
-                    display_command(&job.command),
-                    mode_label(job.mode),
-                    job.status,
-                    command_job_duration(job),
-                )));
-                for (name, tail, bytes) in [
-                    ("stdout", &detail.stdout_tail, job.stdout_bytes),
-                    ("stderr", &detail.stderr_tail, job.stderr_bytes),
-                ] {
-                    if tail.is_empty() {
-                        continue;
-                    }
-                    lines.push(Line::from(if bytes > COMMAND_JOB_FRONTEND_TAIL_BYTES {
-                        format!(
-                            "{name} (last {} KiB of {}):",
-                            COMMAND_JOB_FRONTEND_TAIL_BYTES / 1024,
-                            byte_label(bytes)
-                        )
-                    } else {
-                        format!("{name} ({}):", byte_label(bytes))
-                    }));
-                    lines.extend(
-                        terminal_tail_text(tail)
-                            .lines()
-                            .map(|s| Line::from(s.to_owned())),
-                    );
-                }
-                if detail.stdout_tail.is_empty() && detail.stderr_tail.is_empty() {
-                    lines.push(Line::from(if job.status.is_terminal() {
-                        "No output."
-                    } else {
-                        "No output yet."
-                    }));
-                }
-            } else {
-                lines.push(Line::from("Loading output tails…"));
-            }
+        let spin = ((self.opened_at.elapsed().as_millis() / 250) % 4) as usize;
+        let title_width = usize::from(area.width.saturating_sub(2));
+        let inspected = self.inspector.inspected();
+        let row = inspected.and_then(|_| self.selected()).map(JobRow::from);
+        let title = row.as_ref().map_or_else(
+            || {
+                Line::raw(truncate_display_width(
+                    &format!(" {} ", summary_title(self.inspector.jobs())),
+                    title_width,
+                ))
+            },
+            |row| inspect_title(row, title_width, spin),
+        );
+        let footer = hint_line(self.context(), &self.hint_eligibility(), title_width);
+        let mut inner = modal(frame, area, title, footer);
+        let width = usize::from(inner.width);
+        let muted = Style::new().fg(theme().text.muted);
+
+        if let Some(id) = inspected
+            && inner.height > 1
+        {
+            frame.render_widget(
+                Line::styled(truncate_display_width(id.as_str(), width), muted),
+                Rect { height: 1, ..inner },
+            );
+            inner.y = inner.y.saturating_add(1);
+            inner.height -= 1;
+        }
+        if let Some(message) = self.inspector.message()
+            && inner.height > 1
+        {
+            let (text, style) = match message {
+                JobsMessage::Accepted => ("Control accepted".into(), muted),
+                JobsMessage::Rejected(message) => (
+                    terminal_tail_text(message)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    Style::new().fg(theme().feedback.error),
+                ),
+            };
+            inner.height -= 1;
+            frame.render_widget(
+                Line::styled(truncate_display_width(&text, width), style),
+                Rect {
+                    y: inner.y.saturating_add(inner.height),
+                    height: 1,
+                    ..inner
+                },
+            );
+        }
+        let (lines, entries) = if inspected.is_some() {
+            (self.detail_lines(row.as_ref()), Vec::new())
+        } else if self.inspector.jobs().is_empty() {
+            (
+                vec![Line::styled("No commands in this session.", muted)],
+                Vec::new(),
+            )
         } else {
-            for job in &self.jobs {
-                entries.push(lines.len());
-                lines.push(Line::from(format!(
-                    "{} · {} · {} · {} · {}",
-                    job.id,
-                    mode_label(job.mode),
-                    job.status,
-                    command_job_duration(job),
-                    display_command(&job.command)
-                )));
-            }
-            if self.jobs.is_empty() {
-                lines.push(Line::from("No command jobs in this session."));
-            }
+            let lines = list_lines(self.inspector.jobs(), width, spin);
+            let entries = (0..lines.len())
+                .map(|n| crate::viewport::RowRange::from_start_len(n, 1))
+                .collect();
+            (lines, entries)
+        };
+        let physical = if entries.is_empty() {
+            crate::layout::prepare::wrapped_height(&lines, inner.width.max(1))
+        } else {
+            lines.len()
+        };
+        let has_list = !entries.is_empty();
+        // Inspection pans the output only; keep the job identity pinned above it.
+        if inspected.is_some() {
+            self.nav
+                .viewport
+                .reconcile(physical, usize::from(inner.height));
+        } else {
+            self.nav
+                .reconcile_rows(entries, physical, usize::from(inner.height));
         }
-        if !self.message.is_empty() {
-            lines.push(Line::from(clean(&self.message)));
-        }
-        let footer = hint_line(
-            self.context(),
-            &self.hint_eligibility(),
-            usize::from(area.width.saturating_sub(2)),
-        );
-        let inner = modal(frame, area, " Jobs ", footer);
-        let mut physical = 0;
-        let rows: Vec<_> = lines
-            .iter()
-            .map(|line| {
-                let start = physical;
-                physical += Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(inner.width.max(1));
-                crate::viewport::RowRange::new(start, physical)
-            })
-            .collect();
-        self.nav.reconcile_rows(
-            entries.into_iter().map(|i| rows[i]).collect(),
-            physical,
-            usize::from(inner.height),
-        );
         if self.follow {
             self.nav.viewport.jump_end();
         }
+        let body = Paragraph::new(lines)
+            .style(crate::chrome::overlay_style())
+            .scroll((crate::viewport::rows_to_u16(self.nav.viewport.top()), 0));
         frame.render_widget(
-            Paragraph::new(lines)
-                .style(crate::chrome::overlay_style())
-                .wrap(Wrap { trim: false })
-                .scroll((crate::viewport::rows_to_u16(self.nav.viewport.top()), 0)),
+            if has_list {
+                body
+            } else {
+                body.wrap(Wrap { trim: false })
+            },
             inner,
         );
-        if self.inspect.is_none() && !self.jobs.is_empty() {
+        if has_list {
             self.nav.paint_selected(frame, inner);
         }
         crate::viewport::render_scrollbar(frame, area, &self.nav.viewport);
     }
-}
-fn mode_label(mode: CommandJobMode) -> &'static str {
-    match mode {
-        CommandJobMode::Foreground => "fg",
-        CommandJobMode::Background => "bg",
+
+    fn detail_lines(&self, row: Option<&JobRow>) -> Vec<Line<'static>> {
+        let t = theme();
+        let mut lines = Vec::new();
+        if let Some(detail) = self.inspector.detail() {
+            for (name, tail, bytes, color) in [
+                (
+                    "stdout",
+                    &detail.stdout_tail,
+                    detail.snapshot.stdout_bytes,
+                    t.text.primary,
+                ),
+                (
+                    "stderr",
+                    &detail.stderr_tail,
+                    detail.snapshot.stderr_bytes,
+                    t.feedback.warning,
+                ),
+            ] {
+                if !tail.is_empty() {
+                    lines.push(
+                        Span::styled(
+                            format!("{name} ({}):", tail_byte_label(bytes)),
+                            Style::new().fg(t.text.secondary),
+                        )
+                        .into(),
+                    );
+                    lines.extend(
+                        terminal_tail_text(tail)
+                            .lines()
+                            .map(|text| Line::styled(text.to_owned(), Style::new().fg(color))),
+                    );
+                }
+            }
+        }
+        if lines.is_empty() {
+            let text = if row.is_some_and(|row| row.icon != StatusIcon::Running) {
+                "No output."
+            } else if self.inspector.detail().is_some() {
+                "No output yet."
+            } else {
+                "Loading output tails…"
+            };
+            lines.push(Line::styled(text, Style::new().fg(t.text.muted)));
+        }
+        lines
     }
 }
-fn display_command(command: &str) -> String {
-    zevria_presentation::shell::display(command)
-        .text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+
+fn glyph(icon: StatusIcon, spin: usize) -> Span<'static> {
+    Span::styled(icon.glyph(spin), Style::new().fg(job_ink(icon)))
 }
-fn clean(text: &str) -> String {
-    text.chars()
-        .filter(|ch| !ch.is_control() || *ch == '\n' || *ch == '\t')
+
+fn shell_spans(command: &str, width: usize) -> Vec<Span<'static>> {
+    crate::syntax::highlighted_code_lines(
+        &truncate_display_width(command, width),
+        Some("bash"),
+        Style::new().fg(theme().text.primary),
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_default()
+    .spans
+}
+
+fn inspect_title(row: &JobRow, width: usize, spin: usize) -> Line<'static> {
+    let meta = format!(" · {} · {} · {} ", row.mode, row.status, row.duration);
+    let meta_width = display_width(&meta).min(width.saturating_sub(10) / 2);
+    let mut spans = vec![Span::raw(" "), glyph(row.icon, spin), Span::raw(" ")];
+    spans.extend(shell_spans(
+        &row.command.text,
+        width.saturating_sub(meta_width + 3),
+    ));
+    spans.push(Span::styled(
+        truncate_display_width(&meta, meta_width),
+        Style::new().fg(theme().text.muted),
+    ));
+    Line::from(spans)
+}
+
+fn list_lines(jobs: &[CommandJobSnapshot], width: usize, spin: usize) -> Vec<Line<'static>> {
+    let rows: Vec<_> = jobs.iter().map(JobRow::from).collect();
+    let duration = rows
+        .iter()
+        .map(|row| display_width(&row.duration))
+        .max()
+        .unwrap_or(0);
+    let status = rows
+        .iter()
+        .map(|row| display_width(&row.status))
+        .max()
+        .unwrap_or(0)
+        .min(width.saturating_sub(duration + 12) / 2)
+        .min(24);
+    let meta_width = if status > 0 { 8 + duration + status } else { 0 };
+    let command_width = width.saturating_sub(meta_width + 2);
+    let muted = Style::new().fg(theme().text.muted);
+    rows.into_iter()
+        .map(|row| {
+            let mut spans = vec![glyph(row.icon, spin), Span::raw(" ")];
+            let command = shell_spans(&row.command.text, command_width);
+            let used = command.iter().map(|span| span.width()).sum::<usize>();
+            spans.extend(command);
+            if status > 0 {
+                let pad = command_width.saturating_sub(used);
+                let phrase = truncate_display_width(&row.status, status);
+                spans.push(Span::styled(
+                    format!(
+                        "{}  {}  {:>duration$}  {phrase}",
+                        " ".repeat(pad),
+                        row.mode,
+                        row.duration
+                    ),
+                    muted,
+                ));
+            }
+            Line::from(spans)
+        })
         .collect()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-    fn key(ch: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
-    }
-    fn snapshot(mode: CommandJobMode) -> CommandJobSnapshot {
-        CommandJobSnapshot {
-            id: CommandJobId::new("job-inspect"),
-            call_id: None,
-            command: "echo output".into(),
-            mode,
-            status: zevria_foundation::CommandJobStatus::Exited {
-                code: Some(0),
-                success: true,
-                signal: None,
-            },
-            started_at: std::time::SystemTime::UNIX_EPOCH,
-            finished_at: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(1234)),
-            stdout_bytes: 0,
-            stderr_bytes: 0,
-        }
-    }
-    fn render_text(overlay: &mut JobsOverlay, width: u16, height: u16) -> String {
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| overlay.render(frame, frame.area()))
-            .unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .chunks(usize::from(width))
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn reply_inspect(overlay: &mut JobsOverlay, view: CommandJobView) {
-        let SessionCommand::Control(ControlCommand::Command(request)) =
-            overlay.commands.pop_front().unwrap()
-        else {
-            panic!("inspect request")
-        };
-        assert!(matches!(request.action, Request::Inspect { .. }));
-        overlay.event(&SessionEvent::CommandControlResult {
-            request_id: request.request_id,
-            result: Reply::Inspected(vec![view]),
-        });
-    }
-    fn view(job: &CommandJobSnapshot, lines: usize) -> CommandJobView {
-        let stdout_tail: String = (0..lines).map(|n| format!("line {n:03}\n")).collect();
-        let mut snapshot = job.clone();
-        snapshot.stdout_bytes = stdout_tail.len();
-        CommandJobView {
-            snapshot,
-            stdout_tail,
-            stderr_tail: String::new(),
-        }
-    }
-
-    #[test]
-    fn inspection_opens_at_the_tail_and_follows_until_panned_up() {
-        let job = snapshot(CommandJobMode::Background);
-        let mut overlay = JobsOverlay::default();
-        overlay.show();
-        reply_inspect(&mut overlay, view(&job, 0));
-        overlay.handle_input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(overlay.follow);
-        reply_inspect(&mut overlay, view(&job, 50));
-        let text = render_text(&mut overlay, 100, 12);
-        assert!(text.contains("line 049"), "{text}");
-        assert!(!text.contains("line 000"), "{text}");
-        assert_eq!(overlay.nav.viewport.top(), overlay.nav.viewport.max_top());
-
-        overlay.tick(Instant::now() + Duration::from_secs(2));
-        reply_inspect(&mut overlay, view(&job, 60));
-        let text = render_text(&mut overlay, 100, 12);
-        assert!(text.contains("line 059"), "{text}");
-        assert_eq!(overlay.nav.viewport.top(), overlay.nav.viewport.max_top());
-
-        overlay.handle_input(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert!(!overlay.follow);
-        let top = overlay.nav.viewport.top();
-        overlay.tick(Instant::now() + Duration::from_secs(2));
-        reply_inspect(&mut overlay, view(&job, 70));
-        let text = render_text(&mut overlay, 100, 12);
-        assert_eq!(overlay.nav.viewport.top(), top);
-        assert!(!text.contains("line 069"), "{text}");
-
-        overlay.handle_input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        assert!(overlay.follow);
-        let text = render_text(&mut overlay, 100, 12);
-        assert!(text.contains("line 069"), "{text}");
-        overlay.tick(Instant::now() + Duration::from_secs(2));
-        reply_inspect(&mut overlay, view(&job, 80));
-        assert!(render_text(&mut overlay, 100, 12).contains("line 079"));
-        overlay.handle_input(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert!(!overlay.follow);
-        overlay.handle_input(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert!(overlay.follow, "reaching the end resumes following");
-        overlay.handle_input(key('b'));
-        assert!(!overlay.follow);
-        assert!(overlay.inspect.is_none());
-    }
-
-    #[test]
-    fn list_and_inspection_show_shared_durations_modes_and_stream_sizes() {
-        for mode in [CommandJobMode::Foreground, CommandJobMode::Background] {
-            let mut job = snapshot(mode);
-            let mut overlay = JobsOverlay::default();
-            // Finished foreground commands are retained only while inspected.
-            overlay.inspect = Some(job.id.clone());
-            overlay.update(job.clone());
-            overlay.inspect = None;
-            let text = render_text(&mut overlay, 100, 28);
-            assert!(
-                text.contains(&format!(
-                    "{} · {} · exited 0 · 1.2s",
-                    job.id,
-                    mode_label(mode)
-                )),
-                "{text}"
-            );
-            job.stdout_bytes = 1536 * 1024;
-            job.stderr_bytes = 1536;
-            overlay.inspect = Some(job.id.clone());
-            overlay.detail = Some(CommandJobView {
-                snapshot: job,
-                stdout_tail: "output".into(),
-                stderr_tail: "warning".into(),
-            });
-            let text = render_text(&mut overlay, 100, 28);
-            assert!(
-                text.contains(&format!(
-                    "echo output · {} · exited 0 · 1.2s",
-                    mode_label(mode)
-                )),
-                "{text}"
-            );
-            assert!(text.contains("stdout (last 8 KiB of 1.5 MiB):"), "{text}");
-            assert!(text.contains("stderr (1.5 KiB):"), "{text}");
-        }
-    }
-
-    #[test]
-    fn inspection_sanitizes_tails_and_omits_empty_stream_sections() {
-        let job = snapshot(CommandJobMode::Background);
-        let mut overlay = JobsOverlay::default();
-        overlay.inspect = Some(job.id.clone());
-        overlay.detail = Some(CommandJobView {
-            snapshot: job,
-            stdout_tail: "\u{1b}[31mred\u{1b}[0m\na\rb".into(),
-            stderr_tail: String::new(),
-        });
-        let text = render_text(&mut overlay, 100, 28);
-        assert!(text.contains("red"), "{text}");
-        assert!(
-            text.lines()
-                .any(|line| line.trim_matches(|ch| ch == ' ' || ch == '│') == "b"),
-            "{text}"
-        );
-        assert!(
-            !text.contains("[31m") && !text.contains("[0m") && !text.contains("ab"),
-            "{text}"
-        );
-        assert!(!text.contains("stderr ("), "{text}");
-        for running in [false, true] {
-            let detail = overlay.detail.as_mut().unwrap();
-            detail.stdout_tail.clear();
-            if running {
-                detail.snapshot.status = zevria_foundation::CommandJobStatus::Running;
-            }
-            let text = render_text(&mut overlay, 100, 28);
-            assert!(
-                text.contains(if running {
-                    "No output yet."
-                } else {
-                    "No output."
-                }),
-                "{text}"
-            );
-            assert!(
-                !text.contains("stdout (") && !text.contains("stderr ("),
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn finished_background_retention_remains_eight() {
-        let mut overlay = JobsOverlay::default();
-        for n in 0..10 {
-            let mut job = snapshot(CommandJobMode::Background);
-            job.id = CommandJobId::new(format!("job-{n}"));
-            job.started_at += Duration::from_secs(n);
-            overlay.update(job);
-        }
-        assert_eq!(overlay.jobs.len(), 8);
-        assert_eq!(overlay.jobs[0].id, CommandJobId::new("job-2"));
-    }
-
-    #[test]
-    fn stale_inspection_cannot_resurrect_a_finished_foreground_job_or_reopen_overlay() {
-        let mut overlay = JobsOverlay::default();
-        overlay.show();
-        let SessionCommand::Control(ControlCommand::Command(first)) =
-            overlay.commands.pop_front().unwrap()
-        else {
-            panic!()
-        };
-        let mut job = CommandJobSnapshot {
-            id: CommandJobId::new("job-stale"),
-            call_id: None,
-            command: "sleep 20".into(),
-            mode: CommandJobMode::Foreground,
-            status: zevria_foundation::CommandJobStatus::Running,
-            started_at: std::time::SystemTime::now(),
-            finished_at: None,
-            stdout_bytes: 0,
-            stderr_bytes: 0,
-        };
-        let stale = job.clone();
-        overlay.event(&SessionEvent::CommandJobUpdated { job: job.clone() });
-        job.status = zevria_foundation::CommandJobStatus::Exited {
-            code: Some(0),
-            success: true,
-            signal: None,
-        };
-        overlay.event(&SessionEvent::CommandJobUpdated { job });
-        overlay.event(&SessionEvent::CommandControlResult {
-            request_id: first.request_id,
-            result: Reply::Inspected(vec![CommandJobView {
-                snapshot: stale,
-                stdout_tail: "stale".into(),
-                stderr_tail: String::new(),
-            }]),
-        });
-        assert!(overlay.jobs.is_empty());
-        assert!(
-            overlay
-                .hint_eligibility()
-                .disabled
-                .contains(&Action::Terminate)
-        );
-        assert_eq!(overlay.commands.len(), 1);
-        overlay.handle_input(key('q'));
-        let SessionCommand::Control(ControlCommand::Command(next)) =
-            overlay.commands.pop_front().unwrap()
-        else {
-            panic!()
-        };
-        overlay.event(&SessionEvent::CommandControlResult {
-            request_id: next.request_id,
-            result: Reply::Inspected(Vec::new()),
-        });
-        assert!(!overlay.is_open());
-    }
-    #[test]
-    fn jobs_list_and_inspect_headers_hide_routing_without_mutating_the_job() {
-        let job = CommandJobSnapshot {
-            id: CommandJobId::new("job-display"),
-            call_id: None,
-            command: "rtk proxy cargo\n test".into(),
-            mode: CommandJobMode::Background,
-            status: zevria_foundation::CommandJobStatus::Running,
-            started_at: std::time::SystemTime::now(),
-            finished_at: None,
-            stdout_bytes: 0,
-            stderr_bytes: 0,
-        };
-        let mut overlay = JobsOverlay::default();
-        overlay.show();
-        overlay.update(job.clone());
-        for inspect in [false, true] {
-            overlay.inspect = inspect.then(|| job.id.clone());
-            overlay.detail = inspect.then(|| CommandJobView {
-                snapshot: job.clone(),
-                stdout_tail: String::new(),
-                stderr_tail: String::new(),
-            });
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 28)).unwrap();
-            terminal
-                .draw(|frame| overlay.render(frame, frame.area()))
-                .unwrap();
-            let text: String = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
-            assert!(text.contains("cargo test"), "{text}");
-            assert!(!text.contains("rtk"), "{text}");
-            assert_eq!(overlay.jobs[0].command, job.command);
-        }
-    }
-
-    #[test]
-    fn jobs_list_and_inspection_render_in_tiny_and_normal_terminals() {
-        let mut overlay = JobsOverlay::default();
-        overlay.show();
-        for inspect in [false, true] {
-            overlay.inspect = inspect.then(|| CommandJobId::new("job-view"));
-            for (width, height) in [(1, 1), (2, 2), (10, 8), (100, 28)] {
-                let mut terminal =
-                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
-                        .unwrap();
-                terminal
-                    .draw(|frame| overlay.render(frame, frame.area()))
-                    .unwrap();
-            }
-        }
-    }
-    #[test]
-    fn correlated_controls_one_inspect_and_cancel_only_dismisses() {
-        let mut overlay = JobsOverlay::default();
-        overlay.show();
-        overlay.tick(Instant::now() + Duration::from_secs(2));
-        assert_eq!(overlay.commands.len(), 1);
-        let SessionCommand::Control(ControlCommand::Command(control)) =
-            overlay.commands.pop_front().unwrap()
-        else {
-            panic!()
-        };
-        let job = CommandJobSnapshot {
-            id: CommandJobId::new("job-test"),
-            call_id: None,
-            command: "sleep 600".into(),
-            mode: CommandJobMode::Foreground,
-            status: zevria_foundation::CommandJobStatus::Running,
-            started_at: std::time::SystemTime::now(),
-            finished_at: None,
-            stdout_bytes: 0,
-            stderr_bytes: 0,
-        };
-        overlay.event(&SessionEvent::CommandControlResult {
-            request_id: control.request_id,
-            result: Reply::Inspected(vec![CommandJobView {
-                snapshot: job,
-                stdout_tail: String::new(),
-                stderr_tail: String::new(),
-            }]),
-        });
-        overlay.handle_input(key('m'));
-        overlay.handle_input(key('x'));
-        assert!(overlay.commands.iter().any(|c| matches!(
-            c,
-            SessionCommand::Control(ControlCommand::Command(CommandControl {
-                action: Request::MoveToBackground { .. },
-                ..
-            }))
-        )));
-        assert!(overlay.commands.iter().any(|c| matches!(
-            c,
-            SessionCommand::Control(ControlCommand::Command(CommandControl {
-                action: Request::Terminate { .. },
-                ..
-            }))
-        )));
-        let before = overlay.commands.len();
-        overlay.handle_input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(!overlay.is_open());
-        assert_eq!(overlay.commands.len(), before);
-    }
-}
+#[path = "job_view_tests.rs"]
+mod tests;

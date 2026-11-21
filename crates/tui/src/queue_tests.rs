@@ -105,8 +105,7 @@ fn job_notice_is_a_compact_system_block_without_stream_output() {
     });
     let text = rendered_text(&mut app, 100, 24);
     assert!(text.contains("Background jobs finished"));
-    assert!(text.contains("job-view"));
-    assert!(text.contains("exited 1"));
+    assert!(text.contains("✗ exited 1 · 0.0s · sleep 5; false"));
     assert!(!text.contains("hidden stream output"));
     assert!(matches!(
         app.handle_event(ctrl('c')),

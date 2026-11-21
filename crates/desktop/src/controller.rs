@@ -10,6 +10,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use zevria_foundation::CommandJobId;
 use zevria_host::{
     Config, RunningSession, SessionStart,
     sessions::{self, SessionSummary},
@@ -394,7 +395,6 @@ impl SessionController {
                             break;
                         }
                     }
-                    this.ensure_tick(cx);
                     cx.notify();
                     if let Some(handoff) = fresh {
                         let inherited_models = match this.model.root.session_models() {
@@ -474,14 +474,24 @@ impl SessionController {
         if let SessionUpdate::Lifecycle(event) = &update {
             self.retain_unsaved_partial(event);
         }
-        self.projection_revision = self.projection_revision.wrapping_add(1);
+        let job_reply = matches!(
+            &update,
+            SessionUpdate::Lifecycle(zevria_session_api::SessionEvent::CommandControlResult { .. })
+        );
+        let history_len = self.model.root.conversation.history().len();
         let reduction = self.model.apply(update);
+        // Tail polling is independent of the transcript. Only reproject a job
+        // reply when it surfaced a new root notice.
+        if !job_reply || self.model.root.conversation.history().len() != history_len {
+            self.projection_revision = self.projection_revision.wrapping_add(1);
+        }
+        self.flush_job_commands(cx);
+        self.ensure_tick(cx);
         if let Some(root) = reduction.root {
             self.apply_reduction(root);
         }
         if !self.model.root.is_busy() {
             self.cancelling = false;
-            self.tick.take();
             if let Some(submitted) = self.submitted.take()
                 && self.draft_generation == submitted.generation
                 && self.draft == submitted.text
@@ -643,8 +653,18 @@ impl SessionController {
         self.dispatch_job_continuation(cx);
         cx.notify();
     }
+    fn clock_required(&self) -> bool {
+        self.model.root.is_busy()
+            || self.model.jobs.is_open()
+            || self
+                .model
+                .jobs
+                .jobs()
+                .iter()
+                .any(zevria_presentation::jobs::JobsInspector::can_terminate)
+    }
     fn ensure_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.model.root.is_busy() || self.tick.is_some() {
+        if !self.clock_required() || self.tick.is_some() {
             return;
         }
         self.tick = Some(cx.spawn(async move |owner, cx| {
@@ -653,9 +673,12 @@ impl SessionController {
                     .timer(Duration::from_millis(250))
                     .await;
                 let busy = owner.update(cx, |this, cx| {
-                    this.model.observe_clock(Instant::now());
+                    let now = Instant::now();
+                    this.model.observe_clock(now);
+                    this.model.jobs.tick(now);
+                    this.flush_job_commands(cx);
                     cx.notify();
-                    if this.model.root.is_busy() {
+                    if this.clock_required() {
                         true
                     } else {
                         this.tick = None;
@@ -669,12 +692,18 @@ impl SessionController {
         }));
     }
     pub fn send(&mut self, command: SessionCommand, cx: &mut Context<Self>) {
-        self.projection_revision = self.projection_revision.wrapping_add(1);
+        if !matches!(
+            &command,
+            SessionCommand::Control(ControlCommand::Command(_))
+        ) {
+            self.projection_revision = self.projection_revision.wrapping_add(1);
+        }
         if self
             .command
             .as_ref()
             .is_none_or(|sender| sender.send(command).is_err())
         {
+            self.projection_revision = self.projection_revision.wrapping_add(1);
             let reduction = self.model.disconnected();
             self.apply_reduction(reduction);
             self.terminal_error = Some("The session engine is no longer available.".into());
@@ -737,6 +766,67 @@ impl SessionController {
         self.model.models.cancel();
         self.flush_model_commands(cx);
     }
+    pub fn flush_job_commands(&mut self, cx: &mut Context<Self>) {
+        while self.phase == Phase::Live {
+            let Some(command) = self.model.jobs.commands.pop_front() else {
+                break;
+            };
+            self.send(command, cx);
+        }
+    }
+    fn open_jobs(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.phase != Phase::Live
+            || self.model.selected_child.is_some()
+            || self.model.root.workflow.dialog().is_some()
+            || self.capturing_dialog
+            || self.model.models.is_open()
+        {
+            return false;
+        }
+        self.model.jobs.show();
+        self.model.select_default_job();
+        self.flush_job_commands(cx);
+        self.ensure_tick(cx);
+        cx.notify();
+        self.model.jobs.is_open()
+    }
+    pub fn toggle_jobs(&mut self, cx: &mut Context<Self>) {
+        if self.model.jobs_panel_visible() {
+            self.model.jobs.close();
+            cx.notify();
+        } else {
+            self.open_jobs(cx);
+        }
+    }
+    pub fn inspect_job(&mut self, id: CommandJobId, cx: &mut Context<Self>) {
+        if self.open_jobs(cx) {
+            self.model.jobs.inspect(id);
+            self.flush_job_commands(cx);
+            cx.notify();
+        }
+    }
+    pub fn terminate_job(&mut self, id: CommandJobId, cx: &mut Context<Self>) {
+        self.control_job(id, true, cx);
+    }
+    pub fn background_job(&mut self, id: CommandJobId, cx: &mut Context<Self>) {
+        self.control_job(id, false, cx);
+    }
+    fn control_job(&mut self, id: CommandJobId, terminate: bool, cx: &mut Context<Self>) {
+        if self.phase != Phase::Live {
+            return;
+        }
+        let notice = if terminate {
+            self.model.jobs.terminate(id)
+        } else {
+            self.model.jobs.move_to_background(id)
+        };
+        if let Some(notice) = notice {
+            self.model.root.conversation.push_error(notice);
+            self.projection_revision = self.projection_revision.wrapping_add(1);
+        }
+        self.flush_job_commands(cx);
+        cx.notify();
+    }
     pub fn submit(&mut self, cx: &mut Context<Self>) {
         if self.phase != Phase::Live
             || self.model.selected_child.is_some()
@@ -760,6 +850,12 @@ impl SessionController {
                 // acquire submitted-turn bookkeeping. Only an accepted slash
                 // invocation consumes its own command text.
                 if self.open_model_picker(scope, cx) {
+                    self.draft.clear();
+                    self.draft_generation += 1;
+                }
+            }
+            InputRoute::Jobs => {
+                if self.open_jobs(cx) {
                     self.draft.clear();
                     self.draft_generation += 1;
                 }

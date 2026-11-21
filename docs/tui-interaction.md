@@ -28,28 +28,30 @@ questions, help.
 Suspended surfaces retain state. Only the resolved owner can install the cursor.
 Text in a dialog belongs to the dialog, never the pane composer.
 
-`/jobs` opens the Jobs overlay even while the root is busy or has locally queued
-follow-ups. It is frontend-only: it never allocates a turn, enters the follow-up
-queue, or sends text to the model. The list shows running foreground/background
-commands and eight recent finished background jobs (plus jobs pinned for pending
-delivery or promised unread output), including their IDs,
-status, elapsed time (seconds to one decimal), and command previews. Enter
-inspects bounded stdout/stderr tails, opening at the newest output and following
-it while scrolled to the end. Panning up stops following; End or panning back to
-the end resumes it. The inspection header shows command, `fg`/`bg` mode, status,
-and duration. Non-empty stream labels show the shown and total byte counts (for
-example, `stdout (last 8 KiB of 1.2 MiB):` or `stdout (1.2 KiB):` when the whole
-stream fits). Escape sequences are stripped for display, and carriage-return
-progress shows its final state; model output and copied transcripts stay raw.
-Backspace/Left/`b` returns to the list. `x` terminates a running job and `m`
-moves a running foreground command into the background. Ineligible actions are
-both disabled and omitted from hints. Escape or Ctrl+C dismisses only the overlay;
-`?` opens its help. Inspection refreshes on open, lifecycle updates, and once a
-second while open, without consuming the model's incremental output cursor.
-The root status bar shows a lowest-priority `1 job` / `N jobs` count of all running
-root commands (foreground and background), and background command rows retain a `background · job-xxxxxx` badge plus live status when available.
-Jobs survive turn cancellation but end when the session is closed or replaced;
-resumed transcripts display old badges without restoring the processes.
+`Alt+J` opens the Jobs overlay from the composer (including completion), Normal,
+or Selection without changing the draft. `/jobs` opens it too, even while the
+root is busy or has queued follow-ups. Neither starts a turn or sends text to the
+model. The list shows the running/finished counts and one row per job, with a
+status glyph, shell-highlighted command, `fg`/`bg` mode, elapsed time, and status.
+It includes running root commands and up to eight recent finished background jobs.
+
+Enter inspects the selected job. Its ID appears below the header, and non-empty
+stdout/stderr sections show bounded tails with byte counts (for example,
+`stdout (last 8 KiB of 1.2 MiB):` or `stdout (1.2 KiB):`). Inspection starts at the
+newest output. Panning up pauses following; End or scrolling back down resumes
+it. Escape sequences are stripped for display and carriage-return progress
+shows its final state. Inspection refreshes while open without consuming the
+model's incremental output cursor.
+
+Backspace/Left/`b` returns to the list. `x` terminates a running job; `m` moves a
+running foreground job to the background. The same keys work in **Block** scope
+of Selection on a live root command row, without opening Jobs. Ineligible
+controls are omitted from hints. Escape or Ctrl+C dismisses the overlay without
+cancelling the turn; `?` opens help. The root status bar still shows a
+lowest-priority `1 job` / `N jobs` count of running commands, and background rows
+keep their `background · job-xxxxxx` badge with colored live status when available.
+Background jobs survive turn cancellation but end when the session closes or is
+replaced. Restoring a transcript does not restart processes.
 
 Editing, work submission, control eligibility, transcript rewriting, management,
 and navigation are independent capabilities. Root and live-worker drafts remain
@@ -165,9 +167,10 @@ stronger draft/paste/undo lock until acceptance or rejection.
 ## Background-job completion handoff
 
 Finished jobs reach the model automatically before its next eligible request,
-without polling. Compact system-styled notice rows show status summaries, not
-stream output; copying a notice includes its full model-visible text, and `/jobs`
-continues to show bounded output tails. Notice rows are not editable or recallable.
+without polling. A **Background jobs finished** notice shows one glyph, status,
+duration, and command per job, followed by **Still running:** when applicable.
+The rows omit stream output, but copying the notice returns the exact model-visible
+text. Use Jobs to inspect bounded output tails. Notice rows cannot be edited or recalled.
 
 If the agent has already finished responding, the engine can advertise an idle
 continuation. The TUI dispatches it only after **EngineIdle**, with the advertised
