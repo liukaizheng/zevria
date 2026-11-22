@@ -258,7 +258,13 @@ fn shared_grammar_routes_supported_commands_and_retains_unsupported_drafts() {
         workspace.route_input("busy", false),
         InputRoute::Retained
     ));
+    assert!(matches!(
+        workspace.route_input("/subtasks", false),
+        InputRoute::Subtasks
+    ));
+    workspace.subtasks_open = true;
     workspace.disconnected();
+    assert!(!workspace.subtasks_open);
     assert!(matches!(
         workspace.route_input("/model", false),
         InputRoute::Models(zevria_model::models::ModelSelectionScope::SessionAndDefault)

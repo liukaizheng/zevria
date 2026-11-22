@@ -27,6 +27,7 @@ pub struct WorkspaceModel {
     pub question: Option<QuestionForm>,
     pub models: zevria_presentation::models::ModelPicker,
     pub jobs: JobsInspector,
+    pub subtasks_open: bool,
     pub registry: CommandRegistry,
     pub session_id: String,
     pub transcript_path: PathBuf,
@@ -43,6 +44,7 @@ pub enum InputRoute {
     Resume,
     Models(zevria_model::models::ModelSelectionScope),
     Jobs,
+    Subtasks,
     Notice(String),
     Retained,
 }
@@ -54,6 +56,7 @@ impl Default for WorkspaceModel {
             question: None,
             models: Default::default(),
             jobs: JobsInspector::new("desktop.jobs."),
+            subtasks_open: false,
             registry: CommandRegistry::default(),
             session_id: String::new(),
             transcript_path: PathBuf::new(),
@@ -293,6 +296,9 @@ impl WorkspaceModel {
             && self.selected_child.is_none()
             && self.root.workflow.dialog().is_none()
     }
+    pub fn subtasks_panel_visible(&self) -> bool {
+        self.subtasks_open && !self.children.is_empty() && self.root.workflow.dialog().is_none()
+    }
     pub fn select_default_job(&mut self) {
         if self.jobs.is_open() && self.jobs.inspected().is_none() {
             let jobs = self.jobs.jobs();
@@ -309,6 +315,7 @@ impl WorkspaceModel {
         self.question = None;
         self.models.reset();
         self.jobs = JobsInspector::new("desktop.jobs.");
+        self.subtasks_open = false;
         self.root.disconnected()
     }
     pub fn model_selection_available(&self) -> Result<(), &'static str> {
@@ -349,8 +356,10 @@ impl WorkspaceModel {
         let classified = self
             .registry
             .classify_prompt(&zevria_content::UserPrompt::from_text(input));
-        if matches!(classified, Ok(ClassifiedInput::Builtin(SlashCommand::Jobs))) {
-            return InputRoute::Jobs;
+        match classified {
+            Ok(ClassifiedInput::Builtin(SlashCommand::Jobs)) => return InputRoute::Jobs,
+            Ok(ClassifiedInput::Builtin(SlashCommand::Subtasks)) => return InputRoute::Subtasks,
+            _ => {}
         }
         if self.root.is_busy() {
             return InputRoute::Retained;

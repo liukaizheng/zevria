@@ -14,6 +14,7 @@ pub enum KeyContext {
     SkillsInspect,
     JobsList,
     JobsInspect,
+    SubtasksList,
     ModelList,
     ModelReasoning,
     ModelConfirm,
@@ -33,6 +34,7 @@ impl KeyContext {
             Self::OverlayInspect => "Inspect",
             Self::SkillsList | Self::SkillsInspect => "Skills",
             Self::JobsList | Self::JobsInspect => "Jobs",
+            Self::SubtasksList => "Subtasks",
             Self::ModelList | Self::ModelReasoning | Self::ModelConfirm => "Models",
             Self::PlanDecision => "Plan decision",
             Self::Question => "Question",
@@ -283,16 +285,28 @@ const MODELS: &[Binding] = &[b!(
         ..key(Char('m'))
     }
 )];
-const OPEN_JOBS: &[Binding] = &[b!(
-    JobsOverlay,
-    "jobs",
-    0,
-    "Session",
-    Key {
-        modifiers: KeyModifiers::ALT,
-        ..key(Char('j'))
-    }
-)];
+const OPEN_LISTS: &[Binding] = &[
+    b!(
+        JobsOverlay,
+        "jobs",
+        0,
+        "Session",
+        Key {
+            modifiers: KeyModifiers::ALT,
+            ..key(Char('j'))
+        }
+    ),
+    b!(
+        SubtasksOverlay,
+        "subtasks",
+        0,
+        "Session",
+        Key {
+            modifiers: KeyModifiers::ALT,
+            ..key(Char('s'))
+        }
+    ),
+];
 const COMPLETION: &[Binding] = &[
     b!(AcceptCompletion, "accept/run", 1, "Completion", key(Enter)),
     b!(
@@ -409,18 +423,18 @@ const HELP_CLOSE: &[Binding] = &[b!(Help, "close", 5, "Help", key(Char('?')))];
 pub fn bindings(context: KeyContext) -> impl Iterator<Item = &'static Binding> {
     use KeyContext::*;
     let groups: &[&[Binding]] = match context {
-        Composer => &[EDITOR, MODE, MODELS, OPEN_JOBS, PANES, GLOBAL],
+        Composer => &[EDITOR, MODE, MODELS, OPEN_LISTS, PANES, GLOBAL],
         Completion => &[
             COMPLETION,
             EDITOR,
             MODE,
             MODELS,
-            OPEN_JOBS,
+            OPEN_LISTS,
             &PANES[..1],
             GLOBAL,
         ],
         Transcript => &[
-            NORMAL, TRANSCRIPT, PAGES, MODE, MODELS, OPEN_JOBS, PANES, GLOBAL, HELP,
+            NORMAL, TRANSCRIPT, PAGES, MODE, MODELS, OPEN_LISTS, PANES, GLOBAL, HELP,
         ],
         BlockNav => &[
             SELECTION,
@@ -428,12 +442,12 @@ pub fn bindings(context: KeyContext) -> impl Iterator<Item = &'static Binding> {
             PHYSICAL_PAGES,
             USER_JUMPS,
             MODELS,
-            OPEN_JOBS,
+            OPEN_LISTS,
             PANES,
             GLOBAL,
             HELP,
         ],
-        OverlayList => &[CONFIRM, LIST, PAGES, GLOBAL, HELP],
+        OverlayList | SubtasksList => &[CONFIRM, LIST, PAGES, GLOBAL, HELP],
         OverlayInspect => &[LIST, PAGES, GLOBAL, HELP],
         SkillsList => &[CONFIRM, SKILLS, FILTER, LIST, PAGES, GLOBAL, HELP],
         SkillsInspect => &[INSPECT, SKILLS, FILTER, LIST, PAGES, GLOBAL, HELP],
@@ -659,6 +673,7 @@ mod tests {
             KeyContext::SkillsInspect,
             KeyContext::JobsList,
             KeyContext::JobsInspect,
+            KeyContext::SubtasksList,
             KeyContext::ModelList,
             KeyContext::ModelReasoning,
             KeyContext::ModelConfirm,
@@ -702,6 +717,7 @@ mod tests {
             KeyContext::SkillsInspect,
             KeyContext::JobsList,
             KeyContext::JobsInspect,
+            KeyContext::SubtasksList,
             KeyContext::ModelList,
             KeyContext::ModelReasoning,
             KeyContext::ModelConfirm,
@@ -759,6 +775,7 @@ mod tests {
                 KeyContext::SkillsInspect,
                 KeyContext::JobsList,
                 KeyContext::JobsInspect,
+                KeyContext::SubtasksList,
                 KeyContext::ModelList,
                 KeyContext::ModelReasoning,
                 KeyContext::ModelConfirm,

@@ -44,6 +44,7 @@ pub struct DesktopWindow {
     pub(super) plan_width: f32,
     pub(super) plan_overlay: bool,
     pub(super) jobs_ui: super::jobs::JobsPanelView,
+    pub(super) subtasks_ui: super::subtasks::SubtasksPanelView,
     pub(super) question_focus: FocusHandle,
     pub(super) model_ui: Option<super::models::ModelPickerView>,
     pub(super) window_focus: FocusHandle,
@@ -147,6 +148,7 @@ impl DesktopWindow {
             plan_width: 400.,
             plan_overlay: false,
             jobs_ui: super::jobs::JobsPanelView::new(cx),
+            subtasks_ui: super::subtasks::SubtasksPanelView::new(cx),
             question_focus: cx.focus_handle(),
             model_ui: None,
             window_focus,
@@ -169,6 +171,7 @@ impl DesktopWindow {
         let live = controller.phase == Phase::Live;
         let inspecting = controller.model.selected_child.is_some();
         let jobs_visible = live && controller.model.jobs_panel_visible();
+        let subtasks_visible = live && controller.model.subtasks_panel_visible();
         let plan = controller
             .model
             .root
@@ -228,6 +231,21 @@ impl DesktopWindow {
             if jobs_visible {
                 window.focus(&self.jobs_ui.list_focus, cx);
             } else if self.jobs_ui.focus.contains_focused(window, cx) {
+                window.focus(&self.window_focus, cx);
+            }
+        }
+        if subtasks_visible != self.subtasks_ui.visible {
+            self.subtasks_ui.visible = subtasks_visible;
+            if subtasks_visible {
+                let model = &self.controller.read(cx).model;
+                let index = model
+                    .children
+                    .iter()
+                    .position(|child| model.selected_child.as_ref() == Some(&child.id))
+                    .map_or(0, |index| index + 1);
+                self.subtasks_ui.list_scroll.scroll_to_item(index);
+                window.focus(&self.subtasks_ui.list_focus, cx);
+            } else if self.subtasks_ui.focus.contains_focused(window, cx) {
                 window.focus(&self.window_focus, cx);
             }
         }
@@ -392,6 +410,11 @@ impl DesktopWindow {
             });
             return;
         }
+        if controller.model.subtasks_panel_visible() {
+            self.controller
+                .update(cx, |this, cx| this.toggle_subtasks(cx));
+            return;
+        }
         self.controller.update(cx, |this, cx| this.cancel(cx));
     }
 }
@@ -466,10 +489,8 @@ impl DesktopWindow {
                         .small()
                         .label("Conversation")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.controller.update(cx, |this, cx| {
-                                this.model.selected_child = None;
-                                cx.notify();
-                            })
+                            this.controller
+                                .update(cx, |this, cx| this.select_pane(None, cx))
                         })),
                 )
                 .child(style::label().text_color(t.text.muted).child("›"))
@@ -585,16 +606,11 @@ impl Render for DesktopWindow {
         let width = f32::from(window.viewport_size().width);
         let visible = self.sidebar_visible(width);
         self.plan_width = (width * 0.36).clamp(400., 560.);
-        let plan_open = self
-            .controller
-            .read(cx)
-            .model
-            .root
-            .workflow
-            .dialog()
-            .is_some();
+        let model = &self.controller.read(cx).model;
         let main_width = width - if visible { style::SIDEBAR } else { 0. };
-        let panel_open = plan_open || self.controller.read(cx).model.jobs_panel_visible();
+        let panel_open = model.root.workflow.dialog().is_some()
+            || model.jobs_panel_visible()
+            || model.subtasks_panel_visible();
         self.plan_overlay = panel_open && main_width - self.plan_width < 560.;
         self.plan_width = self.plan_width.min(main_width);
         let compact = main_width
@@ -641,6 +657,10 @@ impl Render for DesktopWindow {
             .on_action(cx.listener(|this, _: &actions::ToggleJobs, _, cx| {
                 this.controller
                     .update(cx, |controller, cx| controller.toggle_jobs(cx));
+            }))
+            .on_action(cx.listener(|this, _: &actions::ToggleSubtasks, _, cx| {
+                this.controller
+                    .update(cx, |controller, cx| controller.toggle_subtasks(cx));
             }))
             .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| this.cancel(cx)))
             .on_action(cx.listener(|this, _: &actions::Stop, _, cx| {
@@ -781,6 +801,8 @@ impl Render for DesktopWindow {
                 body = body.child(plan);
             } else if let Some(jobs) = self.jobs_panel(window, cx) {
                 body = body.child(jobs);
+            } else if let Some(subtasks) = self.subtasks_panel(window, cx) {
+                body = body.child(subtasks);
             }
             root = root.child(body);
         }

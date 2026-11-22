@@ -207,68 +207,27 @@ impl DesktopWindow {
         if scroll.max_offset().y + scroll.offset().y <= px(6.) {
             scroll.scroll_to_bottom();
         }
-        let mut panel = div()
-            .id("jobs-panel")
-            .test_support()
-            .track_focus(&view.focus)
-            .key_context("ZevriaJobs")
-            .w(px(self.plan_width))
-            .h_full()
-            .flex_shrink_0()
-            .min_h_0()
-            .when(self.plan_overlay, |panel| {
-                // Keep the chip available underneath the compact overlay.
-                panel
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .bottom(px(status::HEIGHT))
-                    .h_auto()
-                    .shadow_lg()
-                    .occlude()
-            })
-            .flex()
-            .flex_col()
-            .bg(t.surfaces.overlay)
-            .rounded(px(14.))
-            .border_l_1()
-            .border_color(tone.hairline)
-            .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| {
-                this.controller
-                    .update(cx, |controller, cx| controller.toggle_jobs(cx));
-                cx.stop_propagation();
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .flex_shrink_0()
-                    .px(px(20.))
-                    .py(px(14.))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(18.))
-                                    .line_height(px(24.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Jobs"),
-                            )
-                            .child(style::meta().text_color(t.text.muted).child(summary)),
-                    )
-                    .child(
-                        style::icon_button("close-jobs", IconName::PanelRightClose, "Close Jobs")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.controller
-                                    .update(cx, |controller, cx| controller.toggle_jobs(cx));
-                            })),
-                    ),
-            )
-            .child(list);
+        let mut panel =
+            style::inspector_panel("jobs-panel", self.plan_width, self.plan_overlay, cx)
+                .test_support()
+                .track_focus(&view.focus)
+                .key_context("ZevriaJobs")
+                .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| {
+                    this.controller
+                        .update(cx, |controller, cx| controller.toggle_jobs(cx));
+                    cx.stop_propagation();
+                }))
+                .child(style::inspector_header(
+                    "Jobs",
+                    summary,
+                    style::icon_button("close-jobs", IconName::PanelRightClose, "Close Jobs")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.controller
+                                .update(cx, |controller, cx| controller.toggle_jobs(cx));
+                        })),
+                    cx,
+                ))
+                .child(list);
         if let Some(id) = selected {
             panel = panel.child(detail(
                 id,

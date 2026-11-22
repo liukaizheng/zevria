@@ -11,6 +11,7 @@ pub mod screens;
 pub mod sidebar;
 pub mod status;
 pub mod style;
+mod subtasks;
 pub mod theme;
 pub mod time;
 pub mod transcript;

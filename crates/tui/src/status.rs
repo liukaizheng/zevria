@@ -56,6 +56,7 @@ pub(crate) enum StatusTone {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct StatusBarView {
     pub(crate) jobs: usize,
+    pub(crate) subtasks: usize,
     pub(crate) primary: String,
     pub(crate) accent: StatusAccent,
     pub(crate) tone: StatusTone,
@@ -87,7 +88,7 @@ enum ModelDetail {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RenderOptions {
-    jobs: bool,
+    work_counts: bool,
     response: ResponseDetail,
     optional_left: bool,
     compact_controls: bool,
@@ -98,7 +99,7 @@ struct RenderOptions {
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
-            jobs: true,
+            work_counts: true,
             response: ResponseDetail::Full,
             optional_left: true,
             compact_controls: false,
@@ -181,8 +182,8 @@ fn select_candidate(view: &StatusBarView, width: usize) -> StatusCandidate {
         return candidate;
     }
 
-    // Jobs are informative, never displace activity, controls, or telemetry.
-    options.jobs = false;
+    // Work counts are informative and never displace activity, controls, or telemetry.
+    options.work_counts = false;
     if let Some(candidate) = fitting_candidate(view, options, width) {
         return candidate;
     }
@@ -235,12 +236,17 @@ fn fitting_candidate(
 
 fn build_candidate(view: &StatusBarView, options: RenderOptions) -> StatusCandidate {
     let mut left = Vec::new();
-    if options.jobs && view.jobs > 0 {
-        left.push(format!(
-            "{} {}",
-            view.jobs,
-            if view.jobs == 1 { "job" } else { "jobs" }
-        ));
+    if options.work_counts {
+        if view.jobs > 0 {
+            left.push(format!(
+                "{} {}",
+                view.jobs,
+                if view.jobs == 1 { "job" } else { "jobs" }
+            ));
+        }
+        if view.subtasks > 0 {
+            left.push(zevria_presentation::subtasks::chip_label(view.subtasks));
+        }
     }
     if options.optional_left {
         left.extend(
@@ -470,25 +476,38 @@ mod tests {
     }
 
     #[test]
-    fn jobs_are_dropped_before_any_other_status_segment() {
+    fn running_subtask_count_uses_singular_and_plural() {
+        for (subtasks, expected) in [(1, "1 subtask"), (2, "2 subtasks")] {
+            let mut view = complete_view();
+            view.subtasks = subtasks;
+            let text = compact_text(&view, 240);
+            assert!(text.contains(expected), "{text}");
+            assert_eq!(text.contains("subtasks"), subtasks > 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn jobs_and_subtasks_drop_together_before_any_other_status_segment() {
         let mut view = complete_view();
         view.jobs = 2;
+        view.subtasks = 3;
         let full = build_candidate(&view, RenderOptions::default());
-        assert!(full.tail.contains("2 jobs"));
-        let without_jobs = build_candidate(
+        assert!(full.tail.contains("2 jobs · 3 subtasks"));
+        let without_counts = build_candidate(
             &view,
             RenderOptions {
-                jobs: false,
+                work_counts: false,
                 ..RenderOptions::default()
             },
         );
         assert_eq!(select_candidate(&view, full.minimum_width()), full);
         assert_eq!(
-            select_candidate(&view, without_jobs.minimum_width()),
-            without_jobs
+            select_candidate(&view, full.minimum_width() - 1),
+            without_counts
         );
-        assert!(without_jobs.right.contains("cached"));
-        assert!(!without_jobs.tail.contains("2 jobs"));
+        assert!(without_counts.right.contains("cached"));
+        assert!(!without_counts.tail.contains("jobs"));
+        assert!(!without_counts.tail.contains("subtasks"));
     }
 
     #[test]
@@ -547,7 +566,7 @@ mod tests {
                 compact_controls: true,
                 model: ModelDetail::Omitted,
                 context: false,
-                jobs: false,
+                work_counts: false,
             },
         ];
         let candidates = options

@@ -12,7 +12,7 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::*, *};
 use std::time::SystemTime;
 use zevria_presentation::{
-    blocks::{PresentationBlockKind, PresentationRole, subtask_icon},
+    blocks::{PresentationBlockKind, PresentationRole},
     conversation::HistoryEntry,
     status_icon::StatusIcon,
 };
@@ -26,9 +26,7 @@ impl DesktopWindow {
             .map_or_else(|| "Zevria".into(), |n| n.to_string_lossy().into_owned())
     }
     pub(super) fn sidebar(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let count = 1
-            + self.controller.read(cx).model.children.len()
-            + self.controller.read(cx).sessions.len();
+        let count = 1 + self.controller.read(cx).sessions.len();
         self.sidebar_focus.resize_with(count, || cx.focus_handle());
         let controller = self.controller.read(cx);
         let t = palette(cx);
@@ -191,68 +189,10 @@ impl DesktopWindow {
                     ))
                     .child(div().min_w_0().truncate().text_size(px(14.)).child(title))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.controller.update(cx, |controller, cx| {
-                            controller.model.selected_child = None;
-                            cx.notify();
-                        })
+                        this.controller
+                            .update(cx, |controller, cx| controller.select_pane(None, cx))
                     })),
             );
-        for (index, child) in controller.model.children.iter().enumerate() {
-            let id = child.id.clone();
-            let selected = controller.model.selected_child.as_ref() == Some(&id);
-            let ink = match child.kind {
-                zevria_foundation::SubtaskKind::Explore => t.workflow.explore,
-                zevria_foundation::SubtaskKind::Build => t.workflow.build,
-            };
-            let status = child
-                .status
-                .map(subtask_icon)
-                .unwrap_or(StatusIcon::Pending);
-            listing = listing.child(
-                div().ml(px(12.)).child(
-                    Button::new(("subtask", index))
-                        .ghost()
-                        .w_full()
-                        .h_auto()
-                        .px(px(8.))
-                        .py(px(8.))
-                        .track_focus(&self.sidebar_focus[index + 1])
-                        .disabled(model_management)
-                        .accessibility_label(format!("Inspect {}: {}", child.kind, child.title))
-                        .border_l_2()
-                        .border_color(if selected { ink } else { tone.hairline })
-                        .when(selected, |b| b.bg(tone.list_active))
-                        .child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(style::status_glyph(status, ink, cx))
-                                .child(
-                                    style::label()
-                                        .text_color(ink)
-                                        .child(style::kind_label(child.kind)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(14.))
-                                        .child(child.title.clone()),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.controller.update(cx, |controller, cx| {
-                                controller.model.selected_child = Some(id.clone());
-                                cx.notify();
-                            })
-                        })),
-                ),
-            );
-        }
         listing = listing.child(
             style::group_label(
                 if controller.show_sessions {
@@ -287,7 +227,7 @@ impl DesktopWindow {
                     .justify_start()
                     .px(px(8.))
                     .py(px(8.))
-                    .track_focus(&self.sidebar_focus[1 + controller.model.children.len() + index])
+                    .track_focus(&self.sidebar_focus[1 + index])
                     .disabled(transitioning)
                     .tooltip(session.id.clone())
                     .accessibility_label(format!("Resume {title}"))

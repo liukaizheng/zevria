@@ -13,7 +13,7 @@ use gpui_kit::{prelude::*, *};
 use std::time::Instant;
 use zevria_foundation::ModelRole;
 use zevria_presentation::{
-    ConversationTail, SessionModel, jobs::JobsInspector, status_icon::StatusIcon,
+    ConversationTail, SessionModel, jobs::JobsInspector, status_icon::StatusIcon, subtasks,
 };
 
 pub(super) const HEIGHT: f32 = 28.;
@@ -280,6 +280,39 @@ pub fn accent(model: &SessionModel, cx: &App) -> Hsla {
         ModelRole::Explore => t.workflow.explore,
     }
 }
+fn panel_chip(
+    id: &'static str,
+    name: &str,
+    label: String,
+    running_ink: Option<Hsla>,
+    selected: bool,
+    shortcut: Shortcut,
+    cx: &App,
+) -> Button {
+    let t = palette(cx);
+    let action = if selected { "Hide" } else { "Show" };
+    Button::new(id)
+        .ghost()
+        .small()
+        .h(px(22.))
+        .flex_shrink_0()
+        .selected(selected)
+        .tooltip(format!("{action} {name} ({})", shortcut.label()))
+        .accessibility_label(format!("{action} {name}: {label}"))
+        .when_some(running_ink, |button, ink| {
+            button.child(style::status_glyph(StatusIcon::Running, ink, cx))
+        })
+        .child(
+            div()
+                .text_color(if running_ink.is_some() {
+                    t.text.secondary
+                } else {
+                    t.text.muted
+                })
+                .child(label),
+        )
+}
+
 impl DesktopWindow {
     pub(super) fn status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let controller = self.controller.read(cx);
@@ -345,6 +378,7 @@ impl DesktopWindow {
                 .as_ref()
                 .map_or_else(String::new, |r| format!(" · {r}"))
         );
+        let plan_open = controller.model.root.workflow.dialog().is_some();
         if controller.model.selected_child.is_none() {
             let unavailable = controller.model_selection_available().err();
             let tooltip = format!(
@@ -384,38 +418,21 @@ impl DesktopWindow {
                 } else {
                     format!("{running} jobs")
                 };
-                let selected = controller.model.jobs_panel_visible();
-                let action = if selected { "Hide jobs" } else { "Show jobs" };
                 row = row.child(
-                    Button::new("status-jobs")
-                        .ghost()
-                        .small()
-                        .h(px(22.))
-                        .flex_shrink_0()
-                        .selected(selected)
-                        .disabled(controller.model.root.workflow.dialog().is_some())
-                        .tooltip(format!("{action} ({})", Shortcut::TOGGLE_JOBS.label()))
-                        .accessibility_label(format!("{action}: {label}"))
-                        .when(running != 0, |button| {
-                            button.child(style::status_glyph(
-                                StatusIcon::Running,
-                                accent(model, cx),
-                                cx,
-                            ))
-                        })
-                        .child(
-                            div()
-                                .text_color(if running == 0 {
-                                    t.text.muted
-                                } else {
-                                    t.text.secondary
-                                })
-                                .child(label),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.controller
-                                .update(cx, |controller, cx| controller.toggle_jobs(cx));
-                        })),
+                    panel_chip(
+                        "status-jobs",
+                        "jobs",
+                        label,
+                        (running != 0).then(|| accent(model, cx)),
+                        controller.model.jobs_panel_visible(),
+                        Shortcut::TOGGLE_JOBS,
+                        cx,
+                    )
+                    .disabled(plan_open)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.controller
+                            .update(cx, |controller, cx| controller.toggle_jobs(cx));
+                    })),
                 );
             }
         } else {
@@ -427,6 +444,26 @@ impl DesktopWindow {
                     .truncate()
                     .text_color(t.text.secondary)
                     .child(label),
+            );
+        }
+        if !controller.model.children.is_empty() {
+            let running =
+                subtasks::active_count(controller.model.children.iter().map(|child| child.status));
+            row = row.child(
+                panel_chip(
+                    "status-subtasks",
+                    "subtasks",
+                    subtasks::chip_label(running),
+                    (running != 0).then(|| accent(&controller.model.root, cx)),
+                    controller.model.subtasks_panel_visible(),
+                    Shortcut::TOGGLE_SUBTASKS,
+                    cx,
+                )
+                .disabled(plan_open)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.controller
+                        .update(cx, |controller, cx| controller.toggle_subtasks(cx));
+                })),
             );
         }
         row = row.child(div().flex_1());

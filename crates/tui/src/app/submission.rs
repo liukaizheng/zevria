@@ -13,12 +13,13 @@ impl App {
         if self.composer.is_blank() {
             return self.send_queued_now();
         }
-        // Frontend-only control is admitted before busy/queue gates.
-        if matches!(
-            self.composer.classify(),
-            Ok(ClassifiedInput::Builtin(SlashCommand::Jobs))
-        ) {
-            return self.submit_nonqueued(ClassifiedInput::Builtin(SlashCommand::Jobs));
+        // Frontend-only lists are admitted before busy/queue gates.
+        let classified = self.composer.classify();
+        if let Ok(ClassifiedInput::Builtin(
+            command @ (SlashCommand::Jobs | SlashCommand::Subtasks),
+        )) = classified
+        {
+            return self.submit_nonqueued(ClassifiedInput::Builtin(command));
         }
         let queueable = matches!(
             self.capabilities().queue_work,
@@ -27,7 +28,7 @@ impl App {
         if self.model.session.is_busy() && !queueable {
             return None;
         }
-        let classified = match self.composer.classify() {
+        let classified = match classified {
             Ok(classified) => classified,
             Err(error) => {
                 self.push_error(error.to_string());
@@ -54,7 +55,10 @@ impl App {
 
     fn submit_nonqueued(&mut self, classified: ClassifiedInput) -> Option<UiAction> {
         if self.model.session.is_busy()
-            && !matches!(classified, ClassifiedInput::Builtin(SlashCommand::Jobs))
+            && !matches!(
+                classified,
+                ClassifiedInput::Builtin(SlashCommand::Jobs | SlashCommand::Subtasks)
+            )
         {
             return None;
         }

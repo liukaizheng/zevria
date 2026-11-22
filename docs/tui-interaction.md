@@ -22,10 +22,11 @@ user input. Modifier and press/repeat/release policy is normalized before routin
 | Model picker | Global | Cancel correlated management request; retain correlation until settled | List/details/editor | No |
 | Session/skill picker | Global | Dismiss only this surface | List/details/editor | No |
 | Jobs | Global | Dismiss only this surface; jobs and the root turn keep running | Job list / stdout and stderr tails | No |
+| Subtasks | Global | Dismiss only this surface; subtasks and the root turn keep running | Subtask list | No |
 
-Global paint order, from lowest to highest, is skills, sessions, jobs, models,
-questions, help.
-Suspended surfaces retain state. Only the resolved owner can install the cursor.
+Global paint order, from lowest to highest, is skills, sessions, jobs or subtasks,
+models, questions, help. Jobs and Subtasks replace each other; other suspended
+surfaces retain state. Only the resolved owner can install the cursor.
 Text in a dialog belongs to the dialog, never the pane composer.
 
 `Alt+J` opens the Jobs overlay from the composer (including completion), Normal,
@@ -52,6 +53,16 @@ lowest-priority `1 job` / `N jobs` count of running commands, and background row
 keep their `background · job-xxxxxx` badge with colored live status when available.
 Background jobs survive turn cancellation but end when the session closes or is
 replaced. Restoring a transcript does not restart processes.
+
+`Alt+S` opens the Subtasks list from the composer (including completion), Normal,
+or Selection without changing the draft. `/subtasks` opens it from the root
+composer even during a turn, without submitting or queueing work. The list shows
+live status, workspace, and whether a subtask was restored from history. `▸`
+marks the subtask already visible. Move with ↑/↓ or `k`/`j`, and press Enter to
+close the list and inspect the highlighted subtask. Press `Ctrl+O` to return to
+the conversation. Escape or Ctrl+C closes the list without switching panes; `?`
+opens its help. The root status bar shows the active subtask count next to jobs
+when space permits. ACP worker panes still use their existing navigation.
 
 Editing, work submission, control eligibility, transcript rewriting, management,
 and navigation are independent capabilities. Root and live-worker drafts remain

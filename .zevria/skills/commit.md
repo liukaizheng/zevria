@@ -5,7 +5,13 @@ description: Create a detailed Git commit with a Conventional Commit subject
 
 Inspect `git status`, `git diff`, and `git diff --cached` before changing anything. Preserve unrelated user work: do not reset, clean, amend, rebase, or overwrite changes that are not part of the requested commit. If the working tree contains unrelated changes or the intended scope is unclear, separate the relevant files or ask for clarification rather than mixing work silently.
 
-Use one focused commit when the changes are coherent. Stage only the intended files or hunks, then review the staged diff.
+Use one focused commit when the changes are coherent.
+
+Follow this order for every commit:
+
+1. **Format first.** After all edits are complete, run `cargo fmt --all` from the workspace root. Do not stage any changes for the commit before this step.
+2. **Stage the formatted changes.** Only after formatting, stage the intended files or hunks, including their formatting changes.
+3. **Review before committing.** Check `git diff --cached` to confirm the staged changes include the formatted versions and nothing unrelated.
 
 The commit subject must use exactly this format:
 

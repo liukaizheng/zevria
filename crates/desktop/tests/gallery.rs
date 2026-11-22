@@ -32,7 +32,8 @@ mod native {
         CommandJobId, CommandJobMode, CommandJobNotice, CommandJobNoticeKind, CommandJobSnapshot,
         CommandJobStatus, CommandJobView, FileChange, FileChangeOutput, ModelProfileRef, ModelRole,
         QuestionOption, QuestionPrompt, QuestionPromptKind, QuestionRequest, QuestionRequestId,
-        SessionMode, ToolCallOutcome, ToolResultDetail, ToolResultMetadata, TurnId,
+        SessionMode, SubtaskDescriptor, SubtaskId, SubtaskKind, SubtaskStatus, ToolCallOutcome,
+        ToolResultDetail, ToolResultMetadata, TurnId,
     };
     use zevria_model::{ContextTokenSnapshot, ContextTokenSource, TokenUsage};
     use zevria_session_api::{
@@ -53,6 +54,7 @@ mod native {
         Empty,
         Working,
         Jobs,
+        Subtasks,
         ThinkingLive,
         ThinkingRestored,
         ThinkingInterrupted,
@@ -83,6 +85,7 @@ mod native {
                 Self::Empty => "empty-session",
                 Self::Working => "working",
                 Self::Jobs => "jobs",
+                Self::Subtasks => "subtasks",
                 Self::ThinkingLive => "thinking-live",
                 Self::ThinkingRestored => "thinking-restored",
                 Self::ThinkingInterrupted => "thinking-interrupted",
@@ -150,6 +153,7 @@ mod native {
                 Scene::Empty,
                 Scene::Working,
                 Scene::Jobs,
+                Scene::Subtasks,
                 Scene::WebSearch,
                 Scene::WebSearchLive,
                 Scene::ThinkingLive,
@@ -181,6 +185,7 @@ mod native {
             for scene in [
                 Scene::Working,
                 Scene::Jobs,
+                Scene::Subtasks,
                 Scene::ThinkingLive,
                 Scene::ThinkingRestored,
                 Scene::ThinkingInterrupted,
@@ -219,6 +224,7 @@ mod native {
         for scene in [
             Scene::Empty,
             Scene::Working,
+            Scene::Subtasks,
             Scene::Question,
             Scene::Plan,
             Scene::Completion,
@@ -384,6 +390,7 @@ mod native {
             }
             if matches!(scene,Scene::Working | Scene::Question | Scene::Confirm) { working(&controller,cx); }
             if scene == Scene::Jobs { jobs_scene(&controller, &mut receiver, cx)?; }
+            if scene == Scene::Subtasks { subtasks_scene(&controller, cx); }
             if matches!(scene, Scene::WebSearch | Scene::WebSearchLive) {
                 web_scene(&controller, scene == Scene::WebSearchLive, cx)?;
             }
@@ -715,6 +722,69 @@ mod native {
             }
             Ok(())
         })
+    }
+
+    fn subtasks_scene(controller: &Entity<SessionController>, cx: &mut gpui_kit::App) {
+        controller.update(cx, |c, cx| {
+            let turn_id = TurnId::new(9);
+            c.fixture_event(
+                E::TurnStarted {
+                    turn_id,
+                    mode: SessionMode::Build,
+                    message: Message::user("Fix the failing transcript preview test."),
+                },
+                cx,
+            );
+            for (id, title, kind, status, workspace) in [
+                (
+                    "preview",
+                    "Trace the session preview",
+                    SubtaskKind::Explore,
+                    SubtaskStatus::Completed,
+                    "crates/transcript",
+                ),
+                (
+                    "restore",
+                    "Check the restore round trip",
+                    SubtaskKind::Explore,
+                    SubtaskStatus::Running,
+                    "crates/host",
+                ),
+                (
+                    "fixture",
+                    "Update the transcript fixtures",
+                    SubtaskKind::Build,
+                    SubtaskStatus::Running,
+                    "crates/desktop/tests",
+                ),
+            ] {
+                c.fixture_event(
+                    E::SubtaskLaunched {
+                        turn_id,
+                        call_id: format!("call-{id}"),
+                        entry_index: 0,
+                        descriptor: SubtaskDescriptor {
+                            id: SubtaskId::new(id),
+                            parent_session_id: "gallery".into(),
+                            title: title.into(),
+                            kind,
+                            workspace: Some(workspace.into()),
+                            status: SubtaskStatus::Starting,
+                        },
+                    },
+                    cx,
+                );
+                c.fixture_event(
+                    E::SubtaskStatus {
+                        turn_id,
+                        id: SubtaskId::new(id),
+                        status,
+                    },
+                    cx,
+                );
+            }
+            c.toggle_subtasks(cx);
+        });
     }
 
     fn working(controller: &Entity<SessionController>, cx: &mut gpui_kit::App) {

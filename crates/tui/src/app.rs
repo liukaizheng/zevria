@@ -189,6 +189,7 @@ pub struct App {
     worker: worker_review::WorkerReviewUiState,
     drafts: draft_submission::DraftSubmissions,
     queue: FollowUpQueue,
+    active_subtasks: usize,
     mode_command_draft: Option<(crate::composer::ComposerDraft, u64)>,
     pane_id: crate::input::PaneId,
     view: ViewState,
@@ -198,6 +199,10 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn set_active_subtasks(&mut self, active: usize) {
+        self.active_subtasks = active;
     }
 
     pub(crate) fn subtask_inspect(title: impl Into<String>) -> Self {

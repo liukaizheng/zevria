@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use zevria_foundation::CommandJobId;
+use zevria_foundation::{CommandJobId, SubtaskId};
 use zevria_host::{
     Config, RunningSession, SessionStart,
     sessions::{self, SessionSummary},
@@ -790,15 +790,17 @@ impl SessionController {
             self.send(command, cx);
         }
     }
+    fn can_open_session_panel(&self) -> bool {
+        self.phase == Phase::Live
+            && self.model.root.workflow.dialog().is_none()
+            && !self.capturing_dialog
+            && !self.model.models.is_open()
+    }
     fn open_jobs(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.phase != Phase::Live
-            || self.model.selected_child.is_some()
-            || self.model.root.workflow.dialog().is_some()
-            || self.capturing_dialog
-            || self.model.models.is_open()
-        {
+        if !self.can_open_session_panel() || self.model.selected_child.is_some() {
             return false;
         }
+        self.model.subtasks_open = false;
         self.model.jobs.show();
         self.model.select_default_job();
         self.flush_job_commands(cx);
@@ -813,6 +815,27 @@ impl SessionController {
         } else {
             self.open_jobs(cx);
         }
+    }
+    fn open_subtasks(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.can_open_session_panel() {
+            return false;
+        }
+        self.model.jobs.close();
+        self.model.subtasks_open = true;
+        cx.notify();
+        true
+    }
+    pub fn toggle_subtasks(&mut self, cx: &mut Context<Self>) {
+        if self.model.subtasks_open {
+            self.model.subtasks_open = false;
+            cx.notify();
+        } else {
+            self.open_subtasks(cx);
+        }
+    }
+    pub fn select_pane(&mut self, child: Option<SubtaskId>, cx: &mut Context<Self>) {
+        self.model.selected_child = child;
+        cx.notify();
     }
     pub fn inspect_job(&mut self, id: CommandJobId, cx: &mut Context<Self>) {
         if self.open_jobs(cx) {
@@ -872,6 +895,12 @@ impl SessionController {
             }
             InputRoute::Jobs => {
                 if self.open_jobs(cx) {
+                    self.draft.clear();
+                    self.draft_generation += 1;
+                }
+            }
+            InputRoute::Subtasks => {
+                if self.open_subtasks(cx) {
                     self.draft.clear();
                     self.draft_generation += 1;
                 }

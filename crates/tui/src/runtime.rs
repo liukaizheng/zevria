@@ -283,6 +283,7 @@ pub async fn run_ui(
                             SlashCommand::New => return new_session_outcome(&views.root),
                             SlashCommand::Skills => views.overlays.show_skills(),
                             SlashCommand::Jobs => views.overlays.show_jobs(),
+                            SlashCommand::Subtasks => views.show_subtasks(),
                             SlashCommand::Model | SlashCommand::ModelSession => {
                                 let scope = if command == SlashCommand::ModelSession {
                                     ModelSelectionScope::SessionOnly

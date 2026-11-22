@@ -5,6 +5,8 @@ mod jobs;
 mod models;
 #[path = "prompt_preview_tests.rs"]
 mod prompt_preview;
+#[path = "subtask_tests.rs"]
+mod subtasks;
 #[path = "turn_tests.rs"]
 mod turns;
 #[path = "web_tests.rs"]

@@ -183,26 +183,33 @@ fn pending_work_also_queues_but_management_workers_and_readonly_panes_do_not() {
 }
 
 #[test]
-fn jobs_is_frontend_only_during_active_and_pending_work_without_queueing() {
-    for pending in [false, true] {
-        for activation in [ctrl_enter(), key(KeyCode::Enter)] {
-            let mut app = if pending {
-                let mut app = App::new();
-                assert!(app.begin_operation_for_test(OperationKind::Submit, SessionMode::Build));
-                app
-            } else {
-                busy()
-            };
-            enter_insert(&mut app);
-            app.handle_event(Event::Paste("/jobs".into()));
-            assert_eq!(
-                app.handle_event(activation),
-                Some(UiAction::RunCommand(SlashCommand::Jobs))
-            );
-            assert!(app.input().is_empty());
-            assert_eq!(app.queue_for_test().len, 0);
-            assert!(app.history().is_empty());
-            assert!(app.is_busy());
+fn list_commands_are_frontend_only_during_active_and_pending_work_without_queueing() {
+    for (text, command) in [
+        ("/jobs", SlashCommand::Jobs),
+        ("/subtasks", SlashCommand::Subtasks),
+    ] {
+        for pending in [false, true] {
+            for activation in [ctrl_enter(), key(KeyCode::Enter)] {
+                let mut app = if pending {
+                    let mut app = App::new();
+                    assert!(
+                        app.begin_operation_for_test(OperationKind::Submit, SessionMode::Build)
+                    );
+                    app
+                } else {
+                    busy()
+                };
+                enter_insert(&mut app);
+                app.handle_event(Event::Paste(text.into()));
+                assert_eq!(
+                    app.handle_event(activation),
+                    Some(UiAction::RunCommand(command))
+                );
+                assert!(app.input().is_empty());
+                assert_eq!(app.queue_for_test().len, 0);
+                assert!(app.history().is_empty());
+                assert!(app.is_busy());
+            }
         }
     }
 }

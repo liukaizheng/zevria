@@ -36,6 +36,8 @@ pub enum SlashCommand {
     Skills,
     /// Inspect and control this session's shell jobs, even while busy.
     Jobs,
+    /// List this session's subtasks, even while busy.
+    Subtasks,
     /// Pick a previous session of this workspace and resume it.
     Resume,
     /// Reset the conversation in Build, retaining both modes' model/reasoning choices.
@@ -128,6 +130,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         command: SlashCommand::Jobs,
         name: "jobs",
         description: "Inspect, terminate, or background running shell commands",
+    },
+    CommandSpec {
+        command: SlashCommand::Subtasks,
+        name: "subtasks",
+        description: "List subtasks and open one for inspection",
     },
     CommandSpec {
         command: SlashCommand::Model,
@@ -475,6 +482,7 @@ mod tests {
                 "ensemble-review",
                 "skills",
                 "jobs",
+                "subtasks",
                 "model",
                 "model-session",
             ]
@@ -542,6 +550,7 @@ mod tests {
                 "ensemble-review",
                 "skills",
                 "jobs",
+                "subtasks",
                 "model",
                 "model-session",
             ]
@@ -877,6 +886,7 @@ mod tests {
                 "ensemble-review",
                 "skills",
                 "jobs",
+                "subtasks",
                 "model",
                 "model-session",
             ]

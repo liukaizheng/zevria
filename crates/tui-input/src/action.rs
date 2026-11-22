@@ -31,6 +31,7 @@ pub enum Action {
     ToggleMode,
     ModelPicker,
     JobsOverlay,
+    SubtasksOverlay,
     Undo,
     Redo,
     Paste,

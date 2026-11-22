@@ -227,6 +227,67 @@ pub fn icon_button(
         .tooltip(name.clone())
         .accessibility_label(name)
 }
+pub(super) fn inspector_panel(
+    id: &'static str,
+    width: f32,
+    overlay: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w(px(width))
+        .h_full()
+        .flex_shrink_0()
+        .min_h_0()
+        .when(overlay, |panel| {
+            // Keep the status-bar chips accessible underneath the compact overlay.
+            panel
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom(px(super::status::HEIGHT))
+                .h_auto()
+                .shadow_lg()
+                .occlude()
+        })
+        .flex()
+        .flex_col()
+        .bg(palette(cx).surfaces.overlay)
+        .rounded(px(14.))
+        .border_l_1()
+        .border_color(tones(cx).hairline)
+}
+
+pub(super) fn inspector_header(
+    title: &'static str,
+    summary: String,
+    close: Button,
+    cx: &App,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .flex_shrink_0()
+        .px(px(20.))
+        .py(px(14.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(18.))
+                        .line_height(px(24.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(meta().text_color(palette(cx).text.muted).child(summary)),
+        )
+        .child(close)
+}
+
 pub fn mode_button(mode: zevria_foundation::SessionMode, cx: &App) -> ButtonCustomVariant {
     let t = palette(cx);
     let tones = tones(cx);

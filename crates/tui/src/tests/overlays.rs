@@ -1,5 +1,154 @@
 //! Overlays behavior and presentation tests.
 use super::*;
+use crate::input::{KeyContext, SurfaceKind};
+
+fn alt_subtasks() -> Event {
+    modified_key(KeyCode::Char('s'), KeyModifiers::ALT)
+}
+
+fn launch_listed_subtask(views: &mut SessionViews, title: &str) -> SubtaskId {
+    let id = SubtaskId::new(title);
+    views.apply(SessionEvent::SubtaskLaunched {
+        turn_id: TEST_TURN_ID,
+        call_id: format!("call-{id}"),
+        entry_index: 0,
+        descriptor: SubtaskDescriptor {
+            id: id.clone(),
+            parent_session_id: "parent".into(),
+            title: title.into(),
+            kind: SubtaskKind::Explore,
+            workspace: Some("crates/tui".into()),
+            status: SubtaskStatus::Starting,
+        },
+    });
+    id
+}
+
+#[test]
+fn alt_s_opens_subtasks_from_all_four_pane_contexts() {
+    for context in [
+        KeyContext::Transcript,
+        KeyContext::Composer,
+        KeyContext::Completion,
+        KeyContext::BlockNav,
+    ] {
+        let mut views = SessionViews::new(App::new(), ".".into());
+        views
+            .root
+            .seed_history_entry(history_message(Message::user("Choose work")));
+        let child = launch_listed_subtask(&mut views, "Review the tests");
+        match context {
+            KeyContext::Composer | KeyContext::Completion => {
+                views.handle_event(key(KeyCode::Char('i')));
+                if context == KeyContext::Completion {
+                    views.handle_event(Event::Paste("/".into()));
+                }
+            }
+            KeyContext::BlockNav => {
+                rendered_views_text(&mut views, 120, 28);
+                views.handle_event(key(KeyCode::Char('v')));
+            }
+            _ => {}
+        }
+        assert_eq!(views.root().surface().context(), context);
+        assert_eq!(views.handle_event(alt_subtasks()), None);
+        assert!(views.overlays.owns(SurfaceKind::Subtasks));
+        assert!(rendered_views_text(&mut views, 120, 28).contains("Review the tests"));
+        assert_eq!(views.handle_event(key(KeyCode::Enter)), None);
+        assert_eq!(views.visible_child_id(), Some(&child));
+        assert!(!views.overlays.owns(SurfaceKind::Subtasks));
+        views.handle_event(modified_key(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(views.visible_child_id(), None);
+        assert_eq!(views.root().surface().context(), context);
+    }
+}
+
+#[test]
+fn subtasks_overlay_tracks_launches_status_and_help_without_stealing_the_selection() {
+    let mut views = SessionViews::new(App::new(), ".".into());
+    views.handle_event(alt_subtasks());
+    assert!(!views.clock_required());
+    let first = launch_listed_subtask(&mut views, "First subtask");
+    let second = launch_listed_subtask(&mut views, "Second subtask");
+    assert!(views.clock_required());
+    let screen = rendered_views_text(&mut views, 120, 28);
+    assert!(
+        screen.contains("Subtasks · 2 running · 2 total"),
+        "{screen}"
+    );
+    assert!(screen.find("First subtask").unwrap() < screen.find("Second subtask").unwrap());
+    assert_eq!(views.root.status_for_test().subtasks, 2);
+    views.handle_event(key(KeyCode::Char('?')));
+    assert!(views.overlays.owns(SurfaceKind::Help));
+    let help = rendered_views_text(&mut views, 120, 28);
+    assert!(help.contains("Subtasks help"), "{help}");
+    assert!(help.contains("Enter") && help.contains("inspect"), "{help}");
+    views.handle_event(key(KeyCode::Esc));
+    assert!(views.overlays.owns(SurfaceKind::Subtasks));
+
+    views.apply(SessionEvent::SubtaskStatus {
+        turn_id: TEST_TURN_ID,
+        id: first.clone(),
+        status: SubtaskStatus::Completed,
+    });
+    let screen = rendered_views_text(&mut views, 120, 28);
+    assert!(
+        screen.contains("Subtasks · 1 running · 2 total"),
+        "{screen}"
+    );
+    assert!(screen.contains("completed · crates/tui"), "{screen}");
+    views.apply(SessionEvent::SubtaskStatus {
+        turn_id: TEST_TURN_ID,
+        id: second,
+        status: SubtaskStatus::Cancelled,
+    });
+    assert!(!views.clock_required());
+    assert_eq!(views.root.status_for_test().subtasks, 0);
+    assert_eq!(views.handle_event(key(KeyCode::Enter)), None);
+    assert_eq!(views.visible_child_id(), Some(&first));
+    views.handle_event(alt_subtasks());
+    let screen = rendered_views_text(&mut views, 120, 28);
+    assert!(
+        screen
+            .lines()
+            .any(|line| line.contains("▸") && line.contains("First subtask")),
+        "{screen}"
+    );
+}
+
+#[test]
+fn slash_subtasks_runs_during_a_turn_and_replaces_the_jobs_overlay() {
+    let mut views = SessionViews::new(App::new(), ".".into());
+    views.apply(SessionEvent::TurnStarted {
+        turn_id: TEST_TURN_ID,
+        mode: SessionMode::Build,
+        message: Message::user("Run checks"),
+    });
+    let child = launch_listed_subtask(&mut views, "Inspect checks");
+    views.handle_event(key(KeyCode::Char('i')));
+    views.handle_event(Event::Paste("/subtasks".into()));
+    assert_eq!(
+        views.handle_event(ctrl_enter()),
+        Some(UiAction::RunCommand(SlashCommand::Subtasks))
+    );
+    assert!(views.root().is_busy());
+    assert!(views.root().input().is_empty());
+    // The runtime opens the list from this frontend-only action.
+    views.overlays.show_jobs();
+    views.show_subtasks();
+    assert!(!views.overlays.owns(SurfaceKind::Jobs));
+    assert!(!views.overlays.jobs.is_open());
+    assert!(views.overlays.owns(SurfaceKind::Subtasks));
+    views.overlays.show_jobs();
+    assert!(!views.overlays.owns(SurfaceKind::Subtasks));
+    assert!(!views.overlays.subtasks.is_open());
+    views.show_subtasks();
+    views.handle_event(key(KeyCode::Enter));
+    assert_eq!(views.visible_child_id(), Some(&child));
+    let screen = rendered_views_text(&mut views, 120, 28);
+    assert!(!screen.contains("1 subtask"), "{screen}");
+    assert_eq!(views.root.status_for_test().subtasks, 1);
+}
 
 #[test]
 fn live_worker_chrome_tracks_idle_popup_busy_and_frozen_composer_availability() {

@@ -17,6 +17,7 @@ pub mod session_model;
 mod session_model_tests;
 pub mod shell;
 pub mod status_icon;
+pub mod subtasks;
 pub mod workflow;
 pub use blocks::{TURN_CANCELLED, incomplete_response_outcome};
 pub use prompt_preview::{PREPARING_PROMPT, PromptPaint, PromptPreview};

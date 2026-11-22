@@ -18,6 +18,7 @@ use zevria_foundation::subtask::SubtaskKind;
 use zevria_foundation::subtask::SubtaskLaunchMetadata;
 use zevria_foundation::subtask::SubtaskStatus;
 use zevria_model::models::ModelSelectionScope;
+use zevria_presentation::subtasks::active_count;
 use zevria_session_api::SessionCommand;
 use zevria_session_api::SessionEvent;
 use zevria_session_api::SessionStreamBatch;
@@ -38,6 +39,7 @@ use crate::input::{Action, InputEvent, PaneId, UserInput};
 use crate::picker::SessionPicker;
 use crate::question::QuestionDialog;
 use crate::status::ExternalContextUsage;
+use crate::subtasks::SubtaskRow;
 use crate::theme::theme;
 use crate::workspace_header::WorkspaceHeader;
 
@@ -391,6 +393,7 @@ impl SessionViews {
                 | TranscriptItem::Error { .. } => {}
             }
         }
+        self.refresh_subtasks();
     }
 
     fn seed_subtask_ordinal(&mut self, id: &SubtaskId) {
@@ -501,6 +504,7 @@ impl SessionViews {
         self.children[index].historical = true;
         self.children[index].app.restore(items);
         self.children[index].refresh_pane_metadata();
+        self.refresh_subtasks();
     }
 
     fn install_subtask_metadata(
@@ -735,7 +739,43 @@ impl SessionViews {
     }
 
     pub(crate) fn clock_required(&self) -> bool {
-        self.visible_app().is_busy() || self.overlays.jobs.is_open()
+        self.visible_app().is_busy()
+            || self.overlays.jobs.is_open()
+            || (self.overlays.subtasks.is_open() && self.overlays.subtasks.has_active_rows())
+    }
+
+    fn subtask_rows(&self) -> Vec<SubtaskRow> {
+        let mut children = self.children.iter().collect::<Vec<_>>();
+        children.sort_unstable_by_key(|pane| pane.creation_ordinal);
+        children
+            .into_iter()
+            .map(|pane| SubtaskRow {
+                id: pane.id.clone(),
+                kind: pane.kind,
+                title: pane.title.clone(),
+                workspace: pane.workspace.clone(),
+                status: pane.status,
+                historical: pane.historical,
+                visible: self.visible == Some(VisiblePane::Subtask(pane.app.surface().id.pane)),
+            })
+            .collect()
+    }
+
+    pub(crate) fn show_subtasks(&mut self) {
+        self.visible_app_mut().close_composer_edit_group();
+        self.overlays.show_subtasks(self.subtask_rows());
+    }
+
+    fn refresh_subtask_rows(&mut self) {
+        if self.overlays.subtasks.is_open() {
+            self.overlays.subtasks.replace_rows(self.subtask_rows());
+        }
+    }
+
+    fn refresh_subtasks(&mut self) {
+        self.root
+            .set_active_subtasks(active_count(self.children.iter().map(|pane| pane.status)));
+        self.refresh_subtask_rows();
     }
 
     /// Open the modal session picker over whatever pane is visible.
@@ -751,6 +791,7 @@ impl SessionViews {
     /// Draw the currently visible pane and global workspace chrome, then any
     /// modal overlay above the protected header row.
     pub fn render(&mut self, frame: &mut ratatui::Frame) {
+        self.refresh_subtask_rows();
         let accent = self.visible_app().status_accent().color();
         let snapshot = self.overlays.snapshot(self.visible_app().surface());
         let owner = snapshot.owner;
@@ -862,10 +903,16 @@ impl SessionViews {
         }) {
             self.overlays.set_question(None);
         }
+        let child_count = self.children.len();
+        let mut refresh_subtasks = matches!(
+            &event,
+            SessionEvent::SubtaskLaunched { .. } | SessionEvent::SubtaskStatus { .. }
+        );
         if let SessionEvent::ToolResults { metadata, .. } = &event {
             for entry in metadata.iter().flat_map(|metadata| metadata.subtasks()) {
                 if let Some(launch) = &entry.launch {
                     self.install_subtask_metadata(launch, entry.status);
+                    refresh_subtasks = true;
                 }
             }
         }
@@ -1120,6 +1167,9 @@ impl SessionViews {
             }
             event => self.apply_root_event(event),
         }
+        if refresh_subtasks || self.children.len() != child_count {
+            self.refresh_subtasks();
+        }
         if refresh_workspace_header {
             self.workspace_header.refresh();
         }
@@ -1186,6 +1236,7 @@ impl SessionViews {
     }
 
     pub fn apply_streams(&mut self, batch: &SessionStreamBatch) {
+        let child_count = self.children.len();
         if let Some(stream) = &batch.root {
             self.apply_root_event(if stream.message.is_some() || stream.attempt.is_some() {
                 SessionEvent::AssistantStreamUpdated {
@@ -1222,6 +1273,9 @@ impl SessionViews {
                 effects.is_empty(),
                 "inspect panes cannot prune root workers"
             );
+        }
+        if self.children.len() != child_count {
+            self.refresh_subtasks();
         }
         for stream in &batch.agent_runs {
             if let Some(index) = self.agents.iter().position(|pane| {
@@ -1262,12 +1316,13 @@ impl SessionViews {
         let owner = self.overlays.snapshot(self.visible_app().surface()).owner;
         if owner.captures {
             self.visible_app_mut().close_composer_edit_group();
-            if self.overlays.owns(owner.id.kind) {
-                return self.overlays.handle_input(owner, input);
-            }
-            return self
-                .visible_app_mut()
-                .handle_input_on(owner, input, Instant::now());
+            let action = if self.overlays.owns(owner.id.kind) {
+                self.overlays.handle_input(owner, input)
+            } else {
+                self.visible_app_mut()
+                    .handle_input_on(owner, input, Instant::now())
+            };
+            return self.consume_view_action(action);
         }
         if let UserInput::Key(key) = &input {
             match owner.action(*key) {
@@ -1285,6 +1340,10 @@ impl SessionViews {
                     self.overlays.show_jobs();
                     return None;
                 }
+                Some(Action::SubtasksOverlay) => {
+                    self.show_subtasks();
+                    return None;
+                }
                 Some(Action::ReturnRoot) => {
                     self.set_visible(None);
                     return None;
@@ -1296,10 +1355,14 @@ impl SessionViews {
                 _ => {}
             }
         }
-        match self
+        let action = self
             .visible_app_mut()
-            .handle_input_on(owner, input, Instant::now())
-        {
+            .handle_input_on(owner, input, Instant::now());
+        self.consume_view_action(action)
+    }
+
+    fn consume_view_action(&mut self, action: Option<UiAction>) -> Option<UiAction> {
+        match action {
             Some(UiAction::OpenSubtask { id }) => {
                 self.open_child(&id);
                 None

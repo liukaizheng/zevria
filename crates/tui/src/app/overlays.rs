@@ -8,6 +8,7 @@ use crate::{
     picker::{PickerAction, SessionPicker},
     question::{QuestionDialog, QuestionDialogAction},
     skills::SkillManager,
+    subtasks::{SubtaskRow, SubtasksOverlay},
 };
 use ratatui::{Frame, layout::Rect};
 
@@ -16,6 +17,7 @@ pub(crate) enum Overlay {
     Models,
     Skills,
     Jobs,
+    Subtasks,
     Question(QuestionDialog),
     Help(HelpOverlay),
 }
@@ -26,6 +28,7 @@ impl Overlay {
             Self::Models => SurfaceKind::Models,
             Self::Skills => SurfaceKind::Skills,
             Self::Jobs => SurfaceKind::Jobs,
+            Self::Subtasks => SurfaceKind::Subtasks,
             Self::Question(_) => SurfaceKind::Question,
             Self::Help(_) => SurfaceKind::Help,
         }
@@ -43,10 +46,13 @@ pub(crate) struct OverlayController {
     pub(crate) models: ModelPicker,
     pub(crate) skills: SkillManager,
     pub(crate) jobs: crate::jobs::JobsOverlay,
+    pub(crate) subtasks: SubtasksOverlay,
 }
 impl OverlayController {
     fn replace(&mut self, overlay: Overlay) {
-        self.stack.retain(|entry| entry.kind() != overlay.kind());
+        // Jobs and subtasks share one slot; opening one replaces the other.
+        self.stack
+            .retain(|entry| entry.kind().layer() != overlay.kind().layer());
         self.stack.push(overlay);
         self.stack.sort_by_key(|entry| entry.kind().layer());
     }
@@ -62,8 +68,14 @@ impl OverlayController {
         self.replace(Overlay::Models);
     }
     pub(crate) fn show_jobs(&mut self) {
+        self.subtasks.close();
         self.jobs.show();
         self.replace(Overlay::Jobs);
+    }
+    pub(crate) fn show_subtasks(&mut self, rows: Vec<SubtaskRow>) {
+        self.jobs.inspector.close();
+        self.subtasks.show(rows);
+        self.replace(Overlay::Subtasks);
     }
     pub(crate) fn show_skills(&mut self) {
         self.skills.show();
@@ -93,6 +105,7 @@ impl OverlayController {
             Overlay::Models => self.models.is_open(),
             Overlay::Skills => self.skills.is_open(),
             Overlay::Jobs => self.jobs.is_open(),
+            Overlay::Subtasks => self.subtasks.is_open(),
             _ => true,
         }
     }
@@ -120,6 +133,7 @@ impl OverlayController {
         self.models.invalidate_geometry();
         self.skills.invalidate_geometry();
         self.jobs.invalidate_geometry();
+        self.subtasks.invalidate_geometry();
         for entry in &mut self.stack {
             match entry {
                 Overlay::Picker(picker) => picker.invalidate_geometry(),
@@ -143,6 +157,7 @@ impl OverlayController {
                 Overlay::Models => self.models.render(frame, bounds),
                 Overlay::Skills => self.skills.render(frame, bounds),
                 Overlay::Jobs => self.jobs.render(frame, bounds),
+                Overlay::Subtasks => self.subtasks.render(frame, bounds),
                 Overlay::Question(question) => question.render(frame, bounds),
                 Overlay::Help(help) => help.render(frame, bounds),
             }
@@ -158,6 +173,7 @@ impl OverlayController {
             Overlay::Models => self.models.context(),
             Overlay::Skills => self.skills.context(),
             Overlay::Jobs => self.jobs.context(),
+            Overlay::Subtasks => KeyContext::SubtasksList,
             Overlay::Question(question) => question.context(),
             Overlay::Picker(_) => KeyContext::OverlayList,
             Overlay::Help(_) => KeyContext::Help,
@@ -171,6 +187,7 @@ impl OverlayController {
                 Overlay::Models => self.models.hint_eligibility(),
                 Overlay::Skills => self.skills.hint_eligibility(),
                 Overlay::Jobs => self.jobs.hint_eligibility(),
+                Overlay::Subtasks => self.subtasks.hint_eligibility(),
                 Overlay::Picker(picker) => picker.hint_eligibility(),
                 Overlay::Help(_) => unreachable!("help closes rather than nesting"),
             };
@@ -219,6 +236,17 @@ impl OverlayController {
                     self.jobs.handle_input(key);
                 }
                 None
+            }
+            Overlay::Subtasks => {
+                let action = match input {
+                    UserInput::Key(key) => self
+                        .subtasks
+                        .handle_input(key)
+                        .map(|id| UiAction::OpenSubtask { id }),
+                    UserInput::Paste(_) => None,
+                };
+                close = !self.subtasks.is_open();
+                action
             }
             Overlay::Skills => {
                 match input {

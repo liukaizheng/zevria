@@ -558,6 +558,7 @@ Other useful commands:
 | `/model` | Select this role's model and reasoning level; save to the session and global configuration. |
 | `/model-session` | Select this mode's model and reasoning level; retain on reset/resume without changing global defaults. |
 | `/jobs` | Inspect shell jobs and stop or background an individual command in the terminal or desktop, even during a turn. |
+| `/subtasks` | List session subtasks and open one for inspection in the terminal or desktop, even during a turn. |
 | `/skills` | Inspect, enable, disable, and reload local skills. |
 | `/ensemble-review <prompt>` | Collect independent ACP reviews and synthesize a read-only review. |
 

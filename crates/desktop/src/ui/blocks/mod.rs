@@ -1072,10 +1072,7 @@ impl BlockView {
                 style::icon_button("inspect", IconName::Eye, "Inspect subtask")
                     .track_focus(&self.action_focus[2])
                     .on_click(move |_, _, cx| {
-                        controller.update(cx, |this, cx| {
-                            this.model.selected_child = Some(id.clone());
-                            cx.notify();
-                        })
+                        controller.update(cx, |this, cx| this.select_pane(Some(id.clone()), cx))
                     }),
             );
         }
@@ -1852,10 +1849,8 @@ impl Render for BlockView {
                                 .label("Inspect")
                                 .track_focus(&self.action_focus[2])
                                 .on_click(move |_, _, cx| {
-                                    controller.update(cx, |this, cx| {
-                                        this.model.selected_child = id.clone();
-                                        cx.notify();
-                                    })
+                                    controller
+                                        .update(cx, |this, cx| this.select_pane(id.clone(), cx))
                                 }),
                         ),
                 );

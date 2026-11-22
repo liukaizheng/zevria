@@ -151,12 +151,13 @@ thread and composer share one axis at every width. Spacing follows a 4 px grid;
 turn boundaries add a 32 px gap and a hairline. Tags, controls, carbon wells, the
 composer and decision sheets have distinct 4/6/8/12/14 px radii.
 
-The sidebar pins **This session**, using its first prompt, with subtasks nested
-beneath it. Earlier sessions are single-line titles with aligned relative times.
-Arrow keys navigate those rows; Enter opens one. Below a 900 px window the
-sidebar auto-hides; **⌃⌘S** on macOS or **Ctrl+Shift+S** on Windows overrides it. Below a 760 px main column the gutter
-labels move above content. A Plan sheet overlays instead of squeezing the main
-column below 560 px. The minimum window is 720×520.
+The sidebar pins **This session** using its first prompt. That row returns to the
+root conversation; subtasks are listed in the Subtasks panel instead. Earlier
+sessions are single-line titles with aligned relative times. Arrow keys navigate
+the rows; Enter opens one. Below a 900 px window the sidebar auto-hides; **⌃⌘S** on
+macOS or **Ctrl+Shift+S** on Windows overrides it. Below a 760 px main column the
+gutter labels move above content. A Plan sheet overlays instead of squeezing the
+main column below 560 px. The minimum window is 720×520.
 
 Questions **dock at the end of the thread in place of the composer**, without a
 scrim. The transcript stays scrollable, and the dock scrolls internally above
@@ -349,6 +350,21 @@ Jobs** for retained jobs. **Background jobs finished** notices summarize both
 completed and still-running jobs without showing stream output. Copying the
 notice returns the exact model-visible text. None of these controls stops the
 whole turn or restores processes when you resume a session.
+
+### Subtasks: switch between conversation panes
+
+When the session has subtasks, the status bar shows a **Subtasks** chip in both
+the conversation and child panes. It counts active subtasks; when all have
+finished, the chip still opens the list. Click it, choose **View → Toggle subtasks
+panel**, or press `Shift+Cmd+T` on macOS (`Ctrl+Shift+T` on Windows). `/subtasks`
+opens the panel from the root composer even during a turn.
+
+The panel docks on the right or overlays the thread in a compact window. It
+replaces the Jobs panel and stays hidden during Plan review. Each row shows its
+kind, title, status, and workspace when available. Click a row or focus it and
+press Enter or Space to switch panes. Up/Down also switches panes. The panel stays
+open while you read the child's transcript; select **Conversation** to return to
+the root. Close the panel with Escape, the close button, or the same toggle.
 
 ### Appearance, focus and motion
 
@@ -605,6 +621,7 @@ in the Zevria menu on both platforms.
 | --- | --- | --- |
 | Open workspace / new session / quit | ⌘O / ⌘N / ⌘Q | `Ctrl+O` / `Ctrl+N` / `Ctrl+Q` |
 | Sidebar / switch mode / select model | ⌃⌘S / ⇧⌘M / ⌃⌘M | `Ctrl+Shift+S` / `Ctrl+Shift+M` / `Ctrl+Shift+P` |
+| Toggle Jobs / Subtasks panel | ⇧⌘J / ⇧⌘T | `Ctrl+Shift+Y` / `Ctrl+Shift+T` |
 | Stop turn / confirm visible decision / copy focused disclosure | ⌘. / ⌘↩ / ⌘C | `Ctrl+.` / `Ctrl+Enter` / `Ctrl+C` |
 | Previous / next turn | ⌥⌘↑ / ⌥⌘↓ | `Ctrl+K` / `Ctrl+J` |
 | Jump to beginning / latest | ⌥⇧⌘↑ / ⌥⇧⌘↓ | `Ctrl+Shift+K` / `Ctrl+Shift+J` |
@@ -621,7 +638,7 @@ root turn, including while a non-dismissible question is open.
 
 Supported shared grammar: ordinary text, `/orchestrate <prompt>`, `$skill [args]`,
 `/compact`, `/implement`, `/implement-fresh`, `/plan`, `/build`, `/new`, `/resume`,
-`/model`, `/model-session`. Skill-management, worker-review and `/ensemble-*` commands retain
+`/model`, `/model-session`, `/jobs`, `/subtasks`. Skill-management, worker-review and `/ensemble-*` commands retain
 the draft and show an explicit not-yet-available notice. Input while busy is not
 queued as another turn. A submitted draft stays until acceptance; failures and
 cancellation restore it without replacing a newer draft (Recover draft keeps
@@ -907,7 +924,10 @@ Check these on a scratch workspace:
   scroll stays available, ⌘↩ sends, Esc only dismisses when allowed, and the
   composer's draft returns unchanged. At 720×520 inspect the Plan overlay and
   question dock without obscured controls.
-- [ ] Launch and inspect a subtask; return to the root while it streams.
+- [ ] Launch subtasks and check the live status-bar count. Open the panel via
+  the chip, shortcut and `/subtasks`; switch panes with the arrows or a click,
+  then return to **Conversation** while the child streams. Check that Escape
+  closes the panel and that no child rows appear in the sidebar.
 - [ ] Resume from the sidebar and `--continue` (including no prior root).
 - [ ] Close/Cmd-Q while a turn is active, then resume cleanly.
 - [ ] Scroll away during streaming, expand diffs/reasoning, copy input/output.

@@ -705,7 +705,9 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
 }
 
 #[gpui_kit::test]
-fn sidebar_arrow_navigation_and_enter_inspect_the_pinned_session_children(cx: &mut TestAppContext) {
+fn subtasks_panel_navigation_inspects_children_without_resetting_disclosure(
+    cx: &mut TestAppContext,
+) {
     let (window, view, controller, _) = setup(cx);
     let id = zevria_foundation::SubtaskId::new("child");
     controller.update(cx, |c, cx| {
@@ -735,8 +737,13 @@ fn sidebar_arrow_navigation_and_enter_inspect_the_pinned_session_children(cx: &m
     });
     cx.update_window(window.into(), |_, window, cx| {
         window.press(Shortcut::UNFOLD.0, cx);
-        let focus = view.read(cx).sidebar_focus[0].clone();
-        window.focus(&focus, cx);
+        assert_eq!(view.read(cx).sidebar_focus.len(), 1);
+        window.press(Shortcut::TOGGLE_SUBTASKS.0, cx);
+    })
+    .unwrap();
+    render(window, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.find("subtasks-panel").visible());
         window.press("down", cx);
         window.press("enter", cx);
     })
@@ -747,8 +754,8 @@ fn sidebar_arrow_navigation_and_enter_inspect_the_pinned_session_children(cx: &m
     );
     render(window, cx);
     cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.find("subtask-row-child").focused().unwrap_or(false));
         window.press("up", cx);
-        window.press("enter", cx);
     })
     .unwrap();
     assert!(controller.read_with(cx, |c, _| c.model.selected_child.is_none()));

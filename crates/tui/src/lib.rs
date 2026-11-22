@@ -16,6 +16,7 @@ mod runtime;
 mod skills;
 mod status;
 mod status_icon;
+mod subtasks;
 mod workspace;
 mod workspace_files;
 use zevria_tui_widgets::theme;

@@ -179,6 +179,7 @@ impl App {
             edit,
             pane,
             view,
+            active_subtasks,
             ..
         } = self;
         let SessionModel {
@@ -352,6 +353,7 @@ impl App {
         });
         let status = StatusBarView {
             jobs: running_jobs,
+            subtasks: if pane.is_root() { *active_subtasks } else { 0 },
             primary,
             accent,
             tone,
