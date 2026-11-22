@@ -6,6 +6,10 @@ only after its own complete build/test matrix and bundle assembly succeed.
 Publication is always a separate, manual maintainer action. An independent green
 `test.yml` run cannot substitute for these release checks.
 
+[Cross-platform checks](../.github/workflows/test.yml) still run on branch pushes,
+pull requests, and manual dispatches. Pushing a version tag starts the release
+workflow without repeating the cross-platform workflow.
+
 ## Downloads and platform scope
 
 For package version `<version>`, the release has exactly four workflow-managed
@@ -266,7 +270,7 @@ The dependency chain is `prepare → native build/test matrix → assemble → d
   validates the identity, resolves stable Rust once, and records the immutable
   source SHA, version, and exact Rust toolchain version. Every native job checks
   out that SHA and uses that exact toolchain and explicit target.
-- **Native matrix:** sets up Node 22, Python 3.12, the RTK revision shared with
+- **Native matrix:** sets up Node.js 24, Python 3.12, the RTK revision shared with
   `test.yml`, and native C/C++ tools (including MSVC and verified Git Bash on
   Windows). It runs locked workspace/all-target checks, builds the real debug
   executable required by ACP process fixtures, and runs locked workspace tests.
