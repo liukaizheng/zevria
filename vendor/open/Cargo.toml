@@ -1,6 +1,0 @@
-[package]
-name = "open"
-version = "5.4.4"
-edition = "2024"
-license = "MIT"
-publish = false

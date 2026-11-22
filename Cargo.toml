@@ -103,6 +103,3 @@ which = "8.0.5"
 # See docs/markdown-parser-patch.md for provenance and maintenance.
 [replace]
 "markdown:1.0.0" = { git = "https://github.com/liukaizheng/markdown-rs", rev = "e629e7e4370cac5cc6dac39971c77feba3e3aaf9" }
-# Cargo locks GPUI's optional Linux/FreeBSD backend even though Zevria never
-# builds it. Keep only the native opener commands called by that backend.
-"open:5.4.4" = { path = "vendor/open" }
