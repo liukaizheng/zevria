@@ -10,6 +10,8 @@ pub struct ToolDeclaration {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 impl ToolDeclaration {
@@ -32,6 +34,8 @@ impl From<&ToolDefinition> for ToolDeclaration {
             name: tool.name.to_string(),
             description: tool.description.clone(),
             parameters: tool.parameters.clone(),
+            strict: zevria_foundation::is_mcp_external_tool_name(tool.name.as_str())
+                .then_some(false),
         }
     }
 }

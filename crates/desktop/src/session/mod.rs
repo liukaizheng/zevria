@@ -27,6 +27,7 @@ pub struct WorkspaceModel {
     pub question: Option<QuestionForm>,
     pub models: zevria_presentation::models::ModelPicker,
     pub jobs: JobsInspector,
+    pub mcp: zevria_presentation::mcp::McpInspector,
     pub subtasks_open: bool,
     pub registry: CommandRegistry,
     pub session_id: String,
@@ -44,6 +45,8 @@ pub enum InputRoute {
     Resume,
     Models(zevria_model::models::ModelSelectionScope),
     Jobs,
+    Mcp,
+    McpPrompt(Box<SessionCommand>),
     Subtasks,
     Notice(String),
     Retained,
@@ -56,6 +59,7 @@ impl Default for WorkspaceModel {
             question: None,
             models: Default::default(),
             jobs: JobsInspector::new("desktop.jobs."),
+            mcp: Default::default(),
             subtasks_open: false,
             registry: CommandRegistry::default(),
             session_id: String::new(),
@@ -78,6 +82,8 @@ impl WorkspaceModel {
         }
         .completions();
         workspace.registry = CommandRegistry::new(skills);
+        workspace.mcp.prompts = restored.mcp_prompts;
+        workspace.registry.set_mcp_prompts(&workspace.mcp.prompts);
         let restored_launches = restored
             .transcript_items
             .iter()
@@ -181,6 +187,10 @@ impl WorkspaceModel {
                 WorkspaceReduction::default()
             }
             SessionUpdate::Lifecycle(mut event) => {
+                if self.mcp.event(&event) {
+                    self.registry.set_mcp_prompts(&self.mcp.prompts);
+                    return WorkspaceReduction::default();
+                }
                 if let SessionEvent::ModelsResult { request_id, result } = &event {
                     if self.models.accept(request_id, result) {
                         self.root.install_validated_model_result(result);
@@ -315,6 +325,7 @@ impl WorkspaceModel {
         self.question = None;
         self.models.reset();
         self.jobs = JobsInspector::new("desktop.jobs.");
+        self.mcp = Default::default();
         self.subtasks_open = false;
         self.root.disconnected()
     }
@@ -358,6 +369,7 @@ impl WorkspaceModel {
             .classify_prompt(&zevria_content::UserPrompt::from_text(input));
         match classified {
             Ok(ClassifiedInput::Builtin(SlashCommand::Jobs)) => return InputRoute::Jobs,
+            Ok(ClassifiedInput::Builtin(SlashCommand::Mcp)) => return InputRoute::Mcp,
             Ok(ClassifiedInput::Builtin(SlashCommand::Subtasks)) => return InputRoute::Subtasks,
             _ => {}
         }
@@ -390,6 +402,26 @@ impl WorkspaceModel {
                 self.root
                     .submit(text, RequestBehavior::Orchestrate)
                     .map(SessionCommand::Turn)
+            }
+            ClassifiedInput::McpPrompt {
+                server,
+                prompt,
+                arguments,
+            } => {
+                let mode = self.root.next_mode();
+                if !self.root.begin_mcp_prompt(mode) {
+                    return InputRoute::Notice(
+                        "Finish reviewing the current Plan before running an MCP prompt.".into(),
+                    );
+                }
+                return InputRoute::McpPrompt(Box::new(SessionCommand::Turn(
+                    zevria_session_api::TurnCommand::InvokeMcpPrompt {
+                        server,
+                        prompt,
+                        arguments,
+                        mode,
+                    },
+                )));
             }
             ClassifiedInput::Skill { name, args } => {
                 self.root.invoke_skill(name, args).map(SessionCommand::Turn)
@@ -443,5 +475,33 @@ impl WorkspaceModel {
         command.map_or(InputRoute::Retained, |command| {
             InputRoute::Command(Box::new(command))
         })
+    }
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+
+    #[test]
+    fn routes_management_without_turn_and_explicit_prompt_as_turn() {
+        let mut workspace = WorkspaceModel::default();
+        assert!(matches!(
+            workspace.route_input("/mcp", false),
+            InputRoute::Mcp
+        ));
+        assert!(!workspace.root.is_busy());
+        let InputRoute::McpPrompt(command) =
+            workspace.route_input("/prompt docs:summary topic=release", false)
+        else {
+            panic!("MCP prompt route");
+        };
+        assert!(
+            matches!(*command, SessionCommand::Turn(zevria_session_api::TurnCommand::InvokeMcpPrompt { server, prompt, arguments, mode: SessionMode::Build })
+            if server.as_str() == "docs" && prompt == "summary" && arguments["topic"] == "release")
+        );
+        assert!(matches!(
+            workspace.route_input("/mcp", false),
+            InputRoute::Mcp
+        ));
     }
 }

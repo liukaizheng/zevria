@@ -153,7 +153,7 @@ impl SessionModel {
             SessionEvent::ModeChanged { mode } => self.apply_selected_mode(mode),
             // Management transport belongs to SessionViews. Inspect panes never
             // install root completion metadata or accept management actions.
-            SessionEvent::ModelsResult { .. } | SessionEvent::SkillsResult { .. } | SessionEvent::SkillsChanged { .. } | SessionEvent::WorkerControlResult { .. } => {}
+            SessionEvent::ModelsResult { .. } | SessionEvent::SkillsResult { .. } | SessionEvent::SkillsChanged { .. } | SessionEvent::McpResult { .. } | SessionEvent::McpChanged { .. } | SessionEvent::WorkerControlResult { .. } => {}
             SessionEvent::WorkerReviewUpdated { target, state } => {
                 self.conversation.project_worker_review(&target.run_id, &target.worker_id, &state, crate::projection::ProjectionMode::Live);
             }
@@ -717,6 +717,10 @@ impl SessionModel {
         };
         (entry.blocks.first()?.id == *id).then_some((*index, paint))
     }
+    pub fn begin_mcp_prompt(&mut self, mode: SessionMode) -> bool {
+        self.admits_work() && self.begin_operation(OperationKind::Submit, mode, role_for_mode(mode))
+    }
+
     pub fn invoke_skill(
         &mut self,
         name: zevria_instructions::SkillName,

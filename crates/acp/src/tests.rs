@@ -568,6 +568,7 @@ type ModeAcknowledgment = (
 #[derive(Clone)]
 struct FakeFactory {
     next_id: Arc<AtomicUsize>,
+    delegated_mcp: Arc<Mutex<Vec<Vec<zevria_foundation::AcpMcpServerSpec>>>>,
     event_sender: Arc<Mutex<Option<zevria_session_api::SessionEventSender>>>,
     shutdowns: Arc<AtomicUsize>,
     answers: Arc<Mutex<Vec<QuestionResponse>>>,
@@ -581,6 +582,7 @@ impl FakeFactory {
     fn new() -> Self {
         Self {
             next_id: Arc::new(AtomicUsize::new(1)),
+            delegated_mcp: Arc::default(),
             event_sender: Arc::default(),
             shutdowns: Arc::new(AtomicUsize::new(0)),
             answers: Arc::new(Mutex::new(Vec::new())),
@@ -616,6 +618,10 @@ impl SessionRuntimeFactory for FakeFactory {
     ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<StartedSession>> + Send + '_>>
     {
         Box::pin(async move {
+            self.delegated_mcp
+                .lock()
+                .unwrap()
+                .push(request.mcp_servers.clone());
             let session_id = match &request.start {
                 SessionStart::New => {
                     format!("fake-{}", self.next_id.fetch_add(1, Ordering::AcqRel))
@@ -1129,6 +1135,12 @@ impl SessionRuntimeFactory for FakeFactory {
                         | SessionCommand::Turn(zevria_session_api::TurnCommand::EditTranscript(
                             _,
                         ))
+                        | SessionCommand::Manage(zevria_session_api::ManagementCommand::Mcp {
+                            ..
+                        })
+                        | SessionCommand::Turn(
+                            zevria_session_api::TurnCommand::InvokeMcpPrompt { .. },
+                        )
                         | SessionCommand::Turn(zevria_session_api::TurnCommand::InvokeSkill {
                             ..
                         })
@@ -1926,4 +1938,91 @@ async fn plan_without_elicitation_waits_for_exact_implement_command() {
             AcpSessionUpdate::AgentMessageChunk(chunk)
                 if matches!(&chunk.content, ContentBlock::Text(text) if text.text.contains("implemented plan"))
         )));
+}
+
+#[tokio::test]
+async fn new_load_and_resume_forward_mcp_servers_without_persisting_them() {
+    use agent_client_protocol::schema::v1::{
+        McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+    };
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path().canonicalize().unwrap();
+    let factory = Arc::new(FakeFactory::new());
+    let delegated = factory.delegated_mcp.clone();
+    let (client_transport, server_transport) = Channel::duplex();
+    let root = cwd.clone();
+    let server = tokio::spawn(async move {
+        serve_on(AcpConfig::default(), root, factory, server_transport).await
+    });
+    let client = Client
+        .builder()
+        .connect_with(client_transport, async move |connection| {
+            let init = connection
+                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            assert!(init.agent_capabilities.mcp_capabilities.http);
+            assert!(!init.agent_capabilities.mcp_capabilities.sse);
+            let stdio =
+                McpServer::Stdio(McpServerStdio::new("local", "not-executed-by-fake-factory"));
+            let http = McpServer::Http(McpServerHttp::new("remote", "https://example.invalid/mcp"));
+            let old = McpServer::Sse(McpServerSse::new("old", "https://example.invalid/sse"));
+            let rejected = connection
+                .send_request(NewSessionRequest::new(cwd.clone()).mcp_servers(vec![old]))
+                .block_task()
+                .await;
+            assert!(rejected.is_err());
+            let duplicate = connection
+                .send_request(
+                    NewSessionRequest::new(cwd.clone())
+                        .mcp_servers(vec![http.clone(), http.clone()]),
+                )
+                .block_task()
+                .await;
+            assert!(duplicate.is_err());
+            let opened = connection
+                .send_request(
+                    NewSessionRequest::new(cwd.clone())
+                        .mcp_servers(vec![stdio.clone(), http.clone()]),
+                )
+                .block_task()
+                .await?;
+            connection
+                .send_request(CloseSessionRequest::new(opened.session_id))
+                .block_task()
+                .await?;
+            connection
+                .send_request(
+                    LoadSessionRequest::new("persisted", cwd.clone()).mcp_servers(vec![stdio]),
+                )
+                .block_task()
+                .await?;
+            connection
+                .send_request(CloseSessionRequest::new("persisted"))
+                .block_task()
+                .await?;
+            connection
+                .send_request(ResumeSessionRequest::new("persisted", cwd).mcp_servers(vec![http]))
+                .block_task()
+                .await?;
+            connection
+                .send_request(CloseSessionRequest::new("persisted"))
+                .block_task()
+                .await?;
+            Ok(())
+        });
+    tokio::time::timeout(std::time::Duration::from_secs(5), client)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let delegated = delegated.lock().unwrap();
+    use zevria_foundation::AcpMcpServerSpec::{Http, Stdio};
+    assert!(
+        matches!(delegated.as_slice(), [both, local, remote] if matches!(&both[..], [Stdio { .. }, Http { .. }]) && matches!(&local[..], [Stdio { .. }]) && matches!(&remote[..], [Http { .. }]))
+    );
 }

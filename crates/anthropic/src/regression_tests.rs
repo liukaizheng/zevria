@@ -336,6 +336,7 @@ fn declared_tools_cache_movement_and_golden_body() {
     let tools = vec![zevria_model::ToolDeclaration {
         name: "command".into(),
         description: "Run a command".into(),
+        strict: None,
         parameters: json!({"type":"object","properties":{}}),
     }];
     let compat = Compatibility::default();

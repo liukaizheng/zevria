@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -13,15 +13,16 @@ use agent_client_protocol::schema::{
         AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
         Error as AcpError, Implementation, InitializeRequest, InitializeResponse,
         ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-        NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
-        ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
-        SessionInfo, SessionListCapabilities, SessionMode as AcpSessionMode, SessionModeId,
-        SessionModeState, SessionResumeCapabilities, SetSessionModeRequest, SetSessionModeResponse,
+        McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PromptCapabilities,
+        PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
+        SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
+        SessionMode as AcpSessionMode, SessionModeId, SessionModeState, SessionResumeCapabilities,
+        SetSessionModeRequest, SetSessionModeResponse,
     },
 };
 use agent_client_protocol::{Agent, ConnectTo, ConnectionTo, Stdio};
 use tokio::sync::Semaphore;
-use zevria_foundation::SessionMode;
+use zevria_foundation::{AcpMcpServerSpec, McpServerName, SessionMode};
 use zevria_transcript::transcript::TranscriptItem;
 
 use crate::project::diagnostic_update;
@@ -151,14 +152,15 @@ pub(crate) async fn serve_on(
                 let task_connection = connection.clone();
                 connection.spawn(async move {
                     let result = async {
-                        validate_roots_and_mcp(
+                        let mcp_servers = validate_roots_and_parse_mcp(
                             &request.cwd,
                             &request.additional_directories,
-                            request.mcp_servers.is_empty(),
+                            request.mcp_servers,
+                            state.profile,
                         )?;
                         let workspace = canonical_workspace(&request.cwd)?;
                         let activated = state
-                            .activate(task_connection.clone(), workspace, SessionStart::New)
+                            .activate(task_connection.clone(), workspace, SessionStart::New, mcp_servers)
                             .await?;
                         publish_startup(&activated.live, &activated.startup_notices)?;
                         activated.live.emit_initial_plan()?;
@@ -193,10 +195,11 @@ pub(crate) async fn serve_on(
                 let task_connection = connection.clone();
                 connection.spawn(async move {
                     let result = async {
-                        validate_roots_and_mcp(
+                        let mcp_servers = validate_roots_and_parse_mcp(
                             &request.cwd,
                             &request.additional_directories,
-                            request.mcp_servers.is_empty(),
+                            request.mcp_servers,
+                            state.profile,
                         )?;
                         let workspace = canonical_workspace(&request.cwd)?;
                         let session_id = request.session_id.to_string();
@@ -205,6 +208,7 @@ pub(crate) async fn serve_on(
                                 task_connection.clone(),
                                 workspace,
                                 SessionStart::Existing { session_id },
+                                mcp_servers,
                             )
                             .await?;
                         let replay = replay_transcript(
@@ -234,10 +238,11 @@ pub(crate) async fn serve_on(
                 let task_connection = connection.clone();
                 connection.spawn(async move {
                     let result = async {
-                        validate_roots_and_mcp(
+                        let mcp_servers = validate_roots_and_parse_mcp(
                             &request.cwd,
                             &request.additional_directories,
-                            request.mcp_servers.is_empty(),
+                            request.mcp_servers,
+                            state.profile,
                         )?;
                         let workspace = canonical_workspace(&request.cwd)?;
                         let session_id = request.session_id.to_string();
@@ -246,6 +251,7 @@ pub(crate) async fn serve_on(
                                 task_connection.clone(),
                                 workspace,
                                 SessionStart::Existing { session_id },
+                                mcp_servers,
                             )
                             .await?;
                         publish_startup(&activated.live, &activated.startup_notices)?;
@@ -471,6 +477,7 @@ impl ServerState {
         connection: ConnectionTo<agent_client_protocol::Client>,
         workspace: PathBuf,
         start: SessionStart,
+        mcp_servers: Vec<AcpMcpServerSpec>,
     ) -> Result<ActivatedSession, AcpError> {
         if self.closing.load(Ordering::Acquire) {
             return Err(AcpError::request_cancelled().data("ACP connection is closing"));
@@ -512,6 +519,7 @@ impl ServerState {
             .start(StartSessionRequest {
                 workspace: workspace.clone(),
                 start,
+                mcp_servers,
             })
             .await
             .map_err(internal_error)?;
@@ -726,7 +734,7 @@ fn agent_capabilities(config: AcpConfig, profile: ExecutionProfile) -> AgentCapa
     if profile.is_worker() {
         return capabilities;
     }
-    capabilities.meta(serde_json::Map::from_iter([("zevria.skills".to_string(), serde_json::json!({
+    capabilities.mcp_capabilities(McpCapabilities::new().http(true)).meta(serde_json::Map::from_iter([("zevria.skills".to_string(), serde_json::json!({
             "version": crate::skills::SKILLS_EXTENSION_VERSION,
             "requests": ["_zevria/skills/list", "_zevria/skills/inspect", "_zevria/skills/invoke", "_zevria/skills/reload", "_zevria/skills/config/write"],
             "notifications": ["_zevria/skills/changed"],
@@ -757,23 +765,65 @@ pub(crate) fn session_modes(current: SessionMode, profile: ExecutionProfile) -> 
     )
 }
 
-fn validate_roots_and_mcp(
+fn validate_roots_and_parse_mcp(
     cwd: &Path,
     additional_directories: &[PathBuf],
-    mcp_empty: bool,
-) -> Result<(), AcpError> {
+    servers: Vec<McpServer>,
+    profile: ExecutionProfile,
+) -> Result<Vec<AcpMcpServerSpec>, AcpError> {
+    let invalid = |message: &str| AcpError::invalid_params().data(message.to_owned());
     if !cwd.is_absolute() {
-        return Err(AcpError::invalid_params().data("session cwd must be an absolute path"));
+        return Err(invalid("session cwd must be an absolute path"));
     }
     if !additional_directories.is_empty() {
-        return Err(AcpError::invalid_params()
-            .data("additional workspace directories are not supported by Zevria ACP v1"));
+        return Err(invalid(
+            "additional workspace directories are not supported by Zevria ACP v1",
+        ));
     }
-    if !mcp_empty {
-        return Err(AcpError::invalid_params()
-            .data("MCP server delegation is not supported by Zevria ACP v1"));
+    if profile.is_worker() && !servers.is_empty() {
+        return Err(invalid(
+            "MCP servers are not supported by Zevria Ensemble workers",
+        ));
     }
-    Ok(())
+    let mut names = BTreeSet::new();
+    let mut parse_name = |name: &str| -> Result<McpServerName, AcpError> {
+        let name: McpServerName = name.parse().map_err(invalid)?;
+        if !names.insert(name.clone()) {
+            return Err(invalid("duplicate MCP server name"));
+        }
+        Ok(name)
+    };
+    servers.into_iter().map(|server| match server {
+        McpServer::Stdio(server) => {
+            let name = parse_name(&server.name)?;
+            let command = server.command.into_os_string().into_string().map_err(|_| invalid("invalid MCP stdio command"))?;
+            if command.trim().is_empty() || command.contains('\0') || server.args.iter().any(|arg| arg.contains('\0')) {
+                return Err(invalid("invalid MCP stdio command or arguments"));
+            }
+            let mut env = BTreeMap::new();
+            for pair in server.env {
+                if pair.name.is_empty() || pair.name.contains(['=', '\0']) || pair.value.contains('\0') || env.insert(pair.name, pair.value).is_some() {
+                    return Err(invalid("invalid or repeated MCP environment variable"));
+                }
+            }
+            Ok(AcpMcpServerSpec::Stdio { name, command, args: server.args, env })
+        }
+        McpServer::Http(server) => {
+            let name = parse_name(&server.name)?;
+            let url = url::Url::parse(&server.url).ok().filter(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host().is_some()
+                    && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()
+            }).ok_or_else(|| invalid("MCP HTTP servers require an http(s) URL without URL credentials or a fragment"))?;
+            let mut headers = BTreeMap::new();
+            for header in server.headers {
+                if header.name.trim().is_empty() || header.value.contains(['\n', '\r']) || headers.insert(header.name.to_ascii_lowercase(), header.value).is_some() {
+                    return Err(invalid("invalid or repeated MCP HTTP header"));
+                }
+            }
+            Ok(AcpMcpServerSpec::Http { name, url: url.into(), headers })
+        }
+        _ => Err(invalid("unsupported MCP transport; use stdio or Streamable HTTP (not legacy SSE)")),
+    }).collect()
 }
 
 fn canonical_workspace(path: &Path) -> Result<PathBuf, AcpError> {

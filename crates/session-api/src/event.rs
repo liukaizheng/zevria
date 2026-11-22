@@ -65,6 +65,16 @@ pub enum SessionEvent {
         revision: String,
         counts: crate::skill::SkillCatalogCounts,
     },
+    McpResult {
+        request_id: String,
+        result: McpManagementResult,
+    },
+    McpChanged {
+        revision: String,
+        connected: usize,
+        total: usize,
+        tool_count: usize,
+    },
     /// A manual or automatic checkpoint request is in flight.
     CompactionStarted {
         turn_id: TurnId,
@@ -768,7 +778,9 @@ impl SessionEventReceiver {
             | SessionEvent::EngineIdle
             | SessionEvent::CommandJobUpdated { .. }
             | SessionEvent::JobContinuationChanged { .. }
-            | SessionEvent::CommandControlResult { .. } => {}
+            | SessionEvent::CommandControlResult { .. }
+            | SessionEvent::McpResult { .. }
+            | SessionEvent::McpChanged { .. } => {}
             SessionEvent::AgentRunUpdated {
                 event: AgentRunEvent::ResponseDisplay { .. },
                 ..

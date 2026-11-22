@@ -55,9 +55,14 @@ impl SessionRuntimeFactory for AcpHostFactory {
                     runtime::SessionStart::Resume(summary.path)
                 }
             };
-            let mut running =
-                runtime::start_session_with_profile(&self.config, &workspace, start, self.profile)
-                    .await?;
+            let mut running = runtime::start_session_with_mcp(
+                &self.config,
+                &workspace,
+                start,
+                self.profile,
+                request.mcp_servers,
+            )
+            .await?;
             let commands = running.command_sender();
             let events = running.take_event_receiver()?;
             let mut exits = running.take_exit_receiver()?;
@@ -224,6 +229,7 @@ mod tests {
             assert!(
                 factory
                     .start(StartSessionRequest {
+                        mcp_servers: Vec::new(),
                         workspace: canonical.clone(),
                         start: SessionStart::Existing {
                             session_id: id.into()
@@ -236,6 +242,7 @@ mod tests {
         for _ in 0..2 {
             let mut started = factory
                 .start(StartSessionRequest {
+                    mcp_servers: Vec::new(),
                     workspace: canonical.clone(),
                     start: SessionStart::Existing {
                         session_id: "saved".into(),
@@ -361,6 +368,7 @@ mod tests {
             }
             let mut started = factory
                 .start(StartSessionRequest {
+                    mcp_servers: Vec::new(),
                     workspace: canonical.clone(),
                     start: SessionStart::Existing {
                         session_id: "saved-plan".into(),
@@ -403,6 +411,7 @@ mod tests {
         let factory = AcpHostFactory::new(Arc::new(crate::config::test_config()));
         let error = match factory
             .start(StartSessionRequest {
+                mcp_servers: Vec::new(),
                 workspace: workspace.path().to_path_buf(),
                 start: SessionStart::Existing {
                     session_id: "../safe-session".to_string(),

@@ -1,11 +1,14 @@
-//! Versioned, engine-owned skill directives. Transcript records persist their
+//! Versioned, engine-owned skill and MCP directives. Transcript records persist their
 //! semantic payloads at exact historical positions and re-render immutable model
 //! input on load. Historical skill activation pins remain lifecycle authority.
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use zevria_foundation::{WorkspaceBinding, WorkspaceContract};
+use zevria_foundation::{
+    MAX_MCP_INSTRUCTIONS_BYTES, McpServerInstruction, McpServerName, McpToolAccess,
+    WorkspaceBinding, WorkspaceContract,
+};
 
 use crate::{
     TurnPolicy,
@@ -32,6 +35,8 @@ pub struct DirectivePolicy {
     pub orchestration: bool,
     pub contract: WorkspaceContract,
     pub workspace: Option<WorkspaceBinding>,
+    #[serde(default, skip_serializing_if = "McpToolAccess::is_none")]
+    pub mcp_access: McpToolAccess,
 }
 
 /// Field order here is part of the deterministic model-facing format.
@@ -48,6 +53,8 @@ struct PolicyDeclaration<'a> {
     workspace: Option<&'a WorkspaceBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inspection: Option<WorkspaceContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp: Option<McpToolAccess>,
 }
 
 #[derive(Serialize)]
@@ -88,6 +95,7 @@ impl DirectivePolicy {
             workspace: self.workspace.as_ref(),
             inspection: (self.contract == WorkspaceContract::SourceReadOnlyScratch)
                 .then_some(self.contract),
+            mcp: (!self.mcp_access.is_none()).then_some(self.mcp_access),
         })
         .expect("policy declaration serializes")
     }
@@ -101,6 +109,7 @@ impl DirectivePolicy {
             orchestration: policy.orchestration,
             contract: policy.contract,
             workspace: policy.workspace.clone(),
+            mcp_access: policy.mcp_access,
         }
     }
 }
@@ -117,6 +126,15 @@ pub enum DirectivePayload {
         name: SkillName,
         reason: String,
     },
+    McpInstructions {
+        server: McpServerName,
+        digest: String,
+        body: String,
+    },
+    McpInstructionsRevocation {
+        server: McpServerName,
+        reason: String,
+    },
 }
 impl DirectivePayload {
     pub fn key(&self) -> String {
@@ -124,8 +142,18 @@ impl DirectivePayload {
             Self::SkillBody { name, .. } | Self::SkillRevocation { name, .. } => {
                 format!("skill:{name}")
             }
+            Self::McpInstructions { server, .. }
+            | Self::McpInstructionsRevocation { server, .. } => format!("mcp:{server}"),
         }
     }
+
+    fn is_revocation(&self) -> bool {
+        matches!(
+            self,
+            Self::SkillRevocation { .. } | Self::McpInstructionsRevocation { .. }
+        )
+    }
+
     pub(crate) fn render(&self) -> String {
         match self {
             Self::SkillBody { name, digest, body } => format!(
@@ -133,6 +161,16 @@ impl DirectivePayload {
             ),
             Self::SkillRevocation { name, reason } => {
                 format!("Skill directive: revoke \"{name}\": {reason}.")
+            }
+            Self::McpInstructions {
+                server,
+                digest,
+                body,
+            } => format!(
+                "MCP server instructions: enable \"{server}\" (snapshot {digest}).\n{body}\nMCP server instructions: end \"{server}\"."
+            ),
+            Self::McpInstructionsRevocation { server, reason } => {
+                format!("MCP server instructions: revoke \"{server}\": {reason}.")
             }
         }
     }
@@ -179,6 +217,24 @@ impl DirectiveContent {
             DirectivePayload::SkillRevocation { reason, .. } => {
                 anyhow::ensure!(!reason.trim().is_empty(), "empty skill revocation reason")
             }
+            DirectivePayload::McpInstructions {
+                body,
+                digest: expected,
+                ..
+            } => anyhow::ensure!(
+                !body.is_empty()
+                    && body == body.trim()
+                    && body.len() <= MAX_MCP_INSTRUCTIONS_BYTES
+                    && digest(body) == *expected,
+                "MCP instructions must be canonical bounded text with a matching digest"
+            ),
+            DirectivePayload::McpInstructionsRevocation { reason, .. } => anyhow::ensure!(
+                !reason.is_empty()
+                    && reason == reason.trim()
+                    && reason.len() <= 1024
+                    && !reason.contains(['\n', '\r']),
+                "invalid MCP instructions revocation reason"
+            ),
         }
         anyhow::ensure!(
             self.text == self.payload.render(),
@@ -214,7 +270,7 @@ impl DirectiveSnapshot {
         for directive in &self.directives {
             directive.validate()?;
             anyhow::ensure!(
-                !matches!(directive.payload, DirectivePayload::SkillRevocation { .. }),
+                !directive.payload.is_revocation(),
                 "instruction snapshots contain only effective components"
             );
             let key = directive.payload.key();
@@ -238,7 +294,7 @@ pub fn effective_directives<'a>(
     let mut state = BTreeMap::new();
     for directive in directives {
         let key = directive.payload.key();
-        if matches!(directive.payload, DirectivePayload::SkillRevocation { .. }) {
+        if directive.payload.is_revocation() {
             state.remove(&key);
         } else {
             state.insert(key, directive);
@@ -267,7 +323,7 @@ impl DirectiveState {
     pub fn apply(&mut self, directive: &DirectiveContent) -> anyhow::Result<()> {
         directive.validate()?;
         let key = directive.payload.key();
-        if matches!(directive.payload, DirectivePayload::SkillRevocation { .. }) {
+        if directive.payload.is_revocation() {
             self.0.remove(&key);
         } else {
             self.0.insert(key, directive.clone());
@@ -305,5 +361,48 @@ impl DirectiveState {
         }
         changes.sort_by_key(|directive| directive.payload.key());
         changes
+    }
+
+    pub fn reconcile_mcp(
+        &self,
+        desired: &[McpServerInstruction],
+    ) -> anyhow::Result<Vec<DirectiveContent>> {
+        let mut changes = BTreeMap::new();
+        let mut active = std::collections::BTreeSet::new();
+        for McpServerInstruction {
+            server,
+            digest,
+            body,
+        } in desired
+        {
+            anyhow::ensure!(
+                active.insert(server),
+                "duplicate MCP instructions for {server}"
+            );
+            let directive = DirectiveContent::new(DirectivePayload::McpInstructions {
+                server: server.clone(),
+                digest: digest.clone(),
+                body: body.clone(),
+            })?;
+            let key = directive.payload.key();
+            if self.0.get(&key) != Some(&directive) {
+                changes.insert(key, directive);
+            }
+        }
+        for (key, old) in &self.0 {
+            if let DirectivePayload::McpInstructions { server, .. } = &old.payload
+                && !active.contains(server)
+            {
+                changes.insert(
+                    key.clone(),
+                    DirectiveContent::new(DirectivePayload::McpInstructionsRevocation {
+                        server: server.clone(),
+                        reason: "server unavailable or disabled by the current workflow policy"
+                            .into(),
+                    })?,
+                );
+            }
+        }
+        Ok(changes.into_values().collect())
     }
 }

@@ -186,6 +186,7 @@ fn pending_work_also_queues_but_management_workers_and_readonly_panes_do_not() {
 fn list_commands_are_frontend_only_during_active_and_pending_work_without_queueing() {
     for (text, command) in [
         ("/jobs", SlashCommand::Jobs),
+        ("/mcp", SlashCommand::Mcp),
         ("/subtasks", SlashCommand::Subtasks),
     ] {
         for pending in [false, true] {

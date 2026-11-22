@@ -238,7 +238,9 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
                         zevria_presentation::blocks::PresentedTool::Native { call, .. } => {
                             super::blocks::tool_label(call.function.name.as_str())
                         }
-                        zevria_presentation::blocks::PresentedTool::Acp(tool) => &tool.title,
+                        zevria_presentation::blocks::PresentedTool::Acp(tool) => {
+                            std::borrow::Cow::Borrowed(tool.title.as_str())
+                        }
                     };
                     return streamed
                         .map_or_else(|| format!("Running {}", name.to_lowercase()), str::to_owned);

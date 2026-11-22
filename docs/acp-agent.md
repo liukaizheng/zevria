@@ -105,6 +105,12 @@ expose_session_list = true
 
 Each active ACP session owns an independent provider connection and runtime. Per-session delegated work remains subject to the ordinary `[session]` subtask limits.
 
+### MCP delegation
+
+Interactive `initialize` advertises `mcpCapabilities.http = true`. Send `mcpServers` with `session/new`, `session/load`, or `session/resume` to start local stdio or Streamable HTTP servers for that session. Names must be distinct, including from servers configured in `[mcp.servers]`. Legacy SSE is rejected. ACP delegation is not persisted, so clients must supply it again after closing a session. Global `[mcp].enabled = false` opts out. Ensemble workers do not advertise HTTP support and reject nonempty `mcpServers`.
+
+**Trust the ACP client before allowing delegation.** A delegated stdio command starts immediately with Zevria's OS permissions, before a user prompt. HTTP endpoints receive their configured headers and arguments. Inspect and configure Plan permissions as described in [MCP servers](mcp.md).
+
 Every Zevria-owned new/load/resume captures [AGENTS.md guidance](guidance.md)
 from `~/.zevria/AGENTS.md` and the **workspace supplied for that session**, not
 the server process working directory. Project guidance overrides global defaults.
@@ -262,7 +268,7 @@ Zevria advertises and implements:
 
 Both root and worker profiles advertise image prompt support. Ordered text and embedded PNG, JPEG, WebP, and GIF blocks use the shared validated image layer; image-only prompts are valid. Original bytes and MIME types survive live projection and session replay. No URI is fetched. See [image input](image-input.md) for byte, pixel, count, animation, persistence, and model limitations.
 
-Zevria does **not** support audio prompts, embedded resources, resource-link prompts, MCP servers, additional workspace roots, client filesystem or terminal delegation, interactive authentication, session deletion, fresh-session Plan implementation, or ACP permission requests. Blank complete prompts and unsupported content blocks are rejected.
+Zevria does **not** support audio prompts, embedded resources, resource-link prompts, legacy MCP SSE, additional workspace roots, client filesystem or terminal delegation, interactive authentication, session deletion, fresh-session Plan implementation, or ACP permission requests. Blank complete prompts and unsupported content blocks are rejected.
 
 The requested `cwd` must be an existing absolute directory and is canonicalized before startup. Additional roots and MCP inputs are rejected rather than silently ignored.
 

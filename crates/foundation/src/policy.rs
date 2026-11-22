@@ -1,5 +1,6 @@
 //! Policy orchestration.
 
+use crate::McpToolAccess;
 use std::fmt;
 
 /// The user-selected workflow mode for one submitted turn.
@@ -161,6 +162,8 @@ pub struct TurnPolicy {
     /// Explicit capability gate for both new activations and active-skill
     /// request materialization. This is not inferred from a tool name.
     pub skills_enabled: bool,
+    /// Independent gate for user-configured external server capabilities.
+    pub mcp_access: McpToolAccess,
     /// Static eligibility for explicit root request orchestration. This does not
     /// itself authorize Builder delegation; accepted request behavior does.
     pub orchestration: bool,
@@ -183,11 +186,17 @@ impl TurnPolicy {
             instructions: instructions.into(),
             allowed_tool_names,
             skills_enabled,
+            mcp_access: McpToolAccess::None,
             orchestration: false,
             contract: WorkspaceContract::Mutable,
             workspace: None,
             file_mutation_scope: FileMutationScope::WorkspaceOnly,
         }
+    }
+
+    pub fn with_mcp_access(mut self, access: McpToolAccess) -> Self {
+        self.mcp_access = access;
+        self
     }
 
     pub fn with_scope(mut self, scope: impl Into<String>) -> Self {

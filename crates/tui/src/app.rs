@@ -95,7 +95,7 @@ pub(crate) use session::{RetryNotice, role_for_mode};
 const SCROLL_STEP: usize = 1;
 
 /// Side effect requested by the pure [`App`] input reducer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     ContinueAfterJobs {
         mode: SessionMode,
@@ -119,6 +119,7 @@ pub enum UiAction {
         behavior: zevria_foundation::RequestBehavior,
     },
     EditTranscript(TranscriptEdit),
+    InvokeMcpPrompt(zevria_session_api::TurnCommand),
     InvokeSkill {
         name: zevria_instructions::SkillName,
         args: zevria_content::UserPrompt,
@@ -472,6 +473,41 @@ impl App {
     }
 
     /// Add the session's skills to the composer command registry.
+    pub fn with_mcp_prompts(
+        mut self,
+        prompts: &[(
+            zevria_foundation::McpServerName,
+            zevria_foundation::McpPromptInfo,
+        )],
+    ) -> Self {
+        self.replace_mcp_prompts(prompts);
+        self
+    }
+    pub(crate) fn replace_mcp_prompts(
+        &mut self,
+        prompts: &[(
+            zevria_foundation::McpServerName,
+            zevria_foundation::McpPromptInfo,
+        )],
+    ) {
+        self.composer.with_mcp_prompts(prompts);
+    }
+    pub(crate) fn mcp_mode(&self) -> SessionMode {
+        self.model.session.next_mode()
+    }
+    pub(crate) fn begin_overlay_mcp_prompt(
+        &mut self,
+        command: zevria_session_api::TurnCommand,
+    ) -> Option<UiAction> {
+        if !self.model.begin_mcp_prompt(command.mode()) {
+            self.push_error(
+                "Finish reviewing the current Plan before running an MCP prompt.".into(),
+            );
+            return None;
+        }
+        Some(UiAction::InvokeMcpPrompt(command))
+    }
+
     pub fn with_skills(mut self, skills: Vec<SkillMeta>) -> Self {
         self.composer.with_skills(skills);
         self

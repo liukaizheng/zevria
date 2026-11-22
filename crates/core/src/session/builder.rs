@@ -92,6 +92,14 @@ impl<P: ModelProvider> SessionEngineBuilder<P> {
         self
     }
 
+    pub fn with_mcp(
+        mut self,
+        service: Arc<dyn zevria_session_api::mcp::McpSessionService>,
+    ) -> Self {
+        self.engine.capabilities.mcp = Some(service);
+        self
+    }
+
     pub fn with_incremental_tools(self, enabled: bool) -> Self {
         self.capability(|engine| engine.with_incremental_tools(enabled))
     }

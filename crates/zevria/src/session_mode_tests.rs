@@ -130,6 +130,7 @@ async fn fresh_root_headers_and_selected_only_restoration_are_frontend_authorita
 
         let mut restored = factory
             .start(StartSessionRequest {
+                mcp_servers: Vec::new(),
                 workspace: fixture.directory.path().to_path_buf(),
                 start: SessionStart::Existing {
                     session_id: id.into(),
@@ -215,6 +216,7 @@ async fn pending_mode_selection_stays_unsaved_and_historical_modes_resume_across
 
         let mut acp = factory
             .start(StartSessionRequest {
+                mcp_servers: Vec::new(),
                 workspace: fixture.directory.path().to_path_buf(),
                 start: SessionStart::Existing {
                     session_id: id.clone(),
@@ -431,6 +433,7 @@ async fn worker_profile_rejects_persisted_orchestrate_without_provider_or_transc
     );
     let error = match factory
         .start(StartSessionRequest {
+            mcp_servers: Vec::new(),
             workspace,
             start: SessionStart::Existing {
                 session_id: "invalid-worker".into(),

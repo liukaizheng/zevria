@@ -71,6 +71,7 @@ async fn assert_rejected(fixture: &Fixture, root: &Path, bad: &Path) {
     let factory = crate::acp_host::AcpHostFactory::new(Arc::new(load(&fixture.path).unwrap()));
     let error = match factory
         .start(StartSessionRequest {
+            mcp_servers: Vec::new(),
             workspace: fixture.directory.path().to_path_buf(),
             start: SessionStart::Existing {
                 session_id: root.file_stem().unwrap().to_str().unwrap().into(),
@@ -440,6 +441,7 @@ async fn native_workers_require_saved_models_and_reject_old_formats() {
         assert!(
             factory
                 .start(StartSessionRequest {
+                    mcp_servers: Vec::new(),
                     workspace: workspace.clone(),
                     start: SessionStart::Existing {
                         session_id: "native".into()

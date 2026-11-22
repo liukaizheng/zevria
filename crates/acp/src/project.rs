@@ -533,6 +533,8 @@ fn tool_kind(name: &str, arguments: &Value) -> ToolKind {
         "launch_subtasks" => ToolKind::Think,
         "task" | "reconcile_reports" | "question" | "create_plan" | "update_plan" | "read_plan"
         | "submit_plan" | "skill" => ToolKind::Think,
+        "mcp_list_resources" | "mcp_read_resource" => ToolKind::Read,
+        _ if zevria_foundation::is_mcp_external_tool_name(name) => ToolKind::Other,
         _ if name.contains("read") => ToolKind::Read,
         _ if name.contains("search") || name.contains("find") => ToolKind::Search,
         _ => ToolKind::Other,
@@ -540,6 +542,14 @@ fn tool_kind(name: &str, arguments: &Value) -> ToolKind {
 }
 
 fn tool_title(name: &str, arguments: &Value) -> String {
+    if let Some((server, tool)) = zevria_foundation::parse_mcp_tool_prefix(name) {
+        return format!("MCP: {server} / {tool}");
+    }
+    match name {
+        "mcp_list_resources" => return "MCP: list resources".into(),
+        "mcp_read_resource" => return "MCP: read resource".into(),
+        _ => {}
+    }
     if name == "create_plan" {
         return arguments
             .get("markdown")

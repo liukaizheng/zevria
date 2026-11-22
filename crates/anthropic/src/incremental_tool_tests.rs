@@ -11,6 +11,7 @@ fn tool(name: &str, description: &str) -> ToolDeclaration {
     ToolDeclaration {
         name: name.into(),
         description: description.into(),
+        strict: None,
         parameters: json!({"type":"object","properties":{}}),
     }
 }

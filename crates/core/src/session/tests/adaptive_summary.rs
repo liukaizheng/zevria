@@ -280,6 +280,7 @@ async fn shorter_attempts_are_full_input_prefixes_without_moving_declarations_or
     let declarations = ToolDeclarations::new(vec![zevria_model::ToolDeclaration {
         name: "echo".into(),
         description: "echo".into(),
+        strict: None,
         parameters: json!({"type":"object"}),
     }])
     .unwrap();

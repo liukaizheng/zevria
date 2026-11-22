@@ -19,6 +19,7 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
     let active_skills = zevria_transcript::replay_active_skills(&items).unwrap();
     let pin_allocation = active_skills.snapshots().next().unwrap().body().as_ptr();
     let mut running = RunningSession {
+        mcp: None,
         command_jobs: None,
         cleanup_abandoned_history: true,
         restored_taken: false,
@@ -32,6 +33,7 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
         restored_agent_runs: Vec::new(),
         _lease: None,
         restoration: SessionRestoration {
+            mcp_prompts: vec![],
             model_contexts: crate::config::test_config().routing().context_policies(),
             reasoning_levels: [zevria_foundation::ReasoningLevel::Medium; ModelRole::COUNT],
             model_snapshots: Vec::new(),

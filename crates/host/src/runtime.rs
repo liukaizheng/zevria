@@ -388,7 +388,17 @@ pub async fn start_session_with_profile(
     start: SessionStart,
     profile: ExecutionProfile,
 ) -> anyhow::Result<RunningSession> {
-    startup::start(config, workspace, start, profile).await
+    start_session_with_mcp(config, workspace, start, profile, Vec::new()).await
+}
+
+pub async fn start_session_with_mcp(
+    config: &Config,
+    workspace: &Path,
+    start: SessionStart,
+    profile: ExecutionProfile,
+    mcp_servers: Vec<zevria_foundation::AcpMcpServerSpec>,
+) -> anyhow::Result<RunningSession> {
+    startup::start(config, workspace, start, profile, mcp_servers).await
 }
 
 /// Capture startup discovery once: native global skills overridden by project
@@ -461,6 +471,10 @@ pub struct SessionRestoration {
     /// Validated startup pins; frontends must not replay the transcript again.
     pub active_skills: zevria_instructions::skill::ActiveSkills,
     pub startup_notices: Vec<String>,
+    pub mcp_prompts: Vec<(
+        zevria_foundation::McpServerName,
+        zevria_foundation::McpPromptInfo,
+    )>,
     /// Snapshot from the fully configured engine, captured before spawning it.
     pub plan_state: PlanWorkflowState,
     /// Authoritative selection from the engine, independent of Plan presentation.
@@ -485,6 +499,10 @@ pub struct RestoredSession {
     /// Validated startup pins; frontends must not replay the transcript again.
     pub active_skills: zevria_instructions::skill::ActiveSkills,
     pub startup_notices: Vec<String>,
+    pub mcp_prompts: Vec<(
+        zevria_foundation::McpServerName,
+        zevria_foundation::McpPromptInfo,
+    )>,
     /// Snapshot from the fully configured engine, captured before spawning it.
     pub plan_state: PlanWorkflowState,
     /// Authoritative selection from the engine, independent of Plan presentation.
@@ -515,6 +533,7 @@ pub struct RuntimeTaskExit {
 /// senders and take the sole event receiver, while this handle retains task,
 /// transcript, and shutdown ownership.
 pub struct RunningSession {
+    mcp: Option<Arc<zevria_mcp::McpManager>>,
     command_jobs: Option<CommandJobs>,
     // Only existing histories use conservative legacy cleanup. A new pending
     // path may acquire a competing file after allocation; shutdown must not
@@ -564,6 +583,7 @@ impl RunningSession {
             skill_catalog: meta.skill_catalog.clone(),
             active_skills: std::mem::take(&mut meta.active_skills),
             startup_notices: std::mem::take(&mut meta.startup_notices),
+            mcp_prompts: std::mem::take(&mut meta.mcp_prompts),
             plan_state: std::mem::take(&mut meta.plan_state),
             selected_mode: meta.selected_mode,
             subtasks: std::mem::take(&mut self.restored_subtasks),
@@ -624,6 +644,10 @@ impl RunningSession {
             jobs.shutdown(std::time::Duration::from_secs(5)).await;
         }
 
+        if let Some(mcp) = self.mcp.take() {
+            mcp.shutdown(std::time::Duration::from_secs(5)).await;
+        }
+
         let transcript_is_empty = self.cleanup_abandoned_history
             && transcript::is_abandoned_root(&self.restoration.transcript_path);
         if transcript_is_empty
@@ -647,7 +671,7 @@ pub async fn start_session(
     workspace: &Path,
     start: SessionStart,
 ) -> anyhow::Result<RunningSession> {
-    startup::start(app_config, workspace, start, ExecutionProfile::Interactive).await
+    start_session_with_profile(app_config, workspace, start, ExecutionProfile::Interactive).await
 }
 
 trait RuntimeTaskOutcome {
@@ -1213,6 +1237,7 @@ mod tests {
         .await
         .expect("background job must publish its PID before shutdown");
         let running = RunningSession {
+            mcp: None,
             command_jobs: Some(jobs),
             cleanup_abandoned_history: true,
             restored_taken: false,
@@ -1220,6 +1245,7 @@ mod tests {
             restored_agent_runs: Vec::new(),
             _lease: Some(lease),
             restoration: SessionRestoration {
+                mcp_prompts: vec![],
                 model_contexts: crate::config::test_config().routing().context_policies(),
                 reasoning_levels: [zevria_foundation::ReasoningLevel::Medium; ModelRole::COUNT],
                 model_snapshots: Vec::new(),
@@ -1282,6 +1308,7 @@ mod tests {
             SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
         );
         let running = RunningSession {
+            mcp: None,
             command_jobs: None,
             cleanup_abandoned_history: true,
             restored_taken: false,
@@ -1289,6 +1316,7 @@ mod tests {
             restored_agent_runs: Vec::new(),
             _lease: None,
             restoration: SessionRestoration {
+                mcp_prompts: vec![],
                 model_contexts: crate::config::test_config().routing().context_policies(),
                 reasoning_levels: [zevria_foundation::ReasoningLevel::Medium; ModelRole::COUNT],
                 model_snapshots: Vec::new(),

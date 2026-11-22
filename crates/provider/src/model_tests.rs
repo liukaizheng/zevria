@@ -746,12 +746,14 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
     let initial = zevria_model::ToolDeclarations::new(vec![zevria_model::ToolDeclaration {
         name: "command".into(),
         description: "original declaration".into(),
+        strict: None,
         parameters: json!({"type":"object"}),
     }])
     .unwrap();
     let additional = zevria_model::ToolDeclarations::new(vec![zevria_model::ToolDeclaration {
         name: "write".into(),
         description: "new declaration".into(),
+        strict: None,
         parameters: json!({"type":"object"}),
     }])
     .unwrap();

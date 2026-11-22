@@ -604,3 +604,192 @@ fn prospective_additions_become_input_without_changing_shape_or_double_counting(
     assert!(fixed > engine.fixed_input_tokens(&build));
     assert_eq!(before, after);
 }
+
+struct McpFixture {
+    connected: std::sync::atomic::AtomicBool,
+    changed: std::sync::atomic::AtomicBool,
+    changes: tokio::sync::watch::Sender<u64>,
+}
+
+impl zevria_session_api::mcp::McpSessionService for McpFixture {
+    fn tool_allowed(&self, access: zevria_foundation::McpToolAccess, name: &str) -> bool {
+        use zevria_foundation::McpToolAccess::*;
+        self.connected.load(std::sync::atomic::Ordering::Relaxed)
+            && matches!(
+                (access, name),
+                (AllEnabled, _) | (PlanScoped, "mcp__fixture__read")
+            )
+    }
+
+    fn active_instructions(
+        &self,
+        access: zevria_foundation::McpToolAccess,
+    ) -> Vec<zevria_foundation::McpServerInstruction> {
+        if self.tool_allowed(access, "mcp__fixture__read") {
+            vec![
+                zevria_foundation::McpServerInstruction::from_body(
+                    "fixture".parse().unwrap(),
+                    "Read the fixture catalog first.",
+                )
+                .unwrap(),
+            ]
+        } else {
+            vec![]
+        }
+    }
+
+    fn prompt_catalog(
+        &self,
+    ) -> Vec<(
+        zevria_foundation::McpServerName,
+        zevria_foundation::McpPromptInfo,
+    )> {
+        vec![]
+    }
+
+    fn query_view(
+        &self,
+        _: &zevria_foundation::McpManagementRequest,
+    ) -> zevria_foundation::McpManagementResult {
+        zevria_foundation::McpManagementResult::error("fixture", "not queried")
+    }
+
+    fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn sync_pending_updates(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async {
+            self.changed
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
+    fn manage(
+        &self,
+        request: zevria_foundation::McpManagementRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = zevria_foundation::McpManagementResult> + Send + '_>,
+    > {
+        Box::pin(async move { self.query_view(&request) })
+    }
+
+    fn get_prompt(
+        &self,
+        _: zevria_foundation::McpToolAccess,
+        server: zevria_foundation::McpServerName,
+        prompt: String,
+        _: std::collections::BTreeMap<String, String>,
+        _: CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<zevria_content::UserPrompt>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(format!("[MCP prompt: {server}:{prompt}]\nExample user message").into())
+        })
+    }
+}
+
+#[tokio::test]
+async fn mcp_additions_preserve_prefix_and_stale_tools_are_denied() {
+    use rig_core::tool::{DynamicTool, ManagedToolSink, ToolOutput};
+    use std::sync::atomic::Ordering::Relaxed;
+    use zevria_foundation::McpToolAccess;
+
+    let provider = ScriptedProvider::new([
+        Ok(Message::assistant("first")),
+        Ok(Message::assistant("after refresh")),
+        Ok(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![named_tool_call(
+                "disallowed",
+                "mcp__fixture__write",
+                json!({}),
+            )]),
+        )),
+        Ok(Message::assistant("denial handled")),
+        Ok(Message::assistant("after disconnect")),
+        Ok(Message::assistant("after prompt expansion")),
+    ]);
+    let mut policies = policies();
+    policies.policy_mut(SessionMode::Build).mcp_access = McpToolAccess::AllEnabled;
+    policies.policy_mut(SessionMode::Plan).mcp_access = McpToolAccess::PlanScoped;
+    let tools = registry("command", Arc::new(Mutex::new(vec![])));
+    let make_tool = |name| {
+        DynamicTool::new(
+            rig_core::message::ToolName::new(name).unwrap(),
+            "fixture",
+            json!({"type":"object","properties":{"maybe":{"type":"string"}}}),
+            |_| Box::pin(async { Ok(ToolOutput::text("MCP write unexpectedly ran")) }),
+        )
+    };
+    tools.add_managed_tools(vec![make_tool("mcp__fixture__read")]);
+    let fixture = Arc::new(McpFixture {
+        connected: true.into(),
+        changed: false.into(),
+        changes: tokio::sync::watch::channel(0).0,
+    });
+    let (_dir, transcript) = test_transcript();
+    let mut engine = SessionEngine::builder(
+        provider,
+        tools.clone(),
+        policies,
+        transcript,
+        Arc::new(SkillCatalog::default()),
+    )
+    .unwrap()
+    .with_mcp(fixture.clone())
+    .build()
+    .unwrap();
+    submit(&mut engine, SessionMode::Build, "first").await;
+    tools.add_managed_tools(vec![make_tool("mcp__fixture__write")]);
+    fixture.changed.store(true, Relaxed);
+    submit(&mut engine, SessionMode::Build, "new catalog").await;
+    submit(&mut engine, SessionMode::Plan, "try stale declaration").await;
+    fixture.connected.store(false, Relaxed);
+    fixture.changed.store(true, Relaxed);
+    submit(&mut engine, SessionMode::Build, "disconnected").await;
+    fixture.connected.store(true, Relaxed);
+    fixture.changed.store(true, Relaxed);
+    let (events, mut receiver) = session_event_channel(128);
+    engine
+        .handle_command(
+            SessionCommand::Turn(TurnCommand::InvokeMcpPrompt {
+                server: "fixture".parse().unwrap(),
+                prompt: "summarize".into(),
+                arguments: Default::default(),
+                mode: SessionMode::Build,
+            }),
+            &events,
+        )
+        .await
+        .unwrap();
+    assert!(
+        collect_events(&mut receiver)
+            .await
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+    );
+    let requests = engine.provider.requests.lock().unwrap();
+    assert_eq!(requests[0].instructions, requests[1].instructions);
+    assert!(!requests[0].instructions.contains("fixture"));
+    assert_eq!(requests[0].tools, requests[1].tools);
+    assert_eq!(requests[0].tools.last().unwrap().strict, Some(false));
+    assert!(requests[1].input.starts_with(&requests[0].input));
+    assert!(requests[1].input.iter().any(|item| matches!(item, OwnedModelRequestItem::AdditionalTools(tools) if names(tools) == ["mcp__fixture__write"])));
+    assert!(
+        format!("{:?}", requests[3].input)
+            .contains("MCP tool is disabled, disconnected, or not allowed in this mode")
+    );
+    assert!(!format!("{:?}", requests[3].input).contains("MCP write unexpectedly ran"));
+    assert!(requests[4].input.iter().any(|item| matches!(item, OwnedModelRequestItem::DeveloperInstruction(d) if d.text.contains("revoke \"fixture\""))));
+    assert!(format!("{:?}", requests[5].prompt).contains("[MCP prompt: fixture:summarize]"));
+    assert!(
+        zevria_transcript::InstructionReplayState::replay(engine.conversation().items()).is_ok()
+    );
+}

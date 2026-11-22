@@ -195,6 +195,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         turn: &TurnContext,
     ) -> Result<(), SessionReplayError> {
         self.ensure_replay_valid()?;
+        self.sync_mcp(events).await;
         if !matches!(
             &work,
             TurnWork::Command(TurnCommand::ContinueAfterJobs { .. })
@@ -225,6 +226,58 @@ impl<P: ModelProvider> SessionEngine<P> {
                 self.run_prompt_turn(
                     TurnAnchor::Append,
                     PromptTurnInput::Message { text, behavior },
+                    mode,
+                    events,
+                    turn,
+                )
+                .await
+            }
+            TurnCommand::InvokeMcpPrompt {
+                server,
+                prompt,
+                arguments,
+                mode,
+            } => {
+                let access = self.policies.policy(mode).mcp_access;
+                if self.conversation.is_read_only()
+                    || access.is_none()
+                    || self.capabilities.mcp.is_none()
+                {
+                    return self
+                        .finish_rejected(
+                            turn,
+                            events,
+                            Rejection::Rejected(
+                                "MCP prompts are unavailable in this session or mode".into(),
+                            ),
+                        )
+                        .await;
+                }
+                let service = self.capabilities.mcp.as_ref().expect("checked MCP service");
+                let result = service
+                    .get_prompt(
+                        access,
+                        server,
+                        prompt,
+                        arguments,
+                        turn.cancellation().clone(),
+                    )
+                    .await;
+                if turn.is_cancelled() {
+                    return self
+                        .finish_rejected(turn, events, Rejection::Cancelled)
+                        .await;
+                }
+                let text = match result {
+                    Ok(text) => text,
+                    Err(error) => return self.finish_rejected(turn, events, error.into()).await,
+                };
+                self.run_prompt_turn(
+                    TurnAnchor::Append,
+                    PromptTurnInput::Message {
+                        text,
+                        behavior: zevria_foundation::RequestBehavior::Standard,
+                    },
                     mode,
                     events,
                     turn,

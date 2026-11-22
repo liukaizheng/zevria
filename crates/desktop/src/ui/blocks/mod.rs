@@ -665,7 +665,7 @@ impl BlockView {
         let (icon, label, target) = match step {
             Step::Tool(tool) => (
                 tool_icon(&tool.name),
-                tool_label(&tool.name).to_owned(),
+                tool_label(&tool.name).into_owned(),
                 tool.summary.clone(),
             ),
             Step::Web(web) => (

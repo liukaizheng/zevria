@@ -84,6 +84,13 @@ pub enum TurnCommand {
         args: UserPrompt,
         mode: SessionMode,
     },
+    /// Explicit frontend invocation; never exposed as a model tool.
+    InvokeMcpPrompt {
+        server: McpServerName,
+        prompt: String,
+        arguments: std::collections::BTreeMap<String, String>,
+        mode: SessionMode,
+    },
     /// Exact-version, Standard-only feedback on a Ready Plan. Admission is checked before
     /// the Ready plan changes; a single commit records the revision request and feedback.
     /// The turn runs under the same tracked turn and cancellation scope and never approves
@@ -125,6 +132,7 @@ impl TurnCommand {
         match self {
             Self::Submit { mode, .. }
             | Self::InvokeSkill { mode, .. }
+            | Self::InvokeMcpPrompt { mode, .. }
             | Self::Compact { mode }
             | Self::ContinueAfterJobs { mode } => *mode,
             Self::RevisePlanWithMessage { .. } | Self::RevisePlanWithSkill { .. } => {
@@ -185,5 +193,9 @@ pub enum ManagementCommand {
     Skills {
         request_id: String,
         request: crate::skill::SkillManagementRequest,
+    },
+    Mcp {
+        request_id: String,
+        request: McpManagementRequest,
     },
 }

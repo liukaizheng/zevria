@@ -8,6 +8,7 @@ pub mod completion;
 pub mod conversation;
 pub mod fold;
 pub mod jobs;
+pub mod mcp;
 pub mod models;
 pub mod projection;
 mod prompt_preview;

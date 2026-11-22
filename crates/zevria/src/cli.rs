@@ -2,10 +2,11 @@
 
 use std::path::Path;
 
-use crate::{skills_cli::SkillsCli, theme_cli::ThemeCli};
+use crate::{mcp_cli::McpCli, skills_cli::SkillsCli, theme_cli::ThemeCli};
 
 const USAGE: &str = "usage: zevria [--continue | -c]
        zevria --acp [--ensemble-worker]
+       zevria mcp <command>
        zevria skills <command>
        zevria theme <command>
        zevria clean";
@@ -20,6 +21,7 @@ pub(super) struct CliArgs {
     pub(super) ensemble_worker: bool,
     /// Purge the workspace's selected storage directories offline, without a prompt.
     pub(super) clean: bool,
+    pub(super) mcp: Option<McpCli>,
     pub(super) skills: Option<SkillsCli>,
     pub(super) theme: Option<ThemeCli>,
 }
@@ -61,6 +63,12 @@ fn parse_args(args: &[String]) -> anyhow::Result<CliArgs> {
             );
             return Ok(CliArgs {
                 clean: true,
+                ..CliArgs::default()
+            });
+        }
+        Some("mcp") => {
+            return Ok(CliArgs {
+                mcp: Some(McpCli::parse(&args[1..])?),
                 ..CliArgs::default()
             });
         }

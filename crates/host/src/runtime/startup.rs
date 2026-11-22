@@ -25,9 +25,14 @@ use std::{
 use tokio::sync::mpsc::{Receiver, unbounded_channel};
 use zevria_acp::ExecutionProfile;
 use zevria_core::SessionEngine;
-use zevria_foundation::{ModelRole, SessionMode, SessionPolicies};
+use zevria_foundation::{
+    AcpMcpServerSpec, McpManagementRequest, McpManagementResult, McpToolAccess, ModelRole,
+    SessionMode, SessionPolicies,
+};
 use zevria_instructions::{SkillCatalog, SkillContext, skill::ActiveSkills};
+use zevria_mcp::{McpConfigSource, McpManager};
 use zevria_provider::{ProviderRouter, ProviderRouterFactory};
+use zevria_session_api::mcp::McpSessionService;
 use zevria_session_api::{
     CommandJobs, QuestionRequester, QuestionResponder, SessionCommand, SessionEventReceiver,
     SessionEventSender, SubtaskLaunchRequest, SubtaskLauncher, question_channels,
@@ -88,6 +93,7 @@ struct SessionServices {
     responder: QuestionResponder,
     command_jobs: Option<CommandJobs>,
     startup_notices: Vec<String>,
+    mcp: Option<Arc<McpManager>>,
     root: Option<RootServices>,
 }
 struct RootTasks {
@@ -102,6 +108,7 @@ struct BuiltEngine {
     event_rx: SessionEventReceiver,
     command_jobs: Option<CommandJobs>,
     startup_notices: Vec<String>,
+    mcp: Option<Arc<McpManager>>,
     root: Option<RootTasks>,
 }
 
@@ -110,10 +117,15 @@ pub(super) async fn start(
     workspace: &Path,
     start: SessionStart,
     profile: ExecutionProfile,
+    mcp_servers: Vec<AcpMcpServerSpec>,
 ) -> anyhow::Result<RunningSession> {
+    anyhow::ensure!(
+        !profile.is_worker() || mcp_servers.is_empty(),
+        "ensemble workers cannot connect to delegated MCP servers"
+    );
     let resolved = resolve(config, workspace, start, profile).await?;
     let mut storage = open_storage(resolved).await?;
-    let services = build_services(&storage).await?;
+    let services = build_services(&storage, mcp_servers).await?;
     let engine = build_engine(&mut storage, services).await?;
     spawn(storage, engine).await
 }
@@ -266,7 +278,10 @@ async fn open_storage(resolved: ResolvedStartup<'_>) -> anyhow::Result<OpenedSto
     })
 }
 
-async fn build_services(storage: &OpenedStorage<'_>) -> anyhow::Result<SessionServices> {
+async fn build_services(
+    storage: &OpenedStorage<'_>,
+    mcp_servers: Vec<AcpMcpServerSpec>,
+) -> anyhow::Result<SessionServices> {
     let resolved = &storage.resolved;
     let config = resolved.config;
     let (event_tx, event_rx) = session_event_channel(config.session.event_queue_capacity);
@@ -299,6 +314,7 @@ async fn build_services(storage: &OpenedStorage<'_>) -> anyhow::Result<SessionSe
             responder: questions.responder,
             command_jobs: None,
             startup_notices: Vec::new(),
+            mcp: None,
             root: None,
         });
     }
@@ -347,7 +363,7 @@ async fn build_services(storage: &OpenedStorage<'_>) -> anyhow::Result<SessionSe
                 .filter_map(|meta| meta.command_job().map(|job| job.id.clone())),
         );
     }
-    let policies = build_session_policies(config.session.plan, command_jobs.is_some());
+    let mut policies = build_session_policies(config.session.plan, command_jobs.is_some());
     let skill_service = Arc::new(LocalSkillService {
         roots: skill_catalog
             .roots
@@ -369,7 +385,39 @@ async fn build_services(storage: &OpenedStorage<'_>) -> anyhow::Result<SessionSe
         &resolved.model_config().session.preamble,
         &resolved.id,
     )?;
-    let startup_notices = startup_preflight(storage, &provider);
+    let mut startup_notices = startup_preflight(storage, &provider);
+    let source = if let Some(path) = config.source_path.clone() {
+        tokio::task::spawn_blocking(move || crate::mcp::load_mcp_config(&path)).await??
+    } else {
+        McpConfigSource {
+            config: config.mcp.clone(),
+            revision: "memory".into(),
+        }
+    };
+    let mcp = if source.config.enabled
+        && (!source.config.servers.is_empty() || !mcp_servers.is_empty())
+    {
+        let store = config.source_path.clone().map(|path| {
+            Arc::new(crate::mcp::LocalMcpConfigStore::new(path))
+                as Arc<dyn zevria_mcp::McpConfigPersister>
+        });
+        let mcp = McpManager::start(
+            source,
+            mcp_servers,
+            resolved.workspace.clone(),
+            tools.clone(),
+            store,
+        )
+        .await?;
+        if let McpManagementResult::View { view } = mcp.query_view(&McpManagementRequest::List) {
+            startup_notices.extend(view.diagnostics);
+        }
+        policies.policy_mut(SessionMode::Build).mcp_access = McpToolAccess::AllEnabled;
+        policies.policy_mut(SessionMode::Plan).mcp_access = McpToolAccess::PlanScoped;
+        Some(mcp)
+    } else {
+        None
+    };
     Ok(SessionServices {
         provider,
         tools,
@@ -381,6 +429,7 @@ async fn build_services(storage: &OpenedStorage<'_>) -> anyhow::Result<SessionSe
         responder: questions.responder,
         command_jobs,
         startup_notices,
+        mcp,
         root: Some(RootServices {
             requests: channels.requests,
             keepalive,
@@ -483,6 +532,7 @@ async fn build_engine(
         responder,
         command_jobs,
         mut startup_notices,
+        mcp,
         root,
     } = services;
     #[cfg(feature = "cache-diagnostics")]
@@ -525,7 +575,7 @@ async fn build_engine(
     let (engine, root) = match root {
         Some((ensemble, requests, keepalive, skill_service)) => {
             let mut engine = engine
-                .with_incremental_tools(config.session.incremental_tools)
+                .with_incremental_tools(config.session.incremental_tools || mcp.is_some())
                 .with_skill_catalog(skill_catalog.clone())?
                 .with_mode_management()
                 .with_idle_notifications()
@@ -536,6 +586,9 @@ async fn build_engine(
                 .with_question_responder(responder)
                 .with_ensemble_launcher(ensemble)
                 .with_plans_dir(transcript::plans_dir(&resolved.workspace));
+            if let Some(mcp) = &mcp {
+                engine = engine.with_mcp(mcp.clone());
+            }
             if let Some(jobs) = &command_jobs {
                 engine = engine
                     .with_command_jobs(jobs.clone())
@@ -581,6 +634,7 @@ async fn build_engine(
         event_rx,
         command_jobs,
         startup_notices,
+        mcp,
         root,
     })
 }
@@ -602,6 +656,7 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
         event_rx,
         command_jobs,
         startup_notices,
+        mcp,
         root,
     } = built;
     let config = resolved.config;
@@ -696,8 +751,12 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
             ))
             .map_err(|_| anyhow::anyhow!("the session engine stopped before its opening prompt"))?;
     }
+    let mcp_prompts = mcp
+        .as_ref()
+        .map_or_else(Vec::new, |mcp| mcp.prompt_catalog());
     Ok(RunningSession {
         command_jobs,
+        mcp,
         cleanup_abandoned_history,
         restored_taken: false,
         restored_subtasks,
@@ -720,6 +779,7 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
             skill_catalog,
             active_skills,
             startup_notices,
+            mcp_prompts,
             plan_state,
             selected_mode,
         },

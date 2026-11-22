@@ -85,6 +85,7 @@ pub enum SessionStart {
 pub struct StartSessionRequest {
     pub workspace: PathBuf,
     pub start: SessionStart,
+    pub mcp_servers: Vec<zevria_foundation::AcpMcpServerSpec>,
 }
 
 /// Bounded metadata exposed through ACP `session/list`.

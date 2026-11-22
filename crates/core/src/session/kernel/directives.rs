@@ -97,9 +97,11 @@ impl RequestPlan {
         state: &DirectiveState,
         active: &ActiveSkills,
     ) -> anyhow::Result<Vec<DirectiveContent>> {
-        Ok(state.reconcile(active, |name| {
+        let mut updates = state.reconcile(active, |name| {
             self.bodies_enabled && self.catalog.config().name_enabled(name)
-        }))
+        });
+        updates.extend(state.reconcile_mcp(&self.mcp_instructions)?);
+        Ok(updates)
     }
 }
 

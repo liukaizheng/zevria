@@ -1054,6 +1054,8 @@ impl LiveSession {
             }
             // Model management is local TUI traffic, never assistant/tool content.
             SessionEvent::ModelsResult { .. }
+            | SessionEvent::McpResult { .. }
+            | SessionEvent::McpChanged { .. }
             | SessionEvent::WorkerReviewUpdated { .. }
             | SessionEvent::WorkerControlResult { .. } => {}
             SessionEvent::ModeResult { request_id, result } => {

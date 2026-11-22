@@ -39,6 +39,7 @@ pub(in crate::session) struct RequestPlan {
     pub(in crate::session) catalog: Arc<SkillCatalog>,
     pub(in crate::session) catalog_available: bool,
     pub(in crate::session) bodies_enabled: bool,
+    pub(in crate::session) mcp_instructions: Vec<zevria_foundation::McpServerInstruction>,
     validation: Option<String>,
 }
 
@@ -114,6 +115,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             catalog: self.skills.catalog.clone(),
             catalog_available: available,
             bodies_enabled: available,
+            mcp_instructions: self
+                .capabilities
+                .mcp
+                .as_ref()
+                .map_or_else(Vec::new, |mcp| mcp.active_instructions(policy.mcp_access)),
             validation,
         })
     }

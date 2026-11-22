@@ -10,6 +10,22 @@ configured provider selects `openai.responses` (default) or `anthropic.messages`
 Core, transcripts, TUI and ACP remain protocol-agnostic. See
 [native Messages](anthropic-messages.md) for its wire contract and thinking safety.
 
+## MCP client boundary
+
+`zevria-mcp` is the root-session MCP adapter (the 23rd workspace crate). It owns the SDK, credentials, transports, and managed Rig handlers. The engine and frontends use transport-neutral MCP types from foundation and the service interface in session-api. Workers and subtasks are composed independently without that service.
+
+```mermaid
+flowchart LR
+  UI[CLI / TUI / Desktop / ACP] --> API[session-api + foundation]
+  Host[host] --> Core[core]
+  Host --> MCP[zevria-mcp]
+  Core --> API
+  MCP --> API
+  MCP --> SDK[rmcp: stdio and Streamable HTTP]
+```
+
+Server notifications stage catalogs. Core adopts a complete snapshot only at idle or turn start, using the pinned tool window and append-only MCP instruction directives. Execution checks current permission even when a declaration is still present in history. See [MCP servers](mcp.md).
+
 ## Response attempts, recovery and display
 
 Conversation content, provider replay, abandoned-response recovery and live

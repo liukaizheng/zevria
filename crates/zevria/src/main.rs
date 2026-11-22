@@ -5,6 +5,7 @@
 use zevria_ensemble as ensemble;
 use zevria_host::{acp_host, clean, config, runtime, skills, theme_store};
 mod cli;
+mod mcp_cli;
 #[cfg(test)]
 mod session_model_tests;
 mod skills_cli;
@@ -196,6 +197,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(command) = args.skills {
         return command.run(&workspace);
     }
+    if let Some(command) = args.mcp {
+        let code = command.run(&workspace).await?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
     cli::diagnostics(&workspace)?;
     zevria_foundation::shell::prepare_native().await?;
     let app_config = Config::load()?;
@@ -325,11 +333,13 @@ async fn run_session(
             restoration.model_contexts[role.index()].profile.clone(),
         )
     });
-    let root_app = App::new().with_skill_context(&zevria_instructions::skill::SkillContext {
-        catalog: restoration.skill_catalog.clone(),
-        pins: restoration.active_skills,
-        mode_enabled: true,
-    });
+    let root_app = App::new()
+        .with_mcp_prompts(&restoration.mcp_prompts)
+        .with_skill_context(&zevria_instructions::skill::SkillContext {
+            catalog: restoration.skill_catalog.clone(),
+            pins: restoration.active_skills,
+            mode_enabled: true,
+        });
     let mut views = SessionViews::new_restored(
         root_app,
         workspace.to_path_buf(),

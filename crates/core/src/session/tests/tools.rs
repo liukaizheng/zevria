@@ -15,7 +15,16 @@ async fn dispatch_rich_output(output: rig_core::tool::ToolOutput, id: &str) -> T
         unreachable!();
     };
     let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new());
-    dispatch_tool_call(&tools, &EngineCall::new(&call), &turn, None, None, None).await
+    dispatch_tool_call(
+        &tools,
+        &EngineCall::new(&call),
+        &turn,
+        None,
+        None,
+        None,
+        zevria_foundation::McpToolAccess::None,
+    )
+    .await
 }
 
 #[tokio::test]

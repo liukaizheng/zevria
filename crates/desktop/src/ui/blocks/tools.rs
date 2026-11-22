@@ -16,7 +16,10 @@ use zevria_presentation::{
     status_icon::StatusIcon,
 };
 
-pub fn tool_label(name: &str) -> &str {
+pub fn tool_label(name: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(label) = mcp_tool_label(name) {
+        return label.into();
+    }
     match name {
         "command" => "Command",
         "command_status" => "Check job",
@@ -36,6 +39,7 @@ pub fn tool_label(name: &str) -> &str {
         "launch_subtasks" => "Subtasks",
         _ => name,
     }
+    .into()
 }
 
 #[derive(Debug)]

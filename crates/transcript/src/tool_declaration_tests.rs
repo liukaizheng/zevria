@@ -10,6 +10,7 @@ fn record(placement: ToolDeclarationPlacement, name: &str) -> TranscriptItem {
             ToolDeclarations::new(vec![ToolDeclaration {
                 name: name.into(),
                 description: "description".into(),
+                strict: None,
                 parameters: serde_json::json!({"type":"object", "properties":{"z":{},"a":{}}}),
             }])
             .unwrap(),

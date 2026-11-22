@@ -20,6 +20,7 @@ fn history(target: &ModelProfileRef) -> Vec<OwnedModelRequestItem> {
         OwnedModelRequestItem::message(Message::user("inspect the source")),
         OwnedModelRequestItem::AdditionalTools(ToolDeclarations::new(vec![ToolDeclaration {
             name: "inspect".into(), description: "Inspect source".into(),
+            strict: None,
             parameters: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}),
         }]).unwrap()),
         OwnedModelRequestItem::message(Message::from(vec![AssistantContent::ToolCall(call)])),

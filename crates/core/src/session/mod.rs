@@ -285,9 +285,13 @@ impl<P: ModelProvider> SessionEngine<P> {
         self
     }
 
+    pub(in crate::session) fn allows_tool(&self, policy: &TurnPolicy, name: &str) -> bool {
+        manage::mcp::allows_tool(policy, self.capabilities.mcp.as_deref(), name)
+    }
+
     pub(super) fn desired_tool_declarations(&self, policy: &TurnPolicy) -> ToolDeclarations {
         ToolDeclarations::from_definitions(self.tools.snapshot().definitions(), |tool| {
-            policy.allows_tool(tool.name.as_str())
+            self.allows_tool(policy, tool.name.as_str())
         })
         .expect("registered tools have unique names and object schemas")
     }
@@ -429,6 +433,14 @@ impl<P: ModelProvider> SessionEngine<P> {
                 request_id,
                 request,
             }) => self.manage_skills(request_id, request, events).await,
+            SessionCommand::Manage(ManagementCommand::Mcp {
+                request_id,
+                request,
+            }) => {
+                self.manage_mcp(request_id, request, events, &CancellationToken::new())
+                    .await;
+                Ok(())
+            }
             SessionCommand::Control(_) => unreachable!("control plane consumed the command"),
         }
     }

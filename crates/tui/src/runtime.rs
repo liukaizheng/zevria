@@ -46,6 +46,7 @@ fn send_turn_action(
         UiAction::EditTranscript(edit) => {
             (TurnCommand::EditTranscript(edit), "the transcript edit")
         }
+        UiAction::InvokeMcpPrompt(command) => (command, "the MCP prompt"),
         UiAction::InvokeSkill { name, args, mode } => (
             TurnCommand::InvokeSkill { name, args, mode },
             "the skill invocation",
@@ -173,6 +174,11 @@ pub async fn run_ui(
                 .send(command)
                 .map_err(|_| anyhow::anyhow!("session engine stopped before skill management"))?;
         }
+        while let Some(command) = views.overlays.mcp.inspector.commands.pop_front() {
+            commands
+                .send(command)
+                .map_err(|_| anyhow::anyhow!("session engine stopped before MCP management"))?;
+        }
         if !engine_done && let Some(action) = views.dispatch_queued_root_work() {
             dispatch_turn_action(&mut views, commands, &mut engine_done, action)?;
         }
@@ -239,6 +245,7 @@ pub async fn run_ui(
                         Some(action @ (UiAction::ContinueAfterJobs { .. } | UiAction::Submit { .. }
                             | UiAction::EditTranscript(_)
                             | UiAction::InvokeSkill { .. }
+                            | UiAction::InvokeMcpPrompt(_)
                             | UiAction::RevisePlanWithMessage { .. }
                             | UiAction::RevisePlanWithSkill { .. }
                             | UiAction::Compact { .. }
@@ -280,6 +287,8 @@ pub async fn run_ui(
                             SlashCommand::Resume => open_resume_picker(&mut views, context),
                             SlashCommand::New => return new_session_outcome(&views.root),
                             SlashCommand::Skills => views.overlays.show_skills(),
+                            SlashCommand::Mcp => views.overlays.show_mcp(),
+                            SlashCommand::Prompt => unreachable!("MCP prompts are classified separately"),
                             SlashCommand::Jobs => views.overlays.show_jobs(),
                             SlashCommand::Subtasks => views.show_subtasks(),
                             SlashCommand::Model | SlashCommand::ModelSession => {

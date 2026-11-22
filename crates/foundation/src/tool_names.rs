@@ -12,6 +12,10 @@ pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 pub const SKILL_TOOL_NAME: &str = "skill";
 pub const SKILL_READ_TOOL_NAME: &str = "skill_read";
 pub const SKILL_TOOL_NAMES: [&str; 2] = [SKILL_TOOL_NAME, SKILL_READ_TOOL_NAME];
+pub const MCP_LIST_RESOURCES_TOOL_NAME: &str = "mcp_list_resources";
+pub const MCP_READ_RESOURCE_TOOL_NAME: &str = "mcp_read_resource";
+pub const MCP_RESOURCE_TOOL_NAMES: [&str; 2] =
+    [MCP_LIST_RESOURCES_TOOL_NAME, MCP_READ_RESOURCE_TOOL_NAME];
 pub const QUESTION_TOOL_NAME: &str = "question";
 pub const LAUNCH_SUBTASKS_TOOL_NAME: &str = "launch_subtasks";
 pub const TASK_TOOL_NAME: &str = "task";

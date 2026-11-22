@@ -592,6 +592,15 @@ pub fn normalized_arguments(raw: &serde_json::Value) -> Option<serde_json::Value
     }
 }
 
+pub fn mcp_tool_label(name: &str) -> Option<String> {
+    match name {
+        zevria_foundation::MCP_LIST_RESOURCES_TOOL_NAME => Some("MCP resources".into()),
+        zevria_foundation::MCP_READ_RESOURCE_TOOL_NAME => Some("MCP resource".into()),
+        _ => zevria_foundation::parse_mcp_tool_prefix(name)
+            .map(|(server, tool)| format!("MCP · {server} · {tool}")),
+    }
+}
+
 pub fn tool_argument(state: &NativeToolState, key: &str) -> Option<String> {
     state
         .arguments

@@ -3,6 +3,7 @@ pub mod blocks;
 pub mod composer;
 mod jobs;
 pub mod math;
+mod mcp;
 pub mod models;
 pub mod plan;
 pub mod question;

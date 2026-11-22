@@ -4,6 +4,7 @@ use zevria_ensemble as ensemble;
 pub mod acp_host;
 pub mod clean;
 pub mod config;
+pub mod mcp;
 mod models;
 pub mod runtime;
 pub mod session_config;

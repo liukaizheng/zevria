@@ -34,6 +34,8 @@ pub enum SlashCommand {
     ModelSession,
     /// Inspect and manage the two fixed skill locations.
     Skills,
+    Mcp,
+    Prompt,
     /// Inspect and control this session's shell jobs, even while busy.
     Jobs,
     /// List this session's subtasks, even while busy.
@@ -127,6 +129,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Inspect, enable/disable, and reload local skills",
     },
     CommandSpec {
+        command: SlashCommand::Mcp,
+        name: "mcp",
+        description: "Inspect, reload, toggle MCP servers, and run MCP prompts",
+    },
+    CommandSpec {
+        command: SlashCommand::Prompt,
+        name: "prompt",
+        description: "Run an MCP server prompt: /prompt <server>:<name> [key=value ...]",
+    },
+    CommandSpec {
         command: SlashCommand::Jobs,
         name: "jobs",
         description: "Inspect, terminate, or background running shell commands",
@@ -193,6 +205,11 @@ pub enum ClassifiedInput {
     Message(zevria_content::UserPrompt),
     Orchestrate(zevria_content::UserPrompt),
     Builtin(SlashCommand),
+    McpPrompt {
+        server: zevria_foundation::McpServerName,
+        prompt: String,
+        arguments: std::collections::BTreeMap<String, String>,
+    },
     Ensemble {
         workflow: EnsembleWorkflow,
         prompt: zevria_content::UserPrompt,
@@ -211,11 +228,13 @@ pub enum ClassificationError {
     MissingEnsemblePrompt(EnsembleWorkflow),
     MissingOrchestrationPrompt,
     ImagesOnControl,
+    InvalidMcpPrompt(String),
 }
 
 impl std::fmt::Display for ClassificationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidMcpPrompt(error) => formatter.write_str(error),
             Self::MissingOrchestrationPrompt => {
                 formatter.write_str("/orchestrate requires a prompt; the draft was retained.")
             }
@@ -244,6 +263,7 @@ enum Sigil {
 pub enum MatchEntry<'registry> {
     Builtin(&'static CommandSpec),
     Skill(&'registry SkillMeta),
+    McpPrompt(&'registry str, &'registry str),
 }
 
 impl MatchEntry<'_> {
@@ -251,13 +271,14 @@ impl MatchEntry<'_> {
         match self {
             Self::Builtin(spec) => spec.name,
             Self::Skill(meta) => meta.name.as_str(),
+            Self::McpPrompt(name, _) => name,
         }
     }
 
     /// The sigil that invokes this entry, for rendering and completion.
     pub fn sigil(&self) -> char {
         match self {
-            Self::Builtin(_) => '/',
+            Self::Builtin(_) | Self::McpPrompt(..) => '/',
             Self::Skill(_) => '$',
         }
     }
@@ -266,6 +287,7 @@ impl MatchEntry<'_> {
         match self {
             Self::Builtin(spec) => spec.description,
             Self::Skill(meta) => &meta.description,
+            Self::McpPrompt(_, description) => description,
         }
     }
 }
@@ -274,6 +296,7 @@ impl MatchEntry<'_> {
 #[derive(Debug, Default)]
 pub struct CommandRegistry {
     skills: Vec<SkillMeta>,
+    mcp_prompts: Vec<(String, String)>,
     worker: bool,
 }
 
@@ -283,15 +306,37 @@ impl CommandRegistry {
     pub fn new(skills: Vec<SkillMeta>) -> Self {
         Self {
             skills,
+            mcp_prompts: vec![],
             worker: false,
         }
     }
 
     pub fn worker() -> Self {
         Self {
-            skills: Vec::new(),
             worker: true,
+            ..Self::default()
         }
+    }
+    pub fn set_skills(&mut self, skills: Vec<SkillMeta>) {
+        self.skills = skills;
+    }
+    pub fn set_mcp_prompts(
+        &mut self,
+        prompts: &[(
+            zevria_foundation::McpServerName,
+            zevria_foundation::McpPromptInfo,
+        )],
+    ) {
+        self.mcp_prompts = prompts
+            .iter()
+            .filter(|(_, prompt)| !prompt.name.chars().any(char::is_whitespace))
+            .map(|(server, prompt)| {
+                (
+                    format!("prompt {server}:{}", prompt.name),
+                    prompt.description.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
     }
     fn commands(&self) -> &'static [CommandSpec] {
         if self.worker {
@@ -310,6 +355,13 @@ impl CommandRegistry {
             return Vec::new();
         };
         match completion.kind {
+            CompletionKind::Command if !self.worker && completion.prefix.starts_with("prompt ") => {
+                self.mcp_prompts
+                    .iter()
+                    .filter(|(name, _)| name.starts_with(&completion.prefix))
+                    .map(|(name, description)| MatchEntry::McpPrompt(name, description))
+                    .collect()
+            }
             CompletionKind::Command => self
                 .commands()
                 .iter()
@@ -382,6 +434,13 @@ impl CommandRegistry {
                     return Err(ClassificationError::ImagesOnControl);
                 }
                 match spec.command {
+                    SlashCommand::Prompt => crate::mcp::parse_prompt(&args.text_projection())
+                        .map(|(server, prompt, arguments)| ClassifiedInput::McpPrompt {
+                            server,
+                            prompt,
+                            arguments,
+                        })
+                        .map_err(ClassificationError::InvalidMcpPrompt),
                     SlashCommand::Orchestrate if args.is_blank() => {
                         Err(ClassificationError::MissingOrchestrationPrompt)
                     }
@@ -481,6 +540,8 @@ mod tests {
                 "ensemble-plan",
                 "ensemble-review",
                 "skills",
+                "mcp",
+                "prompt",
                 "jobs",
                 "subtasks",
                 "model",
@@ -549,6 +610,8 @@ mod tests {
                 "ensemble-plan",
                 "ensemble-review",
                 "skills",
+                "mcp",
+                "prompt",
                 "jobs",
                 "subtasks",
                 "model",
@@ -885,6 +948,8 @@ mod tests {
                 "ensemble-plan",
                 "ensemble-review",
                 "skills",
+                "mcp",
+                "prompt",
                 "jobs",
                 "subtasks",
                 "model",

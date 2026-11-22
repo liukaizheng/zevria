@@ -234,6 +234,7 @@ pub(in crate::session) async fn dispatch_tool_call(
     reconciliation_catalog: Option<&ReportReconciliationCatalog>,
     skill_context: Option<&zevria_instructions::skill::SkillContext>,
     plan_scope: Option<&PlanDraftScope>,
+    mcp_access: zevria_foundation::McpToolAccess,
 ) -> ToolCallSlot {
     let arguments = tool_arguments_for_dispatch(&call.function);
     // Per-call context carries the assistant call id into the tool, so tools
@@ -244,6 +245,9 @@ pub(in crate::session) async fn dispatch_tool_call(
         .insert(ToolCallId(call.id.to_string()))
         .expect("call IDs are serializable");
     context.insert_scope(turn.clone());
+    if !mcp_access.is_none() && zevria_foundation::is_mcp_tool_name(&call.function.name) {
+        context.insert_scope(mcp_access);
+    }
     if let Some(skill_context) = skill_context {
         context.insert_scope(skill_context.clone());
     }
@@ -399,6 +403,7 @@ pub(in crate::session) async fn dispatch_tool_call(
 
 pub(in crate::session) struct ToolExecutionScope<'a> {
     pub(in crate::session) tools: &'a ToolServerHandle,
+    pub(in crate::session) mcp: Option<&'a dyn zevria_session_api::mcp::McpSessionService>,
     pub(in crate::session) mode: SessionMode,
     pub(in crate::session) policy: &'a TurnPolicy,
     pub(in crate::session) catalog: &'a Arc<zevria_instructions::skill::SkillCatalog>,
@@ -422,9 +427,17 @@ pub(in crate::session) async fn execute_ordinary_tool_call(
         return cancelled_slot(call);
     }
     if (call.tool == EngineTool::Skill && !scope.skill_activation_available)
-        || !scope.policy.allows_tool(&call.function.name)
+        || !crate::session::manage::mcp::allows_tool(scope.policy, scope.mcp, &call.function.name)
         || (call.tool.is_skill() && !scope.policy.skills_enabled)
     {
+        if zevria_foundation::is_mcp_tool_name(&call.function.name) {
+            return ToolCallSlot::local_diagnostic(
+                call,
+                ToolCallOutcome::Denied,
+                "status: denied\nreason: ",
+                "MCP tool is disabled, disconnected, or not allowed in this mode".into(),
+            );
+        }
         return denied_slot(call, scope.mode);
     }
     let skill_context = call
@@ -443,6 +456,7 @@ pub(in crate::session) async fn execute_ordinary_tool_call(
             scope.reconciliation_catalog,
             skill_context.as_ref(),
             plan_scope,
+            scope.policy.mcp_access,
         )
         .await;
     }
@@ -746,6 +760,7 @@ pub(in crate::session) async fn execute_planned_tool_calls(
                         scope.reconciliation_catalog,
                         None,
                         None,
+                        zevria_foundation::McpToolAccess::None,
                     )
                     .await
                 } else {
@@ -919,6 +934,7 @@ impl<'a> ToolExecutionScope<'a> {
     ) -> Self {
         Self {
             tools: &engine.tools,
+            mcp: engine.capabilities.mcp.as_deref(),
             mode,
             policy,
             catalog: &engine.skills.catalog,

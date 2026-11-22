@@ -16,7 +16,7 @@ impl App {
         // Frontend-only lists are admitted before busy/queue gates.
         let classified = self.composer.classify();
         if let Ok(ClassifiedInput::Builtin(
-            command @ (SlashCommand::Jobs | SlashCommand::Subtasks),
+            command @ (SlashCommand::Jobs | SlashCommand::Subtasks | SlashCommand::Mcp),
         )) = classified
         {
             return self.submit_nonqueued(ClassifiedInput::Builtin(command));
@@ -57,7 +57,9 @@ impl App {
         if self.model.session.is_busy()
             && !matches!(
                 classified,
-                ClassifiedInput::Builtin(SlashCommand::Jobs | SlashCommand::Subtasks)
+                ClassifiedInput::Builtin(
+                    SlashCommand::Jobs | SlashCommand::Subtasks | SlashCommand::Mcp
+                )
             )
         {
             return None;
@@ -85,7 +87,7 @@ impl App {
                 ClassifiedInput::Ensemble { workflow, prompt } => {
                     TranscriptEditReplacement::Ensemble { workflow, prompt }
                 }
-                ClassifiedInput::Builtin(_) => {
+                ClassifiedInput::Builtin(_) | ClassifiedInput::McpPrompt { .. } => {
                     self.push_error(
                         "Built-in commands cannot replace transcript items; cancel the recall to run the command."
                             .to_string(),
@@ -141,6 +143,28 @@ impl App {
                 self.stage_draft();
                 self.queue.resume();
                 Some(action)
+            }
+            ClassifiedInput::McpPrompt {
+                server,
+                prompt,
+                arguments,
+            } => {
+                let mode = self.mcp_mode();
+                if !self.model.begin_mcp_prompt(mode) {
+                    self.push_error(
+                        "Finish reviewing the current Plan before running an MCP prompt.".into(),
+                    );
+                    return None;
+                }
+                self.after_admission();
+                self.stage_draft();
+                self.queue.resume();
+                Some(UiAction::InvokeMcpPrompt(TurnCommand::InvokeMcpPrompt {
+                    server,
+                    prompt,
+                    arguments,
+                    mode,
+                }))
             }
             ClassifiedInput::Builtin(SlashCommand::Build) => {
                 self.begin_mode_selection(SessionMode::Build, true)

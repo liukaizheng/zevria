@@ -513,6 +513,7 @@ impl SessionController {
             self.projection_revision = self.projection_revision.wrapping_add(1);
         }
         self.flush_job_commands(cx);
+        self.flush_mcp_commands(cx);
         self.ensure_tick(cx);
         if let Some(root) = reduction.root {
             self.apply_reduction(root);
@@ -902,11 +903,55 @@ impl SessionController {
             && !self.capturing_dialog
             && !self.model.models.is_open()
     }
+    pub fn flush_mcp_commands(&mut self, cx: &mut Context<Self>) {
+        while self.phase == Phase::Live {
+            let Some(command) = self.model.mcp.commands.pop_front() else {
+                break;
+            };
+            self.send(command, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_mcp(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.can_open_session_panel() || self.model.selected_child.is_some() {
+            return false;
+        }
+        self.model.jobs.close();
+        self.model.subtasks_open = false;
+        self.model.mcp.show();
+        self.flush_mcp_commands(cx);
+        true
+    }
+
+    pub fn run_mcp_prompt(
+        &mut self,
+        arguments: std::collections::BTreeMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(draft) = &mut self.model.mcp.draft {
+            draft.values = arguments;
+        }
+        if self.model.root.ready_revision_target().is_some() {
+            self.model.mcp.notice = Some("Finish reviewing the current Plan first.".into());
+            cx.notify();
+            return;
+        }
+        let mode = self.model.root.next_mode();
+        if let Some(command) = self.model.mcp.run_prompt(mode, self.model.root.is_busy())
+            && self.model.root.begin_mcp_prompt(mode)
+        {
+            self.send(SessionCommand::Turn(command), cx);
+        }
+        cx.notify();
+    }
+
     fn open_jobs(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.can_open_session_panel() || self.model.selected_child.is_some() {
             return false;
         }
         self.model.subtasks_open = false;
+        self.model.mcp.close();
         self.model.jobs.show();
         self.model.select_default_job();
         self.flush_job_commands(cx);
@@ -927,6 +972,7 @@ impl SessionController {
             return false;
         }
         self.model.jobs.close();
+        self.model.mcp.close();
         self.model.subtasks_open = true;
         cx.notify();
         true
@@ -982,7 +1028,7 @@ impl SessionController {
             return;
         }
         match self.model.route_input(&self.draft, self.orchestrate) {
-            InputRoute::Command(command) => {
+            InputRoute::Command(command) | InputRoute::McpPrompt(command) => {
                 self.submitted = Some(SubmittedDraft {
                     text: self.draft.clone(),
                     generation: self.draft_generation,
@@ -995,6 +1041,12 @@ impl SessionController {
                 // acquire submitted-turn bookkeeping. Only an accepted slash
                 // invocation consumes its own command text.
                 if self.open_model_picker(scope, cx) {
+                    self.draft.clear();
+                    self.draft_generation += 1;
+                }
+            }
+            InputRoute::Mcp => {
+                if self.open_mcp(cx) {
                     self.draft.clear();
                     self.draft_generation += 1;
                 }

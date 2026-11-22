@@ -47,6 +47,15 @@ pub(in crate::session) fn request_shape_fingerprint(
             }
         }
     }
+    match policy.mcp_access {
+        zevria_foundation::McpToolAccess::None => {}
+        zevria_foundation::McpToolAccess::PlanScoped => {
+            update_component(&mut hasher, b"mcp:plan_scoped")
+        }
+        zevria_foundation::McpToolAccess::AllEnabled => {
+            update_component(&mut hasher, b"mcp:all_enabled")
+        }
+    }
     RequestShapeFingerprint(hasher.finalize().into())
 }
 
@@ -129,6 +138,7 @@ pub(in crate::session) struct ModelManagement {
 
 #[derive(Default)]
 pub(in crate::session) struct RootCapabilities {
+    pub(in crate::session) mcp: Option<Arc<dyn zevria_session_api::mcp::McpSessionService>>,
     pub(in crate::session) command_jobs: Option<zevria_session_api::CommandJobs>,
     pub(in crate::session) job_follow: crate::session::turn::job_notices::JobFollowState,
     pub(in crate::session) mode_management: bool,

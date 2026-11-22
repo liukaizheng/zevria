@@ -12,6 +12,7 @@ cache-diagnostics = ["zevria-provider/cache-diagnostics"]
 zevria-core = { workspace = true }
 zevria-provider = { workspace = true }
 zevria-tools = { workspace = true }
+zevria-mcp = { workspace = true }
 zevria-acp = { workspace = true }
 zevria-ensemble = { workspace = true }
 zevria-theme = { workspace = true }

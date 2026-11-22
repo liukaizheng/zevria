@@ -35,23 +35,7 @@ pub fn load_skill_config(path: &Path) -> anyhow::Result<SkillConfigSource> {
 }
 
 pub(crate) fn parse_skill_config(contents: &str) -> anyhow::Result<SkillsConfig> {
-    // Parse unrelated settings as data only, not provider/credential models.
-    // Match the full application's top-level schema, while allowing those
-    // unrelated tables to remain intentionally incomplete for offline use.
-    let document: toml::Table = toml::from_str(contents)?;
-    for key in document.keys() {
-        anyhow::ensure!(
-            key != "providers",
-            "configuration key {key:?} moved to models.jsonc next to this file"
-        );
-        anyhow::ensure!(
-            matches!(
-                key.as_str(),
-                "session" | "skills" | "theme" | "acp" | "ensemble" | "command" | "log" | "modes"
-            ),
-            "unsupported configuration key {key:?}"
-        );
-    }
+    let document = crate::config::partial_document(contents)?;
     let settings: SkillsConfig = document
         .get("skills")
         .cloned()

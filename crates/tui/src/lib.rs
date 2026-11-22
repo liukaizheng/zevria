@@ -8,6 +8,7 @@ mod hints;
 mod input;
 mod jobs;
 mod layout;
+mod mcp;
 mod models;
 mod picker;
 pub(crate) use zevria_presentation::blocks as presentation;

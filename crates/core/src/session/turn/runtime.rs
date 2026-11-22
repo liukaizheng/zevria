@@ -39,6 +39,7 @@ struct ActiveWorkControl {
     worker_controls: WorkerControlRouter,
     command_jobs: Option<zevria_session_api::CommandJobs>,
     skill_queries: Arc<Mutex<zevria_instructions::skill::SkillContext>>,
+    mcp_queries: Option<Arc<dyn zevria_session_api::mcp::McpSessionService>>,
 }
 
 impl<P: ModelProvider> SessionEngine<P> {
@@ -58,6 +59,8 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> Result<(), SessionReplayError> {
         self.ensure_replay_valid()?;
         let mut pending = self.restored_work();
+        let mut mcp_changes = self.capabilities.mcp.as_ref().map(|mcp| mcp.changes());
+        self.sync_mcp(&events).await;
         let mut completions = self
             .capabilities
             .command_jobs
@@ -92,6 +95,16 @@ impl<P: ModelProvider> SessionEngine<P> {
                     } => {
                         if changed.is_err() || self.capabilities.command_jobs.as_ref().is_some_and(|jobs| jobs.is_closed()) { completions = None; }
                         self.refresh_continuation_offer(&events).await;
+                        RunControl::Continue
+                    }
+                    changed = async {
+                        match &mut mcp_changes {
+                            Some(receiver) => receiver.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if changed.is_err() { mcp_changes = None; }
+                        self.sync_mcp(&events).await;
                         RunControl::Continue
                     }
                     () = self.provider.prewarm(role), if !prewarmed => {
@@ -186,11 +199,47 @@ impl<P: ModelProvider> SessionEngine<P> {
                     worker_controls: self.capabilities.worker_controls.clone(),
                     command_jobs: self.capabilities.command_jobs.clone(),
                     skill_queries: Arc::new(Mutex::new(self.management_skill_context()?)),
+                    mcp_queries: self.capabilities.mcp.clone(),
                 };
                 let active = self
                     .manage_models(request_id, request, events, &cancellation)
                     .boxed();
                 Self::supervise(active, &control, commands, pending, events).await
+            }
+            SessionCommand::Manage(ManagementCommand::Mcp {
+                request_id,
+                request,
+            }) => {
+                let cancellation = CancellationToken::new();
+                if request.is_query() {
+                    self.manage_mcp(request_id, request, events, &cancellation)
+                        .await;
+                    return Ok(RunControl::Continue);
+                }
+                let control = ActiveWorkControl {
+                    work: ActiveWork::Maintenance {
+                        request_id: request_id.clone(),
+                        cancellation: cancellation.clone(),
+                    },
+                    question_responder: self.capabilities.question_responder.clone(),
+                    worker_controls: self.capabilities.worker_controls.clone(),
+                    command_jobs: self.capabilities.command_jobs.clone(),
+                    skill_queries: Arc::new(Mutex::new(self.management_skill_context()?)),
+                    mcp_queries: self.capabilities.mcp.clone(),
+                };
+                Self::supervise(
+                    async {
+                        self.manage_mcp(request_id, request, events, &cancellation)
+                            .await;
+                        Ok(())
+                    }
+                    .boxed(),
+                    &control,
+                    commands,
+                    pending,
+                    events,
+                )
+                .await
             }
             SessionCommand::Control(_) => unreachable!("control plane consumed the command"),
         }
@@ -232,6 +281,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             worker_controls: self.capabilities.worker_controls.clone(),
             command_jobs: self.capabilities.command_jobs.clone(),
             skill_queries: self.enter_turn()?,
+            mcp_queries: self.capabilities.mcp.clone(),
         };
         // Preserve the Send-only provider contract by erasing the nested future.
         let active = self.execute_turn(work, events, &turn).boxed();
@@ -474,6 +524,23 @@ impl CommandRouter<'_> {
                         ),
                     });
                 }
+            }
+            Some(SessionCommand::Manage(ManagementCommand::Mcp {
+                request_id,
+                request,
+            })) => {
+                let result = if request.is_query() {
+                    crate::session::manage::mcp::query(
+                        self.active.and_then(|active| active.mcp_queries.as_deref()),
+                        &request,
+                    )
+                } else {
+                    zevria_foundation::McpManagementResult::error(
+                        "busy",
+                        "MCP changes require an idle session; request was not queued.",
+                    )
+                };
+                reply = Some(SessionEvent::McpResult { request_id, result });
             }
             Some(SessionCommand::Control(ControlCommand::Shutdown)) | None => {
                 if let Some(active) = self.active {

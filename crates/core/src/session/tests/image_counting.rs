@@ -791,6 +791,7 @@ fn tool_revisions_keep_inline_baselines_but_invalidate_folded_fixed_prefixes() {
         let tools = zevria_model::ToolDeclarations::new(vec![zevria_model::ToolDeclaration {
             name: "inspect".into(),
             description: "revised declaration".into(),
+            strict: None,
             parameters: json!({"type":"object","properties":{}}),
         }])
         .unwrap();

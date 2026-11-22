@@ -1211,6 +1211,7 @@ async fn production_acp_factory_restores_models_and_reports_legacy_errors() {
     let fixture = Fixture::new(&server.url);
     let factory = crate::acp_host::AcpHostFactory::new(Arc::new(load(&fixture.path).unwrap()));
     let request = |start| StartSessionRequest {
+        mcp_servers: Vec::new(),
         workspace: fixture.directory.path().to_path_buf(),
         start,
     };

@@ -96,7 +96,7 @@ fn production_domain_graph_has_only_approved_edges() {
         }
     }
     let lower = ["foundation", "content", "instructions", "model", "workflow"];
-    let allowed: [(&str, Vec<&str>); 22] = [
+    let allowed: [(&str, Vec<&str>); 23] = [
         ("foundation", vec![]),
         ("content", vec!["foundation"]),
         ("instructions", vec!["foundation", "content"]),
@@ -121,6 +121,7 @@ fn production_domain_graph_has_only_approved_edges() {
             [lower.as_slice(), &["responses", "anthropic", "session-api"]].concat(),
         ),
         ("tools", [lower.as_slice(), &["session-api"]].concat()),
+        ("mcp", [lower.as_slice(), &["session-api"]].concat()),
         (
             "acp",
             [lower.as_slice(), &["session-api", "transcript"]].concat(),
@@ -162,6 +163,7 @@ fn production_domain_graph_has_only_approved_edges() {
                     "core",
                     "provider",
                     "tools",
+                    "mcp",
                     "acp",
                     "ensemble",
                     "theme",
@@ -238,7 +240,7 @@ fn production_domain_graph_has_only_approved_edges() {
             );
         }
     }
-    for adapter in ["provider", "tools", "acp", "tui", "ensemble"] {
+    for adapter in ["provider", "tools", "mcp", "acp", "tui", "ensemble"] {
         assert!(!reaches(&graph, &package(adapter), "zevria-core"));
     }
     assert!(!reaches(&graph, "zevria-session-api", "zevria-transcript"));

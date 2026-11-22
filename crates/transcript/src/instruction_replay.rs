@@ -163,6 +163,8 @@ impl InstructionReplayState {
                         self.skills.contains(name),
                         "skill revocation has no recorded activation"
                     ),
+                    DirectivePayload::McpInstructions { .. }
+                    | DirectivePayload::McpInstructionsRevocation { .. } => {}
                 }
                 self.directives.apply(directive)?;
             }

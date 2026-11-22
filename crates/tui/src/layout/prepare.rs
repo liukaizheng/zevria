@@ -1254,6 +1254,23 @@ fn render_tool_call(
         }
         return Some(header);
     }
+    if let Some(mut label) = zevria_presentation::blocks::mcp_tool_label(&call.function.name) {
+        if let Some(detail) = state
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.mcp_call())
+            && zevria_foundation::is_mcp_external_tool_name(&call.function.name)
+        {
+            label = format!("MCP · {} · {}", detail.server, detail.tool);
+        }
+        if let Some(uri) = tool_argument(state, "uri") {
+            label.push_str(&format!(" · {uri}"));
+        }
+        let header = FoldHeader::single(label, native_header_status(call, state));
+        lines.push(header.expanded());
+        render_tool_diagnostic(state, lines);
+        return Some(header);
+    }
     if call.function.name == READ_IMAGE_TOOL_NAME {
         let path = tool_argument(state, "file_path")
             .filter(|path| !path.is_empty())

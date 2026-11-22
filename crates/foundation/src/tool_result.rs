@@ -141,6 +141,7 @@ pub enum ToolResultDetail {
     FileChanges(Vec<FileChangeOutput>),
     CommandJob(crate::CommandJobDetail),
     PlanDraft(PlanDraftDetail),
+    Mcp(crate::McpCallDetail),
     /// Input-ordered terminal slots, retaining every accepted child identity.
     Subtasks(Vec<SubtaskEntryMetadata>),
     /// Terminal root-question semantics, including frontend errors. Malformed
@@ -213,6 +214,13 @@ pub struct ToolResultMetadata {
 }
 
 impl ToolResultMetadata {
+    pub fn mcp_call(&self) -> Option<&crate::McpCallDetail> {
+        match self.detail.as_ref()? {
+            ToolResultDetail::Mcp(detail) => Some(detail),
+            _ => None,
+        }
+    }
+
     pub fn command_job(&self) -> Option<&crate::CommandJobDetail> {
         self.detail.as_ref().and_then(ToolResultDetail::command_job)
     }

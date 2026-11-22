@@ -17,6 +17,7 @@ pub(crate) enum Overlay {
     Models,
     Skills,
     Jobs,
+    Mcp,
     Subtasks,
     Question(QuestionDialog),
     Help(HelpOverlay),
@@ -28,6 +29,7 @@ impl Overlay {
             Self::Models => SurfaceKind::Models,
             Self::Skills => SurfaceKind::Skills,
             Self::Jobs => SurfaceKind::Jobs,
+            Self::Mcp => SurfaceKind::Mcp,
             Self::Subtasks => SurfaceKind::Subtasks,
             Self::Question(_) => SurfaceKind::Question,
             Self::Help(_) => SurfaceKind::Help,
@@ -45,6 +47,7 @@ pub(crate) struct OverlayController {
     // Correlated management requests live beyond the modal that initiated them.
     pub(crate) models: ModelPicker,
     pub(crate) skills: SkillManager,
+    pub(crate) mcp: crate::mcp::McpOverlay,
     pub(crate) jobs: crate::jobs::JobsOverlay,
     pub(crate) subtasks: SubtasksOverlay,
 }
@@ -77,6 +80,10 @@ impl OverlayController {
         self.subtasks.show(rows);
         self.replace(Overlay::Subtasks);
     }
+    pub(crate) fn show_mcp(&mut self) {
+        self.mcp.show();
+        self.replace(Overlay::Mcp);
+    }
     pub(crate) fn show_skills(&mut self) {
         self.skills.show();
         self.replace(Overlay::Skills);
@@ -105,6 +112,7 @@ impl OverlayController {
             Overlay::Models => self.models.is_open(),
             Overlay::Skills => self.skills.is_open(),
             Overlay::Jobs => self.jobs.is_open(),
+            Overlay::Mcp => self.mcp.inspector.open,
             Overlay::Subtasks => self.subtasks.is_open(),
             _ => true,
         }
@@ -157,13 +165,20 @@ impl OverlayController {
                 Overlay::Models => self.models.render(frame, bounds),
                 Overlay::Skills => self.skills.render(frame, bounds),
                 Overlay::Jobs => self.jobs.render(frame, bounds),
+                Overlay::Mcp => self.mcp.render(frame, bounds),
                 Overlay::Subtasks => self.subtasks.render(frame, bounds),
                 Overlay::Question(question) => question.render(frame, bounds),
                 Overlay::Help(help) => help.render(frame, bounds),
             }
         }
     }
-    pub(crate) fn handle_input(&mut self, owner: Surface, input: UserInput) -> Option<UiAction> {
+    pub(crate) fn handle_input(
+        &mut self,
+        owner: Surface,
+        input: UserInput,
+        busy: bool,
+        mode: zevria_foundation::SessionMode,
+    ) -> Option<UiAction> {
         let index = self
             .stack
             .iter()
@@ -173,12 +188,13 @@ impl OverlayController {
             Overlay::Models => self.models.context(),
             Overlay::Skills => self.skills.context(),
             Overlay::Jobs => self.jobs.context(),
+            Overlay::Mcp => KeyContext::OverlayList,
             Overlay::Subtasks => KeyContext::SubtasksList,
             Overlay::Question(question) => question.context(),
             Overlay::Picker(_) => KeyContext::OverlayList,
             Overlay::Help(_) => KeyContext::Help,
         };
-        if !matches!(self.stack[index], Overlay::Help(_))
+        if !matches!(self.stack[index], Overlay::Help(_) | Overlay::Mcp)
             && let UserInput::Key(key) = &input
             && ChordState::default().resolve(context, *key) == Some(Action::Help)
         {
@@ -189,7 +205,7 @@ impl OverlayController {
                 Overlay::Jobs => self.jobs.hint_eligibility(),
                 Overlay::Subtasks => self.subtasks.hint_eligibility(),
                 Overlay::Picker(picker) => picker.hint_eligibility(),
-                Overlay::Help(_) => unreachable!("help closes rather than nesting"),
+                Overlay::Help(_) | Overlay::Mcp => unreachable!("help is not opened here"),
             };
             self.show_help(context, &eligibility);
             return None;
@@ -230,6 +246,14 @@ impl OverlayController {
                     UserInput::Paste(text) => self.models.paste(&text),
                 }
                 None
+            }
+            Overlay::Mcp => {
+                let action = self
+                    .mcp
+                    .input(input, busy, mode)
+                    .map(UiAction::InvokeMcpPrompt);
+                close = !self.mcp.inspector.open;
+                action
             }
             Overlay::Jobs => {
                 if let UserInput::Key(key) = input {

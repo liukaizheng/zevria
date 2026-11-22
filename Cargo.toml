@@ -26,6 +26,7 @@ zevria-acp = { path = "crates/acp" }
 zevria-core = { path = "crates/core" }
 zevria-provider = { path = "crates/provider" }
 zevria-tools = { path = "crates/tools" }
+zevria-mcp = { path = "crates/mcp" }
 zevria-tui = { path = "crates/tui" }
 
 anyhow = "1.0.103"
@@ -66,6 +67,11 @@ ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 rig-agent = "0.46.0"
 rig-core = "0.46.0"
+# Apache-2.0; official Model Context Protocol Rust SDK.
+rmcp = { version = "=3.11.0", default-features = false, features = [
+    "client", "base64", "reqwest", "transport-child-process",
+    "transport-streamable-http-client-reqwest", "which-command",
+] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 # Preserve the JSON ordering and float fidelity previously enabled by Rig.

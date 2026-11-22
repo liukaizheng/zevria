@@ -636,12 +636,22 @@ impl ComposerState {
         self.text.replace_range(range, replacement);
     }
 
+    pub fn with_mcp_prompts(
+        &mut self,
+        prompts: &[(
+            zevria_foundation::McpServerName,
+            zevria_foundation::McpPromptInfo,
+        )],
+    ) {
+        self.commands.set_mcp_prompts(prompts);
+    }
+
     pub fn worker_commands(&mut self) {
         self.commands = CommandRegistry::worker();
     }
     pub fn with_skills(&mut self, skills: Vec<SkillMeta>) {
         if self.completion_kind() == Some(CompletionKind::File) {
-            self.commands = CommandRegistry::new(skills);
+            self.commands.set_skills(skills);
             return;
         }
         let cursor = clamp_cursor(&self.text, self.cursor);
@@ -650,7 +660,7 @@ impl ComposerState {
             .matches(&self.text, cursor)
             .get(self.menu.selected)
             .map(|entry| (entry.sigil(), entry.name().to_owned()));
-        self.commands = CommandRegistry::new(skills);
+        self.commands.set_skills(skills);
         let matches = self.commands.matches(&self.text, cursor);
         self.menu.selected = selected
             .and_then(|(sigil, name)| {
@@ -702,7 +712,10 @@ impl ComposerState {
         if let Some(identity) = self.file_identity() {
             return (self.files.dismissed.as_ref() != Some(&identity)).then_some(identity.query);
         }
-        command_query(&self.text, self.cursor)
+        command_query(&self.text, self.cursor).filter(|query| {
+            !query.prefix.starts_with("prompt ")
+                || !self.commands.matches(&self.text, self.cursor).is_empty()
+        })
     }
 
     pub fn completion_kind(&self) -> Option<CompletionKind> {

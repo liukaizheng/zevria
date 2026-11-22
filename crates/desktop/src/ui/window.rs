@@ -43,6 +43,7 @@ pub struct DesktopWindow {
     pub(super) compact: bool,
     pub(super) plan_width: f32,
     pub(super) plan_overlay: bool,
+    pub(super) mcp_ui: super::mcp::McpPanelView,
     pub(super) jobs_ui: super::jobs::JobsPanelView,
     pub(super) subtasks_ui: super::subtasks::SubtasksPanelView,
     pub(super) question_focus: FocusHandle,
@@ -150,6 +151,7 @@ impl DesktopWindow {
             compact: false,
             plan_width: 400.,
             plan_overlay: false,
+            mcp_ui: super::mcp::McpPanelView::new(cx),
             jobs_ui: super::jobs::JobsPanelView::new(cx),
             subtasks_ui: super::subtasks::SubtasksPanelView::new(cx),
             question_focus: cx.focus_handle(),
@@ -274,6 +276,7 @@ impl DesktopWindow {
         } else {
             self.screen_error = None;
         }
+        self.sync_mcp_panel(window, cx);
         self.sync_question(window, cx);
         self.sync_model_picker(window, cx);
     }
@@ -782,6 +785,8 @@ impl Render for DesktopWindow {
             body = body.child(center);
             if let Some(plan) = self.plan_panel(cx) {
                 body = body.child(plan);
+            } else if let Some(mcp) = self.mcp_panel(window, cx) {
+                body = body.child(mcp);
             } else if let Some(jobs) = self.jobs_panel(window, cx) {
                 body = body.child(jobs);
             } else if let Some(subtasks) = self.subtasks_panel(window, cx) {

@@ -36,7 +36,12 @@ pub fn command_query(input: &str, cursor: usize) -> Option<CompletionQuery> {
     };
     let cursor = clamp_cursor(input, cursor).max(1);
     let prefix = input.get(1..cursor)?;
-    if prefix.chars().any(char::is_whitespace) {
+    if prefix.chars().any(char::is_whitespace)
+        && !(kind == CompletionKind::Command
+            && prefix
+                .strip_prefix("prompt ")
+                .is_some_and(|target| !target.chars().any(char::is_whitespace)))
+    {
         return None;
     }
     Some(CompletionQuery {

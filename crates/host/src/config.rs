@@ -67,6 +67,11 @@ max_automatic_continuations = 3
 # Optional total wall-clock limit, at least timeout_seconds. Omit for no limit.
 # background_timeout_seconds = 3600
 
+# Optional: connect to a trusted MCP server (see docs/mcp.md).
+# [mcp.servers.example]
+# command = "my-mcp-server"
+# plan_mode = "read_only"
+
 [acp]
 max_sessions = 4
 expose_session_list = true
@@ -211,7 +216,7 @@ pub(crate) const DEFAULT_MODELS: &str = r#"// Zevria model configuration. JSON w
 }
 "#;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     modes: ModeAssignments,
@@ -219,6 +224,8 @@ struct ConfigFile {
     session: SessionConfig,
     #[serde(default)]
     skills: SkillsConfig,
+    #[serde(default)]
+    mcp: zevria_mcp::McpConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<ThemeSelector>,
     #[serde(default)]
@@ -257,6 +264,7 @@ pub struct Config {
     pub(crate) modes: ModeAssignments,
     pub(crate) session: SessionConfig,
     pub(crate) skills: SkillsConfig,
+    pub(crate) mcp: zevria_mcp::McpConfig,
     pub(crate) theme: Option<ThemeSelector>,
     pub(crate) acp: AcpConfig,
     pub(crate) ensemble: EnsembleConfig,
@@ -286,6 +294,7 @@ impl Config {
         let contents = source
             .contents
             .context("configuration disappeared while loading")?;
+        crate::mcp::parse_mcp_config(&contents)?;
         let file: ConfigFile = toml::from_str(&contents)
             .with_context(|| format!("failed to parse configuration at {}", path.display()))?;
         anyhow::ensure!(
@@ -299,6 +308,9 @@ impl Config {
             )
         })?;
         let mut config = Self::from_files(file, parse_models(&models, &models_path)?)?;
+        config
+            .mcp
+            .bind_config_directory(path.parent().unwrap_or(Path::new(".")));
         config.source_path = Some(path);
         config.models_path = Some(models_path);
         Ok(config)
@@ -308,6 +320,7 @@ impl Config {
         file.ensemble.resolve_runtime_commands()?;
         file.session.validate()?;
         file.skills.validate()?;
+        file.mcp.validate()?;
         file.acp.validate()?;
         file.ensemble.validate()?;
         file.command.validate()?;
@@ -325,6 +338,7 @@ impl Config {
             modes: file.modes,
             session: file.session,
             skills: file.skills,
+            mcp: file.mcp,
             theme: file.theme,
             acp: file.acp,
             ensemble: file.ensemble,
@@ -376,11 +390,49 @@ impl Config {
         models_path: &Path,
     ) -> anyhow::Result<Self> {
         crate::skills::parse_skill_config(contents)?;
-        Self::from_files(
+        crate::mcp::parse_mcp_config(contents)?;
+        let mut config = Self::from_files(
             toml::from_str(contents)?,
             parse_models(models, models_path)?,
-        )
+        )?;
+        config
+            .mcp
+            .bind_config_directory(models_path.parent().unwrap_or(Path::new(".")));
+        Ok(config)
     }
+}
+
+/// Read only the shared configuration envelope, permitting partial files for offline commands.
+pub(crate) fn partial_document(contents: &str) -> anyhow::Result<toml::Table> {
+    // Parse unrelated settings as data only, not provider/credential models.
+    // Match the full application's top-level schema, while allowing those
+    // unrelated tables to remain intentionally incomplete for offline use.
+    let document: toml::Table = toml::from_str(contents).map_err(|error: toml::de::Error| {
+        let offset = error.span().map_or(0, |span| span.start);
+        anyhow::anyhow!("invalid config.toml syntax near byte {offset}")
+    })?;
+    for key in document.keys() {
+        anyhow::ensure!(
+            key != "providers",
+            "configuration key {key:?} moved to models.jsonc next to this file"
+        );
+        anyhow::ensure!(
+            matches!(
+                key.as_str(),
+                "session"
+                    | "skills"
+                    | "mcp"
+                    | "theme"
+                    | "acp"
+                    | "ensemble"
+                    | "command"
+                    | "log"
+                    | "modes"
+            ),
+            "unsupported configuration key {key:?}"
+        );
+    }
+    Ok(document)
 }
 
 #[derive(Debug, Serialize, Deserialize)]

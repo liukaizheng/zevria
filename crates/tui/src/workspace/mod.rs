@@ -881,6 +881,11 @@ impl SessionViews {
         if let Some(entries) = self.overlays.skills.event(&event) {
             self.root.replace_skill_entries(entries);
         }
+        if self.overlays.mcp.inspector.event(&event) {
+            self.root
+                .replace_mcp_prompts(&self.overlays.mcp.inspector.prompts);
+            return;
+        }
         let refresh_workspace_header = matches!(&event, SessionEvent::ToolResults { .. });
         let terminal_turn = match &event {
             SessionEvent::TurnCompleted { turn_id, .. }
@@ -1317,7 +1322,18 @@ impl SessionViews {
         if owner.captures {
             self.visible_app_mut().close_composer_edit_group();
             let action = if self.overlays.owns(owner.id.kind) {
-                self.overlays.handle_input(owner, input)
+                let action = self.overlays.handle_input(
+                    owner,
+                    input,
+                    self.root.is_busy(),
+                    self.root.mcp_mode(),
+                );
+                match action {
+                    Some(UiAction::InvokeMcpPrompt(command)) => {
+                        self.root.begin_overlay_mcp_prompt(command)
+                    }
+                    other => other,
+                }
             } else {
                 self.visible_app_mut()
                     .handle_input_on(owner, input, Instant::now())
