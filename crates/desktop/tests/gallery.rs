@@ -44,7 +44,7 @@ mod native {
     };
     use zevria_workflow::{PlanArtifact, PlanId, PlanVersion, PlanWorkflowState};
 
-    const PLAN: &str = "# Gutter-led native redesign\n\n## Goal\n\nMake Zevria's long tool loops easy to scan without changing session behavior. The editor gutter carries speakers and status; everything around it stays quiet.\n\n## Design language\n\n- Warm graphite planes for reading, recessed wells for literal content.\n- Build mint and Plan blue appear only where the mode acts.\n- SF Pro for conversation, **Charter for documents**, Menlo for code.\n\n## Implementation\n\n1. Validate the palette and map every visible Kit slot.\n2. Align the transcript and composer on one content axis.\n3. Preserve element IDs and exercise all existing desktop flows.\n\n```rust\nlet palette = zevria_theme::ZEVRIA_GRAPHITE;\n```\n\n## Validation\n\nRun the native UI tests and render this gallery at both widths. Prompt-prefix regression tests must remain green.\n";
+    const PLAN: &str = "# A single-column session timeline\n\n## Goal\n\nMake Zevria's long tool loops easy to scan without changing session behavior. A tight stack of tool steps gives commands a place without interrupting the answer.\n\n## Design language\n\n- Warm graphite planes for reading, recessed wells for literal content.\n- Build mint and Plan blue appear only where the mode acts.\n- SF Pro for conversation, **Charter for documents**, Menlo for code.\n\n## Implementation\n\n1. Validate the palette and map every visible Kit slot.\n2. Align the transcript and composer on one content axis.\n3. Preserve element IDs and exercise all existing desktop flows.\n\n```rust\nlet palette = zevria_theme::ZEVRIA_GRAPHITE;\n```\n\n## Validation\n\nRun the native UI tests and render this gallery at both widths. Prompt-prefix regression tests must remain green.\n";
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Scene {
         Config,
@@ -66,6 +66,8 @@ mod native {
         ImageRead,
         CodeHeavy,
         TranscriptFolds,
+        CodingSession,
+        CodingSessionExpanded,
         Plan,
         Question,
         QuestionDetail,
@@ -99,6 +101,8 @@ mod native {
                 Self::ImageRead => "image-read",
                 Self::CodeHeavy => "code-heavy-answer",
                 Self::TranscriptFolds => "transcript-folds",
+                Self::CodingSession => "coding-session",
+                Self::CodingSessionExpanded => "coding-session-expanded",
                 Self::Plan => "plan-review",
                 Self::Question => "question",
                 Self::QuestionDetail => "question-detail",
@@ -147,6 +151,19 @@ mod native {
                 }
             }
             return Ok(());
+        }
+        for scene in [Scene::CodingSession, Scene::CodingSessionExpanded] {
+            for (width, height) in [(1240., 840.), (720., 840.), (1920., 1080.)] {
+                for (suffix, tokens) in [("", zevria_theme::ZEVRIA_GRAPHITE), ("-light", light)] {
+                    capture(
+                        scene,
+                        width,
+                        height,
+                        tokens,
+                        &directory.join(format!("{}{suffix}-{}.png", scene.name(), width as u32)),
+                    )?;
+                }
+            }
         }
         for width in [1240., 720.] {
             for scene in [
@@ -393,6 +410,12 @@ mod native {
                     cx.notify();
                 });
             }
+            if matches!(scene, Scene::CodingSession | Scene::CodingSessionExpanded) {
+                controller.update(cx, |c, cx| {
+                    c.model.root.conversation.restore(coding_items());
+                    cx.notify();
+                });
+            }
             if scene == Scene::TranscriptFolds {
                 controller.update(cx, |c, cx| {
                     c.model.root.conversation.restore(fold_items());
@@ -421,7 +444,7 @@ mod native {
                         zevria_transcript::transcript::TranscriptItem::Message(Message::assistant("The plan is ready. Review the document before implementation.")),
                     ]);
                     c.fixture_event(E::PlanStateChanged { state: PlanWorkflowState::Ready { artifact: PlanArtifact {
-                        version: PlanVersion { id: PlanId::new(), revision: 4 }, title: "Gutter-led native redesign of Zevria Desktop".into(),
+                        version: PlanVersion { id: PlanId::new(), revision: 4 }, title: "A single-column session timeline of Zevria Desktop".into(),
                         markdown: PLAN.into(),source_turn_id: TurnId::new(1),
                     }}},cx);
                 });
@@ -432,7 +455,7 @@ mod native {
                     id: QuestionRequestId::new("gallery-question"), source_label: Some("Explore: desktop layout".into()), dismissible: true,
                     questions: vec![QuestionPrompt { id: "approach".into(), header: "Review approach".into(),
                         question: "How should the transcript present completed tool calls?".into(), kind: QuestionPromptKind::SingleSelect { allow_other: true },
-                        options: vec![QuestionOption { label: "Compact gutter rows".into(),description: "Keep the log readable during long tool loops.".into(), detail: None },
+                        options: vec![QuestionOption { label: "Compact tool steps".into(),description: "Keep the log readable during long tool loops.".into(), detail: None },
                             QuestionOption { label: "Show all details".into(),description: "Expand every call's input and output.".into(), detail: None }], required: true, default: None },
                         QuestionPrompt { id: "notes".into(),header: "Additional notes".into(),question: "Anything else to keep in mind?".into(),
                             kind: QuestionPromptKind::Text { min_length: None, max_length: None }, options: vec![],required: false,default: None }],
@@ -487,36 +510,51 @@ mod native {
             Ok((window,controller))
         })?;
         settle(&mut cx, window)?;
-        if scene == Scene::ImageRead {
+        if matches!(
+            scene,
+            Scene::ImageRead
+                | Scene::TranscriptFolds
+                | Scene::CodingSession
+                | Scene::CodingSessionExpanded
+        ) {
             cx.update_window(window, |_, window, cx| {
-                window.dispatch_action(Box::new(actions::JumpToBeginning), cx);
+                window.dispatch_action(Box::new(actions::JumpToBeginning), cx)
             })?;
             settle(&mut cx, window)?;
-            // Close the first read through its normal disclosure; leave the other cases open.
-            let block = cx.update_window(window, |_, window, cx| {
-                // The prompt also has a disclosure; scope the click to the first tool row.
-                let output = window
-                    .find_all("copy-output")
-                    .into_iter()
-                    .next()
-                    .expect("the first image read has an output action");
-                let block = output
-                    .path()
+        }
+        if matches!(scene, Scene::ImageRead | Scene::CodingSessionExpanded) {
+            let keys = cx.update(|cx| {
+                use zevria_presentation::{blocks::tool_argument, conversation::HistoryEntry};
+                let conversation = &controller.read(cx).model.root.conversation;
+                conversation
+                    .history()
                     .iter()
-                    .rev()
-                    .find(|id| matches!(id, gpui_kit::ElementId::View(_)))
-                    .expect("copy output belongs to a block view")
-                    .clone();
-                window.within(block.clone()).click("block-disclosure", cx);
-                block
-            })?;
-            settle(&mut cx, window)?;
-            cx.update_window(window, |_, window, _| {
-                assert_eq!(
-                    window.within(block).find("block-disclosure").expanded(),
-                    Some(false)
-                );
-            })?;
+                    .filter_map(|entry| match entry {
+                        HistoryEntry::Conversation(entry) => Some(&entry.blocks),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter_map(|block| {
+                        let (call, tool) = block.native_tool()?;
+                        let shown = if scene == Scene::ImageRead {
+                            call.function.name == READ_IMAGE_TOOL_NAME
+                                && !call.id.wire().ends_with("overview.png")
+                        } else {
+                            tool_argument(tool, "command").as_deref() == Some("git status --short")
+                        };
+                        shown.then(|| format!("{:?}-{}", conversation.epoch(), block.id.0))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert!(!keys.is_empty());
+            for key in keys {
+                cx.update_window(window, |_, window, cx| {
+                    let mut row = window.within(key);
+                    assert_eq!(row.find("block-disclosure").expanded(), Some(false));
+                    row.click("block-disclosure", cx);
+                })?;
+                settle(&mut cx, window)?;
+            }
         }
         if scene == Scene::Jobs && width == 1240. {
             // Show a docked inspector at 1240 px and an overlay at 720 px.
@@ -537,13 +575,6 @@ mod native {
                 window.click(("question-note", 0usize), cx);
                 window.render_frame(cx);
                 window.input("Only for the first release", cx);
-            })?;
-            settle(&mut cx, window)?;
-        }
-        if scene == Scene::TranscriptFolds {
-            cx.update_window(window, |_, window, cx| {
-                window.dispatch_action(Box::new(actions::FoldEarlierContent), cx);
-                window.dispatch_action(Box::new(actions::JumpToBeginning), cx);
             })?;
             settle(&mut cx, window)?;
         }
@@ -709,6 +740,75 @@ mod native {
                 AssistantContent::text("The targeted restore checks passed. The workspace check was stopped before it finished.\n\nThe prompt prefix is unchanged."),
             ]))),
         ]
+    }
+    fn coding_items() -> Vec<zevria_transcript::transcript::TranscriptItem> {
+        use serde_json::json;
+        use zevria_transcript::transcript::TranscriptItem as T;
+        let step = |id: &str, name: &str, args, output: &str, detail| {
+            let call = ToolCall::new(
+                CallId::from_wire(id),
+                ToolFunction::new(ToolName::new(name).unwrap(), args),
+            );
+            [
+                T::Message(Message::Assistant(AssistantMessage::new(vec![
+                    AssistantContent::ToolCall(call),
+                ]))),
+                T::ToolResults {
+                    message: Message::tool_result(
+                        CallId::from_wire(id),
+                        ToolName::new(name).unwrap(),
+                        output,
+                    ),
+                    metadata: vec![ToolResultMetadata {
+                        id: id.into(),
+                        call_id: None,
+                        tool_name: name.into(),
+                        outcome: ToolCallOutcome::Success,
+                        diagnostic: None,
+                        detail,
+                    }],
+                    skill_applications: vec![],
+                },
+            ]
+        };
+        let thought = |text| {
+            T::Message(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(rig_core::message::Reasoning::new(text)),
+            ])))
+        };
+        let mut items = vec![
+            T::Message(Message::user(
+                "Fix the session preview so metadata can’t hide the first prompt. Keep the transcript format unchanged.",
+            )),
+            thought(
+                "Trace the restore path. The reader limits the scan rather than looking for a user message.",
+            ),
+        ];
+        items.extend(step("read", "read", json!({"file_path":"crates/transcript/src/transcript.rs","start_line":92,"end_line":125}), "let preview = lines.take(16).find_map(prompt_preview);", None));
+        items.push(thought("Match the first readable prompt. The bounded scan is not needed because the projection already has the parsed items."));
+        items.extend(step("edit", "edit", json!({"file_path":"crates/transcript/src/transcript.rs","old_string":"lines.take(16)","new_string":"lines"}), "Edited transcript.rs", Some(ToolResultDetail::FileChanges(vec![FileChangeOutput {
+            path: "crates/transcript/src/transcript.rs".into(), change: FileChange::Update { unified_diff: "--- a/crates/transcript/src/transcript.rs\n+++ b/crates/transcript/src/transcript.rs\n@@ -92 +92 @@\n-    let preview = lines.take(16).find_map(prompt_preview);\n+    let preview = lines.find_map(prompt_preview);\n".into(), move_path: None },
+        }]))));
+        items.extend(step(
+            "fmt",
+            "command",
+            json!({"command":"cargo fmt"}),
+            "exit_code: 0\nduration: 1.8s",
+            None,
+        ));
+        items.push(T::Message(Message::assistant("The preview now finds the first readable prompt even after a long metadata prefix. The persisted transcript format is unchanged.")));
+        items.push(T::Message(Message::user(
+            "Check the worktree and tell me what changed.",
+        )));
+        items.push(thought(
+            "Check the file list. Keep unrelated changes out of the summary.",
+        ));
+        items.extend(step("status", "command", json!({"command":"git status --short"}), "exit_code: 0\nduration: 0.1s\n<stdout>\n M crates/transcript/src/transcript.rs\n M crates/transcript/src/transcript/test_support.rs\n M crates/desktop/src/ui/transcript.rs\n</stdout>", None));
+        items.push(thought(
+            "Separate the transcript fix from the existing Desktop changes.",
+        ));
+        items.push(T::Message(Message::assistant("The transcript reader and its regression fixture changed. The Desktop timeline also has pre-existing edits; I left those alone.")));
+        items
     }
     fn model_scene(
         controller: &Entity<SessionController>,
@@ -990,7 +1090,7 @@ mod native {
                 c.fixture_event(E::Intermediate { turn_id,message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(call)])),attempt_id: None },cx);
                 if id != "command-live" {
                     c.fixture_event(E::ToolResults { turn_id,message: Message::tool_result(CallId::from_wire(id),ToolName::new(name).unwrap(),
-                        if id == "command-fail" { "assertion failed: restored preview is empty" } else if id == "edit" { "Updated transcript preview scanning." } else { "All 18 tests passed." }),
+                        if id == "command-fail" { "exit_code: 101\nduration: 2.4s\n<stderr>\nassertion failed: restored preview is empty\n</stderr>" } else if id == "edit" { "Updated transcript preview scanning." } else { "exit_code: 0\nduration: 1.8s\n<stdout>\nAll 18 tests passed.\n</stdout>" }),
                         metadata: vec![ToolResultMetadata { id: id.into(),call_id: None,tool_name: name.into(),
                             outcome: if id == "command-fail" { ToolCallOutcome::Error } else { ToolCallOutcome::Success },diagnostic: None,
                             detail: if id == "edit" { Some(ToolResultDetail::FileChanges(vec![FileChangeOutput { path: "crates/transcript/src/transcript.rs".into(),

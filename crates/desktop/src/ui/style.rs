@@ -13,10 +13,8 @@ use zevria_theme::ZevriaTheme;
 
 pub const SIDEBAR: f32 = 256.;
 pub const TITLE: f32 = 40.;
-pub const GUTTER: f32 = 96.;
-pub const GAP: f32 = 24.;
-pub const CONTENT: f32 = 880.;
-pub const PROSE: f32 = 680.;
+pub const COLUMN: f32 = 800.;
+pub const COLUMN_INSET: f32 = 16.;
 pub const UI_FONT: &str = ".SystemUIFont";
 #[cfg(target_os = "macos")]
 pub const MONO_FONT: &str = "Menlo";
@@ -42,7 +40,7 @@ impl Type {
 }
 pub const READING: Type = Type {
     size: 14.,
-    leading: 22.,
+    leading: 23.,
 };
 pub const DOCUMENT: Type = Type {
     size: 15.,
@@ -89,34 +87,11 @@ pub fn kind_label(kind: zevria_foundation::SubtaskKind) -> &'static str {
     }
 }
 
-/// Shared column geometry: at most GUTTER + GAP + CONTENT (1000 px), with
-/// extra pane width split into equal side margins.
-#[derive(Clone, Copy, Default)]
-pub struct Measure {
-    pub compact: bool,
-}
+/// The transcript, composer, and question dock share exactly one reading axis.
+pub struct Measure;
 impl Measure {
-    pub fn column(self) -> Div {
-        div()
-            .w_full()
-            .max_w(px(if self.compact {
-                CONTENT
-            } else {
-                GUTTER + GAP + CONTENT
-            }))
-            .mx_auto()
-            .min_w_0()
-    }
-    pub fn row(self) -> Div {
-        self.column()
-            .flex()
-            .gap(px(GAP))
-            .when(self.compact, |row| row.flex_col().gap(px(4.)))
-    }
-    pub fn gutter(self) -> Div {
-        label()
-            .flex_shrink_0()
-            .when(!self.compact, |g| g.w(px(GUTTER)).text_right())
+    pub fn column() -> Div {
+        div().w_full().max_w(px(COLUMN)).mx_auto().min_w_0()
     }
 }
 pub fn body() -> Div {
@@ -148,36 +123,40 @@ pub fn focus_ring(radius: f32, cx: &App) -> Div {
         .border_color(tones(cx).focus)
         .rounded(px(radius + 4.))
 }
-/// The line covers the entire block, including its vertical padding.
-pub fn thread_segment(dashed: bool, cx: &App) -> Div {
-    div()
-        .absolute()
-        .left(px(-16.))
-        .top_0()
-        .bottom_0()
-        .border_l_1()
-        .border_color(tones(cx).thread)
-        .when(dashed, |line| line.border_dashed())
+pub fn step_icon(icon: gpui_kit::assets::IconName, ink: Hsla) -> gpui_kit::component::Icon {
+    gpui_kit::component::Icon::new(icon)
+        .size(px(14.))
+        .text_color(ink)
 }
-pub fn thread_node(status: StatusIcon, ink: Hsla, cx: &App) -> Div {
-    thread_marker(status.glyph(frame(cx)), glyph_color(status, ink, cx), cx)
+
+pub fn step_status(status: StatusIcon, ink: Hsla, cx: &App) -> gpui_kit::component::Icon {
+    use gpui_kit::assets::IconName;
+    let icon = match status {
+        StatusIcon::Running => IconName::LoaderCircle,
+        StatusIcon::Done | StatusIcon::Updated => IconName::Check,
+        StatusIcon::Failed => IconName::CircleX,
+        StatusIcon::Denied | StatusIcon::Interrupted => IconName::TriangleAlert,
+        StatusIcon::Pending => IconName::Clock,
+        _ => IconName::CircleMinus,
+    };
+    let icon = step_icon(icon, glyph_color(status, ink, cx));
+    if status == StatusIcon::Running {
+        icon.rotate(Radians(
+            (frame(cx) % 8) as f32 * std::f32::consts::FRAC_PI_4,
+        ))
+    } else {
+        icon
+    }
 }
-pub fn thread_marker(glyph: impl Into<SharedString>, ink: Hsla, cx: &App) -> Div {
-    div()
-        .absolute()
-        .left(px(-24.))
-        .top(px(8.))
-        .w(px(16.))
-        .flex()
-        .justify_center()
-        .bg(palette(cx).surfaces.canvas)
-        .child(
-            label()
-                .text_size(px(14.))
-                .text_color(ink)
-                .child(glyph.into()),
-        )
+
+pub fn step_badge(text: impl Into<SharedString>, ink: Hsla) -> Div {
+    meta()
+        .whitespace_nowrap()
+        .flex_shrink_0()
+        .text_color(ink)
+        .child(text.into())
 }
+
 pub(super) fn key_hint(shortcut: Shortcut, label: &'static str, cx: &App) -> Div {
     meta()
         .flex()

@@ -17,7 +17,6 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::*, *};
 use std::path::PathBuf;
-use zevria_presentation::fold::TurnFold;
 
 pub(super) enum Replacement {
     New,
@@ -56,6 +55,7 @@ pub struct DesktopWindow {
     _input: Subscription,
     _controller: Subscription,
     _appearance: Subscription,
+    _transcript: Subscription,
 }
 impl DesktopWindow {
     pub fn new(
@@ -122,6 +122,7 @@ impl DesktopWindow {
         let window_focus = cx.focus_handle();
         let transcript =
             cx.new(|cx| TranscriptView::new(controller.clone(), window_focus.clone(), window, cx));
+        let transcript_watch = cx.observe(&transcript, |_, _, cx| cx.notify());
         let weak = controller.downgrade();
         // Kit's Windows caption button posts WM_CLOSE, so both it and OS close
         // requests enter the same ordered shutdown as the Quit action.
@@ -161,6 +162,7 @@ impl DesktopWindow {
             _input: input,
             _controller: watch,
             _appearance: appearance,
+            _transcript: transcript_watch,
         };
         this.sync(window, cx);
         this
@@ -510,21 +512,21 @@ impl DesktopWindow {
         }
         main = main.child(div().flex_1());
         if transcript_shown {
+            let (label, shortcut) = if self.transcript.read(cx).has_expanded_details() {
+                ("Collapse details", Shortcut::COLLAPSE_ALL)
+            } else {
+                ("Expand details", Shortcut::EXPAND_ALL)
+            };
             main = main.child(
-                Button::new("fold-earlier-content")
+                Button::new("toggle-details")
                     .ghost()
                     .small()
-                    .icon(IconName::BookOpen)
-                    .when(!self.compact, |button| button.label("Fold earlier content"))
-                    .accessibility_label("Fold earlier content")
-                    .tooltip(format!(
-                        "Fold earlier content {}",
-                        Shortcut::FOLD_EARLIER.label()
-                    ))
+                    .icon(gpui_kit::assets::IconName::ChevronsUpDown)
+                    .when(!self.compact, |button| button.label(label))
+                    .accessibility_label(label)
+                    .tooltip(format!("{label} {}", shortcut.label()))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.with_transcript(cx, |view, cx| {
-                            view.fold_turns(TurnFold::AllFinals, window, cx)
-                        });
+                        this.with_transcript(cx, |view, cx| view.toggle_all_details(window, cx));
                     })),
             );
         }
@@ -616,11 +618,7 @@ impl Render for DesktopWindow {
                 0.
             }
             < 760.;
-        if compact != self.compact {
-            self.compact = compact;
-            self.transcript
-                .update(cx, |view, cx| view.set_compact(compact, cx));
-        }
+        self.compact = compact;
         let mut root = div()
             .id("zevria-desktop")
             .test_support()
@@ -676,30 +674,19 @@ impl Render for DesktopWindow {
             }))
             .on_action(
                 cx.listener(|this, _: &actions::ExpandAllThinking, window, cx| {
-                    this.with_transcript(cx, |view, cx| view.thinking(true, window, cx));
+                    this.with_transcript(cx, |view, cx| view.set_all_thinking(true, window, cx));
                 }),
             )
             .on_action(
                 cx.listener(|this, _: &actions::CollapseAllThinking, window, cx| {
-                    this.with_transcript(cx, |view, cx| view.thinking(false, window, cx));
+                    this.with_transcript(cx, |view, cx| view.set_all_thinking(false, window, cx));
                 }),
             )
-            .on_action(
-                cx.listener(|this, _: &actions::FoldEarlierContent, window, cx| {
-                    this.with_transcript(cx, |view, cx| {
-                        view.fold_turns(TurnFold::AllFinals, window, cx)
-                    });
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &actions::FoldOlderTurns, window, cx| {
-                    this.with_transcript(cx, |view, cx| {
-                        view.fold_turns(TurnFold::LastFinal, window, cx)
-                    });
-                }),
-            )
-            .on_action(cx.listener(|this, _: &actions::UnfoldAll, window, cx| {
-                this.with_transcript(cx, |view, cx| view.unfold_all(window, cx));
+            .on_action(cx.listener(|this, _: &actions::CollapseAll, window, cx| {
+                this.with_transcript(cx, |view, cx| view.collapse_all(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &actions::ExpandAll, window, cx| {
+                this.with_transcript(cx, |view, cx| view.expand_all(window, cx));
             }))
             .on_action(cx.listener(|this, _: &actions::PreviousTurn, _, cx| {
                 if this.controller.read(cx).model.models.is_open() {

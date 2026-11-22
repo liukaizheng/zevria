@@ -1,10 +1,381 @@
-//! Bounded tool-log display; raw copy payloads remain exact.
+//! Structured, display-only views for known desktop tool steps.
+use super::command::CommandOutput;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use gpui_kit::component::diff::DiffFile;
-use zevria_foundation::{FileChange, FileChangeOutput, QuestionResponse};
-use zevria_presentation::blocks::{
-    NativeToolState, question_answer_text, question_note_lines, question_response,
+use rig_core::message::ToolCall;
+use std::{ops::Range, sync::Arc, time::SystemTime};
+use zevria_content::{ImageReadSummary, readable::sanitize_readable};
+use zevria_foundation::{
+    CommandJobId, CommandJobSnapshot, CommandJobStatus, FileChange, FileChangeOutput,
+    QuestionResponse, READ_IMAGE_TOOL_NAME,
 };
-pub fn patch(changes: &[FileChangeOutput]) -> String {
+use zevria_presentation::{
+    blocks::*,
+    jobs::JobsInspector,
+    shell::{self, ShellToken},
+    status_icon::StatusIcon,
+};
+
+pub fn tool_label(name: &str) -> &str {
+    match name {
+        "command" => "Command",
+        "command_status" => "Check job",
+        "command_terminate" => "Stop job",
+        "edit" => "Edit",
+        "write" => "Write",
+        "delete" => "Delete",
+        "read" => "Read",
+        READ_IMAGE_TOOL_NAME => "Image",
+        "skill" => "Skill",
+        "skill_read" => "Read skill",
+        "web_search" => "Search",
+        "question" => "Question",
+        "create_plan" | "update_plan" | "read_plan" | "submit_plan" => "Plan draft",
+        "task" => "Tasks",
+        "reconcile_reports" => "Reconcile",
+        "launch_subtasks" => "Subtasks",
+        _ => name,
+    }
+}
+
+#[derive(Debug)]
+pub struct JobMeta {
+    pub id: CommandJobId,
+    pub running: bool,
+    pub foreground: bool,
+    pub status: CommandJobStatus,
+    pub started_at: SystemTime,
+}
+impl From<&CommandJobSnapshot> for JobMeta {
+    fn from(job: &CommandJobSnapshot) -> Self {
+        Self {
+            id: job.id.clone(),
+            running: JobsInspector::can_terminate(job),
+            foreground: job.mode == zevria_foundation::CommandJobMode::Foreground,
+            status: job.status.clone(),
+            started_at: job.started_at,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ToolDetail {
+    Command {
+        input: String,
+        duration: Option<String>,
+        exit: Option<String>,
+        lines: Option<usize>,
+    },
+    File,
+    List {
+        introduction: Option<String>,
+        items: Vec<ListItem>,
+    },
+    Questions(Vec<QuestionDetail>),
+    Image(Option<ImageReadSummary>),
+    Standard {
+        markdown: bool,
+        show_output: bool,
+    },
+}
+
+#[derive(Debug)]
+pub struct ListItem {
+    pub status: Option<StatusIcon>,
+    pub text: String,
+    pub muted: bool,
+}
+
+#[derive(Debug)]
+pub struct QuestionDetail {
+    pub question: String,
+    pub options: Vec<String>,
+    pub answer: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ToolPresentation {
+    pub name: String,
+    pub summary: String,
+    pub status: StatusIcon,
+    pub highlights: Vec<(Range<usize>, ShellToken)>,
+    pub detail: ToolDetail,
+    pub body: String,
+    pub diagnostic: Option<String>,
+    pub changes: Arc<[FileChangeOutput]>,
+    pub added: usize,
+    pub removed: usize,
+    pub background: bool,
+    pub job: Option<JobMeta>,
+}
+
+impl ToolPresentation {
+    pub fn new(tool: &PresentedTool, raw_output: Option<&str>) -> Self {
+        match tool {
+            PresentedTool::Native { call, state } => Self::native(call, state, raw_output),
+            PresentedTool::Acp(tool) => {
+                let summary = tool
+                    .locations
+                    .first()
+                    .map(|l| l.path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let changes = tool.metadata.as_ref().map_or(&[][..], |m| m.file_changes());
+                let (added, removed) = counts(changes);
+                let diagnostic = tool
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.diagnostic.as_deref())
+                    .map(sanitize_readable);
+                Self {
+                    name: tool.title.clone(),
+                    summary,
+                    status: tool.presented_status().icon(),
+                    highlights: vec![],
+                    detail: if changes.is_empty() {
+                        ToolDetail::Standard {
+                            markdown: false,
+                            show_output: tool.content.is_empty(),
+                        }
+                    } else {
+                        ToolDetail::File
+                    },
+                    body: bounded(&tool.content.join("\n")),
+                    diagnostic,
+                    changes: changes.into(),
+                    added,
+                    removed,
+                    background: false,
+                    job: None,
+                }
+            }
+        }
+    }
+
+    fn native(call: &ToolCall, state: &NativeToolState, output: Option<&str>) -> Self {
+        let name = call.function.name.as_str();
+        let mut status = native_header_status(call, state);
+        let mut summary = tool_summary(name, state.arguments.as_ref());
+        let mut highlights = Vec::new();
+        let mut body = String::new();
+        let mut changes = state
+            .metadata
+            .as_ref()
+            .map_or_else(Vec::new, |m| m.file_changes().to_vec());
+        let mut diagnostic = state
+            .metadata
+            .as_ref()
+            .and_then(|m| m.diagnostic.as_deref())
+            .map(sanitize_readable);
+        let failed = state.result.as_ref().is_some_and(|result| result.is_error);
+        if failed && status == StatusIcon::Unknown {
+            status = StatusIcon::Failed;
+        }
+        let mut detail = match name {
+            "command" | "command_status" | "command_terminate" => {
+                let parsed = output.map(CommandOutput::parse);
+                // A successful tool invocation can still report a failed process.
+                if matches!(status, StatusIcon::Done | StatusIcon::Unknown)
+                    && let Some(CommandOutput::Envelope(result)) = &parsed
+                {
+                    let code = result.exit_code.and_then(|code| code.parse::<i32>().ok());
+                    if result.signal.is_some() || code.is_some_and(|code| code != 0) {
+                        status = StatusIcon::Failed;
+                    } else if code == Some(0) {
+                        status = StatusIcon::Done;
+                    }
+                }
+                let input = if name == "command" {
+                    let display = shell::display(&summary);
+                    summary = display.text;
+                    highlights = display.spans;
+                    tool_argument(state, "command").unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                ToolDetail::Command {
+                    input,
+                    duration: parsed
+                        .as_ref()
+                        .and_then(CommandOutput::duration)
+                        .map(str::to_owned),
+                    exit: parsed.as_ref().and_then(CommandOutput::exit_badge),
+                    lines: parsed.as_ref().and_then(CommandOutput::output_line_count),
+                }
+            }
+            "edit" | "write" | "delete" => {
+                if changes.is_empty() || failed {
+                    body = output.map(plain_diagnostic).unwrap_or_default();
+                }
+                ToolDetail::File
+            }
+            READ_IMAGE_TOOL_NAME => {
+                changes.clear();
+                if failed || native_tool_status(state).unsuccessful() {
+                    body = output.map(plain_diagnostic).unwrap_or_default();
+                }
+                ToolDetail::Image(image_read_summary(state))
+            }
+            "task" | "reconcile_reports" => {
+                if let Some(list) = native_list(call, state) {
+                    ToolDetail::List {
+                        introduction: list.explanation,
+                        items: list
+                            .rows
+                            .into_iter()
+                            .map(|row| ListItem {
+                                status: match row.marker {
+                                    ListMarker::Status(s) => Some(s),
+                                    ListMarker::Disagreement => None,
+                                },
+                                text: bounded(&format!("{}{}", row.text, row.annotation)),
+                                muted: row.muted,
+                            })
+                            .collect(),
+                    }
+                } else {
+                    ToolDetail::Standard {
+                        markdown: false,
+                        show_output: true,
+                    }
+                }
+            }
+            "question" => {
+                let entries = question_details(state);
+                if let Some(answer) = entries
+                    .first()
+                    .and_then(|question| question.answer.as_deref())
+                {
+                    summary = one_line(&format!("{summary} → {answer}"));
+                }
+                ToolDetail::Questions(entries)
+            }
+            "create_plan" => {
+                body = tool_argument(state, "markdown").unwrap_or_default();
+                ToolDetail::Standard {
+                    markdown: true,
+                    show_output: body.is_empty() || failed,
+                }
+            }
+            "update_plan" | "submit_plan" | "read_plan" | "skill" | "skill_read" => {
+                ToolDetail::Standard {
+                    markdown: false,
+                    show_output: true,
+                }
+            }
+            "launch_subtasks" => {
+                body = launch_batch_notice(state).map_or_else(String::new, |notice| match notice {
+                    LaunchBatchNotice::Rejected { denied: true } => "Subtask batch denied".into(),
+                    LaunchBatchNotice::Rejected { denied: false } => {
+                        "Subtask batch rejected".into()
+                    }
+                    LaunchBatchNotice::Ended(_) => "Subtask batch ended".into(),
+                    LaunchBatchNotice::Unlaunched { missing, requested } => {
+                        format!("{missing} of {requested} requested subtasks were not launched")
+                    }
+                });
+                ToolDetail::Standard {
+                    markdown: false,
+                    show_output: failed,
+                }
+            }
+            _ => {
+                if output.is_none() {
+                    body = state
+                        .arguments
+                        .as_ref()
+                        .and_then(serde_json::Value::as_object)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|(k, v)| {
+                            v.as_str()
+                                .filter(|s| *s != summary)
+                                .map(|s| format!("{k}: {s}"))
+                        })
+                        .take(8)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                }
+                ToolDetail::Standard {
+                    markdown: false,
+                    show_output: true,
+                }
+            }
+        };
+        if let Some(draft) = state
+            .metadata
+            .as_ref()
+            .and_then(|m| m.detail.as_ref())
+            .and_then(|d| d.plan_draft())
+        {
+            summary = one_line(&draft.title);
+            body = format!(
+                "Revision {} · {} · {}",
+                draft.target_revision,
+                draft
+                    .sequence
+                    .map_or_else(|| "Submitted".into(), |n| format!("Draft {n}")),
+                zevria_presentation::jobs::byte_label(draft.bytes)
+            );
+            if let Some(change) = &draft.change {
+                changes.push(FileChangeOutput {
+                    path: draft
+                        .projection
+                        .clone()
+                        .unwrap_or_else(|| "Plan working copy".into()),
+                    change: change.clone(),
+                });
+            }
+            detail = ToolDetail::Standard {
+                markdown: false,
+                show_output: failed,
+            };
+        }
+        if diagnostic.as_deref() == Some(body.as_str()) {
+            diagnostic = None;
+        }
+        let (added, removed) = counts(&changes);
+        Self {
+            name: name.to_owned(),
+            summary,
+            status,
+            highlights,
+            detail,
+            body: bounded(&body),
+            diagnostic,
+            changes: changes.into(),
+            added,
+            removed,
+            background: state.is_background_command(),
+            job: state.command_job.as_ref().map(JobMeta::from),
+        }
+    }
+}
+
+pub fn bounded(text: &str) -> String {
+    let mut value = text.chars().take(24_000).collect::<String>();
+    if value.len() < text.len() {
+        value.push_str("\nShowing the first 24,000 characters. Copy includes everything.");
+    }
+    value
+}
+
+pub fn plain_diagnostic(text: &str) -> String {
+    sanitize_readable(text.strip_prefix("status: error\nerror: ").unwrap_or(text))
+}
+
+fn one_line(value: &str) -> String {
+    let line = value.lines().next().unwrap_or_default();
+    let mut chars = line.chars();
+    let mut text: String = chars.by_ref().take(240).collect();
+    if chars.next().is_some() {
+        text.push('…');
+    }
+    text
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn patch(changes: &[FileChangeOutput]) -> String {
     let mut patch = String::new();
     for file in changes {
         let path = file.path.to_string_lossy();
@@ -46,8 +417,9 @@ pub fn patch(changes: &[FileChangeOutput]) -> String {
     }
     patch
 }
-pub fn parse(changes: Vec<FileChangeOutput>) -> Result<Vec<DiffFile>, String> {
-    let patch = patch(&changes);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn parse(changes: &[FileChangeOutput]) -> Result<Vec<DiffFile>, String> {
+    let patch = patch(changes);
     if patch.len() > 131_072 {
         return Err(
             "This diff is larger than 128 KiB, so it isn't shown. Copy the output to see it."
@@ -56,38 +428,11 @@ pub fn parse(changes: Vec<FileChangeOutput>) -> Result<Vec<DiffFile>, String> {
     }
     DiffFile::parse(&patch).map_err(|e| e.to_string())
 }
-pub fn summary(changes: &[FileChangeOutput]) -> String {
-    changes
-        .iter()
-        .map(|file| {
-            let (added, removed) = match &file.change {
-                FileChange::Add { content } => (content.lines().count(), 0),
-                FileChange::Delete { content } => (0, content.lines().count()),
-                FileChange::Update { unified_diff, .. } => (
-                    unified_diff
-                        .lines()
-                        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-                        .count(),
-                    unified_diff
-                        .lines()
-                        .filter(|l| l.starts_with('-') && !l.starts_with("---"))
-                        .count(),
-                ),
-                FileChange::Omitted { added, removed, .. } => (*added, *removed),
-            };
-            format!("{}  +{added} −{removed}", file.path.display())
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// A single literal summary, independent of display titles and tool lifecycle.
-/// Malformed/partial arguments produce a quiet empty summary, never a panic or
-/// an unbounded JSON preview. Copy payloads are not passed through this function.
 pub fn tool_summary(name: &str, arguments: Option<&serde_json::Value>) -> String {
-    let Some(args) = arguments.and_then(serde_json::Value::as_object) else {
-        return String::new();
-    };
+    let empty = serde_json::Map::new();
+    let args = arguments
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or(&empty);
     let string = |key: &str| args.get(key).and_then(serde_json::Value::as_str);
     let count = |key: &str| {
         args.get(key)
@@ -96,6 +441,26 @@ pub fn tool_summary(name: &str, arguments: Option<&serde_json::Value>) -> String
     };
     let value = match name {
         "command" => string("command").unwrap_or_default().into(),
+        "command_status" => string("id").unwrap_or("All jobs").into(),
+        "command_terminate" => string("id").unwrap_or_default().into(),
+        "read" => {
+            let path = string("file_path")
+                .or_else(|| string("path"))
+                .unwrap_or_default();
+            let number = |key| args.get(key).and_then(serde_json::Value::as_u64);
+            let range = args.get("line_range");
+            let start = number("start_line")
+                .or_else(|| number("offset"))
+                .or_else(|| range?.get(0)?.as_u64());
+            let end = number("end_line")
+                .or_else(|| range?.get(1)?.as_u64())
+                .or_else(|| start?.checked_add(number("limit")?.checked_sub(1)?));
+            match (start, end) {
+                (Some(a), Some(b)) => format!("{path}:{a}–{b}"),
+                (Some(a), None) | (None, Some(a)) => format!("{path}:{a}"),
+                _ => path.into(),
+            }
+        }
         "edit" | "write" | "delete" | "read_image" => string("file_path")
             .or_else(|| string("path"))
             .unwrap_or_default()
@@ -144,13 +509,7 @@ pub fn tool_summary(name: &str, arguments: Option<&serde_json::Value>) -> String
             .unwrap_or_default()
             .into(),
     };
-    value
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .take(240)
-        .collect()
+    one_line(&value)
 }
 
 pub fn counts(changes: &[FileChangeOutput]) -> (usize, usize) {
@@ -173,6 +532,7 @@ pub fn counts(changes: &[FileChangeOutput]) -> (usize, usize) {
         (a + added, r + removed)
     })
 }
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn diff_height(changes: &[FileChangeOutput]) -> f32 {
     let lines: usize = changes
         .iter()
@@ -185,70 +545,50 @@ pub fn diff_height(changes: &[FileChangeOutput]) -> f32 {
     (lines as f32 * 20. + 40.).clamp(120., 420.)
 }
 
-/// Human-oriented views for known control tools, not a second tool schema or
-/// dispatcher. Missing/malformed data falls back to exact generic JSON.
-pub fn details(name: &str, state: &NativeToolState) -> Option<(String, bool)> {
-    use zevria_presentation::blocks::{LaunchBatchNotice, launch_batch_notice, tool_argument};
-    match name {
-        "question" => question_details(state).map(|body| (body, true)),
-        "skill" | "skill_read" => {
-            let skill = tool_argument(state,"skill")?;
-            let resource = tool_argument(state,"resource").map(|r|format!("\nResource: {r}")).unwrap_or_default();
-            Some((format!("Skill: {skill}{resource}"),true))
-        }
-        "create_plan" => tool_argument(state,"markdown").map(|markdown|(markdown,false)),
-        "update_plan" => Some(("Updating the stored Plan working copy; no workspace file is being edited.".into(),true)),
-        "read_plan" => Some(("Reading the stored Plan working copy.".into(),true)),
-        "submit_plan" => Some(("Submitting the stored Plan for your review. Only an authoritative Ready snapshot enables implementation.".into(),true)),
-        "launch_subtasks" => launch_batch_notice(state).map(|notice| (match notice {
-            LaunchBatchNotice::Rejected { denied } => if denied { "Subtask batch denied".into() } else { "Subtask batch rejected".into() },
-            LaunchBatchNotice::Ended(icon) => format!("{} Subtask batch ended", icon.glyph(0)),
-            LaunchBatchNotice::Unlaunched { missing, requested } => format!("{missing} of {requested} requested subtasks were not launched"),
-        },true)),
-        _ => None,
-    }
-}
-
-fn question_details(state: &NativeToolState) -> Option<String> {
-    use std::fmt::Write as _;
-
-    let questions = state.arguments.as_ref()?.get("questions")?.as_array()?;
+fn question_details(state: &NativeToolState) -> Vec<QuestionDetail> {
+    let Some(questions) = state
+        .arguments
+        .as_ref()
+        .and_then(|args| args.get("questions"))
+        .and_then(|v| v.as_array())
+    else {
+        return vec![];
+    };
     let answers = match question_response(state) {
         Some(QuestionResponse::Answered { answers }) => answers,
-        _ => Vec::new(),
+        _ => vec![],
     };
-    let entries = questions
+    questions
         .iter()
         .map(|prompt| {
-            let text = prompt
+            let question = prompt
                 .get("question")
-                .and_then(|value| value.as_str())
+                .and_then(|v| v.as_str())
                 .unwrap_or_default();
             let options = prompt
                 .get("options")
-                .and_then(|value| value.as_array())
+                .and_then(|v| v.as_array())
                 .into_iter()
                 .flatten()
                 .filter_map(|option| option.get("label")?.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let mut detail = format!("{text}\n{options}");
-            if let Some(id) = prompt.get("id").and_then(|value| value.as_str())
-                && let Some(answer) = answers.iter().find(|answer| answer.id == id)
-            {
-                write!(detail, "\nAnswer: {}", question_answer_text(answer))
-                    .expect("write to String");
-                if let Some(note) = &answer.note {
-                    for line in question_note_lines(note) {
-                        detail.push('\n');
-                        detail.push_str(&line);
-                    }
-                }
+                .map(sanitize_readable)
+                .collect();
+            let answer = prompt
+                .get("id")
+                .and_then(|v| v.as_str())
+                .and_then(|id| answers.iter().find(|answer| answer.id == id));
+            QuestionDetail {
+                question: sanitize_readable(question),
+                options,
+                answer: answer
+                    .map(question_answer_text)
+                    .map(|s| sanitize_readable(&s)),
+                note: answer
+                    .and_then(|a| a.note.as_deref())
+                    .map(sanitize_readable),
             }
-            detail
         })
-        .collect::<Vec<_>>();
-    Some(entries.join("\n\n"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -257,95 +597,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn expanded_question_history_uses_literal_notes_under_the_correlated_answer() {
-        use rig_core::message::{CallId, ToolName, ToolResultContent, UserContent};
-        use zevria_presentation::blocks::{NativeToolCallStatus, tool_result_plain_text};
-
-        let args = json!({"questions": [
-            {"id": "scope", "question": "Which scope?", "options": [{"label":"Focused (Recommended)"}]},
-            {"id": "checks", "question": "Which checks?", "options": [{"label":"Full"}]}
-        ]});
-        let raw = json!({"status": "answered", "answers": [
-            {"id":"checks", "answer":"Full"},
-            {"id":"scope", "answer":"Focused (Recommended)", "note":"Only for the <first> release\nRevisit \u{1b}[2Jlater"},
-        ]}).to_string();
-        let UserContent::ToolResult(result) = UserContent::tool_result(
-            CallId::from_wire("question-call"),
-            ToolName::new("question").unwrap(),
-            vec![ToolResultContent::text(raw.clone())],
-        ) else {
-            unreachable!()
-        };
-        let mut state = NativeToolState::new(NativeToolCallStatus::Finished, &args);
-        state.result = Some(result);
-        let (body, plain) = details("question", &state).expect("expanded detail");
-        assert!(plain);
-        assert!(body.contains("Answer: Focused (Recommended)\n  Note: Only for the <first> release\n        Revisit  [2Jlater\n\nWhich checks?"));
-        assert!(body.ends_with("Answer: Full"));
+    fn job_and_read_summaries_use_structured_targets() {
         assert_eq!(
-            tool_summary("question", state.arguments.as_ref()),
-            "Which scope?"
+            tool_summary("command_status", Some(&json!({"id":null}))),
+            "All jobs"
         );
-        assert_eq!(tool_result_plain_text(state.result.as_ref().unwrap()), raw);
-    }
-
-    #[test]
-    fn known_tool_summaries_and_malformed_arguments() {
-        for (name, args, expected) in [
-            (
-                "command",
-                json!({"command":"cargo test\necho done"}),
-                "cargo test",
+        assert_eq!(
+            tool_summary("command_terminate", Some(&json!({"id":"job-123"}))),
+            "job-123"
+        );
+        assert_eq!(
+            tool_summary(
+                "read",
+                Some(&json!({"file_path":"src/lib.rs","start_line":10,"end_line":21}))
             ),
-            ("edit", json!({"file_path":"src/lib.rs"}), "src/lib.rs"),
-            ("write", json!({"path":"new.rs"}), "new.rs"),
-            ("delete", json!({"file_path":"old.rs"}), "old.rs"),
-            (
-                "read_image",
-                json!({"file_path":"capture.png"}),
-                "capture.png",
-            ),
-            ("read_image", json!({"file_path":123}), ""),
-            ("skill", json!({"skill":"design"}), "design"),
-            (
-                "skill_read",
-                json!({"skill":"design", "resource":"guide.md"}),
-                "design / guide.md",
-            ),
-            ("web_search", json!({"query":"GPUI text"}), "GPUI text"),
-            (
-                "question",
-                json!({"questions":[{"question":"Which approach?"}]}),
-                "Which approach?",
-            ),
-            (
-                "create_plan",
-                json!({"title":"Native desktop"}),
-                "Native desktop",
-            ),
-            ("update_plan", json!({}), "Plan working copy"),
-            ("read_plan", json!({}), "Plan working copy"),
-            ("submit_plan", json!({}), "Plan working copy"),
-            ("task", json!({"tasks":[{},{}]}), "2 items"),
-            (
-                "reconcile_reports",
-                json!({"decisions":[{}],"disagreements":[{}]}),
-                "2 items",
-            ),
-            (
-                "launch_subtasks",
-                json!({"tasks":[{},{}]}),
-                "2 subtasks in batch",
-            ),
-            ("unknown", json!({"path":"literal"}), "literal"),
-            ("command", json!({"command":123}), ""),
-            ("question", json!({"questions":false}), ""),
-            ("unknown", json!([]), ""),
-        ] {
-            assert_eq!(tool_summary(name, Some(&args)), expected, "{name}");
-        }
-        assert!(tool_summary("command", None).is_empty());
-        assert!(tool_summary("unknown", Some(&json!({"huge":"x".repeat(1000)}))).is_empty());
-        assert_eq!(diff_height(&[]), 120.);
+            "src/lib.rs:10–21"
+        );
+        assert_eq!(
+            tool_summary("read", Some(&json!({"path":"src/lib.rs"}))),
+            "src/lib.rs"
+        );
+        assert_eq!(tool_summary("read", Some(&json!({"path":null}))), "");
     }
 }

@@ -5,7 +5,7 @@ use crate::{
 };
 use gpui_kit::{Context, Subscription, Task};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -15,7 +15,10 @@ use zevria_host::{
     Config, RunningSession, SessionStart,
     sessions::{self, SessionSummary},
 };
-use zevria_presentation::Reduction;
+use zevria_presentation::{
+    Reduction, SessionModel,
+    blocks::{NativeHeader, ProjectionEpoch},
+};
 use zevria_session_api::{ControlCommand, ModeSelectionResult, SessionCommand, SessionUpdate};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +37,14 @@ struct SubmittedDraft {
     text: String,
     generation: u64,
     accepted: bool,
+}
+/// Attempt-backed streaming is materialized in presentation history before
+/// commit. Keep only its lifecycle here so Desktop can place the active tip.
+struct DisplayAttempt {
+    header: NativeHeader,
+    id: String,
+    revision: u64,
+    open: bool,
 }
 pub struct SessionController {
     pub phase: Phase,
@@ -56,6 +67,7 @@ pub struct SessionController {
         zevria_presentation::blocks::ProjectionEpoch,
         zevria_presentation::blocks::PresentationBlockId,
     )>,
+    display_attempts: HashMap<ProjectionEpoch, DisplayAttempt>,
     draft_generation: u64,
     submitted: Option<SubmittedDraft>,
     running: Option<RunningSession>,
@@ -108,6 +120,7 @@ impl SessionController {
             capturing_dialog: false,
             projection_revision: 0,
             unsaved_blocks: HashSet::new(),
+            display_attempts: HashMap::new(),
             draft_generation: 0,
             submitted: None,
             running: None,
@@ -198,6 +211,7 @@ impl SessionController {
                         this.running = Some(running);
                         this.model = model;
                         this.unsaved_blocks.clear();
+                        this.display_attempts.clear();
                         this.projection_revision = this.projection_revision.wrapping_add(1);
                         if this.quit_requested
                             || this.pending.is_some()
@@ -483,6 +497,7 @@ impl SessionController {
         cx: &mut Context<Self>,
     ) -> Option<zevria_workflow::PlanHandoff> {
         self.model.observe_clock(Instant::now());
+        self.observe_display_attempts(&update);
         if let SessionUpdate::Lifecycle(event) = &update {
             self.retain_unsaved_partial(event);
         }
@@ -517,6 +532,97 @@ impl SessionController {
         }
         reduction.fresh
     }
+    pub(crate) fn live_attempt_header(&self, pane: &SessionModel) -> Option<NativeHeader> {
+        let observed = self.display_attempts.get(&pane.conversation.epoch())?;
+        (observed.open
+            && pane.session.has_turn_work()
+            && pane.session.call_header() == Some(observed.header))
+        .then_some(observed.header)
+    }
+
+    fn observe_display_attempts(&mut self, update: &SessionUpdate) {
+        use zevria_session_api::SessionEvent as Event;
+        let child = |id| {
+            self.model
+                .children
+                .iter()
+                .find(|c| &c.id == id)
+                .map(|c| &c.model)
+        };
+        let attempts = &mut self.display_attempts;
+        let mut observe =
+            |pane: &SessionModel, turn, attempt: Option<&zevria_content::ResponseAttempt>| {
+                let Some(header) = pane
+                    .session
+                    .call_header()
+                    .filter(|_| pane.session.accepts_active(turn))
+                else {
+                    return;
+                };
+                let epoch = pane.conversation.epoch();
+                if let Some(attempt) = attempt {
+                    if let Some(prior) = attempts
+                        .get_mut(&epoch)
+                        .filter(|prior| prior.id == attempt.id)
+                    {
+                        if prior.header == header && attempt.revision > prior.revision {
+                            prior.revision = attempt.revision;
+                            prior.open = !attempt.outcome.is_terminal();
+                        }
+                    } else if !attempt.outcome.is_terminal()
+                        && attempt.has_display()
+                        && attempt.validate().is_ok()
+                    {
+                        attempts.insert(
+                            epoch,
+                            DisplayAttempt {
+                                header,
+                                id: attempt.id.clone(),
+                                revision: attempt.revision,
+                                open: true,
+                            },
+                        );
+                    }
+                } else if let Some(prior) = attempts.get_mut(&epoch) {
+                    prior.open = false;
+                }
+            };
+        match update {
+            SessionUpdate::Streams(batch) => {
+                if let Some(stream) = &batch.root {
+                    observe(&self.model.root, stream.turn_id, stream.attempt.as_ref());
+                }
+                for (id, stream) in &batch.subtasks {
+                    if let Some(pane) = child(id) {
+                        observe(pane, stream.turn_id, stream.attempt.as_ref());
+                    }
+                }
+            }
+            SessionUpdate::Lifecycle(event) => {
+                let (pane, event) = if let Event::SubtaskSession { id, event } = event {
+                    let Some(pane) = child(id) else { return };
+                    (pane, event.as_ref())
+                } else {
+                    (&self.model.root, event)
+                };
+                match event {
+                    Event::AssistantStreamUpdated { turn_id, snapshot } => {
+                        observe(pane, *turn_id, snapshot.attempt.as_ref())
+                    }
+                    Event::ResponseAttemptUpdated { turn_id, attempt } => {
+                        observe(pane, *turn_id, Some(attempt))
+                    }
+                    Event::StreamCleared { turn_id }
+                    | Event::Intermediate { turn_id, .. }
+                    | Event::TurnCompleted { turn_id, .. }
+                    | Event::TurnCancelled { turn_id }
+                    | Event::TurnFailed { turn_id, .. } => observe(pane, *turn_id, None),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn retain_unsaved_partial(&mut self, event: &zevria_session_api::SessionEvent) {
         use zevria_presentation::{
             ConversationTail,

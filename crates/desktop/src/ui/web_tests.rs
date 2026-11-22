@@ -1,7 +1,7 @@
 use super::*;
-use crate::ui::{
-    blocks::{BlockData, BlockKind, Gutter, LiveTail},
-    status::StatusLine,
+use crate::{
+    timeline::{BlockKind, Step, TimelineRow, web::WebRow},
+    ui::status::StatusLine,
 };
 use gpui_kit::test::TestQueryExt as _;
 use serde_json::{Value, json};
@@ -101,19 +101,26 @@ fn frame(window: Window, cx: &mut TestAppContext) {
         .unwrap();
 }
 
-fn rows(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
+fn rows(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<TimelineRow> {
     view.read_with(cx, |view, cx| view.transcript.read(cx).test_data(cx))
 }
 
-fn web_rows(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
+fn web_rows(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<TimelineRow> {
     rows(view, cx)
         .into_iter()
-        .filter(|row| matches!(row.kind, BlockKind::Web(_)))
+        .filter(|row| matches!(row.data.kind, BlockKind::Step(Step::Web(_))))
         .collect()
 }
 
+fn web_step(row: &TimelineRow) -> &WebRow {
+    let BlockKind::Step(Step::Web(web)) = &row.data.kind else {
+        panic!("expected web step")
+    };
+    web
+}
+
 #[gpui_kit::test]
-fn web_actions_grow_in_place_with_a_live_tip_node_and_exact_copy(cx: &mut TestAppContext) {
+fn web_actions_grow_in_place_then_auto_collapse_and_copy_exactly(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup_at_size(cx, 720., 520.);
     let mut attempt = start(&controller, cx);
     attempt.presentation.push(reasoning(0));
@@ -126,9 +133,8 @@ fn web_actions_grow_in_place_with_a_live_tip_node_and_exact_copy(cx: &mut TestAp
     let mut initial = web_rows(&view, cx);
     assert_eq!(initial.len(), 1);
     let first = initial.remove(0);
-    assert_eq!(first.gutter, Gutter::Glyph(StatusIcon::Running));
+    assert_eq!(web_step(&first).status(), StatusIcon::Running);
     assert!(first.expanded);
-    assert!(rows(&view, cx).iter().any(|b| matches!(&b.kind, BlockKind::Live(LiveTail::Activity(phrase)) if phrase == "Searching the web")));
     controller.read_with(cx, |controller, _| {
         let status = StatusLine::new(controller.model.visible(), controller.cancelling);
         assert_eq!(status.activity, "Searching the web");
@@ -136,36 +142,29 @@ fn web_actions_grow_in_place_with_a_live_tip_node_and_exact_copy(cx: &mut TestAp
     let entity = view.read_with(cx, |view, cx| {
         view.transcript
             .read(cx)
-            .test_identity(&first.key, cx)
+            .test_identity(&first.data.key, cx)
             .unwrap()
     });
-    cx.update_window(window.into(), |_, window, _| {
-        let node = window.find("web-thread-node").bounds();
-        let header = window.find("web-header").bounds();
-        assert!(node.size.width > px(0.) && node.origin.x < header.origin.x);
-    })
-    .unwrap();
-
     attempt.hosted_activity[0].action =
         Some(json!({"type":"search","queries":["gpui text view links","gpui link safety"]}));
     attempt.hosted_activity[1].action = Some(json!({"type":"search","query":"gpui components"}));
     stream(&controller, &mut attempt, cx);
     frame(window, cx);
-    assert_eq!(web_rows(&view, cx)[0].key, first.key);
+    assert_eq!(web_rows(&view, cx)[0].data.key, first.data.key);
     assert_eq!(
         entity,
         view.read_with(cx, |view, cx| view
             .transcript
             .read(cx)
-            .test_identity(&first.key, cx)
+            .test_identity(&first.data.key, cx)
             .unwrap())
     );
     cx.update_window(window.into(), |_, window, cx| {
         assert!(window.find("web-action-1").bounds().origin.y < window.find("web-action-2").bounds().origin.y);
-        let mut row = window.within(first.key.clone());
-        assert!(row.try_find_by_label("Web activity details").is_some());
+        let mut row = window.within(first.data.key.clone());
+        assert_eq!(row.find("block-disclosure").expanded(), Some(true));
         assert!(row.try_find_by_label("Copy web activity").is_some());
-        row.hover("web-header", cx);
+        row.hover("block-disclosure", cx);
         row.click("copy", cx);
         assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
             Some("Web search: gpui text view links · gpui link safety ✓\nWeb search: gpui components ◐"));
@@ -175,17 +174,15 @@ fn web_actions_grow_in_place_with_a_live_tip_node_and_exact_copy(cx: &mut TestAp
     stream(&controller, &mut attempt, cx);
     frame(window, cx);
     let completed = web_rows(&view, cx).remove(0);
-    assert_eq!(completed.key, first.key);
-    assert_eq!(completed.gutter, Gutter::Glyph(StatusIcon::Done));
-    let BlockKind::Web(row) = completed.kind else {
-        unreachable!()
-    };
-    assert_eq!(row.counts(), "2 searches");
-    assert!(completed.primary.ends_with("gpui components ✓"));
+    assert_eq!(completed.data.key, first.data.key);
+    assert_eq!(web_step(&completed).status(), StatusIcon::Done);
+    assert_eq!(web_step(&completed).counts(), "2 searches");
+    assert!(!completed.expanded);
+    assert!(completed.data.primary_copy().ends_with("gpui components ✓"));
 }
 
 #[gpui_kit::test]
-fn visible_reasoning_splits_web_groups_and_keeps_the_first_fold(cx: &mut TestAppContext) {
+fn aggregated_reasoning_keeps_web_steps_coalesced_and_preserves_override(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup(cx);
     let mut attempt = start(&controller, cx);
     attempt.hosted_activity = vec![
@@ -203,28 +200,29 @@ fn visible_reasoning_splits_web_groups_and_keeps_the_first_fold(cx: &mut TestApp
     stream(&controller, &mut attempt, cx);
     frame(window, cx);
     let first = web_rows(&view, cx).remove(0);
-    assert!(first.expanded);
+    assert!(!first.expanded);
     cx.update_window(window.into(), |_, window, cx| {
-        assert!(window.try_find("web-count-meta").is_some());
         window
-            .within(first.key.clone())
-            .click("block-disclosure", cx);
+            .within(first.data.key.clone())
+            .click("block-disclosure", cx)
     })
     .unwrap();
     frame(window, cx);
-    assert!(!web_rows(&view, cx)[0].expanded);
-    cx.update_window(window.into(), |_, window, _| {
-        assert!(window.try_find("web-action-list").is_none())
-    })
-    .unwrap();
+    assert!(web_rows(&view, cx)[0].expanded);
     attempt.presentation.push(reasoning(1));
     stream(&controller, &mut attempt, cx);
     frame(window, cx);
-    let split = web_rows(&view, cx);
-    assert_eq!(split.len(), 2);
-    assert_eq!(split[0].key, first.key);
-    assert!(!split[0].expanded);
-    assert!(split[1].expanded);
+    let steps = web_rows(&view, cx);
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].data.key, first.data.key);
+    assert!(steps[0].expanded);
+    assert_eq!(
+        rows(&view, cx)
+            .iter()
+            .filter(|r| r.data.thought().is_some())
+            .count(),
+        1
+    );
 }
 
 #[gpui_kit::test]
@@ -255,10 +253,16 @@ fn closed_web_attempt_keeps_explicit_interrupted_and_unconfirmed_states(cx: &mut
     );
     event(&controller, E::TurnCancelled { turn_id: TURN }, cx);
     frame(window, cx);
-    assert_eq!(
-        web_rows(&view, cx)[0].gutter,
-        Gutter::Glyph(StatusIcon::Interrupted)
-    );
+    let closed = web_rows(&view, cx).remove(0);
+    assert_eq!(web_step(&closed).status(), StatusIcon::Interrupted);
+    assert!(!closed.expanded);
+    cx.update_window(window.into(), |_, window, cx| {
+        window
+            .within(closed.data.key.clone())
+            .click("block-disclosure", cx)
+    })
+    .unwrap();
+    frame(window, cx);
     cx.update_window(window.into(), |_, window, _| {
         assert!(
             window
@@ -294,6 +298,11 @@ fn web_page_text_and_keyboard_control_only_open_safe_urls(cx: &mut TestAppContex
         ),
     ];
     stream(&controller, &mut attempt, cx);
+    frame(window, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click("block-disclosure", cx)
+    })
+    .unwrap();
     frame(window, cx);
     cx.update_window(window.into(), |_, window, cx| {
         assert!(window.try_find("web-open-1").is_none());
@@ -344,7 +353,7 @@ fn answer_sources_update_independently_and_restore_with_working_chips(cx: &mut T
     frame(window, cx);
     let answer = rows(&view, cx)
         .into_iter()
-        .find(|row| row.primary == text)
+        .find(|row| row.data.primary_copy() == text)
         .unwrap();
     cx.update_window(window.into(), |_, window, cx| {
         assert!(window.try_find("answer-sources").is_some());
@@ -397,14 +406,14 @@ fn answer_sources_update_independently_and_restore_with_working_chips(cx: &mut T
     );
     cx.update_window(window.into(), |_, window, cx| {
         assert!(window.try_find("popup-menu").is_none());
-        window
-            .within(answer.key.clone())
-            .click("block-disclosure", cx);
+        window.press(Shortcut::COLLAPSE_ALL.0, cx);
     })
     .unwrap();
     frame(window, cx);
     cx.update_window(window.into(), |_, window, _| {
-        assert!(window.try_find("answer-sources").is_none())
+        let sources = window.find("answer-sources").bounds();
+        let prose = window.find(answer.data.key.clone()).bounds();
+        assert_eq!(sources.origin.x, prose.origin.x);
     })
     .unwrap();
 
@@ -422,17 +431,11 @@ fn answer_sources_update_independently_and_restore_with_working_chips(cx: &mut T
     frame(window, cx);
     let restored = rows(&view, cx)
         .into_iter()
-        .find(|row| row.primary == text)
+        .find(|row| row.data.primary_copy() == text)
         .unwrap();
-    assert_eq!(restored.sources, answer.sources);
-    cx.update_window(window.into(), |_, window, cx| {
-        assert!(window.try_find("answer-sources").is_some());
-        window.within(restored.key).click("message-disclosure", cx);
-    })
-    .unwrap();
-    frame(window, cx);
+    assert_eq!(restored.data.sources, answer.data.sources);
     cx.update_window(window.into(), |_, window, _| {
-        assert!(window.try_find("answer-sources").is_none())
+        assert!(window.try_find("answer-sources").is_some());
     })
     .unwrap();
 }

@@ -19,9 +19,8 @@ gpui_kit::actions!(
         Unfold,
         ExpandAllThinking,
         CollapseAllThinking,
-        FoldEarlierContent,
-        FoldOlderTurns,
-        UnfoldAll,
+        CollapseAll,
+        ExpandAll,
         PreviousTurn,
         NextTurn,
         JumpToBeginning,
@@ -69,9 +68,8 @@ impl Shortcut {
     pub const UNFOLD: Self = Self::platform("alt-cmd-right", "ctrl-shift-u");
     pub const COLLAPSE_THINKING: Self = Self::platform("alt-shift-cmd-left", "ctrl-shift-h");
     pub const EXPAND_THINKING: Self = Self::platform("alt-shift-cmd-right", "ctrl-shift-e");
-    pub const FOLD_EARLIER: Self = Self::platform("shift-cmd-r", "ctrl-shift-r");
-    pub const FOLD_OLDER: Self = Self::platform("alt-shift-cmd-r", "ctrl-shift-b");
-    pub const UNFOLD_ALL: Self = Self::platform("alt-cmd-r", "ctrl-shift-a");
+    pub const COLLAPSE_ALL: Self = Self::platform("shift-cmd-r", "ctrl-shift-r");
+    pub const EXPAND_ALL: Self = Self::platform("alt-cmd-r", "ctrl-shift-a");
 
     // Display Kit's existing textarea bindings without re-registering them.
     pub const ENTER: Self = Self("enter");
@@ -111,9 +109,8 @@ fn bindings() -> impl IntoIterator<Item = KeyBinding> {
         Shortcut::COPY_DISCLOSURE.bind(gpui_kit::component::input::Copy, Some("ZevriaDisclosure")),
         Shortcut::EXPAND_THINKING.bind(ExpandAllThinking, desktop),
         Shortcut::COLLAPSE_THINKING.bind(CollapseAllThinking, desktop),
-        Shortcut::FOLD_EARLIER.bind(FoldEarlierContent, desktop),
-        Shortcut::FOLD_OLDER.bind(FoldOlderTurns, desktop),
-        Shortcut::UNFOLD_ALL.bind(UnfoldAll, desktop),
+        Shortcut::COLLAPSE_ALL.bind(CollapseAll, desktop),
+        Shortcut::EXPAND_ALL.bind(ExpandAll, desktop),
         Shortcut::PREVIOUS_TURN.bind(PreviousTurn, desktop),
         Shortcut::NEXT_TURN.bind(NextTurn, desktop),
         Shortcut::JUMP_TO_BEGINNING.bind(JumpToBeginning, desktop),
@@ -211,9 +208,8 @@ mod tests {
             (Shortcut::UNFOLD, "Ctrl+Shift+U"),
             (Shortcut::COLLAPSE_THINKING, "Ctrl+Shift+H"),
             (Shortcut::EXPAND_THINKING, "Ctrl+Shift+E"),
-            (Shortcut::FOLD_EARLIER, "Ctrl+Shift+R"),
-            (Shortcut::FOLD_OLDER, "Ctrl+Shift+B"),
-            (Shortcut::UNFOLD_ALL, "Ctrl+Shift+A"),
+            (Shortcut::COLLAPSE_ALL, "Ctrl+Shift+R"),
+            (Shortcut::EXPAND_ALL, "Ctrl+Shift+A"),
         ] {
             assert_eq!(shortcut.label(), label);
             assert!(
@@ -250,9 +246,8 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("Expand all thinking", ExpandAllThinking),
             MenuItem::action("Collapse all thinking", CollapseAllThinking),
             MenuItem::separator(),
-            MenuItem::action("Fold earlier content", FoldEarlierContent),
-            MenuItem::action("Fold older turns", FoldOlderTurns),
-            MenuItem::action("Unfold all", UnfoldAll),
+            MenuItem::action("Collapse details", CollapseAll),
+            MenuItem::action("Expand details", ExpandAll),
             MenuItem::separator(),
             MenuItem::action("Previous turn", PreviousTurn),
             MenuItem::action("Next turn", NextTurn),

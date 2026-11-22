@@ -358,7 +358,7 @@ fn job_notice_copies_original_model_visible_text(cx: &mut TestAppContext) {
                 )
             })
             .unwrap();
-        format!("{:?}-row-{index}", conversation.epoch())
+        format!("{:?}-entry-{index}", conversation.epoch())
     });
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);

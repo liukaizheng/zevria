@@ -506,7 +506,7 @@ impl DesktopWindow {
         };
         let mut dialog = style::sheet(cx)
             .w_full()
-            .max_w(px(style::CONTENT))
+            .max_w(px(style::COLUMN))
             .max_h(px((f32::from(window.viewport_size().height)
                 * height_ratio)
                 .max(180.)))
@@ -595,22 +595,10 @@ impl DesktopWindow {
                 .id("question-dialog")
                 .test_support()
                 .flex_shrink_0()
-                .px(px(16.))
+                .px(px(style::COLUMN_INSET))
                 .py(px(12.))
                 .child(
-                    style::Measure {
-                        compact: self.compact,
-                    }
-                    .row()
-                    .when(!self.compact, |row| {
-                        row.gap(px(8.)).child(
-                            style::Measure { compact: false }
-                                .gutter()
-                                .pt(px(8.))
-                                .child("Question"),
-                        )
-                    })
-                    .child(
+                    style::Measure::column().child(
                         dialog.child(
                             buttons
                                 .child(style::key_hint(Shortcut::CONFIRM, "Send answer", cx))

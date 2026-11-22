@@ -627,7 +627,7 @@ fn restored_math_and_plan_document_and_panel_render_at_both_widths(cx: &mut Test
                     )
                 })
                 .unwrap();
-            format!("{:?}-row-{index}", conversation.epoch())
+            format!("{:?}-entry-{index}", conversation.epoch())
         });
         for _ in 0..3 {
             cx.run_until_parked();
@@ -635,10 +635,7 @@ fn restored_math_and_plan_document_and_panel_render_at_both_widths(cx: &mut Test
                 .unwrap();
         }
         cx.update_window(window.into(), |_, window, cx| {
-            assert_eq!(
-                window.within(key).find("block-disclosure").expanded(),
-                Some(true)
-            );
+            assert!(window.find(key).visible());
             window.click("plan-copy", cx);
             assert_eq!(
                 cx.read_from_clipboard().and_then(|i| i.text()),
@@ -1013,7 +1010,7 @@ fn shared_palette_drives_syntax_and_native_diff_card_expansion(cx: &mut TestAppC
     use zevria_foundation::{
         FileChange, FileChangeOutput, ToolCallOutcome, ToolResultDetail, ToolResultMetadata,
     };
-    let (window, _, controller, _) = setup(cx);
+    let (window, view, controller, _) = setup(cx);
     cx.update(|cx| {
         let t = theme::palette(cx);
         let syntax = &gpui_kit::component::Theme::global(cx)
@@ -1083,42 +1080,149 @@ fn shared_palette_drives_syntax_and_native_diff_card_expansion(cx: &mut TestAppC
         },
         cx,
     );
+    let key = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Completed edits do not prepare the diff until opened.
+            let tool = controller
+                .read(cx)
+                .model
+                .root
+                .conversation
+                .history()
+                .iter()
+                .find_map(|entry| {
+                    let zevria_presentation::conversation::HistoryEntry::Conversation(entry) =
+                        entry
+                    else {
+                        return None;
+                    };
+                    entry
+                        .blocks
+                        .iter()
+                        .find(|b| b.native_tool().is_some())
+                        .map(|b| b.id)
+                })
+                .unwrap();
+            let key = format!(
+                "{:?}-{}",
+                controller.read(cx).model.root.conversation.epoch(),
+                tool.0
+            );
+            assert_eq!(
+                window
+                    .within(key.clone())
+                    .find("block-disclosure")
+                    .expanded(),
+                Some(false)
+            );
+            assert!(!view.read(cx).transcript.read(cx).test_prepared(&key, cx));
+            assert!(window.try_find("native-diff").is_none());
+            window.within(key.clone()).click("block-disclosure", cx);
+            key
+        })
+        .unwrap();
+    assert!(view.read_with(cx, |v, cx| v.transcript.read(cx).test_prepared(&key, cx)));
+    cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        // Tool details are expanded unless explicitly folded.
-        let tool = controller
+        assert!(window.within(key).try_find("native-diff").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn restored_image_is_decoded_only_on_disclosure_and_stays_inside_its_step(cx: &mut TestAppContext) {
+    use rig_core::message::{
+        AssistantContent, AssistantMessage, CallId, ToolCall, ToolFunction, ToolName,
+        ToolResultContent, UserContent,
+    };
+    use zevria_content::{ImageReadSummary, PromptImage};
+    use zevria_foundation::{ToolCallOutcome, ToolResultMetadata};
+    use zevria_transcript::transcript::TranscriptItem as T;
+    let (window, view, controller, _) = setup(cx);
+    let image = PromptImage::from_rgba(420, 360, &vec![180; 420 * 360 * 4]).unwrap();
+    let path = "docs/capture.png";
+    let call = ToolCall::new(
+        CallId::from_wire("capture"),
+        ToolFunction::new(
+            ToolName::new("read_image").unwrap(),
+            serde_json::json!({"file_path":path}),
+        ),
+    );
+    let summary = ImageReadSummary {
+        path: path.into(),
+        mime: image.mime_type().into(),
+        dimensions: image.dimensions(),
+        bytes: image.encoded_len(),
+        original: Some(((840, 720), 123_456)),
+    }
+    .to_string();
+    let result = call.result(vec![
+        ToolResultContent::text(summary.clone()),
+        image.to_tool_result_content(),
+    ]);
+    controller.update(cx, |c, cx| {
+        c.model.root.conversation.restore(vec![
+            T::Message(Message::user("Inspect the capture")),
+            T::Message(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::ToolCall(call),
+            ]))),
+            T::ToolResults {
+                message: Message::User {
+                    content: vec![UserContent::ToolResult(result)],
+                },
+                metadata: vec![ToolResultMetadata {
+                    id: "capture".into(),
+                    call_id: None,
+                    tool_name: "read_image".into(),
+                    outcome: ToolCallOutcome::Success,
+                    diagnostic: None,
+                    detail: None,
+                }],
+                skill_applications: vec![],
+            },
+            T::Message(Message::assistant("The capture is legible.")),
+        ]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let key = view.read_with(cx, |view, cx| {
+        view.transcript
             .read(cx)
-            .model
-            .root
-            .conversation
-            .history()
-            .iter()
-            .find_map(|entry| {
-                let zevria_presentation::conversation::HistoryEntry::Conversation(entry) = entry
-                else {
-                    return None;
-                };
-                entry
-                    .blocks
-                    .iter()
-                    .find(|b| b.native_tool().is_some())
-                    .map(|b| b.id)
-            })
+            .test_data(cx)
+            .into_iter()
+            .find(|row| row.position.is_some())
+            .unwrap()
+            .data
+            .key
+            .clone()
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("image-read-preview").is_none());
+        assert!(!view.read(cx).transcript.read(cx).test_prepared(&key, cx));
+        window.within(key.clone()).click("block-disclosure", cx);
+    })
+    .unwrap();
+    for _ in 0..3 {
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
             .unwrap();
-        let key = format!(
-            "{:?}-{}",
-            controller.read(cx).model.root.conversation.epoch(),
-            tool.0
-        );
+    }
+    cx.update_window(window.into(), |_, window, cx| {
+        let answer_y = window.find("answer").bounds().origin.y;
+        let mut row = window.within(key);
+        let preview = row.find("image-read-preview").bounds();
+        assert!(preview.size.height <= px(240.) && preview.bottom() < answer_y);
+        row.hover("block-disclosure", cx);
+        row.click("copy-output", cx);
         assert_eq!(
-            window.within(key).find("block-disclosure").expanded(),
-            Some(true)
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(format!("{summary}\n[image]"))
         );
     })
     .unwrap();
-    cx.run_until_parked();
-    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
-        .unwrap();
 }
 
 #[gpui_kit::test]
@@ -1280,57 +1384,7 @@ fn compact_segmented_modes_emit_the_same_authoritative_mode_commands(cx: &mut Te
 }
 
 #[gpui_kit::test]
-fn width_class_changes_remeasure_retained_gutter_rows(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup(cx);
-    controller.update(cx, |c, cx| {
-        c.model.root.conversation.restore(vec![
-            zevria_transcript::transcript::TranscriptItem::Message(Message::user("A short prompt")),
-        ]);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    let key = controller.read_with(cx, |c, _| {
-        let conversation = &c.model.root.conversation;
-        let zevria_presentation::conversation::HistoryEntry::Conversation(entry) =
-            &conversation.history()[0]
-        else {
-            panic!("prompt entry");
-        };
-        format!("{:?}-{}", conversation.epoch(), entry.blocks[0].id.0)
-    });
-    let wide = cx
-        .update_window(window.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.find(key.clone()).bounds().size.height
-        })
-        .unwrap();
-    cx.simulate_window_resize(window.into(), size(px(720.), px(840.)));
-    cx.run_until_parked();
-    let compact = cx
-        .update_window(window.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.find(key.clone()).bounds().size.height
-        })
-        .unwrap();
-    assert!(view.read_with(cx, |v, _| v.compact));
-    assert!(
-        compact > wide,
-        "compact {compact:?} should include the hanging label above prose, wide {wide:?}"
-    );
-    cx.simulate_window_resize(window.into(), size(px(1240.), px(840.)));
-    cx.run_until_parked();
-    let restored = cx
-        .update_window(window.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.find(key).bounds().size.height
-        })
-        .unwrap();
-    assert!(!view.read_with(cx, |v, _| v.compact));
-    assert_eq!(restored, wide);
-}
-
-#[gpui_kit::test]
-fn wide_window_centers_transcript_and_composer_on_one_axis(cx: &mut TestAppContext) {
+fn transcript_and_composer_share_one_axis_at_every_width(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup_at_size(cx, 1920., 1080.);
     controller.update(cx, |c, cx| {
         c.model.root.conversation.restore(vec![
@@ -1350,7 +1404,6 @@ fn wide_window_centers_transcript_and_composer_on_one_axis(cx: &mut TestAppConte
     });
     let assert_column = |pane_left: f32, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App| {
         window.render_frame(cx);
-        assert!(!view.read(cx).compact);
         let assert_close = |actual: gpui_kit::Pixels, expected: f32| {
             assert!(
                 (f32::from(actual) - expected).abs() <= 1.,
@@ -1358,7 +1411,8 @@ fn wide_window_centers_transcript_and_composer_on_one_axis(cx: &mut TestAppConte
             );
         };
         let pane_right = f32::from(window.viewport_size().width);
-        let expected_width = 1000_f32.min(pane_right - pane_left - 32.);
+        let expected_width =
+            super::style::COLUMN.min(pane_right - pane_left - super::style::COLUMN_INSET * 2.);
         let row = window.find(key.clone()).bounds();
         let composer = window.find("composer-column").bounds();
         assert_close(row.size.width, expected_width);
@@ -1370,8 +1424,11 @@ fn wide_window_centers_transcript_and_composer_on_one_axis(cx: &mut TestAppConte
         assert_close(composer.size.width, f32::from(row.size.width));
         assert_close(
             window.find("composer-panel").bounds().size.width,
-            expected_width - 104.,
+            expected_width,
         );
+        let panel = window.find("composer-panel").bounds();
+        let mode = window.find("mode-build").bounds();
+        assert!(mode.origin.x >= panel.origin.x && mode.bottom() <= panel.bottom());
     };
     cx.update_window(window.into(), |_, window, cx| {
         assert_column(256., window, cx)
@@ -1397,6 +1454,17 @@ fn wide_window_centers_transcript_and_composer_on_one_axis(cx: &mut TestAppConte
         assert_column(256., window, cx)
     })
     .unwrap();
+    cx.simulate_window_resize(window.into(), size(px(720.), px(520.)));
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(view.read(cx).compact);
+        assert_column(256., window, cx);
+        window.press(Shortcut::TOGGLE_SIDEBAR.0, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| assert_column(0., window, cx))
+        .unwrap();
 }
 
 #[gpui_kit::test]

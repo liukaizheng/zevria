@@ -219,7 +219,7 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
             match &block.kind {
                 PresentationBlockKind::WebActivity(activity) if newest_web => {
                     newest_web = false;
-                    if let Some(phrase) = super::blocks::web::live_phrase(&activity.actions) {
+                    if let Some(phrase) = crate::timeline::web::live_phrase(&activity.actions) {
                         return phrase.into();
                     }
                 }

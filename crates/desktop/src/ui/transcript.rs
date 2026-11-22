@@ -1,8 +1,5 @@
 use super::{
-    blocks::{
-        self, BlockData, BlockKind, BlockView, DisclosureChanged, Gutter, LiveTail,
-        MessageDisclosure,
-    },
+    blocks::{BlockView, DetailResized, DisclosureChanged},
     rows::{self, RowChange},
     style,
     theme::palette,
@@ -10,27 +7,20 @@ use super::{
 use crate::{
     actions::Shortcut,
     controller::SessionController,
-    disclosure::{self, Phase, TailIdentity},
+    disclosure::DisclosureState,
+    timeline::{BlockKind, Projector, TimelineRow},
     turns::{self, TurnDirection},
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::{prelude::*, *};
-use std::{
-    collections::{HashMap, HashSet},
-    time::Instant,
-};
-use zevria_presentation::{
-    ConversationTail,
-    blocks::PresentationBlockId,
-    conversation::{HistoryEntry, ToolCallStatus},
-    fold::{BlockFold, FoldKey, FoldState, SpanRole, TurnFold},
-    session::StreamSnapshotId,
-};
+use std::collections::{HashMap, HashSet};
+use zevria_presentation::blocks::{NativeHeader, ProjectionEpoch};
 
 struct RetainedBlock {
     view: Entity<BlockView>,
-    _subscriptions: Vec<Subscription>,
+    _subscriptions: [Subscription; 2],
 }
+
 #[derive(Clone, Copy)]
 pub(super) enum LocalFold {
     Toggle,
@@ -38,179 +28,45 @@ pub(super) enum LocalFold {
     Open,
 }
 
-/// Each pane keeps its own rendering, fold intent, and scroll position while parked.
+/// Each pane retains its own renderer identities, disclosure intent and viewport.
 struct PaneView {
     scroller: Entity<MessageScrollerState>,
-    epoch: String,
-    fingerprints: Vec<u64>,
-    row_data: HashMap<usize, (u64, Vec<BlockData>)>,
-    tail_data: Vec<BlockData>,
-    pending: Option<(u64, Vec<BlockData>)>,
-    stream_snapshot: Option<StreamSnapshotId>,
+    epoch: Option<ProjectionEpoch>,
+    rows: Vec<TimelineRow>,
+    indices: HashMap<String, usize>,
+    projector: Projector,
     blocks: HashMap<String, RetainedBlock>,
-    folds: FoldState,
-    // A covered row/target can be restored when its representative reopens.
-    scroll_return: Option<(usize, usize)>,
-    focus_return: Option<(FoldKey, FoldKey)>,
-    restored: HashSet<String>,
-    anchors: HashMap<String, (usize, PresentationBlockId)>,
+    disclosures: DisclosureState,
     revision: u64,
     busy: bool,
-    call: Option<zevria_presentation::blocks::NativeHeader>,
+    call: Option<NativeHeader>,
+    pending: Option<u64>,
+    cancelling: bool,
 }
 impl PaneView {
     fn new(cx: &mut Context<TranscriptView>) -> Self {
         Self {
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
-            epoch: String::new(),
-            fingerprints: Vec::new(),
-            row_data: HashMap::new(),
-            tail_data: Vec::new(),
-            pending: None,
-            stream_snapshot: None,
+            epoch: None,
+            rows: vec![],
+            indices: HashMap::new(),
+            projector: Projector::default(),
             blocks: HashMap::new(),
-            folds: FoldState::default(),
-            scroll_return: None,
-            focus_return: None,
-            restored: HashSet::new(),
-            anchors: HashMap::new(),
+            disclosures: DisclosureState::default(),
             revision: u64::MAX,
             busy: false,
             call: None,
+            pending: None,
+            cancelling: false,
         }
-    }
-    fn source(&self, index: usize) -> &[BlockData] {
-        self.row_data
-            .get(&index)
-            .map(|(_, data)| data.as_slice())
-            .unwrap_or(&self.tail_data)
-    }
-    fn range_key(&self, start: usize) -> String {
-        format!("{}-range-{start}", self.epoch)
-    }
-    fn representative(&self, history: &[HistoryEntry], target: FoldKey) -> FoldKey {
-        let target = self.folds.representative(history, target, false);
-        let row = target.history_index();
-        if self
-            .source(row)
-            .iter()
-            .any(|block| block.target == Some(target) && matches!(block.kind, BlockKind::Web(_)))
-        {
-            self.data(history, row)
-                .iter()
-                .find(|block| block.represents(target))
-                .and_then(|block| block.target)
-                .unwrap_or(target)
-        } else {
-            target
-        }
-    }
-    /// Visibility order is range, message, then individual block/item. The
-    /// canonical row data and its retained renderers are never replaced by a preview.
-    fn data(&self, history: &[HistoryEntry], index: usize) -> Vec<BlockData> {
-        let Some((_, blocks)) = self.row_data.get(&index) else {
-            let mut tail = self.tail_data.clone();
-            if self.folds.stream_is_folded(self.stream_snapshot) {
-                for block in &mut tail {
-                    if !matches!(block.kind, BlockKind::Live(_)) {
-                        block.summary = true;
-                        block.expanded = false;
-                    }
-                }
-                tail = blocks::coalesce_rows(tail);
-            }
-            if let Some((_, pending)) = &self.pending {
-                tail.splice(..0, pending.iter().cloned());
-            }
-            return tail;
-        };
-        let folds = self.folds.entry(index);
-        match folds.span() {
-            Some(SpanRole::Hidden { .. }) => return Vec::new(),
-            Some(SpanRole::Summary { end }) => {
-                let mut row = BlockData::range(
-                    &self.epoch,
-                    index,
-                    end,
-                    self.folds.span_summary(history, index, false),
-                );
-                row.grouped_targets = self
-                    .folds
-                    .group(history, FoldKey::Span { start: index, end }, false)
-                    .into_iter()
-                    .skip(1)
-                    .collect();
-                return vec![row];
-            }
-            None => {}
-        }
-        let folded = folds.is_message_folded();
-        let mut data = if folded {
-            blocks.first().cloned().into_iter().collect()
-        } else if let Some(HistoryEntry::Conversation(entry)) = history.get(index) {
-            let modes = folds.block_folds(entry, false);
-            let visible = entry
-                .blocks
-                .iter()
-                .zip(modes)
-                .filter_map(|(block, mode)| block.visible(false).then_some(mode));
-            blocks::coalesce_rows(
-                blocks
-                    .iter()
-                    .zip(visible)
-                    // A leading Merged block has no local activity row; the span
-                    // already carries its digest and disclosure target.
-                    .skip_while(|(_, mode)| *mode == BlockFold::Merged)
-                    .map(|(block, mode)| {
-                        let mut block = block.clone();
-                        block.summary = matches!(mode, BlockFold::Activity(_) | BlockFold::Merged);
-                        block.expanded = mode == BlockFold::Expanded;
-                        block
-                    })
-                    .collect(),
-            )
-        } else {
-            blocks
-                .iter()
-                .cloned()
-                .map(|mut block| {
-                    block.expanded = block
-                        .target
-                        .is_none_or(|target| !self.folds.contains(target));
-                    block
-                })
-                .collect()
-        };
-        if let Some(first) = data.first_mut().filter(|first| first.target.is_some()) {
-            first.message = Some(MessageDisclosure {
-                key: FoldKey::Message {
-                    history_index: index,
-                },
-                folded,
-                show_speaker: folded
-                    || blocks
-                        .first()
-                        .is_some_and(|block| matches!(block.gutter, Gutter::Label(_)))
-                    || index
-                        .checked_sub(1)
-                        .is_some_and(|previous| self.folds.entry(previous).span().is_some()),
-                blocks: blocks.len(),
-                speaker: blocks
-                    .first()
-                    .filter(|block| matches!(block.gutter, Gutter::Label(_)))
-                    .unwrap_or(first)
-                    .speaker(),
-            });
-        }
-        data
     }
 }
+
 pub struct TranscriptView {
     controller: Entity<SessionController>,
     pane: PaneView,
     selected: Option<zevria_foundation::SubtaskId>,
     parked: HashMap<Option<zevria_foundation::SubtaskId>, PaneView>,
-    compact: bool,
     window_focus: FocusHandle,
     _controller: Subscription,
 }
@@ -224,60 +80,45 @@ impl TranscriptView {
         let pane = PaneView::new(cx);
         let selected = controller.read(cx).model.selected_child.clone();
         let watch = cx.observe_in(&controller, window, |this, _, window, cx| {
-            this.sync(window, cx);
-            cx.notify();
+            this.sync(window, cx)
         });
         let mut this = Self {
             controller,
             pane,
             selected,
             parked: HashMap::new(),
-            compact: false,
             window_focus,
             _controller: watch,
         };
         this.sync(window, cx);
         this
     }
-    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
-        if self.compact == compact {
-            return;
-        }
-        self.compact = compact;
-        self.pane.scroller.update(cx, |list, cx| {
-            list.remeasure_items(0..self.pane.fingerprints.len(), cx)
-        });
-        self.refresh_views(cx);
-        cx.notify();
-    }
-    fn rekey(&mut self, old: &str, new: &str) {
+
+    fn rekey(&mut self, old: &str, new: &str, window: &mut Window, cx: &mut Context<Self>) {
         if old == new {
             return;
         }
-        if self.pane.restored.remove(old) {
-            self.pane.restored.insert(new.into());
-        }
-        if let Some(block) = self.pane.blocks.remove(old) {
-            self.pane.blocks.entry(new.into()).or_insert(block);
+        self.pane.disclosures.rekey(old, new);
+        if let Some(retained) = self.pane.blocks.remove(old) {
+            let focused = retained.view.read(cx).contains_focus(window, cx);
+            let target = self.pane.blocks.entry(new.into()).or_insert(retained);
+            if focused && !target.view.read(cx).contains_focus(window, cx) {
+                window.focus(&target.view.read(cx).disclosure_focus(), cx);
+            }
         }
     }
-    #[cfg(test)]
-    pub(super) fn scroller(&self) -> Entity<MessageScrollerState> {
-        self.pane.scroller.clone()
-    }
+
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.controller.read(cx).model.selected_child.clone();
+        let epoch = self
+            .controller
+            .read(cx)
+            .model
+            .visible()
+            .conversation
+            .epoch();
         let pane_changed = selected != self.selected;
-        let epoch = format!(
-            "{:?}",
-            self.controller
-                .read(cx)
-                .model
-                .visible()
-                .conversation
-                .epoch()
-        );
-        let reset_focus = (pane_changed || epoch != self.pane.epoch)
+        let reset_focus = (pane_changed || Some(epoch) != self.pane.epoch)
             && self
                 .pane
                 .blocks
@@ -292,449 +133,155 @@ impl TranscriptView {
             self.parked.insert(self.selected.clone(), previous);
             self.selected = selected;
             self.pane.revision = u64::MAX;
-            // Background parsing may have completed while this pane was hidden.
             self.pane.scroller.update(cx, |list, cx| list.remeasure(cx));
         }
-        self.parked.retain(|id, _| {
-            id.as_ref().is_none_or(|id| {
-                self.controller
-                    .read(cx)
-                    .model
-                    .children
-                    .iter()
-                    .any(|child| &child.id == id)
-            })
-        });
         let controller = self.controller.read(cx);
+        self.parked.retain(|id, _| {
+            id.as_ref()
+                .is_none_or(|id| controller.model.children.iter().any(|c| &c.id == id))
+        });
         let model = controller.model.visible();
-        let history = model.conversation.history();
-        // Management is busy for admission/status, never a conversational live-tip row.
+        let revision = controller.projection_revision;
         let busy = model.session.has_turn_work();
         let call = model.session.call_header();
-        let revision = controller.projection_revision;
-        let replaced = epoch != self.pane.epoch;
-        let same_projection = !replaced
-            && revision == self.pane.revision
-            && call == self.pane.call
-            && history.len() + 1 == self.pane.fingerprints.len();
-        let pending = model.pending_prompt();
-        let pending_changed =
-            pending.map(|p| p.id()) != self.pane.pending.as_ref().map(|(id, _)| *id);
-        // The clock and draft edits must not re-fingerprint history or clone the tail.
-        if same_projection && !pending_changed && busy == self.pane.busy {
-            return;
+        let pending = model.pending_prompt().map(|p| p.id());
+        let cancelling = controller.cancelling;
+        let replaced = Some(epoch) != self.pane.epoch;
+        if !replaced
+            && self.pane.revision == revision
+            && self.pane.busy == busy
+            && self.pane.call == call
+            && self.pane.pending == pending
+            && self.pane.cancelling == cancelling
+        {
+            return; // Draft edits and the status clock do not rebuild the timeline.
         }
-        if replaced || pending_changed {
-            if let Some((_, old)) = self.pane.pending.take() {
-                for block in old {
-                    self.pane.blocks.remove(&block.key);
+        if replaced {
+            self.pane.epoch = Some(epoch);
+            self.pane.projector = Projector::default();
+            self.pane.disclosures = DisclosureState::default();
+            self.pane.blocks.clear();
+        }
+        let activity = busy.then(|| super::status::working_activity(model, cancelling));
+        let mut projection = self.pane.projector.project_timeline(
+            model,
+            &format!("{epoch:?}"),
+            &controller.unsaved_blocks,
+            activity.as_deref(),
+            controller.live_attempt_header(model),
+        );
+        let mut aliases = HashMap::new();
+        if !replaced {
+            for old in &self.pane.rows {
+                if let Some(anchor) = old.data.source {
+                    let resolved = model.conversation.resolved_identity(anchor);
+                    if resolved != anchor
+                        && let Some(new) = projection.anchors.get(&resolved)
+                    {
+                        aliases.insert(old.data.key.clone(), new.clone());
+                    }
                 }
             }
-            self.pane.pending =
-                pending.map(|p| (p.id(), blocks::pending_prompt(&epoch, history.len(), p)));
+            aliases.extend(projection.transfers);
         }
-        if let Some((_, blocks)) = &mut self.pane.pending {
-            // A pre-turn compaction divider can move the live-tip row.
-            for (ordinal, block) in blocks.iter_mut().enumerate() {
-                block.row = history.len();
-                block.turn_boundary = ordinal == 0 && !history.is_empty();
-            }
+        for (old, new) in &aliases {
+            self.rekey(old, new, window, cx);
         }
-        if same_projection && pending_changed {
-            // Local append admission changes only the tip; history has not been touched.
-            let tip = history.len();
-            self.pane.tail_data = Self::activity_tip(controller, &epoch, tip)
-                .into_iter()
-                .collect();
-            self.pane.busy = busy;
-            self.pane
-                .scroller
-                .update(cx, |list, cx| list.remeasure_items(tip..tip + 1, cx));
-            return;
+        let valid: HashSet<_> = projection
+            .rows
+            .iter()
+            .map(|row| row.data.key.as_str())
+            .collect();
+        self.pane
+            .blocks
+            .retain(|key, _| valid.contains(key.as_str()));
+        self.pane.disclosures.retain_keys(&valid);
+        for row in &mut projection.rows {
+            row.apply_disclosure(&self.pane.disclosures);
         }
-        let mut fingerprints = history
+        let old = std::mem::replace(&mut self.pane.rows, projection.rows);
+        self.pane.indices = self
+            .pane
+            .rows
             .iter()
             .enumerate()
-            .map(|(i, entry)| {
-                rows::fingerprint(
-                    entry,
-                    rows::continues_turn(i.checked_sub(1).and_then(|p| history.get(p)), entry),
-                )
-            })
-            .collect::<Vec<_>>();
-        fingerprints.push(0); // Stable live-tip row, even when idle.
-        let history_changed = replaced || self.pane.fingerprints != fingerprints;
-        let mut previous_rows = std::mem::take(&mut self.pane.row_data);
-        let mut rows = HashMap::new();
-        let mut anchors = HashMap::new();
-        let mut aliases = Vec::new();
-        if !replaced && history_changed {
-            for (key, anchor) in &self.pane.anchors {
-                let resolved = model.conversation.resolved_identity(*anchor);
-                if resolved != *anchor {
-                    aliases.push((key.clone(), format!("{epoch}-{}", resolved.1.0)));
-                }
-            }
-        }
-        for (index, entry) in history.iter().enumerate() {
-            let fingerprint = fingerprints[index];
-            let mut data = if !replaced
-                && let Some((prior, data)) = previous_rows.remove(&index)
-                && prior == fingerprint
-            {
-                data
-            } else {
-                blocks::entry(
-                    &epoch,
-                    index,
-                    entry,
-                    fingerprint,
-                    rows::continues_turn(index.checked_sub(1).and_then(|p| history.get(p)), entry),
-                    controller.model.selected_child.is_some(),
-                )
-            };
-            let last = data.len().saturating_sub(1);
-            for (position, block) in data.iter_mut().enumerate() {
-                if let Some(id) = block.source {
-                    anchors.insert(block.key.clone(), (index, id));
-                }
-                block.phase = if block.source.is_some_and(|id| {
-                    controller
-                        .unsaved_blocks
-                        .contains(&(model.conversation.epoch(), id))
-                }) {
-                    Phase::Unsaved
-                } else if replaced
-                    || self.pane.restored.contains(&block.key)
-                    || aliases
-                        .iter()
-                        .any(|(old, new)| new == &block.key && self.pane.restored.contains(old))
-                {
-                    Phase::Restored
-                } else if let HistoryEntry::Conversation(entry) = entry
-                    && entry.blocks.iter().any(|b| {
-                        zevria_presentation::incomplete_response_outcome(&b.kind).is_some()
-                    })
-                {
-                    Phase::Interrupted
-                } else if busy
-                    && block.header.is_some()
-                    && call
-                        .is_some_and(|call| block.header.is_some_and(|h| h.turn() == call.turn()))
-                {
-                    if block.header == call && position == last {
-                        Phase::Live
-                    } else {
-                        Phase::Working
-                    }
-                } else {
-                    Phase::Finished
-                };
-            }
-            rows.insert(index, (fingerprint, data));
-        }
-        let mut tail = Vec::new();
-        if let ConversationTail::Streaming { message, .. } = model.tail(Instant::now())
-            && let Some(entry) =
-                HistoryEntry::from_message(message.clone(), ToolCallStatus::Executing)
-        {
-            tail = blocks::entry(
-                &epoch,
-                history.len(),
-                &entry,
-                revision,
-                history.last().is_some_and(rows::is_assistant),
-                controller.model.selected_child.is_some(),
-            );
-            let last = tail.len().saturating_sub(1);
-            let mut ordinal = 0;
-            for (position, block) in tail.iter_mut().enumerate() {
-                if let Some(kind) = block.tail_kind() {
-                    block.key = TailIdentity {
-                        header: call,
-                        kind,
-                        ordinal,
-                    }
-                    .key(&epoch);
-                    ordinal += 1;
-                }
-                block.source = None;
-                block.target = None;
-                block.header = call;
-                block.phase = if position == last {
-                    Phase::Live
-                } else {
-                    Phase::Working
-                };
-            }
-        }
-        tail.extend(Self::activity_tip(controller, &epoch, history.len()));
-        // Match message-only previews to the newly committed call, never a later call's ordinal.
-        let mut transfers = Vec::new();
-        if !replaced && history_changed {
-            for (_, data) in rows.values() {
-                let mut ordinal = 0;
-                for block in data {
-                    if let Some(kind) = block.tail_kind() {
-                        let identity = TailIdentity {
-                            header: block.header,
-                            kind,
-                            ordinal,
-                        };
-                        if !self.pane.anchors.contains_key(&block.key)
-                            && let Some(before) = self
-                                .pane
-                                .tail_data
-                                .iter()
-                                .find(|before| before.key == identity.key(&epoch))
-                            && disclosure::can_commit(identity, identity, &before.body, &block.body)
-                        {
-                            transfers.push((before.key.clone(), block.key.clone()));
-                        }
-                        ordinal += 1;
-                    }
-                }
-            }
-        }
-        let prior_folds = (!replaced).then(|| self.pane.folds.clone());
-        if replaced {
-            self.pane.blocks.clear();
-            self.pane.folds.clear();
-            self.pane.scroll_return = None;
-            self.pane.focus_return = None;
-            self.pane.restored = rows
-                .values()
-                .flat_map(|(_, data)| data.iter().map(|b| b.key.clone()))
-                .collect();
-        } else {
-            // A preview can commit in place without changing any rendered data.
-            self.pane.folds.reconcile(&model.conversation);
-        }
-        self.pane.stream_snapshot = model.session.stream_snapshot();
-        self.pane.epoch = epoch;
-        // Never attach a retained parser to an ambiguous repeated tail block.
-        let mut counts = HashMap::new();
-        for (old, _) in &transfers {
-            *counts.entry(old.clone()).or_insert(0usize) += 1;
-        }
-        for (old, new) in aliases
-            .into_iter()
-            .chain(transfers.into_iter().filter(|(old, _)| counts[old] == 1))
-        {
-            self.rekey(&old, &new);
-        }
-        self.pane.row_data = rows;
-        self.pane.tail_data = tail;
-        self.pane.anchors = anchors;
-        self.prune_views(cx);
+            .map(|(i, row)| (row.data.key.clone(), i))
+            .collect();
         self.pane.revision = revision;
         self.pane.busy = busy;
         self.pane.call = call;
+        self.pane.pending = pending;
+        self.pane.cancelling = cancelling;
         if replaced {
             self.pane
                 .scroller
-                .update(cx, |list, cx| list.reset(fingerprints.len(), cx));
+                .update(cx, |list, cx| list.reset(self.pane.rows.len(), cx));
         } else {
-            match rows::compare(&self.pane.fingerprints, &fingerprints) {
-                RowChange::None => {}
-                RowChange::Remeasure(indices) => {
-                    for i in indices {
+            let old_keys: HashSet<_> = old.iter().map(|row| row.data.key.as_str()).collect();
+            let mut renamed = HashSet::new();
+            let before = old
+                .iter()
+                .map(|row| {
+                    let key = aliases
+                        .get(&row.data.key)
+                        .filter(|next| {
+                            self.pane.indices.contains_key(*next)
+                                && !old_keys.contains(next.as_str())
+                                && renamed.insert(next.as_str())
+                        })
+                        .unwrap_or(&row.data.key);
+                    (key.as_str(), row.fingerprint)
+                })
+                .collect::<Vec<_>>();
+            let after = self
+                .pane
+                .rows
+                .iter()
+                .map(|row| (row.data.key.as_str(), row.fingerprint))
+                .collect::<Vec<_>>();
+            for change in rows::reconcile(&before, &after) {
+                match change {
+                    RowChange::None => {}
+                    RowChange::Remeasure(indices) => {
+                        self.pane.scroller.update(cx, |list, cx| {
+                            for i in indices {
+                                list.remeasure_items(i..i + 1, cx);
+                            }
+                        });
+                    }
+                    RowChange::Splice { old, count } => {
                         self.pane
                             .scroller
-                            .update(cx, |list, cx| list.remeasure_items(i..i + 1, cx));
+                            .update(cx, |list, cx| list.splice(old, count, cx));
                     }
                 }
-                RowChange::Splice { old, count } => {
-                    self.pane
-                        .scroller
-                        .update(cx, |list, cx| list.splice(old, count, cx));
-                }
             }
-            let last = fingerprints.len() - 1;
-            self.pane
-                .scroller
-                .update(cx, |list, cx| list.remeasure_items(last..last + 1, cx));
         }
-        self.pane.fingerprints = fingerprints;
         if reset_focus {
-            // The previous pane's disclosures aren't in this key dispatch path anymore.
             window.focus(&self.window_focus, cx);
         }
-        if let Some(before) = prior_folds.as_ref().filter(|_| !replaced) {
-            self.remeasure_folds(before, cx);
-        }
-        self.refresh_views(cx);
-    }
-    fn activity_tip(controller: &SessionController, epoch: &str, row: usize) -> Option<BlockData> {
-        let model = controller.model.visible();
-        if !model.session.has_turn_work() {
-            return None;
-        }
-        let phrase = super::status::working_activity(model, controller.cancelling);
-        let mut tip = BlockData::new(
-            format!("{epoch}-tip"),
-            BlockKind::Live(LiveTail::Activity(phrase.clone())),
-            Gutter::Live,
-            phrase,
-            true,
-        );
-        tip.row = row;
-        Some(tip)
-    }
-    fn prune_views(&mut self, cx: &App) {
-        let pane = &mut self.pane;
-        let valid = pane
-            .row_data
-            .values()
-            .flat_map(|(_, data)| data)
-            .chain(&pane.tail_data)
-            .chain(pane.pending.iter().flat_map(|(_, data)| data))
-            .map(|b| b.key.as_str())
-            .collect::<HashSet<_>>();
-        let range_prefix = format!("{}-range-", pane.epoch);
-        pane.blocks.retain(|key, block| {
-            valid.contains(key.as_str())
-                || (key.starts_with(&range_prefix)
-                    && matches!(
-                        pane.folds.entry(block.view.read(cx).row()).span(),
-                        Some(SpanRole::Summary { .. })
-                    ))
-        });
-        pane.restored.retain(|key| valid.contains(key.as_str()));
-    }
-    fn history<'a>(&self, cx: &'a App) -> &'a [HistoryEntry] {
-        self.controller
-            .read(cx)
-            .model
-            .visible()
-            .conversation
-            .history()
-    }
-    fn refresh_views(&mut self, cx: &mut Context<Self>) {
-        for index in 0..self.pane.fingerprints.len() {
-            // Do not clone long, unmaterialized history on every stream delta.
-            if !self
-                .pane
-                .source(index)
-                .iter()
-                .any(|block| self.pane.blocks.contains_key(&block.key))
-                && !matches!(
-                    self.pane.folds.entry(index).span(),
-                    Some(SpanRole::Summary { .. })
-                )
-            {
-                continue;
-            }
-            let data = self.pane.data(self.history(cx), index);
-            for block in data {
-                if let Some(retained) = self.pane.blocks.get(&block.key) {
-                    retained
-                        .view
-                        .update(cx, |view, cx| view.sync(block, self.compact, cx));
-                }
+        for row in &self.pane.rows {
+            if let Some(block) = self.pane.blocks.get(&row.data.key) {
+                block
+                    .view
+                    .update(cx, |view, cx| view.sync(row.clone(), window, cx));
             }
         }
-    }
-    fn remeasure_folds(&mut self, before: &FoldState, cx: &mut Context<Self>) {
-        if before == &self.pane.folds {
-            return;
-        }
-        let history = self.history(cx);
-        let changed_summaries = self
-            .pane
-            .row_data
-            .keys()
-            .copied()
-            .filter(|&row| {
-                matches!(
-                    self.pane.folds.entry(row).span(),
-                    Some(SpanRole::Summary { .. })
-                ) && self.pane.folds.entry(row).span() == before.entry(row).span()
-                    && self.pane.folds.span_summary(history, row, false)
-                        != before.span_summary(history, row, false)
-            })
-            .collect::<HashSet<_>>();
-        let top = self.pane.scroller.read(cx).logical_scroll_top();
-        let origin = self
-            .pane
-            .scroll_return
-            .filter(|&(row, _)| row == top.item_ix)
-            .map_or(top.item_ix, |(_, origin)| origin);
-        let visible = self
-            .pane
-            .folds
-            .representative(
-                history,
-                FoldKey::Message {
-                    history_index: origin,
-                },
-                false,
-            )
-            .history_index();
-        let pane = &mut self.pane;
-        pane.scroller.update(cx, |list, cx| {
-            // The list preserves a live item anchor when remeasuring. Only
-            // redirect the top when its representative changes, never unpin the tail.
-            if !list.is_following_tail() {
-                pane.scroll_return = (visible != origin).then_some((visible, origin));
-                if visible != top.item_ix
-                    || (top.offset_in_item > px(0.)
-                        && (before.entry(visible).span() != pane.folds.entry(visible).span()
-                            || (before.entry(visible).message_mode()
-                                != pane.folds.entry(visible).message_mode()
-                                && pane.folds.entry(visible).is_message_folded())))
-                {
-                    list.scroll_to_item(visible, cx);
-                }
-            } else {
-                pane.scroll_return = None;
-            }
-            for (&row, (_, blocks)) in &pane.row_data {
-                let old = before.entry(row);
-                let new = pane.folds.entry(row);
-                if old.span() != new.span()
-                    || old.absorbing_span() != new.absorbing_span()
-                    || changed_summaries.contains(&row)
-                    || (new.span().is_none()
-                        && (old.message_mode() != new.message_mode()
-                            || blocks
-                                .iter()
-                                .take(if new.is_message_folded() {
-                                    1
-                                } else {
-                                    blocks.len()
-                                })
-                                .filter_map(|b| b.target)
-                                .any(|target| before.mode(target) != pane.folds.mode(target))))
-                {
-                    list.remeasure_items(row..row + 1, cx);
-                }
-            }
-            if before.stream_is_folded(pane.stream_snapshot)
-                != pane.folds.stream_is_folded(pane.stream_snapshot)
-            {
-                let tail = pane.row_data.len();
-                list.remeasure_items(tail..tail + 1, cx);
-            }
-        });
-    }
-    pub fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
-        self.pane.scroller.update(cx, |list, cx| {
-            list.scroll_to_end(cx);
-        });
         cx.notify();
     }
+
+    pub fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        self.pane
+            .scroller
+            .update(cx, |list, cx| list.scroll_to_end(cx));
+    }
+    pub fn jump_to_beginning(&mut self, cx: &mut Context<Self>) {
+        self.pane
+            .scroller
+            .update(cx, |list, cx| list.scroll_to_item(0, cx));
+    }
     pub fn jump_turn(&mut self, direction: TurnDirection, cx: &mut Context<Self>) -> bool {
-        let starts = turns::turn_rows(
-            &self
-                .controller
-                .read(cx)
-                .model
-                .visible()
-                .conversation
-                .turn_starts(false),
-            &self.pane.folds,
-        );
+        let starts = turns::turn_rows(&self.pane.rows);
         let top = self.pane.scroller.read(cx).logical_scroll_top();
         let Some(row) =
             turns::destination(&starts, top.item_ix, top.offset_in_item > px(0.), direction)
@@ -745,26 +292,61 @@ impl TranscriptView {
             .scroller
             .update(cx, |list, cx| list.scroll_to_item(row, cx))
     }
-    pub fn jump_to_beginning(&mut self, cx: &mut Context<Self>) {
-        self.pane
-            .scroller
-            .update(cx, |list, cx| list.scroll_to_item(0, cx));
+
+    pub fn has_expanded_details(&self) -> bool {
+        self.pane.disclosures.has_any_expanded(
+            self.pane
+                .rows
+                .iter()
+                .filter(|row| row.data.is_disclosure())
+                .map(|row| (row.data.key.as_str(), row.data.default_expanded())),
+        )
     }
-    fn focused_target(&self, window: &Window, cx: &App) -> Option<FoldKey> {
-        self.pane
-            .blocks
-            .values()
-            .find_map(|b| b.view.read(cx).focused_target(window, cx))
-            .filter(|&target| self.pane.representative(self.history(cx), target) == target)
-    }
-    fn focus_target(&mut self, target: FoldKey, window: &mut Window, cx: &mut Context<Self>) {
-        let data = self.pane.data(self.history(cx), target.history_index());
-        if let Some(data) = data.into_iter().find(|b| {
-            b.target == Some(target) || b.message.is_some_and(|message| message.key == target)
-        }) {
-            let view = self.retained(data, window, cx);
-            window.focus(&view.read(cx).fold_focus(target), cx);
+    pub fn toggle_all_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_expanded_details() {
+            self.collapse_all(window, cx);
+        } else {
+            self.expand_all(window, cx);
         }
+    }
+    pub fn expand_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane.disclosures.expand_keys(
+            self.pane
+                .rows
+                .iter()
+                .filter(|r| r.data.is_disclosure())
+                .map(|r| r.data.key.clone()),
+        );
+        self.update_disclosures(0..self.pane.rows.len(), window, cx);
+    }
+    pub fn collapse_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane.disclosures.collapse_all(
+            self.pane
+                .rows
+                .iter()
+                .filter(|r| r.data.is_disclosure() && r.data.default_expanded())
+                .map(|r| r.data.key.clone()),
+        );
+        self.update_disclosures(0..self.pane.rows.len(), window, cx);
+    }
+    pub fn set_all_thinking(
+        &mut self,
+        expanded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keys = self
+            .pane
+            .rows
+            .iter()
+            .filter(|r| r.data.thought().is_some())
+            .map(|r| r.data.key.clone());
+        if expanded {
+            self.pane.disclosures.expand_keys(keys);
+        } else {
+            self.pane.disclosures.collapse_keys(keys);
+        }
+        self.update_disclosures(0..self.pane.rows.len(), window, cx);
     }
     pub(super) fn fold_local(
         &mut self,
@@ -772,195 +354,90 @@ impl TranscriptView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(target) = self.focused_target(window, cx) {
-            self.set_local_fold(target, action, window, cx);
-        }
-    }
-    fn set_local_fold(
-        &mut self,
-        target: FoldKey,
-        action: LocalFold,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let controller = self.controller.clone();
-        self.update_folds(window, cx, |folds, cx| match action {
-            LocalFold::Toggle if !folds.contains(target) => folds.fold(target),
-            LocalFold::Close => folds.fold(target),
-            LocalFold::Toggle | LocalFold::Open => {
-                let history = controller.read(cx).model.visible().conversation.history();
-                folds.open(history, target, false);
-            }
-        });
-    }
-    pub(super) fn fold_turns(
-        &mut self,
-        action: TurnFold,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let controller = self.controller.clone();
-        self.update_folds(window, cx, |folds, cx| {
-            controller
+        let key = self.pane.blocks.iter().find_map(|(key, block)| {
+            block
+                .view
                 .read(cx)
-                .model
-                .visible()
-                .fold_transcript(folds, false, action);
+                .has_disclosure_focus(window)
+                .then(|| key.clone())
         });
-    }
-    pub(super) fn unfold_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.apply_folds(window, cx, FoldState::unfold_all);
-    }
-    pub(super) fn thinking(&mut self, expanded: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let keys = self
-            .pane
-            .row_data
-            .values()
-            .flat_map(|(_, blocks)| blocks)
-            .filter(|b| matches!(b.kind, BlockKind::Reasoning))
-            .filter_map(|b| b.target)
-            .collect::<Vec<_>>();
-        self.apply_folds(window, cx, |folds| {
-            for target in keys {
-                if expanded {
-                    folds.unfold(target);
-                } else {
-                    folds.fold(target);
-                }
-            }
-        });
-    }
-    fn apply_folds(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        change: impl FnOnce(&mut FoldState),
-    ) {
-        self.update_folds(window, cx, |folds, _| change(folds));
-    }
-    fn update_folds(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        change: impl FnOnce(&mut FoldState, &App),
-    ) {
-        let focused = self.focused_target(window, cx);
-        let before = self.pane.folds.clone();
-        change(&mut self.pane.folds, cx);
-        if before == self.pane.folds {
+        let Some(index) = key.as_ref().and_then(|k| self.pane.indices.get(k)).copied() else {
             return;
-        }
-        self.remeasure_folds(&before, cx);
-        if let Some(current) = focused {
-            let preferred = self
+        };
+        let key = key.unwrap();
+        match action {
+            LocalFold::Toggle => self
                 .pane
-                .focus_return
-                .take()
-                .filter(|&(representative, _)| representative == current)
-                .map_or(current, |(_, original)| original);
-            let next = self.pane.representative(self.history(cx), preferred);
-            if next != preferred && !matches!(preferred, FoldKey::Span { .. }) {
-                self.pane.focus_return = Some((next, preferred));
-            }
-            if next != current || (!before.contains(next) && self.pane.folds.contains(next)) {
-                self.focus_target(next, window, cx);
+                .disclosures
+                .toggle(key, self.pane.rows[index].expanded),
+            LocalFold::Open => self.pane.disclosures.set(key, true),
+            LocalFold::Close => self.pane.disclosures.set(key, false),
+        }
+        self.update_disclosures(index..index + 1, window, cx);
+    }
+    fn update_disclosures(
+        &mut self,
+        indices: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for index in indices {
+            let row = &mut self.pane.rows[index];
+            let before = row.expanded;
+            row.apply_disclosure(&self.pane.disclosures);
+            if before != row.expanded {
+                if let Some(block) = self.pane.blocks.get(&row.data.key) {
+                    block
+                        .view
+                        .update(cx, |view, cx| view.sync(row.clone(), window, cx));
+                }
+                self.pane
+                    .scroller
+                    .update(cx, |list, cx| list.remeasure_items(index..index + 1, cx));
             }
         }
-        self.prune_views(cx);
-        self.refresh_views(cx);
         cx.notify();
     }
-    #[cfg(test)]
-    pub(super) fn test_data(&self, cx: &App) -> Vec<BlockData> {
-        let history = self.history(cx);
-        (0..self.pane.fingerprints.len())
-            .flat_map(|index| self.pane.data(history, index))
-            .collect()
-    }
-    #[cfg(test)]
-    pub(super) fn test_identity(&self, key: &str, cx: &App) -> Option<(EntityId, EntityId)> {
-        self.pane
-            .blocks
-            .get(key)
-            .map(|block| (block.view.entity_id(), block.view.read(cx).text_id()))
-    }
-    #[cfg(test)]
-    pub(super) fn test_focus(&self, key: &str, target: FoldKey, cx: &App) -> FocusHandle {
-        self.pane
-            .blocks
-            .get(key)
-            .unwrap()
-            .view
-            .read(cx)
-            .fold_focus(target)
-    }
-    #[cfg(test)]
-    pub(super) fn test_clamped(&self, key: &str, cx: &App) -> bool {
-        self.pane
-            .blocks
-            .get(key)
-            .unwrap()
-            .view
-            .read(cx)
-            .text_is_clamped(cx)
-    }
-    /// Materialize independently of row rendering so a newly-created summary can rescue focus.
+
     fn retained(
         &mut self,
-        data: BlockData,
+        row: TimelineRow,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<BlockView> {
-        let key = data.key.clone();
-        if let Some(retained) = self.pane.blocks.get(&key) {
-            let entity = retained.view.clone();
-            entity.update(cx, |block, cx| block.sync(data, self.compact, cx));
-            return entity;
+        let key = row.data.key.clone();
+        if let Some(block) = self.pane.blocks.get(&key) {
+            return block.view.clone();
         }
-        let entity = cx.new(|cx| BlockView::new(data, self.controller.clone(), self.compact, cx));
-        let observe = cx.observe(&entity, |this, entity, cx| {
-            let view = entity.read(cx);
-            if !this
+        let entity = cx.new(|cx| BlockView::new(row, self.controller.clone(), cx));
+        let resize = cx.subscribe(&entity, |this, entity, _: &DetailResized, cx| {
+            let key = entity.read(cx).key();
+            if this
                 .pane
                 .blocks
-                .get(view.key())
-                .is_some_and(|block| block.view == entity)
+                .get(key)
+                .is_some_and(|retained| retained.view == entity)
+                && let Some(&index) = this.pane.indices.get(key)
             {
-                return;
+                this.pane
+                    .scroller
+                    .update(cx, |list, cx| list.remeasure_items(index..index + 1, cx));
             }
-            let row = view.row();
-            if this.pane.folds.entry(row).span().is_some() && view.key() != this.pane.range_key(row)
-            {
-                return;
-            }
-            this.pane
-                .scroller
-                .update(cx, |list, cx| list.remeasure_items(row..row + 1, cx));
-            cx.notify();
         });
         let change = cx.subscribe_in(
             &entity,
             window,
             |this, entity, event: &DisclosureChanged, window, cx| {
-                if !this
+                let key = entity.read(cx).key().to_owned();
+                if this
                     .pane
                     .blocks
-                    .get(entity.read(cx).key())
-                    .is_some_and(|block| block.view == *entity)
+                    .get(&key)
+                    .is_some_and(|retained| retained.view == *entity)
+                    && let Some(&index) = this.pane.indices.get(&key)
                 {
-                    return;
-                }
-                if this.pane.representative(this.history(cx), event.target) == event.target {
-                    this.set_local_fold(
-                        event.target,
-                        if event.expanded {
-                            LocalFold::Open
-                        } else {
-                            LocalFold::Close
-                        },
-                        window,
-                        cx,
-                    );
+                    this.pane.disclosures.set(key, event.expanded);
+                    this.update_disclosures(index..index + 1, window, cx);
                 }
             },
         );
@@ -968,83 +445,100 @@ impl TranscriptView {
             key,
             RetainedBlock {
                 view: entity.clone(),
-                _subscriptions: vec![observe, change],
+                _subscriptions: [resize, change],
             },
         );
         entity
     }
+
     fn row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let data = self.pane.data(self.history(cx), index);
-        if data.is_empty() {
-            return div().w_full().h_0().into_any_element();
-        }
-        let mut row = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .px(px(16.))
-            .when(index + 1 < self.pane.fingerprints.len(), |row| {
-                row.pb(rems(2.))
-            });
+        let Some(row) = self.pane.rows.get(index).cloned() else {
+            return div().into_any_element();
+        };
         let model = self.controller.read(cx).model.visible();
-        let paint = if index == self.pane.row_data.len() {
-            model
-                .pending_prompt()
-                .and_then(|preview| preview.paint_probe())
-        } else {
-            model
+        let paint = match row.data.kind {
+            BlockKind::Prompt {
+                preparing: true, ..
+            } => model.pending_prompt().and_then(|p| p.paint_probe()),
+            BlockKind::Prompt { .. } => model
                 .accepted_prompt_paint()
-                .filter(|(prompt_row, _)| *prompt_row == index)
-                .map(|(_, paint)| paint)
+                .filter(|(i, _)| *i == row.data.history_index)
+                .map(|(_, paint)| paint),
+            _ => None,
         }
         .cloned();
-        for data in data {
-            row = row.child(self.retained(data, window, cx));
-        }
-        if let Some(paint) = paint {
-            // List measurement and overscan are not visible paints.
-            row = row.relative().child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, (), window, _| {
-                        if bounds.intersects(&window.content_mask().bounds) {
-                            paint.mark_painted();
-                        }
-                    },
+        div()
+            .w_full()
+            .px(px(style::COLUMN_INSET))
+            .pt(px(f32::from(row.gap)))
+            .when(row.last, |r| r.pb(px(16.)))
+            .child(style::Measure::column().child(self.retained(row, window, cx)))
+            .when_some(paint, |row, paint| {
+                // List measurement and overscan are not visible paints.
+                row.relative().child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, _| {
+                            if bounds.intersects(&window.content_mask().bounds) {
+                                paint.mark_painted();
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full()
+                    .top_0()
+                    .left_0(),
                 )
-                .absolute()
-                .size_full()
-                .top_0()
-                .left_0(),
-            );
-        }
-        row.into_any_element()
+            })
+            .into_any_element()
+    }
+
+    #[cfg(test)]
+    pub(super) fn scroller(&self) -> Entity<MessageScrollerState> {
+        self.pane.scroller.clone()
+    }
+    #[cfg(test)]
+    pub(super) fn test_data(&self, _: &App) -> Vec<TimelineRow> {
+        self.pane.rows.clone()
+    }
+    #[cfg(test)]
+    pub(super) fn test_identity(&self, key: &str, cx: &App) -> Option<(EntityId, EntityId)> {
+        self.pane
+            .blocks
+            .get(key)
+            .map(|b| (b.view.entity_id(), b.view.read(cx).text_id()))
+    }
+    #[cfg(test)]
+    pub(super) fn test_focus(&self, key: &str, cx: &App) -> FocusHandle {
+        self.pane.blocks[key].view.read(cx).disclosure_focus()
+    }
+    #[cfg(test)]
+    pub(super) fn test_prepared(&self, key: &str, cx: &App) -> bool {
+        self.pane
+            .blocks
+            .get(key)
+            .is_some_and(|b| b.view.read(cx).test_prepared())
     }
 }
+
 impl Render for TranscriptView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let owner = cx.entity();
         let controller = self.controller.read(cx);
-        let model = controller.model.visible();
         if controller.phase == crate::controller::Phase::Live
-            && controller.model.selected_child.is_none()
-            && model.conversation.history().is_empty()
-            && matches!(model.tail(Instant::now()), ConversationTail::None)
+            && self.selected.is_none()
+            && self.pane.rows.is_empty()
         {
             let name = controller
                 .workspace
                 .as_deref()
                 .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Zevria".into());
-            return div().id("transcript").size_full().px(px(16.)).pt(px(80.))
-                .child(style::Measure { compact: self.compact }.row()
-                    .when(!self.compact, |r| r.child(div().w(px(style::GUTTER)).flex_shrink_0()))
-                    .child(div().flex_1().min_w_0().max_w(px(style::PROSE)).flex().flex_col().gap(px(16.))
-                        .child(div().text_size(px(36.)).line_height(px(40.)).font_weight(FontWeight::SEMIBOLD).child(name))
-                        .child(style::body().text_color(palette(cx).text.secondary).child("Describe a change to build, or switch to Plan to work through an approach."))
-                        .child(style::kbd_hint(format!("{}  Open workspace     {}  New session     {}  Switch mode",
-                            Shortcut::OPEN_WORKSPACE.label(), Shortcut::NEW_SESSION.label(), Shortcut::TOGGLE_MODE.label()), cx))))
+                .map_or_else(|| "Zevria".into(), |n| n.to_string_lossy().into_owned());
+            return div().id("transcript").size_full().px(px(style::COLUMN_INSET)).pt(px(64.))
+                .child(style::Measure::column().flex().flex_col().gap(px(12.))
+                    .child(div().text_size(px(30.)).line_height(px(36.)).font_weight(FontWeight::SEMIBOLD).child(name))
+                    .child(style::body().text_color(palette(cx).text.secondary).child("Describe a change to build, or switch to Plan to work through an approach."))
+                    .child(style::kbd_hint(format!("{}  Open workspace     {}  New session     {}  Switch mode", Shortcut::OPEN_WORKSPACE.label(), Shortcut::NEW_SESSION.label(), Shortcut::TOGGLE_MODE.label()), cx)))
                 .into_any_element();
         }
         div()
@@ -1055,9 +549,7 @@ impl Render for TranscriptView {
                 MessageScroller::new(
                     "transcript",
                     self.pane.scroller.clone(),
-                    move |index, window, cx| {
-                        owner.update(cx, |this, cx| this.row(index, window, cx))
-                    },
+                    move |i, window, cx| owner.update(cx, |this, cx| this.row(i, window, cx)),
                 )
                 .with_row_style(StyleRefinement::default().px_0().pb_0())
                 .jump_button(true)

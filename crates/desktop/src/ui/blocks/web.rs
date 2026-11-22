@@ -1,7 +1,9 @@
-//! Desktop-only grouping and rendering of provider-hosted web work.
-
-use super::{BlockData, BlockKind, BlockView, Gutter, style};
-use crate::ui::theme::palette;
+//! Expanded hosted actions and source links on the desktop timeline.
+use super::{BlockView, style};
+use crate::{
+    timeline::web::{WebRow, extra_queries, label, live_phrase, quoted},
+    ui::theme::palette,
+};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -11,183 +13,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::*, *};
 use zevria_content::{CitedSource, citations};
-use zevria_presentation::{
-    blocks::{WebActionKind, WebActionPresentation, WebActivityPresentation, aggregate_web_status},
-    status_icon::StatusIcon,
-};
-
-const INDENT: f32 = 28.;
+use zevria_presentation::{blocks::WebActionPresentation, status_icon::StatusIcon};
 const VISIBLE_DOMAINS: usize = 8;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WebRow {
-    actions: Vec<WebActionPresentation>,
-    copies: Vec<String>,
-}
-
-impl WebRow {
-    pub(super) fn new(activity: &WebActivityPresentation, copy: String) -> Self {
-        Self {
-            actions: activity.actions.clone(),
-            copies: vec![copy],
-        }
-    }
-
-    pub fn status(&self) -> StatusIcon {
-        aggregate_web_status(self.actions.iter().map(|action| action.status))
-    }
-
-    pub fn single(&self) -> Option<&WebActionPresentation> {
-        match self.actions.as_slice() {
-            [action] => Some(action),
-            _ => None,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        self.single()
-            .map_or("Web activity", |action| label(action.kind))
-    }
-
-    pub fn counts(&self) -> String {
-        let mut counts = [0; 4];
-        for action in &self.actions {
-            counts[match action.kind {
-                WebActionKind::Search => 0,
-                WebActionKind::OpenPage => 1,
-                WebActionKind::FindInPage => 2,
-                WebActionKind::Other => 3,
-            }] += 1;
-        }
-        counts
-            .into_iter()
-            .zip(["search", "page", "find", "action"])
-            .filter(|(count, _)| *count > 0)
-            .map(|(count, noun)| {
-                let suffix = match (count, noun) {
-                    (1, _) => "",
-                    (_, "search") => "es",
-                    _ => "s",
-                };
-                format!("{count} {noun}{suffix}")
-            })
-            .collect::<Vec<_>>()
-            .join(" · ")
-    }
-
-    pub fn live_phrase(&self) -> Option<&'static str> {
-        live_phrase(&self.actions)
-    }
-
-    pub fn preview(&self) -> String {
-        let summary = self.single().map_or_else(
-            || self.counts(),
-            |action| summary_preview(action, self.live_phrase()),
-        );
-        if summary.is_empty() {
-            self.label().into()
-        } else {
-            format!("{}  {summary}", self.label())
-        }
-    }
-}
-
-/// Combine adjacent bulk activity, keeping the lead's identity and retained
-/// body. Expanded web rows still coalesce independently of a folded run.
-pub(in crate::ui) fn coalesce(blocks: Vec<BlockData>) -> Vec<BlockData> {
-    let mut rows: Vec<BlockData> = Vec::with_capacity(blocks.len());
-    for mut data in blocks {
-        if data.summary {
-            if let Some(prior) = rows.last_mut().filter(|prior| prior.summary) {
-                prior.digest += data.digest;
-                prior.primary.push_str("\n\n");
-                prior.primary.push_str(&data.primary);
-                prior.grouped_targets.extend(data.target);
-                continue;
-            }
-            data.kind = BlockKind::Activity;
-        }
-        if let Some(BlockData {
-            kind: BlockKind::Web(prior),
-            grouped_targets,
-            ..
-        }) = rows.last_mut()
-            && let BlockKind::Web(current) = &mut data.kind
-        {
-            prior.actions.append(&mut current.actions);
-            prior.copies.append(&mut current.copies);
-            grouped_targets.extend(data.target);
-        } else {
-            rows.push(data);
-        }
-    }
-    for data in &mut rows {
-        if data.summary {
-            data.gutter = data.digest.status.map_or(Gutter::None, Gutter::Glyph);
-        } else if let BlockKind::Web(row) = &data.kind
-            && row.copies.len() > 1
-        {
-            data.body = row.copies.join("\n");
-            data.primary.clone_from(&data.body);
-            data.gutter = Gutter::Glyph(row.status());
-        }
-    }
-    rows
-}
-
-fn label(kind: WebActionKind) -> &'static str {
-    match kind {
-        WebActionKind::Search => "Web search",
-        WebActionKind::OpenPage => "Open page",
-        WebActionKind::FindInPage => "Find in page",
-        WebActionKind::Other => "Web action",
-    }
-}
-
-pub(in crate::ui) fn live_phrase(actions: &[WebActionPresentation]) -> Option<&'static str> {
-    let action = actions
-        .last()
-        .filter(|action| action.status == StatusIcon::Running)?;
-    Some(match action.kind {
-        WebActionKind::Search | WebActionKind::Other => "Searching the web",
-        WebActionKind::OpenPage => "Opening a page",
-        WebActionKind::FindInPage => "Finding in page",
-    })
-}
-
-fn quoted(text: &str) -> String {
-    format!("“{}”", text.replace(['\n', '\t'], " "))
-}
-
-fn extra_queries(action: &WebActionPresentation) -> Option<String> {
-    (action.queries.len() > 1).then(|| format!("+{} more", action.queries.len() - 1))
-}
-
-fn summary_preview(action: &WebActionPresentation, live: Option<&str>) -> String {
-    let mut parts = Vec::new();
-    if let Some(query) = action.queries.first() {
-        parts.push(quoted(query));
-        parts.extend(extra_queries(action));
-    }
-    if let Some(pattern) = &action.pattern {
-        parts.push(quoted(pattern));
-    }
-    if let Some(url) = &action.url {
-        parts.push(
-            action
-                .safe_url()
-                .and_then(citations::url_display)
-                .map_or_else(
-                    || url.replace(['\n', '\t'], " "),
-                    |display| display.host + &display.rest,
-                ),
-        );
-    }
-    if parts.is_empty() {
-        return live.map_or_else(String::new, |phrase| format!("{phrase}…"));
-    }
-    parts.join(" ")
-}
 
 #[derive(Debug, PartialEq, Eq)]
 struct SourceDomain {
@@ -394,6 +221,7 @@ fn status_words(statuses: impl IntoIterator<Item = StatusIcon>, cx: &App) -> Div
         })
 }
 
+#[cfg(test)]
 fn outcome_counts(actions: &[WebActionPresentation]) -> Vec<(StatusIcon, usize)> {
     use StatusIcon::*;
     [
@@ -419,31 +247,6 @@ fn outcome_counts(actions: &[WebActionPresentation]) -> Vec<(StatusIcon, usize)>
     .collect()
 }
 
-fn count_meta(row: &WebRow, ink: Hsla, cx: &App) -> Option<impl IntoElement> {
-    let counts = outcome_counts(&row.actions);
-    if counts.len() < 2 {
-        return None;
-    }
-    let mut meta = div()
-        .id("web-count-meta")
-        .test_support()
-        .flex()
-        .items_center()
-        .gap(px(4.));
-    for (i, (status, count)) in counts.into_iter().enumerate() {
-        if i > 0 {
-            meta = meta.child(style::meta().text_color(palette(cx).text.muted).child("·"));
-        }
-        meta = meta.child(
-            style::meta()
-                .whitespace_nowrap()
-                .text_color(style::glyph_color(status, ink, cx))
-                .child(format!("{count} {}", status.glyph(0))),
-        );
-    }
-    Some(meta)
-}
-
 fn list_item(action: &WebActionPresentation, ink: Hsla, cx: &App) -> impl IntoElement {
     div()
         .id(format!("web-action-{}", action.output_index))
@@ -458,7 +261,7 @@ fn list_item(action: &WebActionPresentation, ink: Hsla, cx: &App) -> impl IntoEl
                 .flex()
                 .justify_center()
                 .pt(px(2.))
-                .child(style::status_glyph(action.status, ink, cx)),
+                .child(style::step_status(action.status, ink, cx)),
         )
         .child(
             action_label(label(action.kind), cx)
@@ -470,73 +273,15 @@ fn list_item(action: &WebActionPresentation, ink: Hsla, cx: &App) -> impl IntoEl
         .child(status_words([action.status], cx).pt(px(3.)))
 }
 
-pub(super) fn render_row(
-    row: &WebRow,
-    view: &BlockView,
-    ink: Hsla,
-    window: &Window,
-    cx: &mut Context<BlockView>,
-) -> Div {
-    let expanded = view.data.expanded;
-    let header = div()
-        .id("web-header")
-        .test_support()
-        .min_h(px(28.))
-        .flex()
-        .items_start()
-        .children(view.block_disclosure(&format!("{} details", row.label()), window, cx));
-    let label = action_label(row.label(), cx).flex_shrink_0().pt(px(2.));
-    let contents = match row.single() {
-        Some(action) => div()
-            .flex()
-            .items_start()
-            .gap(px(8.))
-            .child(label)
-            .child(action_summary(action, expanded, cx))
-            .child(status_words([action.status], cx).pt(px(3.))),
-        None => div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(label.pt_0())
-            .child(
-                style::meta()
-                    .id("web-counts")
-                    .test_support()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(palette(cx).text.muted)
-                    .child(row.counts()),
-            )
-            .child(div().flex_1())
-            .children(count_meta(row, ink, cx))
-            .child(status_words(
-                row.actions.iter().map(|action| action.status),
-                cx,
-            )),
-    };
+pub(super) fn details(row: &WebRow, cx: &App) -> impl IntoElement {
+    let ink = palette(cx).text.muted;
     div()
-        .group("log-block")
+        .id("web-action-list")
+        .test_support()
         .flex()
         .flex_col()
         .gap(px(4.))
-        .child(
-            header
-                .child(contents.flex_1().min_w_0().pt(px(4.)))
-                .child(view.actions(window, cx).flex_shrink_0()),
-        )
-        .when(expanded && row.single().is_none(), |web| {
-            web.child(
-                div()
-                    .id("web-action-list")
-                    .test_support()
-                    .pl(px(INDENT))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .children(row.actions.iter().map(|action| list_item(action, ink, cx))),
-            )
-        })
+        .children(row.actions.iter().map(|action| list_item(action, ink, cx)))
 }
 
 fn page_tooltip(page: &CitedSource) -> String {
@@ -619,7 +364,6 @@ pub(super) fn sources_footer(
     let footer = div()
         .id("answer-sources")
         .test_support()
-        .pl(px(INDENT))
         .flex()
         .flex_wrap()
         .items_center()
@@ -664,6 +408,7 @@ mod tests {
         HostedActivity, HostedActivityKind, HostedActivityStatus, ResponseAttempt,
     };
     use zevria_foundation::ModelProfileRef;
+    use zevria_presentation::blocks::{WebActivityPresentation, aggregate_web_status};
 
     fn row(actions: impl IntoIterator<Item = (Value, HostedActivityStatus)>) -> WebRow {
         let attempt = ResponseAttempt::new(ModelProfileRef::new("fixture", "fixture"));

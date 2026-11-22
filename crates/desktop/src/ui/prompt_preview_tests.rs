@@ -64,16 +64,24 @@ fn first_frame_echoes_the_prompt_while_provider_count_is_blocked(cx: &mut TestAp
         });
         cx.update_window(window.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.find("preparing-prompt").bounds().size.height > px(0.));
-            assert!(window.find("pending-prompt-text").bounds().size.height > px(0.));
+            assert!(window.find("prompt-preparing").bounds().size.height > px(0.));
+            assert!(window.find("prompt-text").bounds().size.height > px(0.));
         })
         .unwrap();
         let data = view.read_with(cx, |view, cx| view.transcript.read(cx).test_data(cx));
-        assert_eq!(data.iter().filter(|b| b.body == PROMPT).count(), 1);
+        assert_eq!(data.iter().filter(|b| &*b.data.body == PROMPT).count(), 1);
         assert!(
             data.iter()
-                .filter(|b| b.body == PROMPT)
-                .all(|b| b.source.is_none() && b.header.is_none() && b.target.is_none())
+                .filter(|b| &*b.data.body == PROMPT)
+                .all(|b| b.data.source.is_none()
+                    && b.turn_start
+                    && matches!(
+                        b.data.kind,
+                        crate::timeline::BlockKind::Prompt {
+                            preparing: true,
+                            ..
+                        }
+                    ))
         );
         assert!(controller.read_with(cx, |this, _| {
             this.model.root.conversation.history().is_empty()
@@ -96,14 +104,14 @@ fn first_frame_echoes_the_prompt_while_provider_count_is_blocked(cx: &mut TestAp
                 controller.read_with(cx, |this, _| this.model.root.active_turn_id().is_some())
             });
             let data = view.read_with(cx, |view, cx| view.transcript.read(cx).test_data(cx));
-            let mut prompts = data.iter().filter(|b| b.body == PROMPT);
+            let mut prompts = data.iter().filter(|b| &*b.data.body == PROMPT);
             let canonical = prompts.next().expect("canonical prompt in projection");
-            assert!(canonical.source.is_some() && canonical.header.is_some());
+            assert!(canonical.data.source.is_some() && canonical.turn_start);
             assert!(prompts.next().is_none());
             cx.update_window(window.into(), |_, window, cx| {
                 window.render_frame(cx);
-                assert!(window.try_find("preparing-prompt").is_none());
-                assert!(window.find(canonical.key.clone()).bounds().size.height > px(0.));
+                assert!(window.try_find("prompt-preparing").is_none());
+                assert!(window.find(canonical.data.key.clone()).bounds().size.height > px(0.));
             })
             .unwrap();
             assert_eq!(
@@ -125,7 +133,7 @@ fn first_frame_echoes_the_prompt_while_provider_count_is_blocked(cx: &mut TestAp
         });
         cx.update_window(window.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find("preparing-prompt").is_none());
+            assert!(window.try_find("prompt-preparing").is_none());
         })
         .unwrap();
         assert!(controller.read_with(cx, |this, _| {
@@ -152,7 +160,7 @@ fn failed_submit_send_clears_preview_and_retains_the_draft(cx: &mut TestAppConte
     }));
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.try_find("preparing-prompt").is_none());
+        assert!(window.try_find("prompt-preparing").is_none());
     })
     .unwrap();
 }

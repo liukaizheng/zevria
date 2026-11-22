@@ -170,7 +170,7 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
     let before = transcript.read_with(cx, |v, cx| {
         v.test_data(cx)
             .iter()
-            .map(|b| (b.key.clone(), b.expanded))
+            .map(|b| (b.data.key.clone(), b.expanded))
             .collect::<Vec<_>>()
     });
     let epoch = controller.read_with(cx, |c, _| c.model.root.conversation.epoch());
@@ -184,7 +184,7 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
         transcript.read_with(cx, |v, cx| v
             .test_data(cx)
             .iter()
-            .map(|b| (b.key.clone(), b.expanded))
+            .map(|b| (b.data.key.clone(), b.expanded))
             .collect::<Vec<_>>()),
         before,
         "management must not insert even a transient conversation activity row"
@@ -250,7 +250,7 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
         transcript.read_with(cx, |v, cx| v
             .test_data(cx)
             .iter()
-            .map(|b| (b.key.clone(), b.expanded))
+            .map(|b| (b.data.key.clone(), b.expanded))
             .collect::<Vec<_>>()),
         before
     );

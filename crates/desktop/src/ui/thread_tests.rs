@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     disclosure::Phase,
-    ui::blocks::{BlockData, BlockKind, LiveTail, NoticeLevel},
+    timeline::{BlockKind, NoticeLevel, TimelineRow},
 };
 use rig_core::message::{AssistantContent, AssistantMessage, Reasoning};
 use zevria_content::{AssistantStreamSnapshot, ResponseAttempt, ResponseAttemptOutcome};
@@ -49,13 +49,13 @@ fn stream(
         cx,
     );
 }
-fn data(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
+fn data(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<TimelineRow> {
     view.read_with(cx, |view, cx| view.transcript.read(cx).test_data(cx))
 }
-fn thoughts(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
+fn thoughts(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<TimelineRow> {
     data(view, cx)
         .into_iter()
-        .filter(|b| matches!(b.kind, BlockKind::Reasoning))
+        .filter(|row| row.data.thought().is_some())
         .collect()
 }
 fn render(window: Window, cx: &mut TestAppContext) {
@@ -65,7 +65,7 @@ fn render(window: Window, cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn render_only_tail_is_unfolded_and_commits_with_the_same_text_view(cx: &mut TestAppContext) {
+fn first_thought_retains_its_renderer_and_auto_collapses_on_prose(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup(cx);
     let id = TurnId::new(100);
     start(&controller, id, cx);
@@ -74,117 +74,146 @@ fn render_only_tail_is_unfolded_and_commits_with_the_same_text_view(cx: &mut Tes
     let thought = thoughts(&view, cx).remove(0);
     assert!(thought.expanded);
     assert_eq!(thought.phase, Phase::Live);
-    assert!(
-        data(&view, cx)
-            .iter()
-            .any(|b| matches!(&b.kind, BlockKind::Live(LiveTail::Activity(p)) if p == "Thinking"))
-    );
+    assert!(matches!(thought.data.kind, BlockKind::ThoughtGroup(_)));
     let identity = view.read_with(cx, |view, cx| {
         view.transcript
             .read(cx)
-            .test_identity(&thought.key, cx)
+            .test_identity(&thought.data.key, cx)
             .unwrap()
     });
-    assert_eq!(thought.target, None);
-    cx.update_window(window.into(), |_, window, cx| {
-        assert!(
-            window.try_find("block-disclosure").is_some(),
-            "the committed prompt is foldable"
-        );
-        window.press(Shortcut::FOLD_EARLIER.0, cx);
-        window.press(Shortcut::COLLAPSE_THINKING.0, cx);
-    })
-    .unwrap();
-    stream(
-        &controller,
-        id,
-        thinking("### **Trace** the source carefully"),
-        cx,
-    );
-    assert!(thoughts(&view, cx)[0].expanded);
+    let answer = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::Reasoning(Reasoning::new("### **Trace** the source carefully")),
+        AssistantContent::text("Found the relevant code."),
+    ]));
+    stream(&controller, id, answer.clone(), cx);
+    assert!(!thoughts(&view, cx)[0].expanded);
     event(
         &controller,
         E::TurnCompleted {
             turn_id: id,
-            message: thinking("### **Trace** the source carefully"),
+            message: answer,
             attempt_id: None,
         },
         cx,
     );
     render(window, cx);
     let committed = thoughts(&view, cx).remove(0);
-    assert!(committed.expanded);
-    assert!(committed.target.is_some());
-    assert_ne!(committed.key, thought.key);
+    assert!(!committed.expanded);
+    assert_eq!(committed.data.key, thought.data.key);
     assert_eq!(
         identity,
         view.read_with(cx, |view, cx| view
             .transcript
             .read(cx)
-            .test_identity(&committed.key, cx)
+            .test_identity(&committed.data.key, cx)
             .unwrap())
     );
-    start(&controller, TurnId::new(101), cx);
-    stream(&controller, TurnId::new(101), thinking("A new thought"), cx);
-    let next = thoughts(&view, cx).pop().unwrap();
-    assert!(
-        next.expanded,
-        "a new turn must not inherit the old collapse"
-    );
-    assert_ne!(next.key, thought.key);
 }
 
 #[gpui_kit::test]
-fn untouched_thinking_stays_open_after_turn_end_and_scroll(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup_at_size(cx, 720., 520.);
+fn later_call_thought_stays_at_live_tail_then_merges_with_pinned_intent(cx: &mut TestAppContext) {
+    use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
+    let (window, view, controller, _) = setup(cx);
     let id = TurnId::new(102);
     start(&controller, id, cx);
-    let body = "Trace the supplied provider text.\n\n".repeat(90);
-    stream(&controller, id, thinking(&body), cx);
+    let inspect = ToolCall::new(
+        CallId::from_wire("inspect"),
+        ToolFunction::new(
+            ToolName::new("read").unwrap(),
+            serde_json::json!({"file_path":"src/lib.rs"}),
+        ),
+    );
+    event(
+        &controller,
+        E::Intermediate {
+            turn_id: id,
+            attempt_id: None,
+            message: Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(Reasoning::new("Read the source")),
+                AssistantContent::ToolCall(inspect),
+            ])),
+        },
+        cx,
+    );
+    event(
+        &controller,
+        E::ToolResults {
+            turn_id: id,
+            metadata: vec![],
+            message: Message::tool_result(
+                CallId::from_wire("inspect"),
+                ToolName::new("read").unwrap(),
+                "contents",
+            ),
+        },
+        cx,
+    );
+    event(
+        &controller,
+        E::ModelCallStarted {
+            turn_id: id,
+            call: 2,
+        },
+        cx,
+    );
+    stream(&controller, id, thinking("Check the reported path"), cx);
     render(window, cx);
-    let scroller = view.read_with(cx, |view, _| view.transcript.clone());
-    scroller.update(cx, |view, cx| {
-        view.scroller().update(cx, |scroller, cx| {
-            scroller.scroll_to_item(0, cx);
-        })
-    });
+    let initial = thoughts(&view, cx);
+    assert_eq!(initial.len(), 2);
+    assert!(!initial[0].expanded);
+    assert!(initial[1].expanded);
+    assert!(matches!(
+        data(&view, cx).last().unwrap().data.kind,
+        BlockKind::LiveThought(_)
+    ));
+    cx.update_window(window.into(), |_, window, cx| {
+        window
+            .within(initial[1].data.key.clone())
+            .click("block-disclosure", cx);
+    })
+    .unwrap();
     render(window, cx);
-    let before = scroller.read_with(cx, |view, cx| view.scroller().read(cx).logical_scroll_top());
+    assert!(!thoughts(&view, cx)[1].expanded);
+    cx.update_window(window.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
     stream(
         &controller,
         id,
-        thinking(&format!("{body}More evidence.")),
+        thinking("Check the reported path and revision"),
         cx,
     );
+    assert!(thoughts(&view, cx)[1].expanded);
     event(
         &controller,
         E::TurnCompleted {
             turn_id: id,
-            message: thinking(&format!("{body}More evidence.")),
+            message: thinking("Check the reported path and revision"),
             attempt_id: None,
         },
         cx,
     );
     render(window, cx);
-    let after = scroller.read_with(cx, |view, cx| view.scroller().read(cx).logical_scroll_top());
-    assert_eq!(before, after, "deltas and commit must not move the reader");
-    assert!(thoughts(&view, cx)[0].expanded);
-    scroller.update(cx, |view, cx| view.jump_to_latest(cx));
-    render(window, cx);
-    assert!(thoughts(&view, cx)[0].expanded);
-    assert!(scroller.read_with(cx, |view, cx| view.scroller().read(cx).is_following_tail()));
-    start(&controller, TurnId::new(103), cx);
-    stream(&controller, TurnId::new(103), thinking("Untouched"), cx);
-    event(
-        &controller,
-        E::TurnCompleted {
-            turn_id: TurnId::new(103),
-            message: thinking("Untouched"),
-            attempt_id: None,
-        },
-        cx,
+    let merged = thoughts(&view, cx).remove(0);
+    assert!(merged.expanded, "the deliberate reopen survives merge");
+    assert_eq!(merged.data.key, initial[0].data.key);
+    assert_eq!(
+        merged.data.primary_copy(),
+        "Read the source\n\nCheck the reported path and revision"
     );
-    assert!(thoughts(&view, cx).last().unwrap().expanded);
+    cx.update_window(window.into(), |_, window, cx| {
+        let handle = view
+            .read(cx)
+            .transcript
+            .read(cx)
+            .test_focus(&merged.data.key, cx);
+        window.focus(&handle, cx);
+        window.press(Shortcut::COPY_DISCLOSURE.0, cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
+            Some("Read the source\n\nCheck the reported path and revision")
+        );
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
@@ -201,13 +230,13 @@ fn blank_click_clears_block_focus_and_keeps_window_shortcuts(cx: &mut TestAppCon
     render(window, cx);
     let thought = thoughts(&view, cx).remove(0);
     cx.update_window(window.into(), |_, window, cx| {
-        let disclosure_focus =
-            view.read(cx)
-                .transcript
-                .read(cx)
-                .test_focus(&thought.key, thought.target.unwrap(), cx);
+        let disclosure_focus = view
+            .read(cx)
+            .transcript
+            .read(cx)
+            .test_focus(&thought.data.key, cx);
         window
-            .within(thought.key.clone())
+            .within(thought.data.key.clone())
             .click("block-disclosure", cx);
         assert!(disclosure_focus.is_focused(window));
         assert!(!view.read(cx).window_focus.is_focused(window));
@@ -239,67 +268,6 @@ fn blank_click_clears_block_focus_and_keeps_window_shortcuts(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-fn restored_thinking_starts_open_and_keyboard_disclosures_are_explicit(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup(cx);
-    controller.update(cx, |c, cx| {
-        c.model.root.conversation.restore(vec![
-            TranscriptItem::Message(thinking("**Read** the file")),
-            TranscriptItem::Message(thinking("Then test")),
-        ]);
-        cx.notify();
-    });
-    render(window, cx);
-    let thought = thoughts(&view, cx).remove(0);
-    assert_eq!(thought.phase, Phase::Restored);
-    assert!(thought.expanded);
-    cx.update_window(window.into(), |_, window, cx| {
-        let focus =
-            view.read(cx)
-                .transcript
-                .read(cx)
-                .test_focus(&thought.key, thought.target.unwrap(), cx);
-        window.focus(&focus, cx);
-        window.press("enter", cx);
-    })
-    .unwrap();
-    assert!(!thoughts(&view, cx)[0].expanded);
-    render(window, cx);
-    cx.update_window(window.into(), |_, window, cx| window.press("space", cx))
-        .unwrap();
-    assert!(thoughts(&view, cx)[0].expanded);
-    render(window, cx);
-    for (Shortcut(key), expected, global) in [
-        (Shortcut::UNFOLD, true, false),
-        (Shortcut::FOLD, false, false),
-        (Shortcut::EXPAND_THINKING, true, true),
-        (Shortcut::COLLAPSE_THINKING, false, true),
-    ] {
-        cx.update_window(window.into(), |_, window, cx| window.press(key, cx))
-            .unwrap();
-        render(window, cx);
-        let states = thoughts(&view, cx);
-        assert_eq!(states[0].expanded, expected, "{key}");
-        if global {
-            assert!(states.iter().all(|b| b.expanded == expected));
-        }
-    }
-    cx.update_window(window.into(), |_, window, cx| {
-        view.update(cx, |view, cx| {
-            view.composer
-                .update(cx, |input, cx| input.focus(window, cx))
-        });
-        window.press(Shortcut::UNFOLD.0, cx);
-    })
-    .unwrap();
-    let states = thoughts(&view, cx);
-    assert!(!states[0].expanded);
-    assert!(
-        !states[1].expanded,
-        "a local action without a transcript target does nothing"
-    );
-}
-
-#[gpui_kit::test]
 fn opaque_only_thinking_has_no_header_and_truthful_waiting_tip(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup(cx);
     let id = TurnId::new(104);
@@ -324,10 +292,12 @@ fn opaque_only_thinking_has_no_header_and_truthful_waiting_tip(cx: &mut TestAppC
     render(window, cx);
     assert!(thoughts(&view, cx).is_empty());
     cx.update_window(window.into(), |_, window, _| {
-        assert!(window.try_find("block-disclosure").is_some());
+        assert!(window.try_find("block-disclosure").is_none());
     })
     .unwrap();
-    assert!(data(&view, cx).iter().any(|b| matches!(&b.kind, BlockKind::Live(LiveTail::Activity(p)) if p == "Waiting for the model")));
+    assert!(data(&view, cx).iter().any(
+        |b| matches!(b.data.kind, BlockKind::Live) && &*b.data.body == "Waiting for the model"
+    ));
 }
 
 #[gpui_kit::test]
@@ -344,18 +314,16 @@ fn message_only_stop_keeps_unsaved_partial_before_a_neutral_stopped_node_but_not
     let data = data(&view, cx);
     let index = data
         .iter()
-        .position(|b| matches!(b.kind, BlockKind::Reasoning))
+        .position(|b| b.data.thought().is_some())
         .unwrap();
     assert_eq!(data[index].phase, Phase::Unsaved);
-    assert!(data[index].expanded);
-    assert_eq!(data[index].primary, "Partial provider thought");
+    assert!(!data[index].expanded);
+    assert_eq!(data[index].data.primary_copy(), "Partial provider thought");
     assert!(matches!(
-        data[index + 1].kind,
-        BlockKind::Notice {
-            level: NoticeLevel::Neutral
-        }
+        data[index + 1].data.kind,
+        BlockKind::Notice(NoticeLevel::Warning)
     ));
-    assert_eq!(data[index + 1].body, "Stopped");
+    assert_eq!(&*data[index + 1].data.body, "Stopped");
     controller.update(cx, |c, cx| {
         c.model
             .root
@@ -405,14 +373,9 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
     let before = thoughts(&view, cx).remove(0);
     assert!(before.expanded);
     assert_eq!(before.phase, Phase::Live);
-    assert!(
-        data(&view, cx)
-            .iter()
-            .any(|b| matches!(&b.kind, BlockKind::Live(LiveTail::Activity(p)) if p == "Thinking"))
-    );
     cx.update_window(window.into(), |_, window, cx| {
         window
-            .within(before.key.clone())
+            .within(before.data.key.clone())
             .click("block-disclosure", cx);
     })
     .unwrap();
@@ -439,15 +402,15 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
     event(&controller, E::TurnCancelled { turn_id: id }, cx);
     render(window, cx);
     let interrupted = thoughts(&view, cx).remove(0);
-    assert_eq!(before.key, interrupted.key);
+    assert_eq!(before.data.key, interrupted.data.key);
     assert_eq!(interrupted.phase, Phase::Interrupted);
     assert!(!interrupted.expanded);
-    assert!(interrupted.body.contains("Revised in place"));
+    assert!(interrupted.data.primary_copy().contains("Revised in place"));
     assert!(controller.read_with(cx, |c, _| c.unsaved_blocks.is_empty()));
     assert!(
         data(&view, cx)
             .iter()
-            .any(|b| b.body == "Stopped before the response finished")
+            .any(|b| &*b.data.body == "Stopped before the response finished")
     );
     controller.update(cx, |c, cx| {
         c.model.root.conversation.restore(vec![
@@ -457,86 +420,12 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
         cx.notify();
     });
     let restored = thoughts(&view, cx).remove(0);
-    assert_eq!(restored.body, "Readable attempt\n\nRevised in place");
-    assert_eq!(restored.phase, Phase::Restored);
-    assert!(restored.expanded);
-}
-
-#[gpui_kit::test]
-fn reasoning_tool_reasoning_answer_order_is_identical_live_committed_and_restored(
-    cx: &mut TestAppContext,
-) {
-    use rig_core::message::{CallId, Text, ToolCall, ToolFunction, ToolName};
-    let (_, view, controller, _) = setup(cx);
-    let id = TurnId::new(107);
-    start(&controller, id, cx);
-    let first = Message::Assistant(AssistantMessage::new(vec![
-        AssistantContent::Reasoning(Reasoning::new("First thought")),
-        AssistantContent::ToolCall(ToolCall::new(
-            CallId::from_wire("test"),
-            ToolFunction::new(
-                ToolName::new("command").unwrap(),
-                serde_json::json!({"command":"cargo test"}),
-            ),
-        )),
-    ]));
-    event(
-        &controller,
-        E::Intermediate {
-            turn_id: id,
-            message: first.clone(),
-            attempt_id: None,
-        },
-        cx,
+    assert_eq!(
+        restored.data.primary_copy(),
+        "Readable attempt\n\nRevised in place"
     );
-    event(
-        &controller,
-        E::ModelCallStarted {
-            turn_id: id,
-            call: 2,
-        },
-        cx,
-    );
-    let second = Message::Assistant(AssistantMessage::new(vec![
-        AssistantContent::Reasoning(Reasoning::new("Second thought")),
-        AssistantContent::Text(Text::new("The answer")),
-    ]));
-    stream(&controller, id, second.clone(), cx);
-    let order = |cx: &TestAppContext| {
-        data(&view, cx)
-            .iter()
-            .filter_map(|b| match b.kind {
-                BlockKind::Reasoning => Some("thinking"),
-                BlockKind::Tool { .. } => Some("tool"),
-                BlockKind::Prose {
-                    role: zevria_presentation::blocks::PresentationRole::Assistant,
-                    ..
-                } => Some("answer"),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(order(cx), ["thinking", "tool", "thinking", "answer"]);
-    event(
-        &controller,
-        E::TurnCompleted {
-            turn_id: id,
-            message: second.clone(),
-            attempt_id: None,
-        },
-        cx,
-    );
-    assert_eq!(order(cx), ["thinking", "tool", "thinking", "answer"]);
-    controller.update(cx, |c, cx| {
-        c.model.root.conversation.restore(vec![
-            TranscriptItem::Message(Message::user("Trace the source")),
-            TranscriptItem::Message(first),
-            TranscriptItem::Message(second),
-        ]);
-        cx.notify();
-    });
-    assert_eq!(order(cx), ["thinking", "tool", "thinking", "answer"]);
-    assert!(thoughts(&view, cx).iter().all(|b| b.expanded));
+    assert_eq!(restored.phase, Phase::Interrupted);
+    assert!(!restored.expanded);
 }
 
 #[gpui_kit::test]
@@ -566,15 +455,13 @@ fn failed_message_tail_is_retained_but_a_foreign_terminal_cannot_capture_it(
     let blocks = data(&view, cx);
     let index = blocks
         .iter()
-        .position(|b| matches!(b.kind, BlockKind::Reasoning))
+        .position(|b| b.data.thought().is_some())
         .unwrap();
     assert_eq!(blocks[index].phase, Phase::Unsaved);
-    assert!(blocks[index].expanded);
+    assert!(!blocks[index].expanded);
     assert!(matches!(
-        blocks[index + 1].kind,
-        BlockKind::Notice {
-            level: NoticeLevel::Error
-        }
+        blocks[index + 1].data.kind,
+        BlockKind::Notice(NoticeLevel::Error)
     ));
 }
 
@@ -728,7 +615,7 @@ fn subtasks_panel_navigation_inspects_children_without_resetting_disclosure(
         cx.notify();
     });
     render(window, cx);
-    let root_key = thoughts(&view, cx)[0].key.clone();
+    let root_key = thoughts(&view, cx)[0].data.key.clone();
     let identity = view.read_with(cx, |view, cx| {
         view.transcript
             .read(cx)
@@ -736,8 +623,9 @@ fn subtasks_panel_navigation_inspects_children_without_resetting_disclosure(
             .unwrap()
     });
     cx.update_window(window.into(), |_, window, cx| {
-        window.press(Shortcut::UNFOLD.0, cx);
-        assert_eq!(view.read(cx).sidebar_focus.len(), 1);
+        window
+            .within(root_key.clone())
+            .click("block-disclosure", cx);
         window.press(Shortcut::TOGGLE_SUBTASKS.0, cx);
     })
     .unwrap();

@@ -5,20 +5,10 @@ use std::{
     hash::{Hash, Hasher},
     ops::Range,
 };
-use zevria_presentation::{blocks::NativeHeader, conversation::HistoryEntry};
-/// A following assistant entry in the same native turn does not repeat its nick.
-pub fn continues_turn(previous: Option<&HistoryEntry>, entry: &HistoryEntry) -> bool {
-    matches!((previous, entry),
-        (Some(HistoryEntry::Conversation(previous)), HistoryEntry::Conversation(current))
-        if matches!((previous.header, current.header),
-            (Some(NativeHeader::Assistant { turn: a, .. }), Some(NativeHeader::Assistant { turn: b, .. })) if a == b))
-}
-pub fn is_assistant(entry: &HistoryEntry) -> bool {
-    matches!(entry, HistoryEntry::Conversation(e) if matches!(e.header, Some(NativeHeader::Assistant { .. })))
-}
-pub fn fingerprint(entry: &HistoryEntry, continues_turn: bool) -> u64 {
+use zevria_presentation::conversation::HistoryEntry;
+
+pub fn fingerprint(entry: &HistoryEntry) -> u64 {
     let mut hash = DefaultHasher::new();
-    continues_turn.hash(&mut hash);
     std::mem::discriminant(entry).hash(&mut hash);
     match entry {
         HistoryEntry::Conversation(entry) => {
@@ -31,10 +21,12 @@ pub fn fingerprint(entry: &HistoryEntry, continues_turn: bool) -> u64 {
         HistoryEntry::PlanArtifact(a) => {
             a.version.hash(&mut hash);
             a.title.hash(&mut hash);
+            a.markdown.hash(&mut hash);
         }
         HistoryEntry::PlanHandoff(h, header) => {
             h.artifact.version.hash(&mut hash);
             h.artifact.title.hash(&mut hash);
+            h.artifact.markdown.hash(&mut hash);
             header.hash(&mut hash);
         }
         HistoryEntry::JobNotice(notice, header) => {
@@ -98,6 +90,50 @@ pub fn compare(before: &[u64], after: &[u64]) -> RowChange {
         count: after.len() - prefix - suffix,
     }
 }
+/// Reuse measured survivors even when several disjoint changes happen at once
+/// (e.g. a thought grows above the viewport as its temporary tail row vanishes).
+/// Splices use the index space *after* earlier splices; remeasures come last.
+pub fn reconcile(before: &[(&str, u64)], after: &[(&str, u64)]) -> Vec<RowChange> {
+    if before.iter().map(|r| r.0).eq(after.iter().map(|r| r.0)) {
+        return vec![compare(
+            &before.iter().map(|r| r.1).collect::<Vec<_>>(),
+            &after.iter().map(|r| r.1).collect::<Vec<_>>(),
+        )];
+    }
+    let prior: std::collections::HashMap<_, _> = before
+        .iter()
+        .enumerate()
+        .map(|(index, (key, _))| (*key, index))
+        .collect();
+    let mut changes = Vec::new();
+    let mut remeasure = Vec::new();
+    let (mut old, mut new) = (0, 0);
+    for (index, &(key, fingerprint)) in after.iter().enumerate() {
+        let Some(&survivor) = prior.get(key).filter(|&&prior| prior >= old) else {
+            continue;
+        };
+        if survivor != old || index != new {
+            changes.push(RowChange::Splice {
+                old: new..new + survivor - old,
+                count: index - new,
+            });
+        }
+        if before[survivor].1 != fingerprint {
+            remeasure.push(index);
+        }
+        old = survivor + 1;
+        new = index + 1;
+    }
+    if old != before.len() || new != after.len() {
+        changes.push(RowChange::Splice {
+            old: new..new + before.len() - old,
+            count: after.len() - new,
+        });
+    }
+    changes.push(RowChange::Remeasure(remeasure));
+    changes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,36 +157,31 @@ mod tests {
         assert_eq!(compare(&[1], &[1]), RowChange::None);
     }
     #[test]
-    fn continuing_turn_changes_the_fingerprint_and_remeasures() {
-        let entry = HistoryEntry::from_message(
-            rig_core::message::Message::assistant("Text"),
-            zevria_presentation::conversation::ToolCallStatus::Finished,
-        )
-        .unwrap();
-        let a = fingerprint(&entry, false);
-        let b = fingerprint(&entry, true);
-        assert_ne!(a, b);
-        assert_eq!(compare(&[a], &[b]), RowChange::Remeasure(vec![0]));
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            let first = crate::ui::blocks::entry("epoch", 0, &entry, a, false, false);
-            let next = crate::ui::blocks::entry("epoch", 0, &entry, b, true, false);
-            assert_eq!(
-                first[0].gutter,
-                crate::ui::blocks::Gutter::Label(crate::ui::blocks::Speaker::Zevria)
-            );
-            assert_eq!(next[0].gutter, crate::ui::blocks::Gutter::None);
-        }
+    fn a_thought_merging_does_not_splice_the_steps_in_between() {
+        assert_eq!(
+            reconcile(
+                &[("prompt", 0), ("thoughts", 1), ("step", 2), ("tail", 3)],
+                &[("prompt", 0), ("thoughts", 4), ("step", 2)]
+            ),
+            [
+                RowChange::Splice {
+                    old: 3..4,
+                    count: 0
+                },
+                RowChange::Remeasure(vec![1])
+            ]
+        );
     }
+
     #[test]
     fn structural_notices_and_versions_invalidate_without_debug_serialization() {
         assert_ne!(
-            fingerprint(&HistoryEntry::Error("a".into()), false),
-            fingerprint(&HistoryEntry::Error("b".into()), false)
+            fingerprint(&HistoryEntry::Error("a".into())),
+            fingerprint(&HistoryEntry::Error("b".into()))
         );
         assert_ne!(
-            fingerprint(&HistoryEntry::CompactionDivider, false),
-            fingerprint(&HistoryEntry::Error(String::new()), false)
+            fingerprint(&HistoryEntry::CompactionDivider),
+            fingerprint(&HistoryEntry::Error(String::new()))
         );
         let artifact = zevria_workflow::PlanArtifact {
             version: zevria_workflow::PlanVersion {
@@ -161,25 +192,9 @@ mod tests {
             markdown: "large document".repeat(1000),
             source_turn_id: zevria_foundation::TurnId::new(1),
         };
-        let before = fingerprint(&HistoryEntry::PlanArtifact(artifact.clone()), false);
+        let before = fingerprint(&HistoryEntry::PlanArtifact(artifact.clone()));
         let mut next = artifact;
         next.version.revision += 1;
-        assert_ne!(
-            before,
-            fingerprint(&HistoryEntry::PlanArtifact(next), false)
-        );
-    }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn ordinary_transcript_text_is_not_subject_to_tool_preview_bounds() {
-        let text = "x".repeat(32_000);
-        let entry = zevria_presentation::conversation::HistoryEntry::from_message(
-            rig_core::message::Message::assistant(text.clone()),
-            zevria_presentation::conversation::ToolCallStatus::Finished,
-        )
-        .unwrap();
-        let blocks = crate::ui::blocks::entry("epoch", 0, &entry, 0, false, false);
-        assert_eq!(blocks[0].body, text);
-        assert_eq!(blocks[0].primary, blocks[0].body);
+        assert_ne!(before, fingerprint(&HistoryEntry::PlanArtifact(next)));
     }
 }

@@ -89,52 +89,6 @@ impl DesktopWindow {
         let mode_disabled = !editable || busy;
         let cancelling = controller.cancelling;
         let recovery = controller.recovery.last().is_some();
-        let measure = style::Measure {
-            compact: self.compact,
-        };
-        let mut modes = measure
-            .gutter()
-            .flex()
-            .flex_col()
-            .items_end()
-            .gap(px(4.))
-            .pt(px(8.));
-        for (id, label, value, ink) in [
-            ("mode-build", "Build", SessionMode::Build, t.workflow.build),
-            ("mode-plan", "Plan", SessionMode::Plan, t.workflow.plan),
-        ] {
-            modes = modes.child(
-                Button::new(id)
-                    .ghost()
-                    .small()
-                    .accessibility_label(label)
-                    .disabled(mode_disabled)
-                    .text_color(if value == mode { ink } else { t.text.muted })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .when(value == mode, |row| {
-                                row.child(div().text_size(px(8.)).child("●"))
-                            })
-                            .child(
-                                style::label()
-                                    .font_weight(if value == mode {
-                                        FontWeight::MEDIUM
-                                    } else {
-                                        FontWeight::NORMAL
-                                    })
-                                    .child(label),
-                            ),
-                    )
-                    .tooltip(format!("Next turn runs in {label} mode"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.controller
-                            .update(cx, |this, cx| this.select_mode(value, cx))
-                    })),
-            );
-        }
         let mut completions = div()
             .id("completions")
             .role(Role::ListBox)
@@ -214,7 +168,7 @@ impl DesktopWindow {
             .bg(t.surfaces.panel)
             .rounded(px(12.))
             .border_1()
-            .border_color(t.surfaces.border)
+            .border_color(tone.hairline)
             .track_focus(&focus)
             .px(px(14.))
             .py(px(12.))
@@ -236,51 +190,49 @@ impl DesktopWindow {
             field = field.child(completions);
         }
         let mut footer = div().flex().flex_wrap().items_center().gap(px(8.));
-        if self.compact {
-            let mut group = ToggleGroup::new("mode-switch")
-                .segmented()
-                .small()
-                .disabled(mode_disabled);
-            for (id, label, value, ink, tint) in [
-                (
-                    "mode-build",
-                    "Build",
-                    SessionMode::Build,
-                    t.workflow.build,
-                    tone.build_tint,
-                ),
-                (
-                    "mode-plan",
-                    "Plan",
-                    SessionMode::Plan,
-                    t.workflow.plan,
-                    tone.plan_tint,
-                ),
-            ] {
-                group = group.child(
-                    Toggle::new(id)
-                        .label(label)
-                        .checked(mode == value)
-                        .tooltip(format!("Next turn runs in {label} mode"))
-                        .text_size(px(12.))
-                        .when(mode == value, |b| b.bg(tint).text_color(ink)),
-                );
-            }
-            // Kit owns the item callbacks in a ToggleGroup. Resolve the one
-            // changed segment here, including reselecting the active segment:
-            // a mode switch must never become a multi-select or turnless state.
-            footer = footer.child(group.on_click(cx.listener(
-                move |this, values: &Vec<bool>, _, cx| {
-                    let value = if values.first().copied() != Some(mode == SessionMode::Build) {
-                        SessionMode::Build
-                    } else {
-                        SessionMode::Plan
-                    };
-                    this.controller
-                        .update(cx, |this, cx| this.select_mode(value, cx));
-                },
-            )));
+        let mut group = ToggleGroup::new("mode-switch")
+            .segmented()
+            .small()
+            .disabled(mode_disabled);
+        for (id, label, value, ink, tint) in [
+            (
+                "mode-build",
+                "Build",
+                SessionMode::Build,
+                t.workflow.build,
+                tone.build_tint,
+            ),
+            (
+                "mode-plan",
+                "Plan",
+                SessionMode::Plan,
+                t.workflow.plan,
+                tone.plan_tint,
+            ),
+        ] {
+            group = group.child(
+                Toggle::new(id)
+                    .label(label)
+                    .checked(mode == value)
+                    .tooltip(format!("Next turn runs in {label} mode"))
+                    .text_size(px(12.))
+                    .when(mode == value, |b| b.bg(tint).text_color(ink)),
+            );
         }
+        // Kit owns the item callbacks in a ToggleGroup. Resolve the one
+        // changed segment here, including reselecting the active segment:
+        // a mode switch must never become a multi-select or turnless state.
+        footer = footer.child(group.on_click(cx.listener(
+            move |this, values: &Vec<bool>, _, cx| {
+                let value = if values.first().copied() != Some(mode == SessionMode::Build) {
+                    SessionMode::Build
+                } else {
+                    SessionMode::Plan
+                };
+                this.controller
+                    .update(cx, |this, cx| this.select_mode(value, cx));
+            },
+        )));
         if mode == SessionMode::Build {
             footer = footer.child(
                 Switch::new("orchestrate")
@@ -362,15 +314,13 @@ impl DesktopWindow {
             field = field.focus_ring_style(window, cx);
         }
         div()
-            .px(px(16.))
+            .px(px(style::COLUMN_INSET))
             .pt(px(12.))
             .pb(px(16.))
             .child(
-                measure
-                    .row()
+                style::Measure::column()
                     .id("composer-column")
                     .test_support()
-                    .when(!self.compact, |row| row.gap(px(8.)).child(modes))
                     .child(field),
             )
             .into_any_element()

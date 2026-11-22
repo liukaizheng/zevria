@@ -6,6 +6,8 @@ pub mod disclosure;
 #[path = "ui/rows.rs"]
 pub mod rows;
 pub mod session;
+#[path = "ui/timeline.rs"]
+pub mod timeline;
 #[path = "ui/turns.rs"]
 pub mod turns;
 

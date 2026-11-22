@@ -1,66 +1,11 @@
 use super::*;
-use crate::ui::blocks::{BlockData, BlockKind};
-use gpui_kit::{AppContext as _, Focusable as _, MenuItem, Role, size};
+use crate::timeline::{BlockKind, Step, TimelineRow, tools::ToolDetail};
+use gpui_kit::{AppContext as _, Focusable as _};
 use rig_core::message::{
-    AssistantContent, AssistantMessage, CallId, Reasoning, Text, ToolCall, ToolFunction, ToolName,
+    AssistantContent, AssistantMessage, CallId, Reasoning, ToolCall, ToolFunction, ToolName,
 };
-use zevria_presentation::fold::FoldKey;
 use zevria_transcript::transcript::TranscriptItem;
-use zevria_workflow::PlanRecord;
 
-fn thinking(text: &str) -> Message {
-    Message::Assistant(AssistantMessage::new(vec![AssistantContent::Reasoning(
-        Reasoning::new(text),
-    )]))
-}
-fn answer(text: &str) -> Message {
-    Message::Assistant(AssistantMessage::new(vec![
-        AssistantContent::Reasoning(Reasoning::new("Checked the result\n\nDetailed evidence")),
-        AssistantContent::Reasoning(Reasoning::new("Checked the logs\n\nDetailed trace")),
-        AssistantContent::Text(Text::new(text)),
-    ]))
-}
-fn command() -> Message {
-    Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
-        ToolCall::new(
-            CallId::from_wire("turn-command"),
-            ToolFunction::new(
-                ToolName::new("command").unwrap(),
-                serde_json::json!({"command":"rtk cargo test --release"}),
-            ),
-        ),
-    )]))
-}
-fn restored_items() -> Vec<TranscriptItem> {
-    let artifact = PlanArtifact {
-        version: PlanVersion {
-            id: PlanId::new(),
-            revision: 1,
-        },
-        title: "Preserve reading position".into(),
-        markdown: "Keep prompts and answers visible.".into(),
-        source_turn_id: TurnId::new(1),
-    };
-    vec![
-        TranscriptItem::Message(Message::user("First prompt")),
-        TranscriptItem::Message(Message::assistant("I'll trace the source.")),
-        TranscriptItem::Message(thinking("Read the supplied notes")),
-        TranscriptItem::Message(command()),
-        TranscriptItem::Message(answer("First final answer")),
-        TranscriptItem::Message(Message::user("Second prompt")),
-        TranscriptItem::Message(Message::assistant("Prepare the plan.")),
-        TranscriptItem::Plan(PlanRecord::Ready { artifact }),
-        TranscriptItem::Message(thinking("Check the plan")),
-        TranscriptItem::Message(answer("Second final answer\n\nFull answer detail")),
-        TranscriptItem::Message(Message::user("Third prompt")),
-        TranscriptItem::Message(Message::assistant("Check the stop path.")),
-        TranscriptItem::Message(thinking("Keep the partial result")),
-        TranscriptItem::Message(Message::assistant("Third partial answer")),
-        TranscriptItem::Error {
-            error: zevria_presentation::TURN_CANCELLED.into(),
-        },
-    ]
-}
 fn restore(
     controller: &Entity<SessionController>,
     items: Vec<TranscriptItem>,
@@ -83,15 +28,6 @@ fn press(window: Window, key: &str, cx: &mut TestAppContext) {
         .unwrap();
     render(window, cx);
 }
-fn blocks(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
-    view.read_with(cx, |view, cx| view.transcript.read(cx).test_data(cx))
-}
-fn summaries(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<BlockData> {
-    blocks(view, cx)
-        .into_iter()
-        .filter(|b| matches!(b.kind, BlockKind::RangeSummary))
-        .collect()
-}
 fn transcript(
     view: &Entity<DesktopWindow>,
     cx: &TestAppContext,
@@ -113,23 +49,6 @@ fn focus_composer(window: Window, view: &Entity<DesktopWindow>, cx: &mut TestApp
     })
     .unwrap();
 }
-fn focus(
-    window: Window,
-    view: &Entity<DesktopWindow>,
-    block: &BlockData,
-    target: FoldKey,
-    cx: &mut TestAppContext,
-) {
-    cx.update_window(window.into(), |_, window, cx| {
-        let focus = view
-            .read(cx)
-            .transcript
-            .read(cx)
-            .test_focus(&block.key, target, cx);
-        window.focus(&focus, cx);
-    })
-    .unwrap();
-}
 fn dispatch<A: gpui_kit::Action>(window: Window, action: A, cx: &mut TestAppContext) {
     cx.update_window(window.into(), |_, window, cx| {
         window.dispatch_action(Box::new(action), cx)
@@ -142,445 +61,6 @@ fn scroll_row(view: &Entity<DesktopWindow>, row: usize, cx: &mut TestAppContext)
         view.scroller()
             .update(cx, |list, cx| list.scroll_to_item(row, cx));
     });
-}
-
-#[gpui_kit::test]
-fn view_actions_are_one_shot_and_keep_the_latest_answer_expanded(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup_at_size(cx, 1240., 1800.);
-    restore(
-        &controller,
-        restored_items().into_iter().take(10).collect(),
-        cx,
-    );
-    render(window, cx);
-    let original = blocks(&view, cx);
-    assert!(original.iter().all(|b| b.expanded));
-    focus_composer(window, &view, cx);
-    cx.update_window(window.into(), |_, window, cx| {
-        window.input("A draft to keep", cx)
-    })
-    .unwrap();
-    press(window, Shortcut::FOLD.0, cx);
-    assert!(
-        blocks(&view, cx).iter().all(|b| b.expanded),
-        "no local target in the composer"
-    );
-    press(window, Shortcut::FOLD_EARLIER.0, cx);
-    let runs = summaries(&view, cx);
-    assert_eq!(
-        runs.iter().map(|b| b.body.as_str()).collect::<Vec<_>>(),
-        [
-            "3 thoughts · 1 tool call · 1 note",
-            "1 note",
-            "3 thoughts · 1 note"
-        ]
-    );
-    let data = blocks(&view, cx);
-    for index in [0, 5] {
-        assert!(
-            data.iter()
-                .any(|b| b.row == index && b.message.is_some_and(|m| m.folded))
-        );
-    }
-    assert_eq!(
-        runs[0].grouped_targets.len(),
-        2,
-        "both thoughts belong to the range"
-    );
-    assert_eq!(data.iter().filter(|b| b.row == 4).count(), 1);
-    for (row, prompt) in [(0, "First prompt"), (5, "Second prompt")] {
-        let block = data.iter().find(|b| b.row == row).unwrap();
-        assert_eq!(block.body, prompt);
-        cx.update_window(window.into(), |_, window, _| {
-            let row = window.within(block.key.clone());
-            assert!(row.try_find("text-body").is_some());
-            assert_eq!(row.find("message-disclosure").label(), Some(prompt));
-        })
-        .unwrap();
-    }
-    assert!(
-        data.iter()
-            .any(|b| b.body == "First final answer" && b.expanded)
-    );
-    assert!(
-        data.iter().any(|b| b.row == 7 && b.expanded),
-        "the Plan is the second turn's result"
-    );
-    assert!(
-        !data.iter().any(|b| b.row == 9),
-        "closing prose is not the result"
-    );
-    cx.update_window(window.into(), |_, window, cx| {
-        let button = window.find("fold-earlier-content");
-        assert_eq!(button.label(), Some("Fold earlier content"));
-        let names: Vec<_> = actions::menus()
-            .into_iter()
-            .flat_map(|m| m.items)
-            .filter_map(|item| match item {
-                MenuItem::Action { ref name, .. }
-                    if [
-                        "Toggle fold",
-                        "Fold",
-                        "Unfold",
-                        "Fold earlier content",
-                        "Fold older turns",
-                        "Unfold all",
-                    ]
-                    .contains(&name.as_ref()) =>
-                {
-                    assert!(!item.is_checked());
-                    Some(name.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(names.len(), 6);
-        assert!(view.read(cx).composer.focus_handle(cx).is_focused(window));
-        assert_eq!(
-            view.read(cx).composer.read(cx).value().as_str(),
-            "A draft to keep"
-        );
-    })
-    .unwrap();
-    cx.update_window(window.into(), |_, window, cx| {
-        window
-            .within(runs[0].key.clone())
-            .click("range-disclosure", cx);
-    })
-    .unwrap();
-    render(window, cx);
-    assert_eq!(
-        blocks(&view, cx)
-            .iter()
-            .filter(|b| b.row == 4 && b.expanded && matches!(b.kind, BlockKind::Reasoning))
-            .count(),
-        2
-    );
-    press(window, Shortcut::FOLD_OLDER.0, cx);
-    assert!(!blocks(&view, cx).iter().any(|b| b.row == 4));
-    let older = summaries(&view, cx).remove(0);
-    assert_eq!(older.body, "First final answer");
-    assert_eq!(older.digest.label(), "3 thoughts · 1 tool call · 1 note");
-    dispatch(window, actions::FoldEarlierContent, cx);
-    assert!(
-        blocks(&view, cx)
-            .iter()
-            .any(|b| b.row == 4 && b.body == "First final answer" && b.expanded)
-    );
-    assert!(!blocks(&view, cx).iter().any(|b| b.row == 2));
-    press(window, Shortcut::UNFOLD_ALL.0, cx);
-    assert!(summaries(&view, cx).is_empty());
-    assert_eq!(
-        blocks(&view, cx)
-            .iter()
-            .map(|b| (&b.key, b.expanded, b.message))
-            .collect::<Vec<_>>(),
-        original
-            .iter()
-            .map(|b| (&b.key, b.expanded, b.message))
-            .collect::<Vec<_>>()
-    );
-}
-
-#[gpui_kit::test]
-fn row_controls_keep_scopes_distinct_and_copy_the_original_payload(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup_at_size(cx, 1240., 1800.);
-    restore(
-        &controller,
-        restored_items().into_iter().take(5).collect(),
-        cx,
-    );
-    render(window, cx);
-    let original = blocks(&view, cx);
-    let last = original.iter().find(|b| b.row == 4).unwrap();
-    let block_key = last.target.unwrap();
-    let message_key = last.message.unwrap().key;
-    cx.update_window(window.into(), |_, window, cx| {
-        let mut row = window.within(last.key.clone());
-        let message = row.find("message-disclosure");
-        let block = row.find("block-disclosure");
-        for control in [&message, &block] {
-            assert_eq!(control.role(), Some(Role::Button));
-            assert_eq!(control.expanded(), Some(true));
-            assert!(control.bounds().size.height >= px(28.));
-        }
-        assert_eq!(message.label(), Some("Zevria message"));
-        assert_eq!(block.label(), Some("Thinking"));
-        assert_eq!(block.description(), Some("Checked the result"));
-        assert!(message.bounds().right() < block.bounds().left());
-        row.click("block-disclosure", cx);
-    })
-    .unwrap();
-    render(window, cx);
-    assert!(
-        !blocks(&view, cx)
-            .iter()
-            .find(|b| b.target == Some(block_key))
-            .unwrap()
-            .expanded
-    );
-    focus(window, &view, last, message_key, cx);
-    dispatch(window, actions::ToggleFold, cx);
-    assert_eq!(blocks(&view, cx).iter().filter(|b| b.row == 4).count(), 1);
-    let copied = controller.read_with(cx, |c, _| {
-        c.model
-            .root
-            .conversation
-            .selected_message_text(4, false)
-            .unwrap()
-    });
-    cx.update_window(window.into(), |_, window, _| {
-        assert_eq!(
-            window
-                .within(last.key.clone())
-                .find("message-disclosure")
-                .expanded(),
-            Some(false)
-        );
-    })
-    .unwrap();
-    focus(window, &view, last, message_key, cx);
-    press(window, Shortcut::COPY_DISCLOSURE.0, cx);
-    cx.update_window(window.into(), |_, _, cx| {
-        assert_eq!(
-            cx.read_from_clipboard()
-                .and_then(|item| item.text())
-                .as_deref(),
-            Some(copied.as_str())
-        );
-    })
-    .unwrap();
-    press(window, Shortcut::UNFOLD.0, cx);
-    assert_eq!(blocks(&view, cx).iter().filter(|b| b.row == 4).count(), 3);
-    assert!(
-        !blocks(&view, cx)
-            .iter()
-            .find(|b| b.target == Some(block_key))
-            .unwrap()
-            .expanded
-    );
-    focus(window, &view, last, block_key, cx);
-    press(window, "space", cx);
-    assert!(
-        blocks(&view, cx)
-            .iter()
-            .find(|b| b.target == Some(block_key))
-            .unwrap()
-            .expanded
-    );
-    press(window, Shortcut::FOLD.0, cx);
-    press(window, Shortcut::COPY_DISCLOSURE.0, cx);
-    cx.update_window(window.into(), |_, _, cx| {
-        assert_eq!(
-            cx.read_from_clipboard()
-                .and_then(|item| item.text())
-                .as_deref(),
-            Some(last.primary.as_str())
-        );
-    })
-    .unwrap();
-}
-
-#[gpui_kit::test]
-fn range_restores_the_covered_anchor_and_focus_and_keeps_nested_folds(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup_at_size(cx, 720., 520.);
-    restore(
-        &controller,
-        vec![
-            TranscriptItem::Message(Message::user("Prompt")),
-            TranscriptItem::Message(thinking("Earlier thought\n\nMore evidence")),
-            TranscriptItem::Message(Message::assistant("Intermediate paragraph.\n\n".repeat(40))),
-            TranscriptItem::Message(Message::assistant("Final response.\n\n".repeat(70))),
-        ],
-        cx,
-    );
-    scroll_row(&view, 2, cx);
-    render(window, cx);
-    let prior = blocks(&view, cx).into_iter().find(|b| b.row == 2).unwrap();
-    let block_key = prior.target.unwrap();
-    let identity =
-        transcript(&view, cx).read_with(cx, |view, cx| view.test_identity(&prior.key, cx));
-    focus(window, &view, &prior, block_key, cx);
-    press(window, Shortcut::FOLD.0, cx);
-    assert_eq!(top(&view, cx), (2, px(0.)));
-    press(window, Shortcut::FOLD_EARLIER.0, cx);
-    assert_eq!(top(&view, cx), (1, px(0.)));
-    let range = summaries(&view, cx).remove(0);
-    cx.update_window(window.into(), |_, window, cx| {
-        let summary = window.within(range.key.clone()).find("range-disclosure");
-        assert_eq!(summary.label(), Some("1 thought · 1 note"));
-        assert_eq!(summary.role(), Some(Role::Button));
-        assert_eq!(summary.expanded(), Some(false));
-        assert_eq!(summary.bounds().size.height, px(28.));
-        let view = view.read(cx).transcript.read(cx);
-        assert!(
-            view.test_focus(&range.key, range.target.unwrap(), cx)
-                .is_focused(window)
-        );
-        assert!(window.try_find(prior.key.clone()).is_none());
-    })
-    .unwrap();
-    press(window, Shortcut::COPY_DISCLOSURE.0, cx);
-    cx.update_window(window.into(), |_, _, cx| {
-        let text = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .unwrap();
-        assert!(text.contains("More evidence") && text.contains(&prior.primary));
-    })
-    .unwrap();
-    press(window, "enter", cx);
-    assert_eq!(top(&view, cx), (2, px(0.)));
-    assert!(summaries(&view, cx).is_empty());
-    assert!(
-        !blocks(&view, cx)
-            .iter()
-            .find(|b| b.row == 2)
-            .unwrap()
-            .expanded
-    );
-    cx.update_window(window.into(), |_, window, cx| {
-        let view = view.read(cx).transcript.read(cx);
-        assert_eq!(view.test_identity(&prior.key, cx), identity);
-        assert!(
-            view.test_focus(&prior.key, block_key, cx)
-                .is_focused(window)
-        );
-    })
-    .unwrap();
-    press(window, Shortcut::UNFOLD_ALL.0, cx);
-    assert!(blocks(&view, cx).iter().all(|b| b.expanded));
-}
-
-#[gpui_kit::test]
-fn folded_prose_uses_actual_wrapping_and_retains_the_text_view_on_resize(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup_at_size(cx, 1240., 860.);
-    restore(
-        &controller,
-        vec![
-            TranscriptItem::Message(Message::user("Fits on one line")),
-            TranscriptItem::Message(Message::assistant(
-                "Keep this line in full when the conversation has enough room.",
-            )),
-        ],
-        cx,
-    );
-    render(window, cx);
-    let original = blocks(&view, cx);
-    let prompt = &original[0];
-    let answer = &original[1];
-    let height = |cx: &mut TestAppContext| {
-        cx.update_window(window.into(), |_, window, _| {
-            window.find(prompt.key.clone()).bounds().size.height
-        })
-        .unwrap()
-    };
-    let before = height(cx);
-    focus(window, &view, prompt, prompt.message.unwrap().key, cx);
-    press(window, Shortcut::FOLD.0, cx);
-    assert_eq!(
-        height(cx),
-        before,
-        "a one-line message fold must not add height"
-    );
-    let transcript = transcript(&view, cx);
-    let identity = transcript.read_with(cx, |v, cx| v.test_identity(&answer.key, cx));
-    let bounds = |cx: &mut TestAppContext| {
-        cx.update_window(window.into(), |_, window, _| {
-            window.find(answer.key.clone()).bounds()
-        })
-        .unwrap()
-    };
-    let wide_expanded = bounds(cx);
-    focus(window, &view, answer, answer.target.unwrap(), cx);
-    press(window, Shortcut::FOLD.0, cx);
-    let clamped =
-        |cx: &TestAppContext| transcript.read_with(cx, |v, cx| v.test_clamped(&answer.key, cx));
-    assert!(
-        !clamped(cx),
-        "wide expanded {wide_expanded:?}, wide folded {:?}, short prompt clamped {}",
-        bounds(cx),
-        transcript.read_with(cx, |v, cx| v.test_clamped(&prompt.key, cx))
-    );
-    cx.simulate_window_resize(window.into(), size(px(720.), px(860.)));
-    render(window, cx);
-    press(window, Shortcut::TOGGLE_SIDEBAR.0, cx); // The sidebar further narrows the compact transcript.
-    assert!(clamped(cx));
-    cx.simulate_window_resize(window.into(), size(px(1240.), px(860.)));
-    render(window, cx);
-    assert!(!clamped(cx));
-    assert_eq!(
-        transcript.read_with(cx, |v, cx| v.test_identity(&answer.key, cx)),
-        identity
-    );
-}
-
-#[gpui_kit::test]
-fn tool_diff_totals_survive_fold_and_unfold(cx: &mut TestAppContext) {
-    use zevria_foundation::{
-        FileChange, FileChangeOutput, ToolCallOutcome, ToolResultDetail, ToolResultMetadata,
-    };
-    let (window, view, controller, _) = setup(cx);
-    let edit = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
-        ToolCall::new(
-            CallId::from_wire("edit"),
-            ToolFunction::new(
-                ToolName::new("edit").unwrap(),
-                serde_json::json!({"file_path":"test.rs"}),
-            ),
-        ),
-    )]));
-    restore(
-        &controller,
-        vec![
-            TranscriptItem::Message(Message::user("Change the file")),
-            TranscriptItem::Message(edit),
-            TranscriptItem::ToolResults {
-                message: Message::tool_result(
-                    CallId::from_wire("edit"),
-                    ToolName::new("edit").unwrap(),
-                    "Changed",
-                ),
-                metadata: vec![ToolResultMetadata {
-                    id: "edit".into(),
-                    call_id: None,
-                    tool_name: "edit".into(),
-                    outcome: ToolCallOutcome::Success,
-                    diagnostic: None,
-                    detail: Some(ToolResultDetail::FileChanges(vec![FileChangeOutput {
-                        path: "test.rs".into(),
-                        change: FileChange::Update {
-                            unified_diff:
-                                "--- a/test.rs\n+++ b/test.rs\n@@ -1 +1,2 @@\n-old\n+new\n+test\n"
-                                    .into(),
-                            move_path: None,
-                        },
-                    }])),
-                }],
-                skill_applications: vec![],
-            },
-            TranscriptItem::Message(Message::assistant("Updated")),
-        ],
-        cx,
-    );
-    render(window, cx);
-    let check_totals = |cx: &TestAppContext| {
-        let tool = blocks(&view, cx)
-            .into_iter()
-            .find(|b| matches!(b.kind, BlockKind::Tool { .. }))
-            .unwrap();
-        let BlockKind::Tool { meta, .. } = &tool.kind else {
-            unreachable!()
-        };
-        assert_eq!((meta.added, meta.removed), (2, 1));
-        tool
-    };
-    let tool = check_totals(cx);
-    focus(window, &view, &tool, tool.target.unwrap(), cx);
-    press(window, Shortcut::FOLD.0, cx);
-    assert!(!check_totals(cx).expanded);
-    press(window, Shortcut::UNFOLD.0, cx);
-    assert!(check_totals(cx).expanded);
 }
 
 #[gpui_kit::test]
@@ -637,7 +117,7 @@ fn turn_shortcuts_from_composer_chain_strict_boundaries_without_changing_draft_o
     assert!(
         !transcript(&view, cx).read_with(cx, |v, cx| v.scroller().read(cx).is_following_tail())
     );
-    press(window, Shortcut::FOLD_EARLIER.0, cx);
+    press(window, Shortcut::COLLAPSE_ALL.0, cx);
     press(window, Shortcut::PREVIOUS_TURN.0, cx);
     assert_eq!(top(&view, cx), (3, px(0.)));
     press(window, Shortcut::NEXT_TURN.0, cx);
@@ -655,456 +135,237 @@ fn turn_shortcuts_from_composer_chain_strict_boundaries_without_changing_draft_o
     .unwrap();
 }
 
-#[gpui_kit::test]
-fn acp_history_uses_stable_block_folds_and_no_native_header_is_required(cx: &mut TestAppContext) {
-    use zevria_presentation::agents::AgentTranscriptReducer;
-    use zevria_workflow::AgentRunEvent;
+fn rows(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<TimelineRow> {
+    transcript(view, cx).read_with(cx, |view, cx| view.test_data(cx))
+}
 
-    let (window, view, controller, _) = setup(cx);
-    let mut reducer = AgentTranscriptReducer::default();
-    let answer = |text: &str| AgentRunEvent::AgentMessage {
-        text: text.into(),
-        message_id: Some("answer".into()),
-    };
-    controller.update(cx, |c, cx| {
-        let conversation = &mut c.model.root.conversation;
-        for event in [
-            AgentRunEvent::UserMessage {
-                text: "Check the test".into(),
-                message_id: Some("prompt".into()),
-            },
-            AgentRunEvent::Thought {
-                text: "Read the log\n\nThe second line is evidence".into(),
-                message_id: Some("thought".into()),
-            },
-            answer("The test passed."),
-        ] {
-            reducer.apply_event(conversation, event);
-        }
-        cx.notify();
-    });
-    render(window, cx);
-    dispatch(window, actions::FoldEarlierContent, cx);
-    let data = blocks(&view, cx);
-    let thought = data
-        .iter()
-        .find(|b| matches!(b.kind, BlockKind::Activity))
-        .unwrap();
-    assert_eq!(thought.digest.label(), "1 thought");
-    assert!(
-        data.iter()
-            .any(|b| b.body == "Check the test" && !b.expanded)
-    );
-    assert!(matches!(thought.target, Some(FoldKey::Block { .. })));
-    assert!(!thought.expanded);
-    assert!(
-        data.iter()
-            .any(|b| b.body == "The test passed." && b.expanded)
-    );
-    assert!(data.iter().all(|b| b.message.is_none_or(|m| !m.folded)));
-    assert!(summaries(&view, cx).is_empty());
-    controller.update(cx, |c, cx| {
-        reducer.apply_event(&mut c.model.root.conversation, answer(" No failures."));
-        cx.notify();
-    });
-    render(window, cx);
-    assert!(
-        blocks(&view, cx)
-            .iter()
-            .any(|b| b.target == thought.target && !b.expanded)
-    );
-    focus(window, &view, thought, thought.target.unwrap(), cx);
-    press(window, Shortcut::UNFOLD.0, cx);
-    assert!(
-        blocks(&view, cx)
-            .iter()
-            .find(|b| b.target == thought.target)
-            .unwrap()
-            .expanded
-    );
-    press(window, Shortcut::UNFOLD_ALL.0, cx);
-    assert!(blocks(&view, cx).iter().all(|b| b.expanded));
+fn command() -> Message {
+    Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+        ToolCall::new(
+            CallId::from_wire("cmd"),
+            ToolFunction::new(
+                ToolName::new("command").unwrap(),
+                serde_json::json!({"command":"git status --short"}),
+            ),
+        ),
+    )]))
+}
+
+fn command_row(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> TimelineRow {
+    rows(view, cx)
+        .into_iter()
+        .find(|row| matches!(row.data.kind, BlockKind::Step(Step::Tool(_))))
+        .unwrap()
 }
 
 #[gpui_kit::test]
-fn ensemble_prompt_and_worker_are_separate_item_targets(cx: &mut TestAppContext) {
-    use zevria_presentation::blocks::{DisplayTurn, NativeHeader};
-    use zevria_workflow::{
-        AgentRunDescriptor, AgentRunId, AgentRunStatus, EnsembleRunId, EnsembleStart,
-        EnsembleWorkflow,
-    };
-
-    let (window, view, controller, _) = setup(cx);
-    controller.update(cx, |c, cx| {
-        let conversation = &mut c.model.root.conversation;
-        let run_id = EnsembleRunId::from_string("review");
-        let worker_id = AgentRunId::from_string("reviewer");
-        conversation.add_ensemble(
-            EnsembleStart {
-                run_id: run_id.clone(),
-                workflow: EnsembleWorkflow::Review,
-                prompt: "Check the run".into(),
-                agents: vec![AgentRunDescriptor {
-                    id: worker_id.clone(),
-                    agent: "codex".into(),
-                    label: "Reviewer".into(),
-                    safe_mode: "read-only".into(),
-                }],
-            },
-            AgentRunStatus::Queued,
-            Some(NativeHeader::Prompt(DisplayTurn(1))),
-        );
-        conversation.update_ensemble_worker(
-            &run_id,
-            &worker_id,
-            AgentRunStatus::Failed,
-            Some("Worker output was not available".into()),
-        );
-        cx.notify();
-    });
-    render(window, cx);
-    let data = blocks(&view, cx);
-    assert_eq!(data.len(), 2);
-    assert!(data[1].body.contains("Worker output was not available"));
-    for (content_index, block) in data.iter().enumerate() {
-        assert_eq!(
-            block.target,
-            Some(FoldKey::Item {
-                history_index: 0,
-                content_index
-            })
-        );
-    }
-    focus(window, &view, &data[1], data[1].target.unwrap(), cx);
-    press(window, Shortcut::FOLD.0, cx);
-    let visible = blocks(&view, cx);
-    assert!(visible[0].expanded && !visible[1].expanded);
-    let transcript = transcript(&view, cx);
-    assert!(transcript.read_with(cx, |v, cx| v.test_clamped(&visible[1].key, cx)));
-    press(window, Shortcut::COPY_DISCLOSURE.0, cx);
-    cx.update_window(window.into(), |_, _, cx| {
-        assert_eq!(
-            cx.read_from_clipboard()
-                .and_then(|item| item.text())
-                .as_deref(),
-            Some(data[1].body.as_str())
-        );
-    })
-    .unwrap();
-}
-
-#[gpui_kit::test]
-fn unfold_all_is_pane_local_and_replacement_retires_old_folds(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup_at_size(cx, 1240., 1800.);
-    restore(&controller, restored_items(), cx);
-    render(window, cx);
-    dispatch(window, actions::FoldEarlierContent, cx);
-    let root = summaries(&view, cx)[0].key.clone();
-    let id = zevria_foundation::SubtaskId::new("turn-child");
-    controller.update(cx, |c, cx| {
-        let mut model = zevria_presentation::SessionModel::default();
-        model.conversation.restore(restored_items());
-        c.model.children.push(crate::session::ChildPane {
-            id: id.clone(),
-            title: "Trace the reader".into(),
-            workspace: None,
-            kind: zevria_foundation::SubtaskKind::Explore,
-            status: Some(zevria_foundation::SubtaskStatus::Completed),
-            model,
-        });
-        c.model.selected_child = Some(id);
-        cx.notify();
-    });
-    render(window, cx);
-    assert!(summaries(&view, cx).is_empty());
-    dispatch(window, actions::FoldOlderTurns, cx);
-    assert!(!summaries(&view, cx).is_empty());
-    dispatch(window, actions::UnfoldAll, cx);
-    assert!(summaries(&view, cx).is_empty());
-    controller.update(cx, |c, cx| {
-        c.model.selected_child = None;
-        cx.notify();
-    });
-    render(window, cx);
-    assert_eq!(summaries(&view, cx)[0].key, root);
-    restore(&controller, restored_items(), cx);
-    render(window, cx);
-    assert!(summaries(&view, cx).is_empty());
-    assert!(
-        blocks(&view, cx)
-            .iter()
-            .all(|b| b.expanded && b.message.is_none_or(|m| !m.folded))
-    );
-}
-
-fn web_response() -> TranscriptItem {
-    use serde_json::json;
-    TranscriptItem::provider_message(zevria_model::ProviderReplay::openai_responses(
-        zevria_foundation::ModelProfileRef::new("fixture", "model"),
-        vec![
-            json!({"type":"message","id":"comment","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Interim prose"}]}),
-            json!({"type":"web_search_call","id":"search","status":"completed","action":{"type":"search","query":"bees"}}),
-            json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[
-                {"type":"output_text","text":"Final reply"},
-                {"type":"output_text","text":"More context","annotations":[{"type":"url_citation","title":"Cited study","url":"https://example.org/study","start_index":0,"end_index":12}]}
-            ]}),
-            json!({"type":"web_search_call","id":"page","status":"completed","action":{"type":"open_page","url":"https://example.net/special-page"}}),
-            json!({"type":"web_search_call","id":"find","status":"completed","action":{"type":"find_in_page","url":"https://example.net/special-page","pattern":"needle"}}),
-        ],
-    )).unwrap()
-}
-
-#[gpui_kit::test]
-fn bulk_shortcuts_and_title_action_hide_web_details_not_answers_or_sources(
+fn running_command_collapses_to_status_and_copies_original_input_and_output(
     cx: &mut TestAppContext,
 ) {
-    use gpui_kit::test::TestQueryExt as _;
-
-    for width in [720., 1240.] {
-        let (window, view, controller, _) = setup_at_size(cx, width, 1400.);
-        restore(
-            &controller,
-            vec![
-                TranscriptItem::Message(Message::user("first prompt")),
-                TranscriptItem::Message(Message::assistant("Older reply")),
-                TranscriptItem::Message(Message::user("second prompt")),
-                web_response(),
-                TranscriptItem::Error {
-                    error: "trailing notice".into(),
-                },
-            ],
-            cx,
-        );
-        render(window, cx);
-        let original = blocks(&view, cx);
-        let search = original
-            .iter()
-            .find(|b| matches!(b.kind, BlockKind::Web(_)) && b.body.contains("bees"))
-            .unwrap();
-        let open_find = original
-            .iter()
-            .find(|b| matches!(b.kind, BlockKind::Web(_)) && b.body.contains("needle"))
-            .unwrap();
-        let final_reply = original.iter().find(|b| b.body == "Final reply").unwrap();
-        let citing = original
-            .iter()
-            .find(|b| b.body.contains("More context"))
-            .unwrap();
-        let older = original.iter().find(|b| b.body == "Older reply").unwrap();
-        let assert_rendered = |cx: &mut TestAppContext, expanded_web, expanded_older| {
-            cx.update_window(window.into(), |_, window, _| {
-                assert_eq!(
-                    window.try_find(search.key.clone()).is_some()
-                        && window
-                            .within(search.key.clone())
-                            .try_find("web-detail")
-                            .is_some(),
-                    expanded_web
-                );
-                assert_eq!(
-                    window
-                        .within(open_find.key.clone())
-                        .try_find("web-action-list")
-                        .is_some(),
-                    expanded_web
-                );
-                assert!(
-                    window
-                        .within(final_reply.key.clone())
-                        .try_find("text-body")
-                        .is_some()
-                );
-                assert!(
-                    window
-                        .within(citing.key.clone())
-                        .try_find("text-body")
-                        .is_some()
-                );
-                assert!(
-                    window
-                        .within(citing.key.clone())
-                        .try_find("answer-sources")
-                        .is_some()
-                );
-                assert!(
-                    window
-                        .try_find_by_label("Open source from example.org")
-                        .is_some()
-                );
-                assert_eq!(window.try_find(older.key.clone()).is_some(), expanded_older);
-            })
-            .unwrap();
-        };
-        assert_rendered(cx, true, true);
-        focus(window, &view, final_reply, final_reply.target.unwrap(), cx);
-        press(window, Shortcut::FOLD.0, cx);
-        focus_composer(window, &view, cx);
-        press(window, Shortcut::FOLD_EARLIER.0, cx);
-        assert_rendered(cx, false, true);
-        let activities: Vec<_> = blocks(&view, cx)
-            .into_iter()
-            .filter(|row| matches!(row.kind, BlockKind::Activity))
-            .collect();
-        assert_eq!(activities.len(), 2, "the answer separates the runs");
-        assert_eq!(activities[0].digest.label(), "1 search · 1 note");
-        assert_eq!(activities[0].grouped_targets, [search.target.unwrap()]);
-        assert!(
-            activities[0].primary.contains("Interim prose")
-                && activities[0].primary.contains("bees")
-        );
-        cx.update_window(window.into(), |_, window, _| {
-            let button = window
-                .within(activities[0].key.clone())
-                .find("block-disclosure");
-            assert_eq!(button.label(), Some("1 search · 1 note"));
-            assert_eq!(button.expanded(), Some(false));
-        })
-        .unwrap();
-        assert!(
-            blocks(&view, cx)
-                .iter()
-                .any(|b| b.key == final_reply.key && b.expanded)
-        );
-        press(window, Shortcut::FOLD_OLDER.0, cx);
-        assert_rendered(cx, false, false);
-        let older_summary = summaries(&view, cx)
-            .into_iter()
-            .find(|row| row.body == "Older reply")
-            .unwrap();
-        cx.update_window(window.into(), |_, window, _| {
-            let button = window
-                .within(older_summary.key.clone())
-                .find("range-disclosure");
-            assert_eq!(button.label(), Some("Older reply"));
-            assert_eq!(button.bounds().size.height, px(28.));
-        })
-        .unwrap();
-        cx.update_window(window.into(), |_, window, cx| {
-            window.click("fold-earlier-content", cx)
-        })
-        .unwrap();
-        render(window, cx);
-        assert_rendered(cx, false, true);
-        cx.update_window(window.into(), |_, window, cx| {
-            window
-                .within(activities[0].key.clone())
-                .click("block-disclosure", cx);
-        })
-        .unwrap();
-        render(window, cx);
-        let reopened = blocks(&view, cx);
-        assert!(
-            reopened
-                .iter()
-                .any(|row| row.body == "Interim prose" && row.expanded)
-        );
-        assert!(
-            reopened
-                .iter()
-                .any(|row| row.target == search.target && row.expanded)
-        );
-        press(window, Shortcut::FOLD_EARLIER.0, cx);
-        focus(window, &view, open_find, open_find.target.unwrap(), cx);
-        press(window, Shortcut::UNFOLD.0, cx);
-        cx.update_window(window.into(), |_, window, _| {
-            assert!(
-                window
-                    .within(open_find.key.clone())
-                    .try_find("web-action-list")
-                    .is_some()
-            );
-            assert!(window.try_find(search.key.clone()).is_none());
-        })
-        .unwrap();
-        press(window, Shortcut::UNFOLD_ALL.0, cx);
-        assert_rendered(cx, true, true);
-        let reopened = blocks(&view, cx);
-        for web in [search, open_find] {
-            let row = reopened.iter().find(|b| b.key == web.key).unwrap();
-            assert!(row.expanded);
-            assert_eq!(row.primary, web.primary);
-        }
-    }
-}
-
-#[gpui_kit::test]
-fn hosted_attempt_bulk_fold_does_not_hide_new_blocks_or_the_in_place_commit(
-    cx: &mut TestAppContext,
-) {
-    let (window, view, controller, _) = setup_at_size(cx, 1240., 1400.);
-    let turn_id = TurnId::new(71);
+    let (window, view, controller, _) = setup(cx);
+    let id = TurnId::new(20);
     event(
         &controller,
         E::TurnStarted {
-            turn_id,
-            message: Message::user("Prompt"),
+            turn_id: id,
             mode: SessionMode::Build,
+            message: Message::user("Check the worktree"),
         },
         cx,
     );
-    event(&controller, E::ModelCallStarted { turn_id, call: 1 }, cx);
-    let item = web_response();
-    let mut attempt = zevria_transcript::restored_attempt(&item, 0).unwrap();
-    let pending = attempt.hosted_activity.split_off(1);
-    let mut later = pending[0].clone();
-    later.output_index = 0;
-    // Fit the new action immediately beside the old one without taking its ID.
-    // The interim prose at output 0 is not needed for this in-place fixture.
-    attempt
-        .presentation
-        .retain(|part| part.source.output_index != 0);
     event(
         &controller,
-        E::ResponseAttemptUpdated {
-            turn_id,
-            attempt: attempt.clone(),
+        E::ModelCallStarted {
+            turn_id: id,
+            call: 1,
+        },
+        cx,
+    );
+    event(
+        &controller,
+        E::Intermediate {
+            turn_id: id,
+            message: command(),
+            attempt_id: None,
         },
         cx,
     );
     render(window, cx);
-    focus_composer(window, &view, cx);
-    press(window, Shortcut::FOLD_OLDER.0, cx);
-    let folded = blocks(&view, cx);
-    assert!(
-        folded
-            .iter()
-            .any(|b| matches!(b.kind, BlockKind::Activity) && b.digest.notes == 2 && !b.expanded)
-    );
-    assert!(folded.iter().any(|b| matches!(&b.kind, BlockKind::Live(_))));
-    attempt.hosted_activity.push(later);
-    attempt.touch();
+    let running = command_row(&view, cx);
+    assert!(running.expanded);
+    let payload = "exit_code: 101\nduration: 1.8s\n<stdout>\n M Cargo.toml\n</stdout>\n<stderr>\npermission denied\n</stderr>";
     event(
         &controller,
-        E::ResponseAttemptUpdated {
-            turn_id,
-            attempt: attempt.clone(),
+        E::ToolResults {
+            turn_id: id,
+            metadata: vec![],
+            message: Message::tool_result(
+                CallId::from_wire("cmd"),
+                ToolName::new("command").unwrap(),
+                payload,
+            ),
         },
         cx,
     );
     render(window, cx);
-    let data = blocks(&view, cx);
-    assert!(data.iter().any(|b| b.body.contains("bees") && b.summary));
-    assert!(
-        data.iter()
-            .any(|b| b.body.contains("special-page") && b.expanded)
+    let finished = command_row(&view, cx);
+    assert_eq!(running.data.key, finished.data.key);
+    assert!(!finished.expanded);
+    let BlockKind::Step(Step::Tool(tool)) = &finished.data.kind else {
+        unreachable!()
+    };
+    let ToolDetail::Command {
+        duration,
+        exit,
+        lines,
+        ..
+    } = &tool.detail
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (duration.as_deref(), exit.as_deref(), *lines),
+        (Some("1.8s"), Some("exit 101"), Some(2))
     );
-    event(
-        &controller,
-        E::TurnCompleted {
-            turn_id,
-            message: item.display_message().unwrap(),
-            attempt_id: Some(attempt.id),
-        },
-        cx,
-    );
-    render(window, cx);
-    assert!(
-        blocks(&view, cx)
-            .iter()
-            .any(|b| b.body == "Final reply" && b.expanded)
-    );
-    cx.update_window(window.into(), |_, window, _| {
-        assert!(window.try_find("answer-sources").is_some());
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.try_find("command-stdout").is_none());
+        assert_eq!(
+            window.find("toggle-details").label(),
+            Some("Expand details")
+        );
+        window
+            .within(finished.data.key.clone())
+            .click("block-disclosure", cx);
     })
     .unwrap();
+    render(window, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(
+            window.find("toggle-details").label(),
+            Some("Collapse details")
+        );
+        assert!(window.try_find("command-stdout").is_some());
+        assert!(window.try_find("command-stderr").is_some());
+        assert!(window.try_find("command-input").is_none());
+        window.press(Shortcut::COPY_DISCLOSURE.0, cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
+            Some(finished.data.primary_copy().as_str())
+        );
+        let mut row = window.within(finished.data.key.clone());
+        row.hover("block-disclosure", cx);
+        row.click("copy-output", cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
+            Some(payload)
+        );
+    })
+    .unwrap();
+    assert!(command_row(&view, cx).expanded);
+    event(
+        &controller,
+        E::ModelCallStarted {
+            turn_id: id,
+            call: 2,
+        },
+        cx,
+    );
+    event(
+        &controller,
+        E::AssistantStreamUpdated {
+            turn_id: id,
+            snapshot: zevria_content::AssistantStreamSnapshot {
+                message: Some(Message::assistant("I'll report the result.")),
+                attempt: None,
+            },
+        },
+        cx,
+    );
+    assert!(command_row(&view, cx).expanded);
+    let child = zevria_foundation::SubtaskId::new("child");
+    controller.update(cx, |c, cx| {
+        c.model.children.push(crate::session::ChildPane {
+            id: child.clone(),
+            title: "Review".into(),
+            workspace: None,
+            kind: zevria_foundation::SubtaskKind::Explore,
+            status: Some(zevria_foundation::SubtaskStatus::Completed),
+            model: Default::default(),
+        });
+        c.select_pane(Some(child.clone()), cx);
+    });
+    render(window, cx);
+    assert!(rows(&view, cx).is_empty());
+    controller.update(cx, |c, cx| c.select_pane(None, cx));
+    render(window, cx);
+    assert!(command_row(&view, cx).expanded);
+    press(window, Shortcut::COLLAPSE_ALL.0, cx);
+    assert!(!command_row(&view, cx).expanded);
+    press(window, Shortcut::EXPAND_ALL.0, cx);
+    assert!(command_row(&view, cx).expanded);
+    restore(&controller, vec![TranscriptItem::Message(command())], cx);
+    assert!(
+        !command_row(&view, cx).expanded,
+        "replacement clears disclosure overrides"
+    );
+}
+
+#[gpui_kit::test]
+fn detail_shortcuts_change_only_thoughts_and_the_focused_step(cx: &mut TestAppContext) {
+    let (window, view, controller, _) = setup(cx);
+    restore(
+        &controller,
+        vec![
+            TranscriptItem::Message(Message::user("Check the worktree")),
+            TranscriptItem::Message(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(Reasoning::new("Read status")),
+            ]))),
+            TranscriptItem::Message(command()),
+            TranscriptItem::Message(Message::assistant("Worktree checked.")),
+        ],
+        cx,
+    );
+    render(window, cx);
+    assert!(
+        rows(&view, cx)
+            .iter()
+            .filter(|r| r.data.is_disclosure())
+            .all(|r| !r.expanded)
+    );
+    press(window, Shortcut::EXPAND_THINKING.0, cx);
+    assert!(
+        rows(&view, cx)
+            .iter()
+            .find(|r| r.data.thought().is_some())
+            .unwrap()
+            .expanded
+    );
+    let key = command_row(&view, cx).data.key.clone();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.focus(&view.read(cx).transcript.read(cx).test_focus(&key, cx), cx);
+        window.press("space", cx);
+    })
+    .unwrap();
+    assert!(command_row(&view, cx).expanded);
+    press(window, Shortcut::COLLAPSE_THINKING.0, cx);
+    assert!(command_row(&view, cx).expanded);
+    assert!(
+        !rows(&view, cx)
+            .iter()
+            .find(|r| r.data.thought().is_some())
+            .unwrap()
+            .expanded
+    );
+    press(window, Shortcut::FOLD.0, cx);
+    assert!(!command_row(&view, cx).expanded);
+    press(window, Shortcut::UNFOLD.0, cx);
+    assert!(command_row(&view, cx).expanded);
+    dispatch(window, actions::ToggleFold, cx);
+    assert!(!command_row(&view, cx).expanded);
+    assert!(
+        rows(&view, cx)
+            .iter()
+            .filter(|r| !r.data.is_disclosure())
+            .all(|r| r.expanded)
+    );
 }
