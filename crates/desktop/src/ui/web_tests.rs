@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    timeline::{BlockKind, Step, TimelineRow, web::WebRow},
+    timeline::{BlockKind, Step, StepPosition, TimelineRow, web::WebRow},
     ui::status::StatusLine,
 };
 use gpui_kit::test::TestQueryExt as _;
@@ -182,7 +182,7 @@ fn web_actions_grow_in_place_then_auto_collapse_and_copy_exactly(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
-fn aggregated_reasoning_keeps_web_steps_coalesced_and_preserves_override(cx: &mut TestAppContext) {
+fn ordered_reasoning_splits_web_steps_and_preserves_first_override(cx: &mut TestAppContext) {
     let (window, view, controller, _) = setup(cx);
     let mut attempt = start(&controller, cx);
     attempt.hosted_activity = vec![
@@ -199,7 +199,11 @@ fn aggregated_reasoning_keeps_web_steps_coalesced_and_preserves_override(cx: &mu
     ];
     stream(&controller, &mut attempt, cx);
     frame(window, cx);
-    let first = web_rows(&view, cx).remove(0);
+    let initial = web_rows(&view, cx);
+    let [first] = initial.as_slice() else {
+        panic!("expected one coalesced web step before reasoning arrives")
+    };
+    assert_eq!(web_step(first).actions.len(), 2);
     assert!(!first.expanded);
     cx.update_window(window.into(), |_, window, cx| {
         window
@@ -212,17 +216,121 @@ fn aggregated_reasoning_keeps_web_steps_coalesced_and_preserves_override(cx: &mu
     attempt.presentation.push(reasoning(1));
     stream(&controller, &mut attempt, cx);
     frame(window, cx);
-    let steps = web_rows(&view, cx);
-    assert_eq!(steps.len(), 1);
-    assert_eq!(steps[0].data.key, first.data.key);
-    assert!(steps[0].expanded);
+    let ordered = rows(&view, cx)
+        .into_iter()
+        .filter(|r| !matches!(r.data.kind, BlockKind::Live))
+        .collect::<Vec<_>>();
+    let [prompt, before, thought, after] = ordered.as_slice() else {
+        panic!("expected the web steps on either side of the thought")
+    };
+    assert!(matches!(prompt.data.kind, BlockKind::Prompt { .. }));
+    assert_eq!(web_step(before).single().unwrap().output_index, 0);
+    assert_eq!(web_step(after).single().unwrap().output_index, 2);
+    assert_eq!(before.position, Some(StepPosition::Only));
+    assert_eq!(after.position, Some(StepPosition::Only));
+    assert_eq!(thought.data.thought().unwrap().segments.len(), 1);
     assert_eq!(
-        rows(&view, cx)
-            .iter()
-            .filter(|r| r.data.thought().is_some())
-            .count(),
-        1
+        thought.data.primary_copy(),
+        "Check the documentation before answering."
     );
+    assert_eq!(before.data.key, first.data.key);
+    assert!(before.expanded);
+    assert!(!after.expanded);
+}
+
+#[gpui_kit::test]
+fn attempt_thought_rekeys_by_anchor_without_overwriting_an_existing_group(cx: &mut TestAppContext) {
+    use AssistantPartIdentity::{Content, Summary};
+    use AssistantPresentationContent as Part;
+    let (window, view, controller, _) = setup(cx);
+    let mut attempt = start(&controller, cx);
+    attempt.presentation = vec![
+        reasoning(3),
+        part(
+            4,
+            Content(0),
+            Part::answer("The documentation confirms it."),
+        ),
+        part(
+            5,
+            Summary(0),
+            Part::Reasoning {
+                text: "Check the result".into(),
+            },
+        ),
+    ];
+    stream(&controller, &mut attempt, cx);
+    frame(window, cx);
+    let initial = rows(&view, cx);
+    let [_, first, _, later] = initial.as_slice() else {
+        panic!("expected two thought groups separated by prose")
+    };
+    cx.update_window(window.into(), |_, window, cx| {
+        window
+            .within(first.data.key.clone())
+            .click("block-disclosure", cx)
+    })
+    .unwrap();
+    frame(window, cx);
+    assert!(rows(&view, cx)[1].expanded);
+    let identity = view.read_with(cx, |view, cx| {
+        view.transcript
+            .read(cx)
+            .test_identity(&first.data.key, cx)
+            .unwrap()
+    });
+
+    // The first insertion has the same text as the old group, so matching
+    // the live ordinal alone would send its override to the wrong row.
+    attempt.presentation.extend([
+        reasoning(0),
+        part(1, Content(0), Part::answer("I found the documentation.")),
+        part(
+            2,
+            Summary(0),
+            Part::Reasoning {
+                text: "Review the context first".into(),
+            },
+        ),
+    ]);
+    stream(&controller, &mut attempt, cx);
+    frame(window, cx);
+    let updated = rows(&view, cx);
+    let [_, earlier, _, prepended, _, retained] = updated.as_slice() else {
+        panic!("expected the earlier thought and prepended segment")
+    };
+    assert_eq!(earlier.data.primary_copy(), first.data.primary_copy());
+    assert!(!earlier.expanded);
+    assert_ne!(prepended.data.key, first.data.key);
+    assert_eq!(
+        prepended.data.primary_copy(),
+        "Review the context first\n\nCheck the documentation before answering."
+    );
+    assert!(prepended.expanded);
+    assert_eq!(retained.data.key, later.data.key);
+    assert_eq!(
+        identity,
+        view.read_with(cx, |view, cx| view
+            .transcript
+            .read(cx)
+            .test_identity(&prepended.data.key, cx)
+            .unwrap())
+    );
+
+    // Removing the separator joins the groups, but the expansion of the
+    // disappearing group should not override the first group's state.
+    attempt
+        .presentation
+        .retain(|part| part.source.output_index != 1);
+    stream(&controller, &mut attempt, cx);
+    let joined = rows(&view, cx);
+    let [_, joined_group, _, retained] = joined.as_slice() else {
+        panic!("expected the two earlier runs to join")
+    };
+    assert_eq!(joined_group.data.key, earlier.data.key);
+    assert_eq!(joined_group.data.thought().unwrap().segments.len(), 3);
+    assert!(!joined_group.expanded);
+    assert_eq!(retained.data.key, later.data.key);
 }
 
 #[gpui_kit::test]

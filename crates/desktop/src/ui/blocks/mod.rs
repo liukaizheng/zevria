@@ -228,9 +228,7 @@ impl BlockView {
         match &row.data.kind {
             BlockKind::Prose { plain } => Some((row.data.body.to_string(), *plain)),
             BlockKind::Document { .. } => Some((row.data.body.to_string(), false)),
-            BlockKind::ThoughtGroup(thought) | BlockKind::LiveThought(thought) if row.expanded => {
-                Some((thought.text(), false))
-            }
+            BlockKind::ThoughtGroup(thought) if row.expanded => Some((thought.text(), false)),
             BlockKind::Step(Step::Tool(tool))
                 if row.expanded
                     && matches!(tool.detail, ToolDetail::Standard { markdown: true, .. }) =>
@@ -1327,7 +1325,7 @@ impl Render for BlockView {
             BlockKind::Prompt { preparing, .. } => {
                 self.prompt(*preparing, window, cx).into_any_element()
             }
-            BlockKind::ThoughtGroup(thought) | BlockKind::LiveThought(thought) => {
+            BlockKind::ThoughtGroup(thought) => {
                 self.thought(thought, window, cx).into_any_element()
             }
             BlockKind::Step(step) => self.step(step, window, cx).into_any_element(),

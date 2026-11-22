@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     disclosure::Phase,
-    timeline::{BlockKind, NoticeLevel, TimelineRow},
+    timeline::{BlockKind, NoticeLevel, Step, TimelineRow},
 };
 use rig_core::message::{AssistantContent, AssistantMessage, Reasoning};
 use zevria_content::{AssistantStreamSnapshot, ResponseAttempt, ResponseAttemptOutcome};
@@ -99,7 +99,8 @@ fn first_thought_retains_its_renderer_and_auto_collapses_on_prose(cx: &mut TestA
     render(window, cx);
     let committed = thoughts(&view, cx).remove(0);
     assert!(!committed.expanded);
-    assert_eq!(committed.data.key, thought.data.key);
+    assert!(committed.data.source.is_some());
+    assert_ne!(committed.data.key, thought.data.key);
     assert_eq!(
         identity,
         view.read_with(cx, |view, cx| view
@@ -111,7 +112,7 @@ fn first_thought_retains_its_renderer_and_auto_collapses_on_prose(cx: &mut TestA
 }
 
 #[gpui_kit::test]
-fn later_call_thought_stays_at_live_tail_then_merges_with_pinned_intent(cx: &mut TestAppContext) {
+fn later_call_thought_stays_in_order_and_keeps_pinned_intent(cx: &mut TestAppContext) {
     use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
     let (window, view, controller, _) = setup(cx);
     let id = TurnId::new(102);
@@ -158,17 +159,26 @@ fn later_call_thought_stays_at_live_tail_then_merges_with_pinned_intent(cx: &mut
     );
     stream(&controller, id, thinking("Check the reported path"), cx);
     render(window, cx);
-    let initial = thoughts(&view, cx);
-    assert_eq!(initial.len(), 2);
-    assert!(!initial[0].expanded);
-    assert!(initial[1].expanded);
-    assert!(matches!(
-        data(&view, cx).last().unwrap().data.kind,
-        BlockKind::LiveThought(_)
-    ));
+    let initial = data(&view, cx);
+    let [prompt, first, step, later] = initial.as_slice() else {
+        panic!("expected the live thought after the read step")
+    };
+    assert!(matches!(prompt.data.kind, BlockKind::Prompt { .. }));
+    assert!(matches!(first.data.kind, BlockKind::ThoughtGroup(_)));
+    assert!(!first.expanded);
+    assert!(matches!(step.data.kind, BlockKind::Step(Step::Tool(_))));
+    assert!(matches!(later.data.kind, BlockKind::ThoughtGroup(_)));
+    assert_eq!(later.phase, Phase::Live);
+    assert!(later.expanded);
+    let identity = view.read_with(cx, |view, cx| {
+        view.transcript
+            .read(cx)
+            .test_identity(&later.data.key, cx)
+            .unwrap()
+    });
     cx.update_window(window.into(), |_, window, cx| {
         window
-            .within(initial[1].data.key.clone())
+            .within(later.data.key.clone())
             .click("block-disclosure", cx);
     })
     .unwrap();
@@ -193,24 +203,40 @@ fn later_call_thought_stays_at_live_tail_then_merges_with_pinned_intent(cx: &mut
         cx,
     );
     render(window, cx);
-    let merged = thoughts(&view, cx).remove(0);
-    assert!(merged.expanded, "the deliberate reopen survives merge");
-    assert_eq!(merged.data.key, initial[0].data.key);
+    let completed = data(&view, cx);
+    let [_, completed_first, completed_step, committed] = completed.as_slice() else {
+        panic!("expected both thought groups to stay in order on commit")
+    };
+    assert_eq!(completed_first.data.key, first.data.key);
+    assert_eq!(completed_first.data.primary_copy(), "Read the source");
+    assert!(!completed_first.expanded);
+    assert_eq!(completed_step.data.key, step.data.key);
+    assert_eq!(committed.phase, Phase::Finished);
+    assert_ne!(committed.data.key, later.data.key);
+    assert!(committed.expanded, "the deliberate reopen survives commit");
     assert_eq!(
-        merged.data.primary_copy(),
-        "Read the source\n\nCheck the reported path and revision"
+        committed.data.primary_copy(),
+        "Check the reported path and revision"
+    );
+    assert_eq!(
+        identity,
+        view.read_with(cx, |view, cx| view
+            .transcript
+            .read(cx)
+            .test_identity(&committed.data.key, cx)
+            .unwrap())
     );
     cx.update_window(window.into(), |_, window, cx| {
         let handle = view
             .read(cx)
             .transcript
             .read(cx)
-            .test_focus(&merged.data.key, cx);
+            .test_focus(&committed.data.key, cx);
         window.focus(&handle, cx);
         window.press(Shortcut::COPY_DISCLOSURE.0, cx);
         assert_eq!(
             cx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
-            Some("Read the source\n\nCheck the reported path and revision")
+            Some("Check the reported path and revision")
         );
     })
     .unwrap();

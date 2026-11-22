@@ -170,28 +170,44 @@ impl TranscriptView {
             activity.as_deref(),
             controller.live_attempt_header(model),
         );
-        let mut aliases = HashMap::new();
-        if !replaced {
-            for old in &self.pane.rows {
-                if let Some(anchor) = old.data.source {
-                    let resolved = model.conversation.resolved_identity(anchor);
-                    if resolved != anchor
-                        && let Some(new) = projection.anchors.get(&resolved)
-                    {
-                        aliases.insert(old.data.key.clone(), new.clone());
-                    }
-                }
-            }
-            aliases.extend(projection.transfers);
-        }
-        for (old, new) in &aliases {
-            self.rekey(old, new, window, cx);
-        }
         let valid: HashSet<_> = projection
             .rows
             .iter()
             .map(|row| row.data.key.as_str())
             .collect();
+        let mut aliases = HashMap::new();
+        if !replaced {
+            let old_keys: HashSet<_> = self
+                .pane
+                .rows
+                .iter()
+                .map(|row| row.data.key.as_str())
+                .collect();
+            aliases.extend(
+                projection
+                    .transfers
+                    .into_iter()
+                    .filter(|(_, new)| !old_keys.contains(new.as_str())),
+            );
+            for old in &self.pane.rows {
+                if let Some(anchor) = old.data.source {
+                    let resolved = model.conversation.resolved_identity(anchor);
+                    if let Some(new) = projection.anchors.get(&resolved) {
+                        // A known anchor takes precedence over a live ordinal match.
+                        aliases.remove(&old.data.key);
+                        if *new != old.data.key
+                            && !valid.contains(old.data.key.as_str())
+                            && (resolved != anchor || !old_keys.contains(new.as_str()))
+                        {
+                            aliases.insert(old.data.key.clone(), new.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for (old, new) in &aliases {
+            self.rekey(old, new, window, cx);
+        }
         self.pane
             .blocks
             .retain(|key, _| valid.contains(key.as_str()));

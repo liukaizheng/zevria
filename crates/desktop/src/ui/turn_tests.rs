@@ -321,6 +321,9 @@ fn detail_shortcuts_change_only_thoughts_and_the_focused_step(cx: &mut TestAppCo
                 AssistantContent::Reasoning(Reasoning::new("Read status")),
             ]))),
             TranscriptItem::Message(command()),
+            TranscriptItem::Message(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(Reasoning::new("Review status output")),
+            ]))),
             TranscriptItem::Message(Message::assistant("Worktree checked.")),
         ],
         cx,
@@ -332,15 +335,18 @@ fn detail_shortcuts_change_only_thoughts_and_the_focused_step(cx: &mut TestAppCo
             .filter(|r| r.data.is_disclosure())
             .all(|r| !r.expanded)
     );
-    press(window, Shortcut::EXPAND_THINKING.0, cx);
-    assert!(
+    let thought_states = |cx: &TestAppContext| {
         rows(&view, cx)
-            .iter()
-            .find(|r| r.data.thought().is_some())
-            .unwrap()
-            .expanded
-    );
-    let key = command_row(&view, cx).data.key.clone();
+            .into_iter()
+            .filter(|r| r.data.thought().is_some())
+            .map(|r| r.expanded)
+            .collect::<Vec<_>>()
+    };
+    press(window, Shortcut::EXPAND_THINKING.0, cx);
+    assert_eq!(thought_states(cx), [true, true]);
+    let command = command_row(&view, cx);
+    assert!(!command.expanded);
+    let key = command.data.key.clone();
     cx.update_window(window.into(), |_, window, cx| {
         window.focus(&view.read(cx).transcript.read(cx).test_focus(&key, cx), cx);
         window.press("space", cx);
@@ -349,13 +355,7 @@ fn detail_shortcuts_change_only_thoughts_and_the_focused_step(cx: &mut TestAppCo
     assert!(command_row(&view, cx).expanded);
     press(window, Shortcut::COLLAPSE_THINKING.0, cx);
     assert!(command_row(&view, cx).expanded);
-    assert!(
-        !rows(&view, cx)
-            .iter()
-            .find(|r| r.data.thought().is_some())
-            .unwrap()
-            .expanded
-    );
+    assert_eq!(thought_states(cx), [false, false]);
     press(window, Shortcut::FOLD.0, cx);
     assert!(!command_row(&view, cx).expanded);
     press(window, Shortcut::UNFOLD.0, cx);

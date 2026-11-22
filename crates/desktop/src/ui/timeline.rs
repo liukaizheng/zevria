@@ -126,7 +126,6 @@ pub enum BlockKind {
         preparing: bool,
     },
     ThoughtGroup(ThoughtGroup),
-    LiveThought(ThoughtGroup),
     Step(Step),
     Prose {
         plain: bool,
@@ -180,13 +179,13 @@ impl BlockData {
     }
     pub fn thought(&self) -> Option<&ThoughtGroup> {
         match &self.kind {
-            BlockKind::ThoughtGroup(thought) | BlockKind::LiveThought(thought) => Some(thought),
+            BlockKind::ThoughtGroup(thought) => Some(thought),
             _ => None,
         }
     }
     pub fn primary_copy(&self) -> String {
         match &self.kind {
-            BlockKind::ThoughtGroup(thought) | BlockKind::LiveThought(thought) => thought.text(),
+            BlockKind::ThoughtGroup(thought) => thought.text(),
             BlockKind::Step(Step::Web(web)) => web.copy_text(),
             _ => self.primary.to_string(),
         }
@@ -196,7 +195,7 @@ impl BlockData {
     }
     pub fn default_expanded(&self) -> bool {
         match &self.kind {
-            BlockKind::ThoughtGroup(thought) | BlockKind::LiveThought(thought) => thought.is_live,
+            BlockKind::ThoughtGroup(thought) => thought.is_live,
             BlockKind::Step(step) => step.status() == StatusIcon::Running,
             _ => true,
         }
@@ -286,6 +285,7 @@ enum Fragment {
     Reasoning {
         segment: ThoughtSegment,
         identity: TailIdentity,
+        history_index: usize,
         source: Option<PresentationBlockId>,
     },
     Row {
@@ -459,18 +459,14 @@ impl Projector {
             let entry = project_entry(epoch, history.len(), stream, 0, Some(call));
             timeline.push_entry(&entry, true, Some(&mut next_live), |_| Phase::Working);
         }
+        timeline.flush_thoughts();
         if let Some(activity) = activity {
             // The active thought/step already signals work. Reserve the tip for
             // waiting, switching calls, reconnecting, or otherwise out-of-band work.
-            let active = timeline
-                .turn
-                .thoughts
-                .last()
-                .is_some_and(|thought| thought.phase == Phase::Live)
-                || timeline.turn.rows.last().is_some_and(|row| {
-                    matches!(&row.data.kind,
-                    BlockKind::LiveThought(_) | BlockKind::Step(_) if row.data.default_expanded())
-                });
+            let active = timeline.turn.rows.last().is_some_and(|row| {
+                matches!(&row.data.kind,
+                    BlockKind::ThoughtGroup(_) | BlockKind::Step(_) if row.data.default_expanded())
+            });
             if !active || activity.starts_with("Stopping") || activity.starts_with("Reconnecting") {
                 let mut data = BlockData::new(
                     format!("{epoch}-tip"),
@@ -486,15 +482,17 @@ impl Projector {
             }
         }
         let mut projection = timeline.finish();
-        // Only rekey a disappearing row. One reasoning group can already own
-        // several bindings; a specific live-tail row owns exactly one.
+        // Only rekey disappearing rows. Segments are bound in order, so the
+        // first unambiguous match owns the transfer for the entire thought group.
         let keys: HashSet<_> = projection
             .rows
             .iter()
             .map(|row| row.data.key.as_str())
             .collect();
+        let mut transferred = HashSet::new();
         for before in &self.live {
-            if keys.contains(before.key.as_str()) {
+            let key = before.key.as_str();
+            if keys.contains(key) || transferred.contains(key) {
                 continue;
             }
             let compatible = |after: &&Binding| {
@@ -504,6 +502,7 @@ impl Projector {
             if let Some(after) = candidates.next()
                 && candidates.all(|other| other.key == after.key)
             {
+                transferred.insert(key);
                 projection
                     .transfers
                     .push((before.key.clone(), after.key.clone()));
@@ -589,6 +588,7 @@ fn project_entry(
                     fragments.push(Fragment::Reasoning {
                         segment,
                         identity,
+                        history_index: index,
                         source: streaming.is_none().then_some(block.id),
                     });
                     continue;
@@ -818,18 +818,22 @@ fn project_block(key: String, index: usize, block: &PresentationBlock) -> BlockD
     data
 }
 
+struct PendingThoughtGroup {
+    key: String,
+    history_index: usize,
+    source: Option<Anchor>,
+    segments: Vec<ThoughtSegment>,
+}
+
 #[derive(Default)]
 struct Turn {
     rows: Vec<TimelineRow>,
-    thought_at: Option<usize>,
-    thoughts: Vec<ThoughtSegment>,
+    pending_thoughts: Option<PendingThoughtGroup>,
     navigable: bool,
-    has_steps_or_prose: bool,
 }
 
 struct Timeline<'a> {
     epoch: &'a str,
-    ordinal: usize,
     turn: Turn,
     rows: Vec<TimelineRow>,
     anchors: HashMap<Anchor, String>,
@@ -838,15 +842,21 @@ impl<'a> Timeline<'a> {
     fn new(epoch: &'a str) -> Self {
         Self {
             epoch,
-            ordinal: 0,
             turn: Turn::default(),
             rows: vec![],
             anchors: HashMap::new(),
         }
     }
 
-    fn thought_key(&self) -> String {
-        format!("{}-turn-{}-thoughts", self.epoch, self.ordinal)
+    fn flush_thoughts(&mut self) {
+        if let Some(group) = self.turn.pending_thoughts.take() {
+            self.turn.rows.push(thought_row(
+                group.key,
+                group.history_index,
+                group.source,
+                group.segments,
+            ));
+        }
     }
 
     fn start_turn(&mut self) {
@@ -881,6 +891,7 @@ impl<'a> Timeline<'a> {
                 Fragment::Reasoning {
                     segment,
                     identity,
+                    history_index,
                     source,
                 } => {
                     let mut segment = segment.clone();
@@ -889,25 +900,30 @@ impl<'a> Timeline<'a> {
                     } else {
                         phase(*source)
                     };
-                    let separate = segment.phase == Phase::Live && self.turn.has_steps_or_prose;
-                    let key = if separate {
-                        identity.key(self.epoch)
-                    } else {
-                        self.thought_key()
-                    };
+                    let anchor = source.map(|id| (*history_index, id));
+                    let group =
+                        self.turn
+                            .pending_thoughts
+                            .get_or_insert_with(|| PendingThoughtGroup {
+                                key: source.map_or_else(
+                                    || identity.key(self.epoch),
+                                    |id| format!("{}-{}", self.epoch, id.0),
+                                ),
+                                history_index: *history_index,
+                                source: anchor,
+                                segments: vec![],
+                            });
+                    if let Some(anchor) = anchor {
+                        self.anchors.insert(anchor, group.key.clone());
+                    }
                     if let Some(bindings) = bindings.as_deref_mut() {
                         bindings.push(Binding {
                             identity: *identity,
-                            key: key.clone(),
+                            key: group.key.clone(),
                             text: segment.text.clone(),
                         });
                     }
-                    if separate {
-                        self.turn.rows.push(thought_row(key, vec![segment], true));
-                    } else {
-                        self.turn.thought_at.get_or_insert(self.turn.rows.len());
-                        self.turn.thoughts.push(segment);
-                    }
+                    group.segments.push(segment);
                 }
                 Fragment::Row { data, identity } => {
                     if let Some((bindings, identity)) =
@@ -934,10 +950,7 @@ impl<'a> Timeline<'a> {
     }
 
     fn push_row(&mut self, data: Arc<BlockData>, phase: Phase) {
-        if matches!(data.kind, BlockKind::Prose { .. } | BlockKind::Step(_)) {
-            self.turn.thought_at.get_or_insert(self.turn.rows.len());
-            self.turn.has_steps_or_prose = true;
-        }
+        self.flush_thoughts();
         if let BlockKind::Step(Step::Web(next)) = &data.kind
             && let Some(previous) = self.turn.rows.last_mut()
             && let BlockKind::Step(Step::Web(web)) = &mut Arc::make_mut(&mut previous.data).kind
@@ -957,21 +970,13 @@ impl<'a> Timeline<'a> {
     }
 
     fn finish_turn(&mut self) {
-        if self.turn.rows.is_empty() && self.turn.thoughts.is_empty() {
+        self.flush_thoughts();
+        if self.turn.rows.is_empty() {
             return;
         }
-        let key = self.thought_key();
-        let turn = std::mem::take(&mut self.turn);
-        let mut rows = turn.rows;
-        if !turn.thoughts.is_empty() {
-            rows.insert(
-                turn.thought_at.unwrap_or(0),
-                thought_row(key, turn.thoughts, false),
-            );
-        }
-        rows[0].turn_start = turn.navigable;
-        self.rows.append(&mut rows);
-        self.ordinal += 1;
+        let mut turn = std::mem::take(&mut self.turn);
+        turn.rows[0].turn_start = turn.navigable;
+        self.rows.append(&mut turn.rows);
     }
 
     fn finish(mut self) -> Projection {
@@ -1018,7 +1023,12 @@ impl<'a> Timeline<'a> {
     }
 }
 
-fn thought_row(key: String, segments: Vec<ThoughtSegment>, tail: bool) -> TimelineRow {
+fn thought_row(
+    key: String,
+    history_index: usize,
+    source: Option<Anchor>,
+    segments: Vec<ThoughtSegment>,
+) -> TimelineRow {
     let revision = hash(
         segments
             .iter()
@@ -1027,17 +1037,9 @@ fn thought_row(key: String, segments: Vec<ThoughtSegment>, tail: bool) -> Timeli
     );
     let thought = ThoughtGroup::new(segments);
     let phase = thought.phase();
-    let mut data = BlockData::new(
-        key,
-        0,
-        if tail {
-            BlockKind::LiveThought(thought)
-        } else {
-            BlockKind::ThoughtGroup(thought)
-        },
-        "",
-    );
+    let mut data = BlockData::new(key, history_index, BlockKind::ThoughtGroup(thought), "");
     data.revision = revision;
+    data.source = source;
     TimelineRow::new(Arc::new(data), phase)
 }
 
@@ -1050,30 +1052,37 @@ mod tests {
     };
     use serde_json::json;
     use zevria_content::{
-        HostedActivity, HostedActivityKind, HostedActivityStatus, ResponseAttempt,
-        ResponseAttemptOutcome,
+        AssistantPartIdentity, AssistantPresentationContent, AssistantPresentationPart,
+        AssistantSourceAddress, HostedActivity, HostedActivityKind, HostedActivityStatus,
+        ResponseAttempt, ResponseAttemptOutcome,
     };
     use zevria_foundation::{ModelProfileRef, TurnId};
+    use zevria_transcript::transcript::TranscriptItem;
     use zevria_workflow::{PlanArtifact, PlanId, PlanVersion};
 
     fn entry(message: Message) -> HistoryEntry {
         HistoryEntry::from_message(message, ToolCallStatus::Finished).unwrap()
     }
+    fn reasoning(text: &str) -> AssistantContent {
+        AssistantContent::Reasoning(Reasoning::new(text))
+    }
+    fn assistant(content: impl IntoIterator<Item = AssistantContent>) -> Message {
+        Message::Assistant(AssistantMessage::new(content.into_iter().collect()))
+    }
     fn thought(text: &str) -> Message {
-        Message::Assistant(AssistantMessage::new(vec![AssistantContent::Reasoning(
-            Reasoning::new(text),
-        )]))
+        assistant([reasoning(text)])
+    }
+    fn command(id: &str) -> AssistantContent {
+        AssistantContent::ToolCall(ToolCall::new(
+            CallId::from_wire(id),
+            ToolFunction::new(
+                ToolName::new("command").unwrap(),
+                json!({"command":"cargo fmt"}),
+            ),
+        ))
     }
     fn tool(id: &str) -> Message {
-        Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
-            ToolCall::new(
-                CallId::from_wire(id),
-                ToolFunction::new(
-                    ToolName::new("command").unwrap(),
-                    json!({"command":"cargo fmt"}),
-                ),
-            ),
-        )]))
+        assistant([command(id)])
     }
     fn call(call: usize) -> NativeHeader {
         NativeHeader::Assistant {
@@ -1081,13 +1090,12 @@ mod tests {
             call,
         }
     }
-    fn presented(
+    fn projected(
         p: &mut Projector,
         conv: &ConversationState,
         stream: Option<(NativeHeader, &HistoryEntry)>,
-        disclosures: &mut DisclosureState,
-    ) -> Vec<TimelineRow> {
-        let mut view = p.project(
+    ) -> Projection {
+        p.project(
             conv,
             "epoch",
             stream.map(|(h, _)| h),
@@ -1097,88 +1105,357 @@ mod tests {
             &HashSet::new(),
             None,
             None,
-        );
-        for (old, new) in view.transfers {
+        )
+    }
+    fn presented(
+        p: &mut Projector,
+        conv: &ConversationState,
+        stream: Option<(NativeHeader, &HistoryEntry)>,
+        disclosures: &mut DisclosureState,
+    ) -> Vec<TimelineRow> {
+        let Projection {
+            mut rows,
+            transfers,
+            ..
+        } = projected(p, conv, stream);
+        for (old, new) in transfers {
             disclosures.rekey(&old, &new);
         }
-        for row in &mut view.rows {
+        for row in &mut rows {
             row.apply_disclosure(disclosures);
         }
-        view.rows
+        rows
+    }
+    fn assert_thought(row: &TimelineRow, texts: &[&str], words: usize, phase: Phase) {
+        let thought = row.data.thought().expect("thought group");
+        assert_eq!(thought.segments.len(), texts.len());
+        assert_eq!(thought.word_count, words);
+        assert_eq!(row.data.primary_copy(), texts.join("\n\n"));
+        assert_eq!(row.phase, phase);
+        assert_eq!(thought.is_live, phase == Phase::Live);
     }
 
     #[test]
-    fn thoughts_aggregate_across_calls_and_at_restore() {
+    fn thoughts_separated_by_tools_keep_order_across_calls_and_at_restore() {
         let mut conv = ConversationState::default();
         conv.push_user_turn(Message::user("Check the changes"), DisplayTurn(1));
         let mut projector = Projector::default();
         let mut disclosures = DisclosureState::default();
-        let streamed = entry(thought("  First pass "));
-        let rows = presented(
+        let first_text = "  First pass ";
+        let first = presented(
             &mut projector,
             &conv,
-            Some((call(1), &streamed)),
+            Some((call(1), &entry(thought(first_text)))),
             &mut disclosures,
         );
-        assert_eq!(rows[1].data.key, "epoch-turn-0-thoughts");
-        assert!(rows[1].expanded);
-        let anchor = rows[1].data.key.clone();
+        assert!(first[1].expanded);
+        let first_live_key = first[1].data.key.clone();
+        disclosures.set(first_live_key.clone(), true);
         conv.commit_response(
-            thought("  First pass "),
+            thought(first_text),
             None,
             ToolCallStatus::Finished,
             Some(call(1)),
         );
         conv.commit_response(tool("one"), None, ToolCallStatus::Finished, Some(call(1)));
-        let second = entry(thought("Second pass\n\nDetails"));
         let rows = presented(
             &mut projector,
             &conv,
-            Some((call(2), &second)),
+            Some((call(2), &entry(thought("Second pass\n\nDetails")))),
             &mut disclosures,
         );
-        assert_eq!(rows[1].data.key, anchor);
-        assert!(!rows[1].expanded);
-        let tail = rows.last().unwrap();
-        assert!(matches!(tail.data.kind, BlockKind::LiveThought(_)));
-        assert!(tail.expanded);
-        disclosures.set(tail.data.key.clone(), false);
-        let grown = entry(thought("Second pass\n\nDetails and notes"));
-        let rows = presented(
+        assert_ne!(rows[1].data.key, first_live_key);
+        assert!(
+            rows[1].expanded,
+            "the first pin survives only on its own group"
+        );
+        assert_thought(&rows[1], &[first_text], 2, Phase::Working);
+        assert!(matches!(rows[2].data.kind, BlockKind::Step(Step::Tool(_))));
+        let second_live_key = rows[3].data.key.clone();
+        assert_eq!(rows[3].phase, Phase::Live);
+        assert!(rows[3].expanded);
+        disclosures.set(second_live_key.clone(), false);
+        let second_text = "Second pass\n\nDetails and notes";
+        let grown = presented(
             &mut projector,
             &conv,
-            Some((call(2), &grown)),
+            Some((call(2), &entry(thought(second_text)))),
             &mut disclosures,
         );
-        assert!(!rows.last().unwrap().expanded);
-        conv.complete_response(
-            thought("Second pass\n\nDetails and notes"),
-            None,
-            Some(call(2)),
-        );
+        assert_eq!(grown[3].data.key, second_live_key);
+        assert!(!grown[3].expanded);
+        conv.complete_response(thought(second_text), None, Some(call(2)));
         let completed = presented(&mut projector, &conv, None, &mut disclosures);
+        assert_eq!(completed[1].data.key, rows[1].data.key);
+        assert_ne!(completed[3].data.key, second_live_key);
+        assert!(completed[1].expanded);
+        assert!(!disclosures.is_expanded(&completed[3].data.key, true));
+
         let restored = presented(
             &mut Projector::default(),
             &conv,
             None,
             &mut DisclosureState::default(),
         );
-        for rows in [&completed, &restored] {
+        for (rows, phase) in [(&completed, Phase::Finished), (&restored, Phase::Restored)] {
+            assert_eq!(rows.len(), 4);
+            assert!(matches!(rows[0].data.kind, BlockKind::Prompt { .. }));
+            assert_thought(&rows[1], &[first_text], 2, phase);
+            assert!(matches!(rows[2].data.kind, BlockKind::Step(Step::Tool(_))));
+            assert_thought(&rows[3], &[second_text], 5, phase);
+            assert!(!rows[3].expanded);
             assert_eq!(
-                rows.iter().filter(|r| r.data.thought().is_some()).count(),
-                1
-            );
-            assert!(!rows[1].expanded);
-            let thought = rows[1].data.thought().unwrap();
-            assert_eq!(thought.segments.len(), 2);
-            assert_eq!(thought.word_count, 7);
-            assert_eq!(&*thought.segments[1].headline, "Second pass");
-            assert_eq!(
-                rows[1].data.primary_copy(),
-                "  First pass \n\nSecond pass\n\nDetails and notes"
+                &*rows[3].data.thought().unwrap().segments[0].headline,
+                "Second pass"
             );
         }
-        assert_eq!(restored[1].phase, Phase::Restored);
+        assert!(!restored[1].expanded);
+    }
+
+    #[test]
+    fn thoughts_aggregate_in_contiguous_runs_around_commands() {
+        let before = ["Inspect inputs", "Read build settings", "Check tests"];
+        let after = [
+            "Review command output",
+            "Compare both paths",
+            "Keep existing behavior",
+            "Check the edge cases",
+            "Summarize findings",
+        ];
+        let prompt = Message::user("Check the workspace");
+        let mut conv = ConversationState::default();
+        conv.push_user_turn(prompt.clone(), DisplayTurn(1));
+        let mut projector = Projector::default();
+        let first = projected(
+            &mut projector,
+            &conv,
+            Some((call(1), &entry(assistant(before.map(reasoning))))),
+        );
+        assert_eq!(first.rows.len(), 2);
+        assert_thought(&first.rows[1], &before, 7, Phase::Live);
+        assert_eq!(first.rows[1].data.history_index, 1);
+        assert_eq!(first.rows[1].data.source, None);
+        assert_eq!(
+            first.rows[1].data.key,
+            TailIdentity {
+                header: Some(call(1)),
+                kind: TailKind::Thinking,
+                ordinal: 0,
+            }
+            .key("epoch")
+        );
+
+        let first_call = assistant(
+            before
+                .map(reasoning)
+                .into_iter()
+                .chain(["one", "two", "three", "four"].map(command)),
+        );
+        conv.commit_response(
+            first_call.clone(),
+            None,
+            ToolCallStatus::Finished,
+            Some(call(1)),
+        );
+        let second = projected(
+            &mut projector,
+            &conv,
+            Some((call(2), &entry(assistant(after.map(reasoning))))),
+        );
+        assert_eq!(second.rows.len(), 7);
+        assert_thought(&second.rows[1], &before, 7, Phase::Working);
+        assert_thought(&second.rows[6], &after, 15, Phase::Live);
+        assert_eq!(
+            second.transfers,
+            [(
+                first.rows[1].data.key.clone(),
+                second.rows[1].data.key.clone()
+            )]
+        );
+        let first_anchor = second.rows[1].data.source.unwrap();
+        let HistoryEntry::Conversation(first_entry) = conv.entry(1).unwrap() else {
+            panic!("first call should be in history")
+        };
+        assert_eq!(first_anchor, (1, first_entry.blocks[0].id));
+        assert_eq!(
+            second.rows[1].data.key,
+            format!("epoch-{}", first_anchor.1.0)
+        );
+        for block in &first_entry.blocks[..before.len()] {
+            assert_eq!(second.anchors[&(1, block.id)], second.rows[1].data.key);
+        }
+
+        let answer = "Workspace checked.";
+        let second_call = assistant(
+            after
+                .map(reasoning)
+                .into_iter()
+                .chain([AssistantContent::text(answer)]),
+        );
+        conv.complete_response(second_call.clone(), None, Some(call(2)));
+        let completed = projected(&mut projector, &conv, None);
+        assert_eq!(
+            completed.transfers,
+            [(
+                second.rows[6].data.key.clone(),
+                completed.rows[6].data.key.clone()
+            )]
+        );
+        assert_eq!(completed.rows[1].data.key, second.rows[1].data.key);
+        assert_eq!(completed.rows[6].data.history_index, 2);
+        assert_eq!(completed.rows[6].data.source.unwrap().0, 2);
+
+        let mut restored_conv = ConversationState::default();
+        restored_conv.restore(vec![
+            TranscriptItem::Message(prompt),
+            TranscriptItem::Message(first_call),
+            TranscriptItem::Message(second_call),
+        ]);
+        let restored = projected(&mut Projector::default(), &restored_conv, None);
+        use StepPosition::*;
+        for (projection, phase) in [(&completed, Phase::Finished), (&restored, Phase::Restored)] {
+            let [prompt, first, a, b, c, d, later, prose] = projection.rows.as_slice() else {
+                panic!("expected prompt, three thoughts, four commands, five thoughts, and prose")
+            };
+            assert!(matches!(prompt.data.kind, BlockKind::Prompt { .. }));
+            assert_thought(first, &before, 7, phase);
+            for (row, position) in [(a, First), (b, Middle), (c, Middle), (d, Last)] {
+                assert!(matches!(row.data.kind, BlockKind::Step(Step::Tool(_))));
+                assert_eq!(row.position, Some(position));
+            }
+            assert_thought(later, &after, 15, phase);
+            assert!(matches!(prose.data.kind, BlockKind::Prose { .. }));
+            assert_eq!(prose.data.primary_copy(), answer);
+            assert_eq!(
+                projection.rows.iter().map(|r| r.gap).collect::<Vec<_>>(),
+                [16, 10, 10, 0, 0, 0, 14, 10]
+            );
+        }
+    }
+
+    #[test]
+    fn consecutive_thoughts_across_calls_aggregate_without_intervening_rows() {
+        let mut conv = ConversationState::default();
+        conv.push_user_turn(Message::user("Review the plan"), DisplayTurn(1));
+        conv.commit_response(
+            thought("First pass"),
+            None,
+            ToolCallStatus::Finished,
+            Some(call(1)),
+        );
+        let HistoryEntry::Conversation(mut hidden) = entry(Message::assistant("Not displayed"))
+        else {
+            unreachable!()
+        };
+        hidden.blocks[0].visibility = BlockVisibility::Diagnostics;
+        conv.push_entry(HistoryEntry::Conversation(hidden));
+        let mut projector = Projector::default();
+        let streamed = projected(
+            &mut projector,
+            &conv,
+            Some((call(2), &entry(thought("Second pass")))),
+        );
+        assert_eq!(streamed.rows.len(), 2);
+        assert_thought(
+            &streamed.rows[1],
+            &["First pass", "Second pass"],
+            4,
+            Phase::Live,
+        );
+        assert_eq!(streamed.rows[1].data.history_index, 1);
+        conv.commit_response(
+            thought("Second pass"),
+            None,
+            ToolCallStatus::Finished,
+            Some(call(2)),
+        );
+        conv.push_entry(entry(Message::assistant("Here's the initial analysis.")));
+        conv.push_entry(entry(thought("After prose")));
+        conv.push_plan_artifact(PlanArtifact {
+            version: PlanVersion {
+                id: PlanId::new(),
+                revision: 1,
+            },
+            title: "Plan".into(),
+            markdown: "## Next steps".into(),
+            source_turn_id: TurnId::new(1),
+        });
+        conv.push_entry(entry(thought("After plan")));
+        conv.push_error("An error occurred".into());
+        conv.push_entry(entry(thought("After notice")));
+        let committed = projected(&mut projector, &conv, None);
+        assert!(committed.transfers.is_empty());
+        let [_, first, prose, second, plan, third, notice, fourth] = committed.rows.as_slice()
+        else {
+            panic!("expected a separate run after each visible separator")
+        };
+        assert_eq!(first.data.key, streamed.rows[1].data.key);
+        assert_thought(first, &["First pass", "Second pass"], 4, Phase::Finished);
+        assert!(matches!(prose.data.kind, BlockKind::Prose { .. }));
+        assert_thought(second, &["After prose"], 2, Phase::Finished);
+        assert!(matches!(plan.data.kind, BlockKind::Document { .. }));
+        assert_thought(third, &["After plan"], 2, Phase::Finished);
+        assert!(matches!(
+            notice.data.kind,
+            BlockKind::Notice(NoticeLevel::Error)
+        ));
+        assert_thought(fourth, &["After notice"], 2, Phase::Finished);
+    }
+
+    #[test]
+    fn out_of_order_attempt_thought_preserves_later_group_key_and_override() {
+        use AssistantPartIdentity::{Content, Summary};
+        use AssistantPresentationContent as Part;
+        let part = |output_index, part, content| AssistantPresentationPart {
+            source: AssistantSourceAddress {
+                output_index,
+                part,
+                item_id: None,
+            },
+            content,
+        };
+        let mut conv = ConversationState::default();
+        conv.push_user_turn(Message::user("Check the result"), DisplayTurn(1));
+        let mut attempt = ResponseAttempt::new(ModelProfileRef::new("fixture", "model"));
+        attempt.presentation = vec![
+            part(1, Content(0), Part::answer("Preliminary result")),
+            part(
+                2,
+                Summary(0),
+                Part::Reasoning {
+                    text: "Double check".into(),
+                },
+            ),
+        ];
+        conv.update_native_attempt(attempt.clone(), Some(call(1)));
+        let mut projector = Projector::default();
+        let mut disclosures = DisclosureState::default();
+        let initial = presented(&mut projector, &conv, None, &mut disclosures);
+        assert_eq!(initial.len(), 3);
+        let later = &initial[2];
+        assert_eq!(later.data.primary_copy(), "Double check");
+        disclosures.set(later.data.key.clone(), true);
+
+        attempt.presentation.push(part(
+            0,
+            Summary(0),
+            Part::Reasoning {
+                text: "Check inputs".into(),
+            },
+        ));
+        attempt.touch();
+        conv.update_native_attempt(attempt, Some(call(1)));
+        let updated = presented(&mut projector, &conv, None, &mut disclosures);
+        let [_, earlier, prose, retained] = updated.as_slice() else {
+            panic!("expected the inserted thought before the prose")
+        };
+        assert_eq!(earlier.data.primary_copy(), "Check inputs");
+        assert!(!earlier.expanded);
+        assert!(matches!(prose.data.kind, BlockKind::Prose { .. }));
+        assert_eq!(retained.data.key, later.data.key);
+        assert_eq!(retained.data.source, later.data.source);
+        assert_eq!(retained.data.primary_copy(), "Double check");
+        assert!(retained.expanded);
     }
 
     #[test]
