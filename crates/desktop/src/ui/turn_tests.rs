@@ -4,6 +4,14 @@ use gpui_kit::{AppContext as _, Focusable as _};
 use rig_core::message::{
     AssistantContent, AssistantMessage, CallId, Reasoning, ToolCall, ToolFunction, ToolName,
 };
+use serde_json::{Value, json};
+use std::time::{Duration, SystemTime};
+use zevria_content::{HostedActivity, HostedActivityKind, HostedActivityStatus, ResponseAttempt};
+use zevria_foundation::{
+    CommandJobId, CommandJobMode, CommandJobSnapshot, CommandJobStatus, ModelProfileRef,
+    SubtaskDescriptor, SubtaskId, SubtaskKind, SubtaskStatus,
+};
+use zevria_presentation::status_icon::StatusIcon;
 use zevria_transcript::transcript::TranscriptItem;
 
 fn restore(
@@ -139,15 +147,18 @@ fn rows(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> Vec<TimelineRow> {
     transcript(view, cx).read_with(cx, |view, cx| view.test_data(cx))
 }
 
+fn tool_call(id: &str, name: &str, args: Value) -> AssistantContent {
+    AssistantContent::ToolCall(ToolCall::new(
+        CallId::from_wire(id),
+        ToolFunction::new(ToolName::new(name).unwrap(), args),
+    ))
+}
+
 fn command() -> Message {
-    Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
-        ToolCall::new(
-            CallId::from_wire("cmd"),
-            ToolFunction::new(
-                ToolName::new("command").unwrap(),
-                serde_json::json!({"command":"git status --short"}),
-            ),
-        ),
+    Message::Assistant(AssistantMessage::new(vec![tool_call(
+        "cmd",
+        "command",
+        json!({"command":"git status --short"}),
     )]))
 }
 
@@ -156,6 +167,243 @@ fn command_row(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> TimelineRow
         .into_iter()
         .find(|row| matches!(row.data.kind, BlockKind::Step(Step::Tool(_))))
         .unwrap()
+}
+
+const THOUGHT: &str = "Check the worktree first.";
+const COMMAND_OUTPUT: &str = "exit_code: 0\nduration: 0.1s\n<stdout>\n M Cargo.toml\n</stdout>";
+
+fn seed_disclosure_rows(controller: &Entity<SessionController>, cx: &mut TestAppContext) {
+    let turn_id = TurnId::new(1);
+    let mut emit = |update| event(controller, update, cx);
+    let command_call = |id, input| tool_call(id, "command", json!({"command":input}));
+    emit(E::TurnStarted {
+        turn_id,
+        mode: SessionMode::Build,
+        message: Message::user("Check the worktree and documentation"),
+    });
+    emit(E::ModelCallStarted { turn_id, call: 1 });
+    emit(E::Intermediate {
+        turn_id,
+        message: Message::Assistant(AssistantMessage::new(vec![
+            AssistantContent::Reasoning(Reasoning::new(THOUGHT)),
+            command_call("running", "cargo check"),
+            command_call("foreground", "git status --short"),
+            command_call("background", "cargo fmt --check"),
+            tool_call("launch", "launch_subtasks", json!({})),
+        ])),
+        attempt_id: None,
+    });
+    for (id, name, output) in [
+        ("foreground", "command", COMMAND_OUTPUT),
+        ("background", "command", "exit_code: 0\nduration: 1s"),
+        ("launch", "launch_subtasks", "Started docs review"),
+    ] {
+        emit(E::ToolResults {
+            turn_id,
+            message: Message::tool_result(
+                CallId::from_wire(id),
+                ToolName::new(name).unwrap(),
+                output,
+            ),
+            metadata: vec![],
+        });
+    }
+    let finished_at = SystemTime::now();
+    emit(E::CommandJobUpdated {
+        job: CommandJobSnapshot {
+            id: CommandJobId::new("job-format"),
+            call_id: Some("background".into()),
+            command: "cargo fmt --check".into(),
+            mode: CommandJobMode::Background,
+            status: CommandJobStatus::Exited {
+                code: Some(0),
+                success: true,
+                signal: None,
+            },
+            started_at: finished_at - Duration::from_secs(1),
+            finished_at: Some(finished_at),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        },
+    });
+    let subtask_id = SubtaskId::new("docs");
+    emit(E::SubtaskLaunched {
+        turn_id,
+        call_id: "launch".into(),
+        entry_index: 0,
+        descriptor: SubtaskDescriptor {
+            id: subtask_id.clone(),
+            parent_session_id: "session".into(),
+            title: "Review the docs".into(),
+            kind: SubtaskKind::Explore,
+            workspace: None,
+            status: SubtaskStatus::Starting,
+        },
+    });
+    emit(E::SubtaskStatus {
+        turn_id,
+        id: subtask_id,
+        status: SubtaskStatus::Completed,
+    });
+    let mut attempt = ResponseAttempt::new(ModelProfileRef::new("fixture", "fixture"));
+    attempt.hosted_activity.push(HostedActivity {
+        kind: HostedActivityKind::WebSearch,
+        item_id: Some("web-docs".into()),
+        output_index: 0,
+        status: HostedActivityStatus::Completed,
+        action: Some(json!({"type":"search", "query":"cargo check"})),
+    });
+    emit(E::ResponseAttemptUpdated { turn_id, attempt });
+}
+
+#[gpui_kit::test]
+fn disclosure_tails_align_and_overlay_clicks_do_not_toggle_expansion(cx: &mut TestAppContext) {
+    let (window, view, controller, _) = setup(cx);
+    seed_disclosure_rows(&controller, cx);
+    render(window, cx);
+
+    let disclosures = rows(&view, cx)
+        .into_iter()
+        .filter(|row| row.data.is_disclosure())
+        .collect::<Vec<_>>();
+    let [thought, running, foreground, background, subtask, web] = disclosures.as_slice() else {
+        panic!("expected a thought, three commands, a subtask and a web search");
+    };
+    assert!(
+        thought
+            .data
+            .thought()
+            .is_some_and(|thought| !thought.is_live)
+    );
+    for (row, status, background) in [
+        (running, StatusIcon::Running, false),
+        (foreground, StatusIcon::Done, false),
+        (background, StatusIcon::Done, true),
+    ] {
+        let BlockKind::Step(Step::Tool(tool)) = &row.data.kind else {
+            panic!("expected a command, got {:?}", row.data.kind);
+        };
+        assert_eq!(tool.name, "command");
+        assert_eq!(
+            (tool.status, tool.background),
+            (status, background),
+            "{}",
+            tool.summary
+        );
+    }
+    assert!(matches!(
+        &subtask.data.kind,
+        BlockKind::Step(Step::Subtask(_))
+    ));
+    assert!(
+        matches!(&web.data.kind, BlockKind::Step(Step::Web(web)) if web.label() == "Web search")
+    );
+
+    for width in [1240., 720.] {
+        cx.simulate_window_resize(window.into(), size(px(width), px(840.)));
+        render(window, cx);
+        cx.update_window(window.into(), |_, window, _| {
+            let reference = window.within(running.data.key.clone());
+            let card = reference.find("timeline-step").bounds();
+            let status = reference.find("step-status").bounds();
+            let tolerance = px(0.5);
+            assert!((status.right() - (card.right() - px(11.))).abs() <= tolerance);
+
+            let thought = window.within(thought.data.key.clone());
+            let left = thought.find("block-disclosure").bounds().left();
+            let tail = thought.find("thought-tail").bounds();
+            assert!(
+                (tail.right() - status.right()).abs() <= tolerance,
+                "Thought tail at {width}px"
+            );
+            assert!(thought.try_find("copy").is_some());
+
+            for (step, expected_actions) in [
+                (running, &["copy"][..]),
+                (foreground, &["copy", "copy-output"][..]),
+                (background, &["copy", "copy-output", "show-in-jobs"][..]),
+                (subtask, &["copy", "inspect"][..]),
+                (web, &["copy"][..]),
+            ] {
+                let row = window.within(step.data.key.clone());
+                let trigger = row.find("block-disclosure");
+                let bounds = row.find("step-status").bounds();
+                assert!(
+                    (bounds.origin.x - status.origin.x).abs() <= tolerance
+                        && (bounds.right() - status.right()).abs() <= tolerance
+                        && (trigger.bounds().left() - left).abs() <= tolerance,
+                    "misaligned header for {:?} at {width}px: {bounds:?} vs. {status:?}",
+                    trigger.label(),
+                );
+                let actions = ["copy", "copy-output", "inspect", "show-in-jobs"]
+                    .into_iter()
+                    .filter(|id| row.try_find(*id).is_some())
+                    .collect::<Vec<_>>();
+                assert_eq!(actions, expected_actions, "{:?}", trigger.label());
+            }
+        })
+        .unwrap();
+    }
+
+    assert_overlay_copies(window, thought, &[("copy", THOUGHT)], cx);
+    assert_overlay_copies(
+        window,
+        foreground,
+        &[
+            ("copy", &foreground.data.primary_copy()),
+            ("copy-output", COMMAND_OUTPUT),
+        ],
+        cx,
+    );
+}
+
+fn assert_overlay_copies(
+    window: Window,
+    row: &TimelineRow,
+    actions: &[(&'static str, &str)],
+    cx: &mut TestAppContext,
+) {
+    let key = &row.data.key;
+    let assert_expanded = |expanded, cx: &mut TestAppContext| {
+        render(window, cx);
+        cx.update_window(window.into(), |_, window, _| {
+            let row = window.within(key.clone());
+            assert_eq!(
+                row.find("block-disclosure").expanded(),
+                Some(expanded),
+                "{key}"
+            );
+        })
+        .unwrap();
+    };
+    assert_expanded(false, cx);
+    for expanded in [false, true] {
+        for &(id, payload) in actions {
+            cx.update_window(window.into(), |_, window, cx| {
+                let mut row = window.within(key.clone());
+                let header = row.find("block-disclosure").bounds();
+                assert!(
+                    header.contains(&row.find(id).bounds().center()),
+                    "{id} should overlap the trigger"
+                );
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+                row.click(id, cx);
+                assert_eq!(
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some(payload)
+                );
+            })
+            .unwrap();
+            assert_expanded(expanded, cx);
+        }
+        cx.update_window(window.into(), |_, window, cx| {
+            window.within(key.clone()).click("block-disclosure", cx);
+        })
+        .unwrap();
+        assert_expanded(!expanded, cx);
+    }
 }
 
 #[gpui_kit::test]

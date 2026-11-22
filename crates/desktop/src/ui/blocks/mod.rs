@@ -516,6 +516,45 @@ impl BlockView {
         actions
     }
 
+    fn floating_actions(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right(px(6.))
+            .flex()
+            .items_center()
+            // The buttons receive the click first. Don't let it also press or toggle
+            // the disclosure trigger underneath the overlay.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                self.actions(window, cx)
+                    .px(px(3.))
+                    .py(px(1.))
+                    .rounded(px(6.))
+                    .bg(palette(cx).surfaces.overlay)
+                    .border_1()
+                    .border_color(tones(cx).hairline),
+            )
+    }
+
+    fn disclosure_header(
+        &self,
+        label: String,
+        contents: Div,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .relative()
+            .flex()
+            .items_center()
+            .min_w_0()
+            .child(self.disclosure(label, contents, window, cx))
+            .child(self.floating_actions(window, cx))
+    }
+
     fn rich_text(&self, document: bool, cx: &App) -> TextView {
         TextView::new(&self.text)
             .markdown_extensions(math::extensions())
@@ -579,26 +618,34 @@ impl BlockView {
             .when_some(phase_label(self.row.phase), |row, phase| {
                 row.child(style::step_badge(phase, t.feedback.warning))
             })
-            .child(style::step_badge(
-                format!("{}w", thought.word_count),
-                t.text.muted,
-            ))
-            .when(thought.is_live, |row| {
-                row.child(style::step_status(StatusIcon::Running, pencil, cx))
-            });
+            .child(
+                div()
+                    .id("thought-tail")
+                    .test_support()
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .gap(px(8.))
+                    .child(style::step_badge(
+                        format!("{}w", thought.word_count),
+                        t.text.muted,
+                    ))
+                    .when(thought.is_live, |tail| {
+                        tail.child(style::step_status(StatusIcon::Running, pencil, cx))
+                    }),
+            );
         div()
             .id("thought")
             .test_support()
             .group("timeline-block")
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(self.disclosure("Thought details".into(), contents, window, cx))
-                    .child(self.actions(window, cx)),
-            )
+            .child(div().px(px(1.)).child(self.disclosure_header(
+                "Thought details".into(),
+                contents,
+                window,
+                cx,
+            )))
             .when(self.row.expanded, |panel| {
                 panel.child(
                     div().pl(px(32.)).pr(px(12.)).py(px(5.)).child(
@@ -766,11 +813,14 @@ impl BlockView {
                     style::glyph_color(status, t.text.muted, cx),
                 ))
             })
-            .child(div().flex().flex_shrink_0().child(style::step_status(
-                status,
-                t.text.muted,
-                cx,
-            )));
+            .child(
+                div()
+                    .id("step-status")
+                    .test_support()
+                    .flex()
+                    .flex_shrink_0()
+                    .child(style::step_status(status, t.text.muted, cx)),
+            );
         let pos = self.row.position.unwrap_or(StepPosition::Only);
         div()
             .id("timeline-step")
@@ -785,15 +835,7 @@ impl BlockView {
             .when(pos.starts(), |card| card.border_t_1().rounded_t(px(10.)))
             .when(pos.ends(), |card| card.rounded_b(px(10.)))
             .bg(t.surfaces.panel)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .min_w_0()
-                    .pr(px(4.))
-                    .child(self.disclosure(title, header, window, cx))
-                    .child(self.actions(window, cx)),
-            )
+            .child(self.disclosure_header(title, header, window, cx))
             .when(self.row.expanded, |card| {
                 let details = match step {
                     Step::Tool(tool) => self.tool_details(tool, cx),
