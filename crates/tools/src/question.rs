@@ -25,7 +25,9 @@ const DESCRIPTION: &str = r#"Ask the user for one to three consequential Plan de
 
 Use this only for a consequential user preference or tradeoff that remains unresolved after repository inspection and any recorded user decisions are applied. Repository evidence should settle factual claims, feasibility, equivalence, and objectively invalid alternatives, but the status quo, existing tests, a smaller diff, worker consensus, or model preference cannot choose what the user wants among multiple viable options. Prefer one batch of related questions over repeated interruptions.
 
-Each question needs a stable snake_case `id`, a non-blank `header` label of any length, clear question text, and zero or more mutually exclusive options. Put the recommended option first and suffix its label with `(Recommended)`. Do not add an Other option; the terminal adds a free-form Other choice automatically.
+Each question needs a stable snake_case `id`, a non-blank `header` label of any length, clear question text, and zero or more options. Options are mutually exclusive unless `multi_select` is true. A multi-select question needs at least one option and returns an array of selected labels (including any free-form Other answer). Put the recommended option first and suffix its label with `(Recommended)`. Do not add an Other option; the frontend adds a free-form Other choice automatically.
+
+Keep option labels and descriptions short. Put code, diffs, mockups, and longer rationale in the option's optional Markdown `detail`. Use language-tagged fences for code and diffs.
 
 The call blocks until the entire batch is answered or dismissed. Issue exactly one `question` call in an assistant response and do not mix it with other tool calls. A dismissal is a successful structured result; respect it and continue without repeating the same question."#;
 
@@ -44,6 +46,9 @@ pub struct QuestionSpec {
     pub header: String,
     pub question: String,
     pub options: Vec<QuestionOptionArgs>,
+    /// Allow the user to choose one or more options. Requires at least one option.
+    #[serde(default)]
+    pub multi_select: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -53,6 +58,9 @@ pub struct QuestionOptionArgs {
     pub label: String,
     /// One short sentence explaining the impact or tradeoff.
     pub description: String,
+    /// Markdown preview for longer explanations, code, diffs, or mockups. Use language-tagged code fences.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug)]
@@ -249,11 +257,27 @@ fn validate_questions(args: QuestionArgs) -> Result<Vec<QuestionPrompt>, Questio
                             "questions[{index}].options[{option_index}].description must not be blank"
                         )));
                     }
-                    Ok(QuestionOption { label, description })
+                    let detail = option.detail.filter(|detail| !detail.trim().is_empty());
+                    Ok(QuestionOption {
+                        label,
+                        description,
+                        detail,
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let kind = if options.is_empty() {
+            let kind = if question.multi_select {
+                if options.is_empty() {
+                    return Err(QuestionError::InvalidArguments(format!(
+                        "questions[{index}].multi_select requires at least one option"
+                    )));
+                }
+                QuestionPromptKind::MultiSelect {
+                    min_selections: Some(1),
+                    max_selections: None,
+                    allow_other: true,
+                }
+            } else if options.is_empty() {
                 QuestionPromptKind::Text {
                     min_length: Some(1),
                     max_length: None,
@@ -309,6 +333,28 @@ fn validate_response(
                 answer.id, question.id
             )));
         }
+        if matches!(question.kind, QuestionPromptKind::MultiSelect { .. }) {
+            if answer
+                .answer
+                .as_ref()
+                .and_then(QuestionAnswerValue::as_strings)
+                .is_none_or(|values| {
+                    values.is_empty() || values.iter().any(|v| v.trim().is_empty())
+                })
+            {
+                return Err(QuestionError::InvalidResponse(format!(
+                    "answer for {:?} must contain an array of one or more nonblank strings",
+                    question.id
+                )));
+            }
+            if answer.note.is_some() {
+                return Err(QuestionError::InvalidResponse(format!(
+                    "multi-select answer for {:?} cannot have a note",
+                    question.id
+                )));
+            }
+            continue;
+        }
         let Some(QuestionAnswerValue::String(value)) = &answer.answer else {
             return Err(QuestionError::InvalidResponse(format!(
                 "answer for {:?} must contain exactly one string",
@@ -362,14 +408,17 @@ mod tests {
                 id: "scope_choice".to_string(),
                 header: "Scope".to_string(),
                 question: "How broad should this be?".to_string(),
+                multi_select: false,
                 options: vec![
                     QuestionOptionArgs {
                         label: "Focused (Recommended)".to_string(),
                         description: "Change only the requested workflow.".to_string(),
+                        detail: None,
                     },
                     QuestionOptionArgs {
                         label: "Broad".to_string(),
                         description: "Include adjacent cleanup.".to_string(),
+                        detail: None,
                     },
                 ],
             }],
@@ -391,6 +440,21 @@ mod tests {
         let schema_text = schema.to_string();
         assert!(schema_text.contains("header"));
         assert!(schema_text.contains("options"));
+        let spec = &schema["$defs"]["QuestionSpec"];
+        assert_eq!(
+            spec["required"],
+            serde_json::json!(["id", "header", "question", "options"])
+        );
+        assert_eq!(spec["properties"]["multi_select"]["default"], false);
+        let option = &schema["$defs"]["QuestionOptionArgs"];
+        assert_eq!(
+            option["required"],
+            serde_json::json!(["label", "description"])
+        );
+        assert_eq!(
+            option["properties"]["detail"]["type"],
+            serde_json::json!(["string", "null"])
+        );
         assert!(!schema_text.contains("note"));
         assert!(!tool.description().contains("note"));
         assert!(tool.description().contains("blocks until"));
@@ -463,9 +527,128 @@ mod tests {
             .extend((0..4).map(|index| QuestionOptionArgs {
                 label: format!("Alternative {index}"),
                 description: format!("Use alternative {index}."),
+                detail: None,
             }));
         let validated = validate_questions(many_options).expect("many options must be valid");
         assert_eq!(validated[0].options.len(), 6);
+    }
+
+    #[test]
+    fn multi_select_requires_options_and_preserves_nonblank_markdown() {
+        let mut args = args();
+        let spec = &mut args.questions[0];
+        spec.multi_select = true;
+        let markdown = "Use **Core**.  \n\n```rust\nfn run() {}\n```\n";
+        spec.options[0].detail = Some(markdown.into());
+        spec.options[1].detail = Some(" \t\n".into());
+        let validated = validate_questions(args.clone()).unwrap();
+        assert_eq!(validated[0].options[0].detail.as_deref(), Some(markdown));
+        assert!(validated[0].options[1].detail.is_none());
+        assert!(matches!(
+            validated[0].kind,
+            QuestionPromptKind::MultiSelect {
+                min_selections: Some(1),
+                max_selections: None,
+                allow_other: true
+            }
+        ));
+        args.questions[0].options.clear();
+        assert!(matches!(
+            validate_questions(args),
+            Err(QuestionError::InvalidArguments(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn multi_select_round_trips_arrays_and_dismissal_and_rejects_malformed_answers() {
+        let answered = |answer, note| QuestionResponse::Answered {
+            answers: vec![QuestionAnswer {
+                id: "scope_choice".into(),
+                answer,
+                note,
+            }],
+        };
+        let values = Some(vec!["Core".to_string(), "TUI".to_string()].into());
+        for (response, expected) in [
+            (
+                answered(values.clone(), None),
+                QuestionTerminalDisposition::Answered,
+            ),
+            (
+                QuestionResponse::Dismissed,
+                QuestionTerminalDisposition::Dismissed,
+            ),
+            (
+                answered(None, None),
+                QuestionTerminalDisposition::InvalidFrontendResponse,
+            ),
+            (
+                answered(Some("Core".to_string().into()), None),
+                QuestionTerminalDisposition::InvalidFrontendResponse,
+            ),
+            (
+                answered(Some(Vec::<String>::new().into()), None),
+                QuestionTerminalDisposition::InvalidFrontendResponse,
+            ),
+            (
+                answered(
+                    Some(vec!["Core".to_string(), " \t".to_string()].into()),
+                    None,
+                ),
+                QuestionTerminalDisposition::InvalidFrontendResponse,
+            ),
+            (
+                answered(values, Some("Unexpected qualification".into())),
+                QuestionTerminalDisposition::InvalidFrontendResponse,
+            ),
+        ] {
+            let (events, mut updates) = session_event_channel(8);
+            let channels = question_channels(events);
+            let tool = QuestionTool::new(channels.requester);
+            let mut args = args();
+            let spec = &mut args.questions[0];
+            spec.multi_select = true;
+            spec.options[0].label = "Core".into();
+            spec.options[1].label = "TUI".into();
+            let call = tokio::spawn(async move {
+                let mut context = ToolContext::new();
+                context.insert_scope(turn(CancellationToken::new()));
+                let result = tool.call(&mut context, args).await;
+                (result, context)
+            });
+            let Some(SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. })) =
+                updates.recv().await
+            else {
+                panic!("expected question request");
+            };
+            assert!(!request.allows_choice_note(0, 0));
+            assert!(channels.responder.respond(&request.id, response.clone()));
+            let (result, context) = call.await.unwrap();
+            assert_eq!(
+                context
+                    .result::<ToolResultDetail>()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(ToolResultDetail::question_disposition),
+                Some(expected)
+            );
+            if expected == QuestionTerminalDisposition::InvalidFrontendResponse {
+                assert!(matches!(result, Err(QuestionError::InvalidResponse(_))));
+            } else {
+                let output = result.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<QuestionResponse>(&output).unwrap(),
+                    response
+                );
+                if expected == QuestionTerminalDisposition::Answered {
+                    let wire: serde_json::Value = serde_json::from_str(&output).unwrap();
+                    assert_eq!(
+                        wire["answers"][0]["answer"],
+                        serde_json::json!(["Core", "TUI"])
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

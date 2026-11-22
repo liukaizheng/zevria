@@ -1,11 +1,18 @@
-use super::{style, theme::palette, window::DesktopWindow};
+use super::{
+    blocks::code_block_header,
+    style,
+    theme::{palette, tones},
+    window::DesktopWindow,
+};
 use crate::{actions::Shortcut, session::question::QuestionForm};
+use gpui_kit::base::text::TextView;
 use gpui_kit::component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     input::{InputEvent, Textarea, TextareaState},
     radio::Radio,
+    text::TextViewState,
 };
 use gpui_kit::{prelude::*, *};
 use zevria_foundation::{QuestionPromptKind, QuestionRequestId};
@@ -33,33 +40,22 @@ pub(super) struct ChoiceNoteEditor {
 }
 
 impl DesktopWindow {
-    pub(super) fn sync_question(
-        &mut self,
-        question: Option<(String, Vec<String>)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((id, values)) = question else {
+    pub(super) fn sync_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.controller.read(cx).model.question.as_ref() else {
             if !self.question_id.is_empty() {
                 self.composer
                     .update(cx, |input, cx| input.focus(window, cx));
             }
             self.question_id.clear();
             self.question_inputs.clear();
+            self.question_details.clear();
             self.question_subscriptions.clear();
             self.question_note_editor = None;
             return;
         };
-        if id == self.question_id {
+        if form.request.id.as_str() == self.question_id {
             if let Some(editor) = &self.question_note_editor
-                && self
-                    .controller
-                    .read(cx)
-                    .model
-                    .question
-                    .as_ref()
-                    .and_then(|form| editor.target.draft(form))
-                    .is_none()
+                && editor.target.draft(form).is_none()
             {
                 if editor.input.focus_handle(cx).is_focused(window) {
                     window.focus(&self.question_focus, cx);
@@ -68,8 +64,38 @@ impl DesktopWindow {
             }
             return;
         }
+        // Draft text and Markdown are only copied on a new request. The
+        // retained text views survive preview and selection changes.
+        self.question_id = form.request.id.to_string();
+        let values = form
+            .answers
+            .iter()
+            .map(|draft| draft.text.clone())
+            .collect::<Vec<_>>();
+        let details = form
+            .request
+            .questions
+            .iter()
+            .map(|prompt| {
+                prompt
+                    .options
+                    .iter()
+                    .map(|option| option.detail.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        self.question_details = details
+            .into_iter()
+            .map(|options| {
+                options
+                    .into_iter()
+                    .map(|detail| {
+                        detail.map(|markdown| cx.new(|cx| TextViewState::markdown(&markdown, cx)))
+                    })
+                    .collect()
+            })
+            .collect();
         self.question_note_editor = None;
-        self.question_id = id;
         window.focus(&self.question_focus, cx);
         self.question_inputs.clear();
         self.question_subscriptions.clear();
@@ -170,6 +196,53 @@ impl DesktopWindow {
         cx.notify();
     }
 
+    fn question_preview(
+        &self,
+        prompt: usize,
+        option: Option<usize>,
+        label: Option<&str>,
+        cx: &App,
+    ) -> impl IntoElement {
+        let t = palette(cx);
+        let pane = div()
+            .id(("question-preview-pane", prompt))
+            .test_support()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .border_color(tones(cx).hairline);
+        let pane = if self.compact {
+            pane.w_full().border_t_1().pt(px(12.))
+        } else {
+            pane.flex_1().border_l_1().pl(px(16.))
+        };
+        let state =
+            option.and_then(|option| self.question_details.get(prompt)?.get(option)?.as_ref());
+        let content = div()
+            .id(("question-preview-scroll", option.unwrap_or(usize::MAX)))
+            .max_h(px(if self.compact { 208. } else { 288. }))
+            .min_w_0()
+            .overflow_y_scroll();
+        pane.child(style::label().child(label.unwrap_or("Preview").to_owned()))
+            .child(if let Some(state) = state {
+                content.child(
+                    style::READING
+                        .apply(TextView::new(state))
+                        .style(style::markdown(cx, false))
+                        .code_block_actions(code_block_header)
+                        .scrollable(false)
+                        .font_family(style::UI_FONT),
+                )
+            } else {
+                content.child(
+                    style::meta()
+                        .text_color(t.text.muted)
+                        .child("No additional detail."),
+                )
+            })
+    }
+
     pub(super) fn question_dialog(
         &self,
         window: &mut Window,
@@ -208,6 +281,16 @@ impl DesktopWindow {
                         .child(question.question.clone()),
                 );
             let multiple = matches!(question.kind, QuestionPromptKind::MultiSelect { .. });
+            let has_details = question.has_details();
+            let preview = form.preview(index);
+            if multiple {
+                field = field.child(
+                    style::meta()
+                        .text_color(t.text.muted)
+                        .child("Select one or more"),
+                );
+            }
+            let mut choices = div().flex().flex_col().gap_2().min_w_0();
             for (option_index, option) in question.options.iter().enumerate() {
                 let label = div()
                     .flex()
@@ -235,49 +318,70 @@ impl DesktopWindow {
                     this.controller.update(cx, |this, cx| {
                         if let Some(form) = this.model.question.as_mut()
                             && form.request.id == request_id
-                            && !form.pending
+                            && form.choose(index, option_index, *value)
                         {
-                            let answer = &mut form.answers[index];
-                            if multiple {
-                                answer.selected.retain(|i| *i != option_index);
-                                if *value {
-                                    answer.selected.push(option_index);
-                                }
-                            } else {
-                                answer.selected = if *value { vec![option_index] } else { vec![] };
-                            }
-                            if !multiple {
-                                answer.other = false;
-                            }
-                            answer.skip = false;
-                            form.error = None;
+                            cx.notify();
                         }
-                        cx.notify();
                     })
                 });
-                field = if multiple {
-                    field.child(
-                        Checkbox::new(("question-option", index * 1000 + option_index))
-                            .checked(checked)
-                            .disabled(pending)
-                            .w_full()
-                            .py(px(4.))
-                            .accessibility_label(option.label.clone())
-                            .child(label)
-                            .on_change(on_change),
-                    )
+                let choice = if multiple {
+                    Checkbox::new(("question-option", index * 1000 + option_index))
+                        .checked(checked)
+                        .disabled(pending)
+                        .w_full()
+                        .py(px(4.))
+                        .accessibility_label(option.label.clone())
+                        .child(label)
+                        .on_change(on_change)
+                        .into_any_element()
                 } else {
-                    field.child(
-                        Radio::new(("question-option", index * 1000 + option_index))
-                            .checked(checked)
-                            .disabled(pending)
-                            .w_full()
-                            .py(px(4.))
-                            .accessibility_label(option.label.clone())
-                            .child(label)
-                            .on_change(on_change),
-                    )
+                    Radio::new(("question-option", index * 1000 + option_index))
+                        .checked(checked)
+                        .disabled(pending)
+                        .w_full()
+                        .py(px(4.))
+                        .accessibility_label(option.label.clone())
+                        .child(label)
+                        .on_change(on_change)
+                        .into_any_element()
                 };
+                if has_details {
+                    let mut row = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .px(px(6.))
+                        .rounded(px(6.))
+                        .when(preview == Some(option_index), |row| {
+                            row.bg(tones(cx).list_active)
+                        })
+                        .child(div().flex_1().min_w_0().child(choice));
+                    if option.detail.is_some() {
+                        let request_id = form.request.id.clone();
+                        row = row.child(
+                            Button::new(("question-preview-option", index * 1000 + option_index))
+                                .ghost()
+                                .small()
+                                .flex_shrink_0()
+                                .label("Preview")
+                                .accessibility_label(format!("Preview {}", option.label))
+                                .disabled(pending)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.controller.update(cx, |this, cx| {
+                                        if let Some(form) = this.model.question.as_mut()
+                                            && form.request.id == request_id
+                                            && form.set_preview(index, option_index)
+                                        {
+                                            cx.notify();
+                                        }
+                                    });
+                                })),
+                        );
+                    }
+                    choices = choices.child(row);
+                } else {
+                    choices = choices.child(choice);
+                }
                 if let Some(draft) = form.choice_note_draft(index, option_index) {
                     let target = ChoiceNoteTarget {
                         request_id: form.request.id.clone(),
@@ -285,7 +389,7 @@ impl DesktopWindow {
                         option: option_index,
                     };
                     let inline = div().pl(px(24.));
-                    field = field.child(
+                    choices = choices.child(
                         if let Some(editor) = &self.question_note_editor
                             && editor.target == target
                         {
@@ -326,7 +430,7 @@ impl DesktopWindow {
             );
             if allow_other {
                 let request_id = form.request.id.clone();
-                field = field.child(
+                choices = choices.child(
                     Checkbox::new(("question-other", index))
                         .label("Other")
                         .checked(answer.other)
@@ -349,11 +453,11 @@ impl DesktopWindow {
                 || (allow_other && answer.other))
                 && let Some(input) = self.question_inputs.get(index)
             {
-                field = field.child(Textarea::new(input).disabled(pending));
+                choices = choices.child(Textarea::new(input).disabled(pending));
             }
             if !question.required {
                 let request_id = form.request.id.clone();
-                field = field.child(
+                choices = choices.child(
                     Checkbox::new(("question-skip", index))
                         .label("Skip this question")
                         .checked(answer.skip)
@@ -371,15 +475,41 @@ impl DesktopWindow {
                         })),
                 );
             }
-            fields = fields.child(field);
+            let content = if has_details {
+                let row = div()
+                    .id(("question-master-detail", index))
+                    .flex()
+                    .gap(px(16.));
+                let row = if self.compact {
+                    row.flex_col().child(choices.w_full())
+                } else {
+                    row.items_start().child(choices.w(px(320.)).flex_shrink_0())
+                };
+                let option = preview.and_then(|option| question.options.get(option));
+                row.child(self.question_preview(
+                    index,
+                    preview,
+                    option.map(|option| option.label.as_str()),
+                    cx,
+                ))
+                .into_any_element()
+            } else {
+                choices.into_any_element()
+            };
+            fields = fields.child(field.child(content));
         }
         let count = form.request.questions.len();
+        let height_ratio = if form.request.has_details() {
+            0.70
+        } else {
+            0.55
+        };
         let mut dialog = style::sheet(cx)
             .w_full()
             .max_w(px(style::CONTENT))
-            .max_h(px(
-                (f32::from(window.viewport_size().height) * 0.55).max(180.)
-            ))
+            .max_h(px((f32::from(window.viewport_size().height)
+                * height_ratio)
+                .max(180.)))
             .p(px(16.))
             .track_focus(&self.question_focus)
             .child(

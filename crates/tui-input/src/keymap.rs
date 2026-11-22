@@ -399,7 +399,7 @@ const QUESTION: &[Binding] = &[
     b!(End, "last choice", 0, "Question", key(Char('G'))),
     b!(Down, "next", 3, "Question", key(Down), key(Char('j'))),
     b!(Up, "previous", 0, "Question", key(Up), key(Char('k'))),
-    b!(Toggle, "toggle", 3, "Question", key(Char(' '))),
+    b!(Toggle, "toggle", 2, "Question", key(Char(' '))),
     b!(Back, "previous question", 0, "Question", key(Left)),
 ];
 const TEXT: &[Binding] = &[
@@ -413,6 +413,8 @@ const TEXT: &[Binding] = &[
     b!(WordRight, "word right", 0, "Text entry", ctrl(Right)),
     b!(Home, "start", 0, "Text entry", key(Home)),
     b!(End, "end", 0, "Text entry", key(End)),
+    b!(PageUp, "page up", 0, "Text entry", key(PageUp)),
+    b!(PageDown, "page down", 0, "Text entry", key(PageDown)),
 ];
 const JOB_TERMINATE: Binding = b!(Terminate, "terminate", 2, "Jobs", key(Char('x')));
 const JOB_BACKGROUND: Binding = b!(MoveToBackground, "background", 3, "Jobs", key(Char('m')));

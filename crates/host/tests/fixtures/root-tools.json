@@ -666,7 +666,7 @@
   },
   {
     "name": "question",
-    "description": "Ask the user for one to three consequential Plan decisions and continue this turn with their answers.\n\nUse this only for a consequential user preference or tradeoff that remains unresolved after repository inspection and any recorded user decisions are applied. Repository evidence should settle factual claims, feasibility, equivalence, and objectively invalid alternatives, but the status quo, existing tests, a smaller diff, worker consensus, or model preference cannot choose what the user wants among multiple viable options. Prefer one batch of related questions over repeated interruptions.\n\nEach question needs a stable snake_case `id`, a non-blank `header` label of any length, clear question text, and zero or more mutually exclusive options. Put the recommended option first and suffix its label with `(Recommended)`. Do not add an Other option; the terminal adds a free-form Other choice automatically.\n\nThe call blocks until the entire batch is answered or dismissed. Issue exactly one `question` call in an assistant response and do not mix it with other tool calls. A dismissal is a successful structured result; respect it and continue without repeating the same question.",
+    "description": "Ask the user for one to three consequential Plan decisions and continue this turn with their answers.\n\nUse this only for a consequential user preference or tradeoff that remains unresolved after repository inspection and any recorded user decisions are applied. Repository evidence should settle factual claims, feasibility, equivalence, and objectively invalid alternatives, but the status quo, existing tests, a smaller diff, worker consensus, or model preference cannot choose what the user wants among multiple viable options. Prefer one batch of related questions over repeated interruptions.\n\nEach question needs a stable snake_case `id`, a non-blank `header` label of any length, clear question text, and zero or more options. Options are mutually exclusive unless `multi_select` is true. A multi-select question needs at least one option and returns an array of selected labels (including any free-form Other answer). Put the recommended option first and suffix its label with `(Recommended)`. Do not add an Other option; the frontend adds a free-form Other choice automatically.\n\nKeep option labels and descriptions short. Put code, diffs, mockups, and longer rationale in the option's optional Markdown `detail`. Use language-tagged fences for code and diffs.\n\nThe call blocks until the entire batch is answered or dismissed. Issue exactly one `question` call in an assistant response and do not mix it with other tool calls. A dismissal is a successful structured result; respect it and continue without repeating the same question.",
     "parameters": {
       "type": "object",
       "additionalProperties": false,
@@ -704,6 +704,11 @@
               "items": {
                 "$ref": "#/$defs/QuestionOptionArgs"
               }
+            },
+            "multi_select": {
+              "type": "boolean",
+              "description": "Allow the user to choose one or more options. Requires at least one option.",
+              "default": false
             }
           },
           "required": [
@@ -724,6 +729,14 @@
             "description": {
               "type": "string",
               "description": "One short sentence explaining the impact or tradeoff."
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Markdown preview for longer explanations, code, diffs, or mockups. Use language-tagged code fences.",
+              "default": null
             }
           },
           "required": [

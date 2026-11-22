@@ -68,6 +68,7 @@ impl SessionPicker {
             } else {
                 Vec::new()
             },
+            ..Eligibility::default()
         }
     }
 

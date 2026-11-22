@@ -68,6 +68,7 @@ mod native {
         TranscriptFolds,
         Plan,
         Question,
+        QuestionDetail,
         QuestionNote,
         Confirm,
         Completion,
@@ -100,6 +101,7 @@ mod native {
                 Self::TranscriptFolds => "transcript-folds",
                 Self::Plan => "plan-review",
                 Self::Question => "question",
+                Self::QuestionDetail => "question-detail",
                 Self::QuestionNote => "question-note",
                 Self::Confirm => "replace-confirmation",
                 Self::Completion => "completion",
@@ -169,6 +171,7 @@ mod native {
                 Scene::TranscriptFolds,
                 Scene::Plan,
                 Scene::Question,
+                Scene::QuestionDetail,
                 Scene::QuestionNote,
                 Scene::Confirm,
                 Scene::Completion,
@@ -198,6 +201,7 @@ mod native {
                 Scene::ThinkingUnsaved,
                 Scene::CodeHeavy,
                 Scene::Question,
+                Scene::QuestionDetail,
                 Scene::Plan,
                 Scene::Models,
                 Scene::ModelConversion,
@@ -428,11 +432,35 @@ mod native {
                     id: QuestionRequestId::new("gallery-question"), source_label: Some("Explore: desktop layout".into()), dismissible: true,
                     questions: vec![QuestionPrompt { id: "approach".into(), header: "Review approach".into(),
                         question: "How should the transcript present completed tool calls?".into(), kind: QuestionPromptKind::SingleSelect { allow_other: true },
-                        options: vec![QuestionOption { label: "Compact gutter rows".into(),description: "Keep the log readable during long tool loops.".into() },
-                            QuestionOption { label: "Show all details".into(),description: "Expand every call's input and output.".into() }], required: true, default: None },
+                        options: vec![QuestionOption { label: "Compact gutter rows".into(),description: "Keep the log readable during long tool loops.".into(), detail: None },
+                            QuestionOption { label: "Show all details".into(),description: "Expand every call's input and output.".into(), detail: None }], required: true, default: None },
                         QuestionPrompt { id: "notes".into(),header: "Additional notes".into(),question: "Anything else to keep in mind?".into(),
                             kind: QuestionPromptKind::Text { min_length: None, max_length: None }, options: vec![],required: false,default: None }],
                 }},cx));
+            }
+            if scene == Scene::QuestionDetail {
+                controller.update(cx, |c, cx| {
+                    let turn_id = TurnId::new(8);
+                    c.fixture_event(E::TurnStarted { turn_id, mode: SessionMode::Plan,
+                        message: Message::user("Plan validation for the new question preview.") }, cx);
+                    c.fixture_event(E::QuestionAsked { turn_id, request: QuestionRequest {
+                        id: QuestionRequestId::new("gallery-question-detail"), source_label: None,
+                        dismissible: true, allow_choice_notes: true,
+                        questions: vec![QuestionPrompt {
+                            id: "targets".into(), header: "Validation targets".into(),
+                            question: "Which crates should get dedicated regression tests?".into(),
+                            kind: QuestionPromptKind::MultiSelect { min_selections: Some(1), max_selections: None, allow_other: true },
+                            required: true, default: Some(vec!["Core".to_string()].into()),
+                            options: vec![
+                                QuestionOption { label: "Core".into(), description: "Check the answer wire format.".into(),
+                                    detail: Some("Pin the response shape before changing either frontend. A multi-select answer should serialize as an array, even when the user chooses just one label.\n\n```rust\nlet answer = QuestionAnswerValue::Strings(\n    vec![\"Core\".into(), \"TUI\".into()],\n);\nassert_eq!(\n    serde_json::to_value(answer)?,\n    json!([\"Core\", \"TUI\"]),\n);\n```\n\nAdd a second case for mixed batches: text still returns a string.".into()) },
+                                QuestionOption { label: "TUI".into(), description: "Exercise paging and keyboard focus.".into(),
+                                    detail: Some("Render the wizard at wide and compact widths. Paging should leave the current selection unchanged.\n\n```rust\nlet backend = TestBackend::new(80, 24);\nlet mut terminal = Terminal::new(backend)?;\n```".into()) },
+                                QuestionOption { label: "Desktop".into(), description: "Verify the dock in both layouts.".into(), detail: None },
+                            ],
+                        }],
+                    } }, cx);
+                });
             }
             if scene == Scene::QuestionNote {
                 controller.update(cx, |c, cx| {
@@ -445,8 +473,8 @@ mod native {
                             id: "scope".into(), header: "Scope".into(), question: "How broad should this change be?".into(),
                             kind: QuestionPromptKind::SingleSelect { allow_other: true }, required: true,
                             default: Some("Focused (Recommended)".to_string().into()),
-                            options: vec![QuestionOption { label: "Focused (Recommended)".into(), description: "Change only the requested workflow.".into() },
-                                QuestionOption { label: "Broad".into(), description: "Include adjacent cleanup.".into() }],
+                            options: vec![QuestionOption { label: "Focused (Recommended)".into(), description: "Change only the requested workflow.".into(), detail: None },
+                                QuestionOption { label: "Broad".into(), description: "Include adjacent cleanup.".into(), detail: None }],
                         }],
                     } }, cx);
                 });

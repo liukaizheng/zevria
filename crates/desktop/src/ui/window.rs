@@ -33,6 +33,7 @@ pub struct DesktopWindow {
     pub(super) screen_error: Option<(String, Entity<TextViewState>)>,
     pub(super) question_id: String,
     pub(super) question_inputs: Vec<Entity<TextareaState>>,
+    pub(super) question_details: Vec<Vec<Option<Entity<TextViewState>>>>,
     pub(super) question_subscriptions: Vec<Subscription>,
     pub(super) question_note_editor: Option<ChoiceNoteEditor>,
     pub(super) pending_replace: Option<Replacement>,
@@ -137,6 +138,7 @@ impl DesktopWindow {
             screen_error: None,
             question_id: String::new(),
             question_inputs: Vec::new(),
+            question_details: Vec::new(),
             question_subscriptions: Vec::new(),
             question_note_editor: None,
             pending_replace: None,
@@ -190,12 +192,6 @@ impl DesktopWindow {
                 Phase::Failed(error) => Some(error.clone()),
                 _ => None,
             });
-        let question = controller.model.question.as_ref().map(|q| {
-            (
-                q.request.id.to_string(),
-                q.answers.iter().map(|a| a.text.clone()).collect::<Vec<_>>(),
-            )
-        });
         if self.composer_mode != mode {
             self.composer_mode = mode;
             self.composer.update(cx, |input, cx| {
@@ -276,7 +272,7 @@ impl DesktopWindow {
         } else {
             self.screen_error = None;
         }
-        self.sync_question(question, window, cx);
+        self.sync_question(window, cx);
         self.sync_model_picker(window, cx);
     }
     pub(super) fn request_replace(&mut self, replacement: Replacement, cx: &mut Context<Self>) {

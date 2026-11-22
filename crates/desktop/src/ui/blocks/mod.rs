@@ -9,7 +9,10 @@ use crate::{
     controller::SessionController,
     disclosure::{Phase, TailKind},
 };
-use gpui_kit::base::{AccordionTrigger, text::TextView};
+use gpui_kit::base::{
+    AccordionTrigger,
+    text::{CodeBlock, TextView},
+};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::{
     Icon, IconName, Sizable,
@@ -1390,25 +1393,7 @@ impl BlockView {
         TextView::new(&self.text)
             .markdown_extensions(math::extensions())
             .style(style::markdown(cx, document))
-            .code_block_actions(|code, _, cx| {
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        style::meta()
-                            .text_color(palette(cx).text.muted)
-                            .child(code.lang().unwrap_or_default()),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Clipboard::new("copy-code")
-                            .value(code.code())
-                            .tooltip("Copy code")
-                            .accessibility_label("Copy code"),
-                    )
-            })
+            .code_block_actions(code_block_header)
             .scrollable(false)
             .font_family(if document {
                 style::DOCUMENT_FONT
@@ -1424,6 +1409,27 @@ impl BlockView {
             })
     }
 }
+
+pub(super) fn code_block_header(code: &CodeBlock, _: &mut Window, cx: &mut App) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            style::meta()
+                .text_color(palette(cx).text.muted)
+                .child(code.lang().unwrap_or_default()),
+        )
+        .child(div().flex_1())
+        .child(
+            Clipboard::new("copy-code")
+                .value(code.code())
+                .tooltip("Copy code")
+                .accessibility_label("Copy code"),
+        )
+}
+
 fn chevron(expanded: bool) -> Icon {
     Icon::new(if expanded {
         IconName::ChevronDown

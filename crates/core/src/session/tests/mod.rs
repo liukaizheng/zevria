@@ -969,10 +969,12 @@ impl Tool for QuestionStubTool {
                         QuestionOption {
                             label: "Focused".to_string(),
                             description: "Keep it narrow.".to_string(),
+                            detail: None,
                         },
                         QuestionOption {
                             label: "Broad".to_string(),
                             description: "Include adjacent work.".to_string(),
+                            detail: None,
                         },
                     ],
                     kind: QuestionPromptKind::SingleSelect { allow_other: true },

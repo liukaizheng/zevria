@@ -104,6 +104,7 @@ impl SubtasksOverlay {
             } else {
                 Vec::new()
             },
+            ..Eligibility::default()
         }
     }
 

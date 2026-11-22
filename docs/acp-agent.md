@@ -380,6 +380,14 @@ A primary default selecting `otherValue` is paired with the companion's nonblank
 
 Clients unaware of `_meta.zevria` can still display the explicit fields, with the companion described as “Custom answer used when Other is selected.” Both the Zevria producer and client must be updated for the integrated experience. This native token-plus-text contract is distinct from the Codex and Claude Code companion conventions described in [ensemble.md](ensemble.md).
 
+For a titled option with Markdown `detail`, the wire `description` contains
+the short description, two newlines, and the detail, so clients that ignore
+metadata still receive the full text. The option also sends
+`_meta.zevria = { "description": "…", "detail": "…" }`. Zevria's host uses
+these fields to split the short description and Markdown preview when it
+receives an ACP form. It ignores malformed metadata and does not change option
+tokens or selection bounds.
+
 Accepting a form answers the existing tool call. Declining or cancelling dismisses the question, which is a successful tool result rather than cancellation of the whole turn. If the client cannot display forms, Zevria immediately dismisses the question and emits a thought explaining the fallback.
 
 Prompt cancellation, `QuestionClosed`, session close, and connection loss cancel the exact outstanding elicitation request.

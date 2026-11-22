@@ -98,6 +98,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                                             options: vec![QuestionOption {
                                                 label: "Focused".into(),
                                                 description: "Narrow scope".into(),
+                                                detail: None,
                                             }],
                                             kind: QuestionPromptKind::SingleSelect {
                                                 allow_other: false,

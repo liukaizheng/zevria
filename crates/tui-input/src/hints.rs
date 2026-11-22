@@ -13,6 +13,8 @@ use zevria_tui_widgets::{
 pub struct Eligibility {
     pub disabled: Vec<Action>,
     pub labels: Vec<(Action, &'static str)>,
+    /// Context-specific ranks for bindings that deserve a footer hint here.
+    pub promoted: Vec<(Action, u8)>,
 }
 impl Eligibility {
     pub fn allows(&self, action: Action) -> bool {
@@ -24,13 +26,21 @@ impl Eligibility {
             .find(|(action, _)| *action == binding.action)
             .map_or(binding.label, |(_, label)| *label)
     }
+    fn rank(&self, binding: &Binding) -> u8 {
+        self.promoted
+            .iter()
+            .find(|(action, _)| *action == binding.action)
+            .map_or(binding.primary, |(_, rank)| *rank)
+    }
 }
 
 pub fn hint_line(context: KeyContext, eligibility: &Eligibility, width: usize) -> Line<'static> {
     let mut candidates: Vec<_> = bindings(context)
-        .filter(|b| b.primary > 0 && b.action != Action::Help && eligibility.allows(b.action))
+        .filter(|b| {
+            eligibility.rank(b) > 0 && b.action != Action::Help && eligibility.allows(b.action)
+        })
         .collect();
-    candidates.sort_by_key(|binding| binding.primary);
+    candidates.sort_by_key(|binding| eligibility.rank(binding));
     let binding_width = |binding: &Binding| {
         display_width(&binding.hint_key_label()) + 1 + display_width(eligibility.label(binding))
     };

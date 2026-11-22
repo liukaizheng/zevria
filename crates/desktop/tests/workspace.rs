@@ -30,10 +30,12 @@ fn question(kind: QuestionPromptKind) -> QuestionRequest {
                 QuestionOption {
                     label: "A".into(),
                     description: "First".into(),
+                    detail: None,
                 },
                 QuestionOption {
                     label: "B".into(),
                     description: "Second".into(),
+                    detail: None,
                 },
             ],
             required: true,
@@ -187,6 +189,71 @@ fn question_text_single_other_multiselect_and_optional_skip_have_exact_wire_type
     };
     assert_eq!(answers[0].answer, None);
 }
+#[test]
+fn question_preview_defaults_to_detail_and_tracks_choices_without_selecting_on_preview() {
+    let mut request = question(QuestionPromptKind::SingleSelect { allow_other: true });
+    let prompt = &mut request.questions[0];
+    prompt.options[0].detail = Some("Preview A".into());
+    prompt.default = Some("B".to_string().into());
+    let mut form = QuestionForm::new(TURN, request.clone());
+    assert_eq!(form.preview(0), Some(0), "the default has no detail");
+    assert_eq!(form.answers[0].selected, [1]);
+    assert!(form.set_preview(0, 0));
+    assert_eq!(form.answers[0].selected, [1]);
+    assert!(form.choose(0, 1, true));
+    assert_eq!(form.preview(0), Some(1));
+
+    request.questions[0].options[1].detail = Some("Preview B".into());
+    let mut form = QuestionForm::new(TURN, request);
+    assert_eq!(
+        form.preview(0),
+        Some(1),
+        "preview the default when it has detail"
+    );
+    form.answers[0].other = true;
+    form.answers[0].skip = true;
+    form.error = Some("Earlier error".into());
+    assert!(form.choose(0, 0, true));
+    assert_eq!(form.preview(0), Some(0));
+    assert_eq!(form.answers[0].selected, [0]);
+    assert!(!form.answers[0].other && !form.answers[0].skip);
+    assert!(form.error.is_none());
+    assert!(!form.set_preview(0, 2));
+    form.pending = true;
+    assert!(!form.choose(0, 1, true));
+    assert_eq!(form.preview(0), Some(0));
+}
+
+#[test]
+fn multi_select_needs_one_choice_and_deduplicates_other() {
+    let request = question(QuestionPromptKind::MultiSelect {
+        min_selections: Some(1),
+        max_selections: None,
+        allow_other: true,
+    });
+    let mut form = QuestionForm::new(TURN, request);
+    assert!(form.response().is_err());
+    assert!(form.choose(0, 1, true));
+    assert!(form.choose(0, 0, true));
+    assert!(form.choose(0, 0, true));
+    assert_eq!(form.answers[0].selected, [1, 0]);
+    assert_eq!(form.preview(0), Some(0));
+    form.answers[0].other = true;
+    form.answers[0].text = " B ".into();
+    let QuestionResponse::Answered { answers } = form.response().unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        answers[0].answer,
+        Some(QuestionAnswerValue::Strings(vec!["A".into(), "B".into()]))
+    );
+    assert!(answers[0].note.is_none());
+    form.answers[0].other = false;
+    assert!(form.choose(0, 1, false));
+    assert!(form.choose(0, 0, false));
+    assert!(form.response().is_err());
+}
+
 #[test]
 fn choice_notes_are_scoped_to_the_selected_radio_and_omitted_for_other_and_skip() {
     let mut request = question(QuestionPromptKind::SingleSelect { allow_other: true });

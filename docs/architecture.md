@@ -2258,23 +2258,32 @@ that target an older modal.
 
 Native `question` option labels must be nonblank after trimming and unique
 within the question (case-insensitive). Prefer 1–5 words for readability; the
-range is advisory. The full trimmed label is preserved, and option counts are
-unrestricted. Native requests opt into `allowChoiceNotes` for predefined
-single-select rows. In the terminal, `n` opens the inline note editor (`n add
+range is advisory. The full trimmed label is preserved. With `multi_select`
+set to true, a native prompt needs at least one predefined option and a nonempty
+answer array, for example `"answer": ["Core", "TUI"]`. Select prompts add Other
+automatically; an Other value is returned as text in the same string or array
+shape. Keep option descriptions short and use optional Markdown `detail` for
+long rationale, code, diffs, or mockups. Give code fences a language tag to
+highlight syntax. Native requests opt into `allowChoiceNotes` for predefined
+single-select rows only. In the terminal, `n` opens the inline note editor (`n add
 note` or `n edit note`); Enter answers with that option and its note, and Esc
 returns to the choices without answering. Enter from the list also includes an
 existing draft for the highlighted option. In Desktop, `Add note` / `Edit note`
 appears under the selected radio option and uses the existing `Send answer`
 action. Drafts belong to an option within a prompt and survive moving the
-selection or revisiting a terminal question. `Other`, text, Skip, and ACP
-forms do not attach notes.
+selection or revisiting a terminal question. Multi-select, Other, text, Skip,
+and ACP forms do not attach notes.
 
 The question popup measures prompts, answer labels/descriptions, editors, and
 validation with the exact width and wrapping configuration used to render.
 When space permits, the wrapped prompt and validation remain pinned around an
-independently scrollable answer viewport; terminals too small to leave one
-answer row use one whole-body viewport inside the same border. Selection is
-bounded. Text, Other, and choice notes share editor-first key routing: Left/Right move by
+independently scrollable answer viewport. A prompt with option details gives
+the focused option a separate Markdown preview, beside the choices at an inner
+width of 84 columns or more and below them otherwise. Focus changes reset
+preview scroll, and only the choice list gets the selection band. Popup sizing
+uses the tallest detail so changing focus does not resize it. When the pinned
+regions cannot fit, one whole-body viewport includes the focused detail.
+Selection is bounded. Text, Other, and choice notes share editor-first key routing: Left/Right move by
 extended grapheme, Ctrl+Left/Right use the composer's alphanumeric/underscore
 word boundaries (punctuation and whitespace separate words), Backspace/Delete
 remove the preceding/following grapheme, and typing inserts at the caret.
@@ -2284,8 +2293,10 @@ Esc returns to choices without losing its draft or caret. Unmodified Left in
 Text returns to the previous question only when already at text start;
 Ctrl+Left never leaves a focused editor. Text's Up/Down still navigate the
 editor/Skip rows, and typing or Backspace from Skip refocuses the editor.
-PageUp/PageDown pan one visible page minus a context row without changing the
-selection, draft, caret, or answer. The next selection change, caret movement,
+PageUp/PageDown pan the preview when it overflows, or the answer list / whole
+body otherwise, without changing the selection, draft, caret, or answer. On a
+multi-select step, Space toggles choices and Enter confirms and advances. The
+next selection change, caret movement,
 or text mutation reveals the active item or inline `▌` again; unchanged editor
 boundary keys preserve manual panning. Renderer-backed caret measurements use
 the complete wrapped editor, bounded scratch buffers, and a revision/caret/width

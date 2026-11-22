@@ -37,6 +37,9 @@ impl fmt::Display for QuestionRequestId {
 pub struct QuestionOption {
     pub label: String,
     pub description: String,
+    /// Optional Markdown shown separately from the short description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// The input control and validation supported by a provider-neutral prompt.
@@ -61,9 +64,8 @@ pub enum QuestionPromptKind {
     },
 }
 
-/// A value returned by the shared question UI. `String` preserves the exact
-/// native-tool wire shape; `Strings` is used only by multi-select
-/// ACP form fields.
+/// A value returned by the shared question UI. `String` is used for text and
+/// single-select prompts; `Strings` is used for multi-select prompts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum QuestionAnswerValue {
@@ -113,6 +115,12 @@ pub struct QuestionPrompt {
     pub required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<QuestionAnswerValue>,
+}
+
+impl QuestionPrompt {
+    pub fn has_details(&self) -> bool {
+        self.options.iter().any(|option| option.detail.is_some())
+    }
 }
 
 #[derive(Deserialize)]
@@ -194,6 +202,10 @@ pub struct QuestionRequest {
 }
 
 impl QuestionRequest {
+    pub fn has_details(&self) -> bool {
+        self.questions.iter().any(QuestionPrompt::has_details)
+    }
+
     pub fn allows_choice_note(&self, prompt: usize, option: usize) -> bool {
         self.allow_choice_notes
             && self.questions.get(prompt).is_some_and(|question| {
@@ -277,6 +289,28 @@ mod tests {
         request.allow_choice_notes = true;
         let wire = serde_json::to_value(&request).unwrap();
         assert_eq!(wire["allowChoiceNotes"], true);
+        assert_eq!(
+            serde_json::from_value::<QuestionRequest>(wire).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn option_detail_is_optional_and_round_trips_markdown() {
+        let legacy = json!({"id": "req", "questions": [{
+            "id": "scope", "header": "Scope", "question": "Which scope?",
+            "kind": {"type": "single_select", "allow_other": true},
+            "options": [{"label": "Core", "description": "Core crate"}]
+        }]});
+        let mut request: QuestionRequest = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!request.has_details());
+        assert_eq!(serde_json::to_value(&request).unwrap(), legacy);
+
+        let detail = "Core only.\n\n```rust\nfn run() {}\n```";
+        request.questions[0].options[0].detail = Some(detail.into());
+        assert!(request.has_details());
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["questions"][0]["options"][0]["detail"], detail);
         assert_eq!(
             serde_json::from_value::<QuestionRequest>(wire).unwrap(),
             request

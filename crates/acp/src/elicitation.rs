@@ -303,9 +303,17 @@ fn select_options(
     for (index, option) in question.options.iter().enumerate() {
         let token = format!("option_{index}");
         options.insert(token.clone(), option.label.clone());
-        values.push(
-            EnumOption::new(token, option.label.clone()).description(option.description.clone()),
-        );
+        let value = EnumOption::new(token, option.label.clone());
+        values.push(if let Some(detail) = &option.detail {
+            value
+                .description(format!("{}\n\n{detail}", option.description))
+                .meta(serde_json::Map::from_iter([(
+                    "zevria".to_string(),
+                    json!({"description": option.description, "detail": detail}),
+                )]))
+        } else {
+            value.description(option.description.clone())
+        });
     }
     if allow_other {
         values.push(

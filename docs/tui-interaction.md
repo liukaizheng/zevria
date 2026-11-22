@@ -18,7 +18,7 @@ user input. Modifier and press/repeat/release policy is normalized before routin
 | Live worker transcript/selection | Pane-local | Cancel only bound eligible worker input | Transcript | Yes |
 | Historical/child transcript | Read-only | No root cancellation or quit | Transcript | Yes |
 | Plan review | Pane-local | Hide, without a workflow decision | Reviewed transcript; arrows select choices | Yes |
-| Question | Global | Correlated Dismissed response | Form/editor | No |
+| Question | Global | Correlated Dismissed response | Form/editor and option preview | No |
 | Model picker | Global | Cancel correlated management request; retain correlation until settled | List/details/editor | No |
 | Session/skill picker | Global | Dismiss only this surface | List/details/editor | No |
 | Jobs | Global | Dismiss only this surface; jobs and the root turn keep running | Job list / stdout and stderr tails | No |
@@ -28,6 +28,12 @@ Global paint order, from lowest to highest, is skills, sessions, jobs or subtask
 models, questions, help. Jobs and Subtasks replace each other; other suspended
 surfaces retain state. Only the resolved owner can install the cursor.
 Text in a dialog belongs to the dialog, never the pane composer.
+
+In the question wizard, ↑/↓ focus choices, Space toggles a choice on a
+multi-select step, and Enter confirms the answer and advances. Markdown details
+follow the focused choice. PgUp/PgDn scroll an overflowing preview without
+moving focus; otherwise they pan the list or the single viewport on a very
+small terminal. The `PgDn scroll` hint appears only for a scrollable preview.
 
 `Alt+J` opens the Jobs overlay from the composer (including completion), Normal,
 or Selection without changing the draft. `/jobs` opens it too, even while the

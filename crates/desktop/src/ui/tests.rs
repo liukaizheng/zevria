@@ -736,10 +736,12 @@ fn native_choice_note_editor_keeps_drafts_and_sends_the_chosen_note(cx: &mut Tes
                 QuestionOption {
                     label: "Focused (Recommended)".into(),
                     description: "Keep it narrow".into(),
+                    detail: None,
                 },
                 QuestionOption {
                     label: "Broad".into(),
                     description: "Include adjacent work".into(),
+                    detail: None,
                 },
             ],
             required: true,
@@ -1504,6 +1506,141 @@ fn completion_keyboard_selection_has_a_rendered_selected_state(cx: &mut TestAppC
     assert!(receiver.try_recv().is_err());
 }
 
+fn ask_multi_select_with_previews(controller: &Entity<SessionController>, cx: &mut TestAppContext) {
+    let turn_id = TurnId::new(21);
+    event(
+        controller,
+        E::TurnStarted {
+            turn_id,
+            mode: SessionMode::Plan,
+            message: Message::user("Plan validation"),
+        },
+        cx,
+    );
+    event(
+        controller,
+        E::QuestionAsked {
+            turn_id,
+            request: QuestionRequest {
+                id: QuestionRequestId::new("targets"),
+                source_label: None,
+                dismissible: true,
+                allow_choice_notes: true,
+                questions: vec![QuestionPrompt {
+                    id: "targets".into(),
+                    header: "Targets".into(),
+                    question: "Which crates should we validate?".into(),
+                    kind: QuestionPromptKind::MultiSelect {
+                        min_selections: Some(1),
+                        max_selections: None,
+                        allow_other: true,
+                    },
+                    options: vec![
+                        QuestionOption {
+                            label: "Core".into(),
+                            description: "Validate shared behavior.".into(),
+                            detail: Some("```rust\nfn validate_core() {}\n```".into()),
+                        },
+                        QuestionOption {
+                            label: "TUI".into(),
+                            description: "Validate the terminal layout.".into(),
+                            detail: Some("```rust\nfn validate_tui() {}\n```".into()),
+                        },
+                    ],
+                    required: true,
+                    default: None,
+                }],
+            },
+        },
+        cx,
+    );
+}
+
+#[gpui_kit::test]
+fn preview_button_changes_markdown_without_toggling_multi_select_then_send_returns_array(
+    cx: &mut TestAppContext,
+) {
+    let (window, _, controller, mut receiver) = setup(cx);
+    ask_multi_select_with_previews(&controller, cx);
+    let preview = ("question-preview-pane", 0usize);
+    let core = ("question-option", 0usize);
+    let tui = ("question-option", 1usize);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(preview).visible());
+        assert_eq!(window.find(core).role(), Some(gpui_kit::Role::CheckBox));
+        assert_eq!(window.find(tui).role(), Some(gpui_kit::Role::CheckBox));
+        window.click(("question-preview-option", 1usize), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        controller.read_with(cx, |c, _| {
+            let form = c.model.question.as_ref().unwrap();
+            (form.preview(0), form.answers[0].selected.clone())
+        }),
+        (Some(1), vec![])
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("copy-code", cx);
+        assert!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| text.contains("fn validate_tui()"))
+        );
+        window.click(core, cx);
+        window.render_frame(cx);
+        window.click(tui, cx);
+        window.render_frame(cx);
+        assert!(window.try_find(("question-note", 0usize)).is_none());
+        window.click("answer-question", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let SessionCommand::Control(ControlCommand::AnswerQuestion {
+        request_id,
+        response,
+        ..
+    }) = receiver.try_recv().unwrap()
+    else {
+        panic!("expected the batch answer");
+    };
+    assert_eq!(request_id.as_str(), "targets");
+    assert_eq!(
+        serde_json::to_value(response).unwrap(),
+        serde_json::json!({
+            "status": "answered", "answers": [{"id": "targets", "answer": ["Core", "TUI"]}]
+        })
+    );
+}
+
+#[gpui_kit::test]
+fn question_preview_is_beside_choices_at_1240_and_below_at_720(cx: &mut TestAppContext) {
+    for (width, compact) in [(1240., false), (720., true)] {
+        let (window, view, controller, _) = setup_at_size(cx, width, 840.);
+        ask_multi_select_with_previews(&controller, cx);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).compact, compact);
+            let pane = window.find(("question-preview-pane", 0usize)).bounds();
+            let core = window.find(("question-option", 0usize)).bounds();
+            let other = window.find(("question-other", 0usize)).bounds();
+            assert!(pane.size.width > px(0.));
+            assert!(pane.size.height > px(0.));
+            if compact {
+                assert!(pane.top() >= other.bottom(), "{pane:?} vs {other:?}");
+            } else {
+                assert!(
+                    pane.left() >= core.right() && pane.top() < other.bottom(),
+                    "{pane:?} vs {core:?}"
+                );
+            }
+        })
+        .unwrap();
+    }
+}
+
 #[gpui_kit::test]
 fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
     cx: &mut TestAppContext,
@@ -1536,6 +1673,7 @@ fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
                     options: vec![zevria_foundation::QuestionOption {
                         label: "Gutter".into(),
                         description: "Compact log rows".into(),
+                        detail: None,
                     }],
                     required: false,
                     default: None,

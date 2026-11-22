@@ -517,6 +517,41 @@ fn elicitation_display_normalizes_before_fallbacks_and_label_disambiguation() {
 }
 
 #[test]
+fn elicitation_restores_option_previews_without_changing_wire_values() {
+    use serde_json::json;
+    let detail = "Try this:\r\n\r\n```rust\r\nfn run() {}\r\n```";
+    let options = json!([
+        {"const": "option_0", "title": "Core", "description": format!("Core crate\n\n{detail}"),
+            "_meta": {"zevria": {"description": "Core crate", "detail": detail}}},
+        {"const": "option_1", "title": "TUI", "description": "Original description",
+            "_meta": {"zevria": {"description": "Ignore this", "detail": 42}}},
+        {"const": "option_2", "title": "Desktop", "description": "Desktop crate"}
+    ]);
+    let converted = convert_fixture(json!({
+        "mode": "form", "sessionId": "session-1", "message": "Choose crates",
+        "requestedSchema": {"type": "object", "properties": {
+            "a": {"type": "string", "oneOf": options},
+            "b": {"type": "array", "minItems": 1, "items": {"anyOf": options}}
+        }}
+    }));
+    for prompt in &converted.request.questions {
+        assert_eq!(prompt.options[0].description, "Core crate");
+        assert_eq!(prompt.options[0].detail.as_deref(), Some("Try this:\n\n```rust\nfn run() {}\n```"));
+        assert_eq!(prompt.options[1].description, "Original description");
+        assert!(prompt.options[1].detail.is_none());
+        assert_eq!(prompt.options[2].description, "Desktop crate");
+        assert!(prompt.options[2].detail.is_none());
+    }
+    assert!(converted.request.has_details());
+    let response = fixture_answers(&converted, vec![
+        Some("Core".to_string().into()),
+        Some(vec!["Core".to_string(), "TUI".to_string()].into()),
+    ]);
+    let wire = converted.accepted_content(response).unwrap();
+    assert_eq!(serde_json::to_value(wire).unwrap(), json!({"a": "option_0", "b": ["option_0", "option_1"]}));
+}
+
+#[test]
 fn elicitation_normalization_preserves_validation_companions_skip_and_custom_answers() {
     let mut fixture = native_elicitation_fixture();
     fixture["requestedSchema"]["required"] = serde_json::json!(["question_1", "question_2"]);

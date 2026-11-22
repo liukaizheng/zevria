@@ -11,6 +11,7 @@ pub struct AnswerDraft {
     pub selected: Vec<usize>,
     pub other: bool,
     pub skip: bool,
+    preview: Option<usize>,
     choice_notes: BTreeMap<usize, String>,
 }
 #[derive(Debug)]
@@ -49,6 +50,12 @@ impl QuestionForm {
                     }
                     None => {}
                 }
+                draft.preview = draft
+                    .selected
+                    .iter()
+                    .copied()
+                    .find(|&index| q.options[index].detail.is_some())
+                    .or_else(|| q.options.iter().position(|option| option.detail.is_some()));
                 draft
             })
             .collect();
@@ -60,6 +67,47 @@ impl QuestionForm {
             error: None,
         }
     }
+    pub fn preview(&self, prompt: usize) -> Option<usize> {
+        self.answers.get(prompt)?.preview
+    }
+
+    pub fn set_preview(&mut self, prompt: usize, option: usize) -> bool {
+        if self.pending
+            || self
+                .request
+                .questions
+                .get(prompt)
+                .and_then(|q| q.options.get(option))
+                .is_none()
+        {
+            return false;
+        }
+        self.answers[prompt].preview = Some(option);
+        true
+    }
+
+    pub fn choose(&mut self, prompt: usize, option: usize, checked: bool) -> bool {
+        if !self.set_preview(prompt, option) {
+            return false;
+        }
+        let draft = &mut self.answers[prompt];
+        if matches!(
+            self.request.questions[prompt].kind,
+            QuestionPromptKind::MultiSelect { .. }
+        ) {
+            draft.selected.retain(|&index| index != option);
+            if checked {
+                draft.selected.push(option);
+            }
+        } else {
+            draft.selected = if checked { vec![option] } else { vec![] };
+            draft.other = false;
+        }
+        draft.skip = false;
+        self.error = None;
+        true
+    }
+
     /// A draft exists only for the currently selected, note-capable radio path.
     /// An empty string denotes an eligible option with no note yet.
     pub fn choice_note_draft(&self, prompt: usize, option: usize) -> Option<&str> {
@@ -170,7 +218,10 @@ impl QuestionForm {
                             "{}: enter Other",
                             q.header
                         );
-                        values.push(draft.text.trim().into());
+                        let other = draft.text.trim();
+                        if !values.iter().any(|value| value == other) {
+                            values.push(other.into());
+                        }
                     }
                     anyhow::ensure!(
                         (!q.required || !values.is_empty())

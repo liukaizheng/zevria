@@ -1,8 +1,8 @@
 //! Global modal for a blocking `question` tool call.
 //!
-//! Each prompt owns a wrapped-row viewport. Rendering measures the same styled
-//! segments and width it draws, then chooses pinned prompt/validation regions
-//! or a whole-body fallback when the terminal cannot leave one answer row.
+//! Each prompt owns a wrapped-row viewport and may have a separate Markdown
+//! preview. Rendering measures the same segments and widths it draws, falling
+//! back to a single viewport when the pinned regions would not fit.
 
 use std::{cell::Cell, collections::BTreeMap};
 
@@ -40,6 +40,12 @@ use crate::{
 };
 use zevria_tui_widgets::overlay::{modal, modal_block};
 
+mod detail;
+#[cfg(test)]
+mod detail_tests;
+
+use detail::{DetailLayout, DetailPane, focused_label};
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum QuestionDialogAction {
     Handled,
@@ -53,6 +59,8 @@ pub enum QuestionDialogAction {
 enum QuestionLayoutMode {
     Pinned,
     WholeBody,
+    SideBySide,
+    Stacked,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +72,7 @@ struct QuestionLayoutKey {
     content_rows: usize,
     visible_rows: usize,
     validation_rows: usize,
+    detail_size: Option<(u16, u16)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +133,7 @@ struct PromptState {
     other_selected: bool,
     multi_selected: Vec<bool>,
     viewport: Viewport,
+    detail: DetailPane,
     reveal_requested: bool,
     last_layout: Option<QuestionLayoutKey>,
 }
@@ -297,6 +307,7 @@ impl QuestionDialog {
     pub fn invalidate_geometry(&mut self) {
         for state in &mut self.states {
             state.viewport.invalidate_geometry();
+            state.detail.invalidate_geometry();
             state.reveal_requested = true;
         }
     }
@@ -333,6 +344,10 @@ impl QuestionDialog {
         }
         if self.question_index == 0 {
             hints.disabled.push(Action::Back);
+        }
+        if self.state().detail.scrollable {
+            hints.promoted.push((Action::PageDown, 2));
+            hints.labels.push((Action::PageDown, "scroll"));
         }
         if self.can_edit_choice_note() {
             let draft = self.state().choice_note(self.state().cursor);
@@ -391,19 +406,25 @@ impl QuestionDialog {
             @ (Action::PageUp | Action::PageDown | Action::HalfPageUp | Action::HalfPageDown),
         ) = action
         {
-            let page = self.state().viewport.visible_rows().max(1);
+            let state = self.state_mut();
+            let viewport = if state.detail.scrollable {
+                &mut state.detail.viewport
+            } else {
+                state.reveal_requested = false;
+                &mut state.viewport
+            };
+            let page = viewport.visible_rows();
             let rows = if matches!(action, Action::HalfPageUp | Action::HalfPageDown) {
-                (page / 2).max(1)
+                page / 2
             } else {
                 page
-            };
-            let state = self.state_mut();
-            if matches!(action, Action::PageUp | Action::HalfPageUp) {
-                state.viewport.page_up(rows);
-            } else {
-                state.viewport.page_down(rows);
             }
-            state.reveal_requested = false;
+            .max(1);
+            if matches!(action, Action::PageUp | Action::HalfPageUp) {
+                viewport.page_up(rows);
+            } else {
+                viewport.page_down(rows);
+            }
             return QuestionDialogAction::Handled;
         }
         let code = match action {
@@ -435,19 +456,6 @@ impl QuestionDialog {
             }
             return QuestionDialogAction::Handled;
         }
-        if matches!(code, KeyCode::PageUp | KeyCode::PageDown) && modifiers.is_empty() {
-            let visible_rows = self.state().viewport.visible_rows();
-            let page_rows = visible_rows.max(1);
-            let state = self.state_mut();
-            if code == KeyCode::PageUp {
-                state.viewport.page_up(page_rows);
-            } else {
-                state.viewport.page_down(page_rows);
-            }
-            state.reveal_requested = false;
-            return QuestionDialogAction::Handled;
-        }
-
         self.validation_error = None;
         match self.state().choice_editor {
             ChoiceEditor::Other => return self.handle_other_key(code, modifiers),
@@ -731,13 +739,21 @@ impl QuestionDialog {
             .zip(&self.state().multi_selected)
             .filter_map(|(option, selected)| selected.then_some(option.label.clone()))
             .collect::<Vec<_>>();
-        if self.state().other_selected {
-            answers.push(self.state().editor.input.trim().to_string());
+        let other = self.state().editor.input.trim();
+        if self.state().other_selected
+            && !other.is_empty()
+            && !answers.iter().any(|value| value == other)
+        {
+            answers.push(other.to_string());
         }
         if let Some(minimum) = min_selections
             && answers.len() < minimum
         {
-            return self.invalid(format!("Select at least {minimum} choices."));
+            return self.invalid(if minimum == 1 {
+                "Select at least one choice.".into()
+            } else {
+                format!("Select at least {minimum} choices.")
+            });
         }
         if let Some(maximum) = max_selections
             && answers.len() > maximum
@@ -812,16 +828,18 @@ impl QuestionDialog {
             return;
         }
         let cursor = if end { row_count - 1 } else { 0 };
+        self.set_cursor(cursor);
         let state = self.state_mut();
         state.choice_editor = ChoiceEditor::Browsing;
-        state.cursor = cursor;
         state.reveal_requested = true;
     }
 
     fn set_cursor(&mut self, cursor: usize) {
-        if self.state().cursor != cursor {
-            self.state_mut().cursor = cursor;
-            self.request_reveal();
+        let state = self.state_mut();
+        if state.cursor != cursor {
+            state.cursor = cursor;
+            state.detail.set_owner(cursor);
+            state.reveal_requested = true;
         }
     }
 
@@ -842,42 +860,99 @@ impl QuestionDialog {
     }
 
     pub fn render(&mut self, frame: &mut Frame, modal_body: Rect) {
-        let popup_width = question_width(modal_body);
+        let popup_width = question_width(modal_body, self.request.has_details());
         let sizing_block = modal_block("", Line::default());
-        let inner_width = sizing_block.inner(Rect::new(0, 0, popup_width, 2)).width;
-        let content = QuestionContent::new(
-            self.current(),
-            self.state(),
-            self.request.allow_choice_notes,
-            self.validation_error.as_deref(),
-            inner_width,
+        let max_inner = sizing_block.inner(Rect::new(0, 0, popup_width, modal_body.height));
+        let inner_width = max_inner.width;
+        let question_index = self.question_index;
+        let prompt = &self.request.questions[question_index];
+        let state = &mut self.states[question_index];
+        let selected = state.cursor;
+        let has_details = prompt.has_details();
+        let layout = has_details.then(|| DetailLayout::new(inner_width));
+        let make_content = |state: &PromptState, answer_width| {
+            QuestionContent::new(
+                prompt,
+                state,
+                self.request.allow_choice_notes,
+                self.validation_error.as_deref(),
+                inner_width,
+                answer_width,
+            )
+        };
+        let list_width = layout
+            .as_ref()
+            .map_or(inner_width, |layout| layout.list_width);
+        let mut content = make_content(state, list_width);
+        let pinned_rows = content.prompt_rows.saturating_add(content.validation_rows);
+        let layout = layout.filter(|layout| {
+            layout.fits(usize::from(max_inner.height).saturating_sub(pinned_rows))
+        });
+
+        let mut natural_body = content.answer_rows;
+        if has_details {
+            if layout.is_none() && list_width != inner_width {
+                // The single viewport wraps both regions at the full width.
+                content = make_content(state, inner_width);
+                natural_body = content.answer_rows;
+            }
+            let detail_width = layout
+                .as_ref()
+                .map_or(inner_width, |layout| layout.detail_width);
+            let tallest = state.detail.prepare(prompt, selected, detail_width);
+            natural_body = if layout
+                .as_ref()
+                .is_some_and(|layout| layout.mode == QuestionLayoutMode::SideBySide)
+            {
+                natural_body.max(tallest)
+            } else {
+                natural_body.saturating_add(1).saturating_add(tallest)
+            };
+        }
+        let popup_area = centered_area(
+            modal_body,
+            popup_width,
+            pinned_rows.saturating_add(natural_body).saturating_add(2),
         );
-        let natural_height = content
-            .prompt_rows
-            .saturating_add(content.answer_rows)
-            .saturating_add(content.validation_rows)
-            .saturating_add(2);
-        let popup_area = centered_area(modal_body, popup_width, natural_height);
+        let inner_area = sizing_block.inner(popup_area);
+        let pinned_answer_rows = usize::from(inner_area.height).saturating_sub(pinned_rows);
+        let answer_area = Rect {
+            y: inner_area
+                .y
+                .saturating_add(rows_to_u16(content.prompt_rows)),
+            height: rows_to_u16(pinned_answer_rows),
+            ..inner_area
+        };
+        let panes = layout
+            .as_ref()
+            .map(|layout| layout.split(answer_area, content.answer_rows));
+        state
+            .detail
+            .reconcile(panes.as_ref().map(|panes| panes.preview));
+        let mode = layout.map_or_else(
+            || {
+                if has_details || pinned_answer_rows == 0 {
+                    QuestionLayoutMode::WholeBody
+                } else {
+                    QuestionLayoutMode::Pinned
+                }
+            },
+            |layout| layout.mode,
+        );
+
         let progress = self.title(popup_area.width);
         let footer = hint_line(
             self.context(),
             &self.hint_eligibility(),
             usize::from(popup_area.width.saturating_sub(2)),
         );
-        let inner_area = modal(frame, popup_area, progress, footer);
-        let pinned_answer_rows = usize::from(inner_area.height)
-            .saturating_sub(content.prompt_rows)
-            .saturating_sub(content.validation_rows);
-        let mode = if pinned_answer_rows > 0 {
-            QuestionLayoutMode::Pinned
-        } else {
-            QuestionLayoutMode::WholeBody
-        };
-        let selected = self.state().cursor;
-        let question_index = self.question_index;
+        modal(frame, popup_area, progress, footer);
+        let state = &mut self.states[question_index];
 
         match mode {
-            QuestionLayoutMode::Pinned => {
+            QuestionLayoutMode::Pinned
+            | QuestionLayoutMode::SideBySide
+            | QuestionLayoutMode::Stacked => {
                 let prompt_height = rows_to_u16(content.prompt_rows);
                 let validation_height = rows_to_u16(content.validation_rows);
                 let prompt_area = Rect {
@@ -886,12 +961,7 @@ impl QuestionDialog {
                     width: inner_area.width,
                     height: prompt_height,
                 };
-                let answer_area = Rect {
-                    x: inner_area.x,
-                    y: inner_area.y.saturating_add(prompt_height),
-                    width: inner_area.width,
-                    height: rows_to_u16(pinned_answer_rows),
-                };
+                let list_area = panes.as_ref().map_or(answer_area, |panes| panes.list);
                 let validation_area = Rect {
                     x: inner_area.x,
                     y: answer_area.y.saturating_add(answer_area.height),
@@ -905,15 +975,17 @@ impl QuestionDialog {
                     mode,
                     prompt_rows: content.prompt_rows,
                     content_rows: content.answer_rows,
-                    visible_rows: pinned_answer_rows,
+                    visible_rows: usize::from(list_area.height),
                     validation_rows: content.validation_rows,
+                    detail_size: panes
+                        .as_ref()
+                        .map(|panes| (panes.preview.width, panes.preview.height)),
                 };
-                let state = &mut self.states[question_index];
                 reconcile_prompt_viewport(
                     state,
                     key,
                     content.answer_rows,
-                    pinned_answer_rows,
+                    key.visible_rows,
                     target,
                 );
 
@@ -925,7 +997,7 @@ impl QuestionDialog {
                     Paragraph::new(content.answer_lines)
                         .wrap(Wrap { trim: false })
                         .scroll((state.viewport.paragraph_offset(), 0)),
-                    answer_area,
+                    list_area,
                 );
                 if validation_height > 0 {
                     frame.render_widget(
@@ -933,11 +1005,44 @@ impl QuestionDialog {
                         validation_area,
                     );
                 }
-                paint_focus_selection(frame, answer_area, &state.viewport, target);
-                render_scrollbar(frame, popup_area, &state.viewport);
+                paint_focus_selection(frame, list_area, &state.viewport, target);
+                if let Some(panes) = panes {
+                    panes.render_divider(frame, mode, focused_label(prompt, selected));
+                    state.detail.render(frame, panes.preview);
+                    // The split uses its divider as the list track; the stacked
+                    // layout uses separate sections of the popup's right border.
+                    let list_scroll_right = if mode == QuestionLayoutMode::SideBySide {
+                        panes.divider.right()
+                    } else {
+                        popup_area.right()
+                    };
+                    render_scrollbar(
+                        frame,
+                        Rect {
+                            width: list_scroll_right - list_area.x,
+                            ..list_area
+                        },
+                        &state.viewport,
+                    );
+                    render_scrollbar(
+                        frame,
+                        Rect {
+                            width: popup_area.right() - panes.preview.x,
+                            ..panes.preview
+                        },
+                        &state.detail.viewport,
+                    );
+                } else {
+                    render_scrollbar(frame, popup_area, &state.viewport);
+                }
             }
             QuestionLayoutMode::WholeBody => {
-                let body = content.whole_body(selected);
+                let mut body = content.whole_body(selected);
+                if has_details {
+                    state
+                        .detail
+                        .append_to(&mut body, focused_label(prompt, selected), inner_width);
+                }
                 let visible_rows = usize::from(inner_area.height);
                 let key = QuestionLayoutKey {
                     inner_width,
@@ -947,8 +1052,8 @@ impl QuestionDialog {
                     content_rows: body.rows,
                     visible_rows,
                     validation_rows: content.validation_rows,
+                    detail_size: None,
                 };
-                let state = &mut self.states[question_index];
                 reconcile_prompt_viewport(state, key, body.rows, visible_rows, body.focus_target);
                 let focus_target = body.focus_target;
                 frame.render_widget(
@@ -1050,6 +1155,7 @@ impl QuestionContent {
         state: &PromptState,
         allow_choice_notes: bool,
         validation_error: Option<&str>,
+        prompt_width: u16,
         width: u16,
     ) -> Self {
         let prompt_lines = vec![
@@ -1059,7 +1165,7 @@ impl QuestionContent {
             ),
             Line::default(),
         ];
-        let prompt_rows = measured_rows(&prompt_lines, width);
+        let prompt_rows = measured_rows(&prompt_lines, prompt_width);
         let mut answer_lines = Vec::new();
         let mut answer_rows = 0;
         let mut focus_targets = Vec::new();
@@ -1184,7 +1290,7 @@ impl QuestionContent {
                 crate::chrome::error_style(),
             ))]
         });
-        let validation_rows = measured_rows(&validation_lines, width);
+        let validation_rows = measured_rows(&validation_lines, prompt_width);
         Self {
             prompt_lines,
             prompt_rows,
@@ -1459,8 +1565,9 @@ fn reconcile_prompt_viewport(
     }
 }
 
-fn question_width(modal_body: Rect) -> u16 {
-    (modal_body.width.saturating_mul(7) / 10)
+fn question_width(modal_body: Rect, has_details: bool) -> u16 {
+    let percent = if has_details { 92 } else { 70 };
+    ((u32::from(modal_body.width) * percent / 100) as u16)
         .max(30)
         .min(modal_body.width)
 }
@@ -1496,10 +1603,12 @@ mod tests {
                         QuestionOption {
                             label: "Focused".to_string(),
                             description: "Keep it narrow.".to_string(),
+                            detail: None,
                         },
                         QuestionOption {
                             label: "Broad".to_string(),
                             description: "Include adjacent work.".to_string(),
+                            detail: None,
                         },
                     ],
                     kind: QuestionPromptKind::SingleSelect { allow_other: true },
@@ -1514,10 +1623,12 @@ mod tests {
                         QuestionOption {
                             label: "Focused".to_string(),
                             description: "Only feature tests.".to_string(),
+                            detail: None,
                         },
                         QuestionOption {
                             label: "Full".to_string(),
                             description: "Run the workspace.".to_string(),
+                            detail: None,
                         },
                     ],
                     kind: QuestionPromptKind::SingleSelect { allow_other: true },
@@ -2295,7 +2406,7 @@ mod tests {
             visible.start() <= row && row < visible.end(),
             "actual caret row {row} is outside {visible:?}, layout {key:?}"
         );
-        let popup_width = question_width(buffer.area);
+        let popup_width = question_width(buffer.area, false);
         let inner_x = usize::from((buffer.area.width - popup_width) / 2) + 2;
         let inner_y = usize::from((buffer.area.height - key.popup_height) / 2) + 1;
         let pinned_shift = if key.mode == QuestionLayoutMode::Pinned {
@@ -2484,7 +2595,7 @@ mod tests {
                 let caret_y = assert_caret_visible(&dialog, &buffer);
                 let key = dialog.state().last_layout.unwrap();
                 assert_eq!(key.mode == QuestionLayoutMode::WholeBody, whole_body);
-                let inner_x = (36 - question_width(buffer.area)) / 2 + 2;
+                let inner_x = (36 - question_width(buffer.area, false)) / 2 + 2;
                 let bottom = (8 - key.popup_height) / 2 + key.popup_height - 1;
                 assert!(caret_y + 1 < usize::from(bottom));
                 for y in rows_to_u16(caret_y + 1)..bottom {
@@ -2667,10 +2778,15 @@ mod tests {
             dialog.request.allow_choice_notes,
             dialog.validation_error.as_deref(),
             key.inner_width,
+            if key.mode == QuestionLayoutMode::SideBySide {
+                DetailLayout::new(key.inner_width).list_width
+            } else {
+                key.inner_width
+            },
         );
         let target = match key.mode {
-            QuestionLayoutMode::Pinned => content.focus_target(state.cursor),
             QuestionLayoutMode::WholeBody => content.whole_body(state.cursor).focus_target,
+            _ => content.focus_target(state.cursor),
         }
         .expect("the prompt has a focus target");
         let visible = state.viewport.visible_range();
@@ -2748,6 +2864,7 @@ mod tests {
             .map(|index| QuestionOption {
                 label: format!("Option {index}"),
                 description: format!("Description {index}."),
+                detail: None,
             })
             .collect();
         let mut dialog = QuestionDialog::new(TurnId::new(1), large_request);
@@ -3102,10 +3219,12 @@ mod tests {
                     QuestionOption {
                         label: "Core".to_string(),
                         description: "Core crate.".to_string(),
+                        detail: None,
                     },
                     QuestionOption {
                         label: "TUI".to_string(),
                         description: "Terminal crate.".to_string(),
+                        detail: None,
                     },
                 ],
                 kind: QuestionPromptKind::MultiSelect {
@@ -3160,6 +3279,7 @@ mod tests {
                     options: vec![QuestionOption {
                         label: "Use it".to_string(),
                         description: String::new(),
+                        detail: None,
                     }],
                     kind: QuestionPromptKind::SingleSelect { allow_other: false },
                     required: false,
@@ -3215,10 +3335,12 @@ mod tests {
                     QuestionOption {
                         label: "Core".to_string(),
                         description: String::new(),
+                        detail: None,
                     },
                     QuestionOption {
                         label: "TUI".to_string(),
                         description: String::new(),
+                        detail: None,
                     },
                 ],
                 kind: QuestionPromptKind::MultiSelect {
@@ -3292,6 +3414,7 @@ mod tests {
                         description: format!(
                             "Description {index} also wraps while keeping the whole focused item reachable."
                         ),
+                        detail: None,
                     })
                     .collect(),
                 kind: QuestionPromptKind::SingleSelect { allow_other: true },
@@ -3346,6 +3469,7 @@ mod tests {
             .map(|index| QuestionOption {
                 label: format!("Option {index}"),
                 description: "A description long enough to occupy wrapped answer rows.".to_string(),
+                detail: None,
             })
             .collect();
         wrapped.questions[0].required = false;
@@ -3476,6 +3600,7 @@ mod tests {
                         label: format!("Choice {index}"),
                         description: "Wrapped choice description for the scrolling viewport."
                             .to_string(),
+                        detail: None,
                     })
                     .collect(),
                 kind: QuestionPromptKind::MultiSelect {
@@ -3518,6 +3643,7 @@ mod tests {
                 options: vec![QuestionOption {
                     label: format!("TALL-OPTION {}", "label ".repeat(60)),
                     description: "description ".repeat(60),
+                    detail: None,
                 }],
                 kind: QuestionPromptKind::SingleSelect { allow_other: false },
                 required: true,
@@ -3588,6 +3714,7 @@ mod tests {
             fitting.request.allow_choice_notes,
             None,
             fit_layout.inner_width,
+            fit_layout.inner_width,
         );
         assert_eq!(
             usize::from(fit_layout.popup_height),
@@ -3644,6 +3771,7 @@ mod tests {
                 label: format!("Question option {index}"),
                 description: "A wrapped description that makes the answer list overflow."
                     .to_string(),
+                detail: None,
             })
             .collect::<Vec<_>>();
         let transition_request = QuestionRequest {

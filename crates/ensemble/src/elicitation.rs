@@ -1,8 +1,42 @@
 //! Deterministic ACP form normalization.
 
 use super::*;
+use agent_client_protocol::schema::v1::EnumOption;
 
 const CODEX_OTHER_OPTION: &str = "None of the above";
+
+struct RawOption {
+    value: String,
+    title: String,
+    description: String,
+    detail: Option<String>,
+}
+
+impl RawOption {
+    fn plain(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+            title: value.to_string(),
+            description: String::new(),
+            detail: None,
+        }
+    }
+
+    fn titled(option: &EnumOption) -> Self {
+        let meta = option.meta.as_ref().and_then(|meta| meta.get("zevria"));
+        let detail = meta.and_then(|meta| meta.get("detail")?.as_str());
+        let short_description = detail.and_then(|_| meta?.get("description")?.as_str());
+        Self {
+            value: option.value.clone(),
+            title: option.title.clone(),
+            description: short_description
+                .or(option.description.as_deref())
+                .unwrap_or_default()
+                .to_owned(),
+            detail: detail.map(str::to_owned),
+        }
+    }
+}
 
 impl ConvertedElicitation {
     pub(super) fn normalized_decision(
@@ -460,10 +494,12 @@ pub(super) fn convert_elicitation_form(
                     QuestionOption {
                         label: "Yes".to_string(),
                         description: "True".to_string(),
+                        detail: None,
                     },
                     QuestionOption {
                         label: "No".to_string(),
                         description: "False".to_string(),
+                        detail: None,
                     },
                 ];
                 let default = schema.default.map(|value| {
@@ -570,22 +606,14 @@ pub(super) fn convert_string_field(
         Some(
             values
                 .iter()
-                .map(|value| (value.clone(), value.clone(), String::new()))
+                .map(|value| RawOption::plain(value))
                 .collect::<Vec<_>>(),
         )
     } else {
-        schema.one_of.as_ref().map(|options| {
-            options
-                .iter()
-                .map(|option| {
-                    (
-                        option.value.clone(),
-                        option.title.clone(),
-                        option.description.clone().unwrap_or_default(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
+        schema
+            .one_of
+            .as_ref()
+            .map(|options| options.iter().map(RawOption::titled).collect::<Vec<_>>())
     };
     let Some(raw_options) = raw_options else {
         if companion.is_some() {
@@ -623,8 +651,8 @@ pub(super) fn convert_string_field(
             "select field has no choices",
         ));
     }
-    for (value, _, _) in &raw_options {
-        validate_text_default(value, min_length, max_length, field_count)?;
+    for option in &raw_options {
+        validate_text_default(&option.value, min_length, max_length, field_count)?;
     }
     let raw_options = filter_companion_other(raw_options, companion.as_ref(), field_count)?;
     let (options, values) = display_options(raw_options, field_count)?;
@@ -691,19 +719,9 @@ pub(super) fn convert_multi_field(
         MultiSelectItems::String(items) => items
             .values
             .iter()
-            .map(|value| (value.clone(), value.clone(), String::new()))
+            .map(|value| RawOption::plain(value))
             .collect(),
-        MultiSelectItems::Titled(items) => items
-            .options
-            .iter()
-            .map(|option| {
-                (
-                    option.value.clone(),
-                    option.title.clone(),
-                    option.description.clone().unwrap_or_default(),
-                )
-            })
-            .collect(),
+        MultiSelectItems::Titled(items) => items.options.iter().map(RawOption::titled).collect(),
         MultiSelectItems::Other(_) => {
             return Err(ElicitationConversionError::decline(
                 field_count,
@@ -779,15 +797,15 @@ pub(super) fn convert_multi_field(
 }
 
 /// Remove only the explicitly marked wire option, before display disambiguation.
-pub(super) fn filter_companion_other(
-    mut options: Vec<(String, String, String)>,
+fn filter_companion_other(
+    mut options: Vec<RawOption>,
     companion: Option<&CustomAnswerCompanion>,
     field_count: usize,
-) -> Result<Vec<(String, String, String)>, ElicitationConversionError> {
+) -> Result<Vec<RawOption>, ElicitationConversionError> {
     if let Some(token) = companion.and_then(|companion| companion.other_value.as_ref()) {
         if options
             .iter()
-            .filter(|(value, _, _)| value == token)
+            .filter(|option| &option.value == token)
             .count()
             != 1
         {
@@ -796,7 +814,7 @@ pub(super) fn filter_companion_other(
                 "custom-answer Other token must occur exactly once in select choices",
             ));
         }
-        options.retain(|(value, _, _)| value != token);
+        options.retain(|option| &option.value != token);
     }
     // display_options validates remaining duplicates and rejects an empty list.
     Ok(options)
@@ -854,8 +872,8 @@ pub(super) fn validate_text_default(
     Ok(())
 }
 
-pub(super) fn display_options(
-    raw: Vec<(String, String, String)>,
+fn display_options(
+    raw: Vec<RawOption>,
     field_count: usize,
 ) -> Result<(Vec<QuestionOption>, HashMap<String, String>), ElicitationConversionError> {
     if raw.is_empty() {
@@ -868,7 +886,13 @@ pub(super) fn display_options(
     let mut labels = HashSet::from(["other".to_string(), "skip".to_string()]);
     let mut options = Vec::with_capacity(raw.len());
     let mut mapping = HashMap::with_capacity(raw.len());
-    for (wire_value, title, description) in raw {
+    for RawOption {
+        value: wire_value,
+        title,
+        description,
+        detail,
+    } in raw
+    {
         if !wire_values.insert(wire_value.clone()) {
             return Err(ElicitationConversionError::decline(
                 field_count,
@@ -898,7 +922,11 @@ pub(super) fn display_options(
             };
         }
         mapping.insert(label.clone(), wire_value);
-        options.push(QuestionOption { label, description });
+        options.push(QuestionOption {
+            label,
+            description,
+            detail: detail.as_deref().map(elicitation_display_text),
+        });
     }
     Ok((options, mapping))
 }

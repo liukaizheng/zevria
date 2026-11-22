@@ -161,8 +161,13 @@ main column below 560 px. The minimum window is 720×520.
 
 Questions **dock at the end of the thread in place of the composer**, without a
 scrim. The transcript stays scrollable, and the dock scrolls internally above
-55% of the window height. Drafts survive answering/dismissing. Only the
-app-level **Stop the current turn?** replacement confirmation remains modal.
+55% of the window height (70% when the batch includes option details). Markdown
+previews have their own scroll area, syntax highlighting, and a **Copy code**
+action on code blocks. The preview sits beside the choices on wide layouts and
+below them in compact layouts. Choose a row to follow it in the preview, or use
+its **Preview** button to read without changing the answer. Drafts survive
+answering/dismissing. Only the app-level **Stop the current turn?** replacement
+confirmation remains modal.
 
 ### Thinking is supplied text, not an invented explanation
 
@@ -598,8 +603,9 @@ parser boundary separately from the fully covered proof fixture.
   a Plan revision of that reviewed version, never as approval or implementation.
   Rejection restores the draft and keeps review hidden. The decision shortcut
   can implement only while the review sheet is visible.
-- Text, single-select, Other, multi-select and optional-skip questions. Native
-  answers use strings; ACP multi-select uses arrays. Dismiss is available only
+- Text, single-select, Other, multi-select and optional-skip questions. Text and
+  single-select answers use strings; native and ACP multi-select answers use
+  arrays. Dismiss is available only
   when the request permits it. Terminal/close correlation cannot dismiss a newer
   unrelated question.
 - Read-only subtask inspection and a breadcrumb back to the root. Child activity

@@ -3896,6 +3896,53 @@ fn question_modal_is_global_collects_the_batch_and_dismisses_with_escape() {
 }
 
 #[test]
+fn question_modal_pages_through_details_and_returns_a_multi_select_answer() {
+    let mut root = App::new();
+    start_empty_turn(&mut root, TEST_TURN_ID, SessionMode::Plan);
+    let mut views = test_session_views(root);
+    let mut request = question_request("preview");
+    request.questions.truncate(1);
+    let prompt = &mut request.questions[0];
+    prompt.kind = QuestionPromptKind::MultiSelect {
+        min_selections: Some(1),
+        max_selections: None,
+        allow_other: true,
+    };
+    prompt.options[0].detail = Some(format!(
+        "Preview begins.\n\n```rust\nfn run() {{\n{}}}\n```",
+        "    step();\n".repeat(32)
+    ));
+    prompt.options[1].detail = Some("Preview the wider scope instead.".into());
+    views.apply(SessionEvent::QuestionAsked {
+        turn_id: TEST_TURN_ID,
+        request,
+    });
+
+    let initial = rendered_views_text(&mut views, 120, 30);
+    assert!(initial.contains("Preview begins.") && initial.contains("PgDn scroll"));
+    assert_eq!(views.handle_event(key(KeyCode::PageDown)), None);
+    let scrolled = rendered_views_text(&mut views, 120, 30);
+    assert!(!scrolled.contains("Preview begins.") && scrolled.contains("step();"));
+    assert_eq!(views.handle_event(key(KeyCode::Char(' '))), None);
+    assert_eq!(views.handle_event(key(KeyCode::Down)), None);
+    assert!(rendered_views_text(&mut views, 120, 30).contains("Preview the wider scope instead."));
+    assert_eq!(views.handle_event(key(KeyCode::Char(' '))), None);
+    assert_eq!(
+        views.handle_event(key(KeyCode::Enter)),
+        Some(UiAction::AnswerQuestion {
+            request_id: QuestionRequestId::new("preview"),
+            response: QuestionResponse::Answered {
+                answers: vec![QuestionAnswer {
+                    id: "scope".into(),
+                    answer: Some(vec!["Focused".to_string(), "Broad".to_string()].into()),
+                    note: None,
+                }]
+            },
+        })
+    );
+}
+
+#[test]
 fn question_modal_codex_three_questions_use_inline_other_without_note_steps() {
     let mut root = App::new();
     start_empty_turn(&mut root, TEST_TURN_ID, SessionMode::Build);
@@ -3915,10 +3962,12 @@ fn question_modal_codex_three_questions_use_inline_other_without_note_steps() {
                     QuestionOption {
                         label: "Focused".into(),
                         description: "Keep it narrow.".into(),
+                        detail: None,
                     },
                     QuestionOption {
                         label: "Broad".into(),
                         description: String::new(),
+                        detail: None,
                     },
                 ],
                 kind: QuestionPromptKind::SingleSelect { allow_other: true },

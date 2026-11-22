@@ -201,6 +201,7 @@ fn question_forms_round_trip_optional_text_multi_select_and_other_values() {
                 options: vec![QuestionOption {
                     label: "Core".to_string(),
                     description: "Core crate".to_string(),
+                    detail: None,
                 }],
                 kind: QuestionPromptKind::MultiSelect {
                     min_selections: Some(1),
@@ -386,6 +387,7 @@ fn native_question_companions_preserve_requiredness_defaults_and_round_trip_answ
     use serde_json::json;
     use zevria_foundation::QuestionAnswerValue;
 
+    let detail = "Use the core crate.\n\n```rust\nfn run() {}\n```";
     for multi in [false, true] {
         for required in [false, true] {
             let answer = |custom: bool| {
@@ -409,6 +411,7 @@ fn native_question_companions_preserve_requiredness_defaults_and_round_trip_answ
                     options: vec![QuestionOption {
                         label: "Core".into(),
                         description: "Core crate".into(),
+                        detail: Some(detail.into()),
                     }],
                     kind: if multi {
                         QuestionPromptKind::MultiSelect {
@@ -434,6 +437,22 @@ fn native_question_companions_preserve_requiredness_defaults_and_round_trip_answ
             let legacy = question_form(&"session".into(), &legacy_request).unwrap();
             assert_eq!(wire, serde_json::to_value(&legacy.request).unwrap());
             let schema = &wire["requestedSchema"];
+            let property = &schema["properties"]["question_0"];
+            let options = if multi {
+                &property["items"]["anyOf"]
+            } else {
+                &property["oneOf"]
+            };
+            assert_eq!(options[0]["description"], format!("Core crate\n\n{detail}"));
+            assert_eq!(
+                options[0]["_meta"],
+                json!({"zevria": {"description": "Core crate", "detail": detail}})
+            );
+            assert!(
+                options[1]
+                    .get("_meta")
+                    .is_none_or(serde_json::Value::is_null)
+            );
             assert_eq!(
                 schema["properties"]["question_0_other"]["_meta"],
                 json!({"zevria": {
@@ -932,6 +951,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                                 options: vec![QuestionOption {
                                                     label: "Focused".to_string(),
                                                     description: "Keep it narrow".to_string(),
+                                                    detail: None,
                                                 }],
                                                 kind: QuestionPromptKind::SingleSelect {
                                                     allow_other: true,

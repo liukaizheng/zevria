@@ -264,10 +264,12 @@ mod tests {
                 QuestionOption {
                     label: "Focused".to_string(),
                     description: "Keep the change narrow.".to_string(),
+                    detail: None,
                 },
                 QuestionOption {
                     label: "Broad".to_string(),
                     description: "Cover adjacent behavior.".to_string(),
+                    detail: None,
                 },
             ],
             kind: QuestionPromptKind::SingleSelect { allow_other: true },

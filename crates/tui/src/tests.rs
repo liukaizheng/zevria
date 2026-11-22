@@ -1203,10 +1203,12 @@ fn question_request(id: &str) -> QuestionRequest {
                     QuestionOption {
                         label: "Focused".to_string(),
                         description: "Change only the requested workflow.".to_string(),
+                        detail: None,
                     },
                     QuestionOption {
                         label: "Broad".to_string(),
                         description: "Include adjacent cleanup.".to_string(),
+                        detail: None,
                     },
                 ],
                 kind: QuestionPromptKind::SingleSelect { allow_other: true },
@@ -1221,10 +1223,12 @@ fn question_request(id: &str) -> QuestionRequest {
                     QuestionOption {
                         label: "Focused".to_string(),
                         description: "Run only feature tests.".to_string(),
+                        detail: None,
                     },
                     QuestionOption {
                         label: "Full".to_string(),
                         description: "Run the full workspace.".to_string(),
+                        detail: None,
                     },
                 ],
                 kind: QuestionPromptKind::SingleSelect { allow_other: true },
