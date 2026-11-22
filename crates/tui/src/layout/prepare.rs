@@ -7,9 +7,10 @@ use crate::presentation::{
     AcpToolPresentation, DiagnosticTone, LaunchBatchNotice, ListMarker, NativeHeader,
     PresentationBlock, PresentationBlockKind, PresentationRole, PresentedChecklist, PresentedPlan,
     PresentedPlanContent, PresentedTool, PromptPhase, TextFlavor, TranscriptAppearance,
-    WebActivityPresentation, launch_batch_notice, native_header_status, native_list,
-    question_answer_text, question_note_lines, question_response, subtask_icon, tool_argument,
-    tool_call_denied, tool_call_failed, tool_result_plain_text,
+    WebActivityPresentation, image_facts_label, image_read_summary, image_resized_label,
+    launch_batch_notice, native_header_status, native_list, question_answer_text,
+    question_note_lines, question_response, subtask_icon, tool_argument, tool_call_denied,
+    tool_call_failed, tool_result_plain_text,
 };
 use crate::status_icon::{StatusIcon, StatusIconColor};
 use crate::text::{display_width, format_elapsed};
@@ -1258,21 +1259,23 @@ fn render_tool_call(
             .filter(|path| !path.is_empty())
             .unwrap_or_else(|| "<invalid arguments>".into());
         let header = FoldHeader::single(
-            format!("read_image · {path}"),
+            format!("read image · {path}"),
             native_header_status(call, state),
         );
-        lines.push(header.expanded());
-        if tool_call_denied(state)
-            || tool_call_failed(state)
-            || state.status == ToolCallStatus::Interrupted
-        {
+        let mut line = header.expanded();
+        if let Some(summary) = image_read_summary(state) {
+            let muted = Style::default().fg(theme().text.muted);
+            line.spans.push(Span::styled(
+                format!(" · {}", image_facts_label(&summary)),
+                muted,
+            ));
+            lines.push(line);
+            if let Some(resized) = image_resized_label(&summary) {
+                lines.push(Line::styled(format!("  {resized}"), muted));
+            }
+        } else {
+            lines.push(line);
             render_tool_diagnostic(state, lines);
-        } else if let Some(result) = &state.result {
-            push_plain_text(
-                &tool_result_plain_text(result),
-                Style::default().fg(theme().text.muted),
-                lines,
-            );
         }
         return Some(header);
     }

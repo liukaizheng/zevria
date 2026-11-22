@@ -787,61 +787,137 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
 }
 
 #[test]
-fn read_image_renders_path_and_summary_without_image_payloads_or_error_envelopes() {
+fn read_image_renders_compact_facts_and_preserves_raw_copy() {
+    use rig_core::message::{ToolFunction, ToolName};
+
     let image = zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
-    let summary = format!(
-        "image: /workspace/capture.png\nformat: image/png\ndimensions: 1×1\nbytes: {}",
-        image.encoded_len()
-    );
-    for (arguments, outcome, status, diagnostic, expected_path) in [
-        (
-            json!({"file_path": "capture.png"}),
-            ToolCallOutcome::Success,
-            ToolCallStatus::Finished,
-            None,
-            "capture.png",
+    let bytes = image.encoded_len();
+    let arguments = r#"{ "file_path": "capture.png" }"#;
+    let call = zevria_content::message::tool_call_from_wire_text(
+        "fc_image_read",
+        "image-read",
+        ToolFunction::new(
+            ToolName::new("read_image").unwrap(),
+            serde_json::from_str(arguments).unwrap(),
         ),
+        arguments.to_owned(),
+    );
+    for resized in [false, true] {
+        let mut summary = format!(
+            "image: /workspace/capture.png\nformat: image/png\ndimensions: 1×1\nbytes: {bytes}"
+        );
+        if resized {
+            summary.push_str(&format!("\nprepared: 4000×3000, 6291456 bytes → 1×1, {bytes} bytes (original file unchanged)"));
+        }
+        let mut app = App::new();
+        apply_turn_event(
+            &mut app,
+            SessionEvent::Intermediate {
+                attempt_id: None,
+                turn_id: TEST_TURN_ID,
+                message: assistant_message(vec![AssistantContent::ToolCall(call.clone())]),
+            },
+        );
+        apply_turn_event(
+            &mut app,
+            SessionEvent::ToolResults {
+                turn_id: TEST_TURN_ID,
+                message: Message::User {
+                    content: vec![UserContent::ToolResult(call.result(vec![
+                        ToolResultContent::text(&summary),
+                        image.to_tool_result_content(),
+                    ]))],
+                },
+                metadata: vec![file_metadata(
+                    "fc_image_read",
+                    Some("image-read"),
+                    "read_image",
+                    ToolCallOutcome::Success,
+                    Vec::new(),
+                )],
+            },
+        );
+        let rendered = rendered_text(&mut app, 120, 12);
+        assert!(
+            rendered.contains(&format!(
+                "◆ read image · capture.png ✓ · png · 1×1 · {bytes} B"
+            )),
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.contains("  resized from 4000×3000 · 6.0 MiB"),
+            resized
+        );
+        for raw in [
+            "image:",
+            "format:",
+            "dimensions:",
+            "bytes:",
+            "prepared:",
+            "[image]",
+            &image.base64(),
+        ] {
+            assert!(!rendered.contains(raw), "found {raw:?} in {rendered}");
+        }
+
+        app.select_for_test(cursor(0, 0));
+        assert_eq!(
+            app.handle_event(key(KeyCode::Char('y'))),
+            Some(UiAction::Copy {
+                text: arguments.into()
+            })
+        );
+        assert_eq!(
+            app.handle_event(key(KeyCode::Char('y'))),
+            Some(UiAction::Copy {
+                text: format!("{summary}\n[image]")
+            })
+        );
+    }
+}
+
+#[test]
+fn unsuccessful_image_reads_render_diagnostics_without_error_envelopes() {
+    for (arguments, outcome, status, diagnostic, expected_path) in [
         (
             json!({"file_path": "capture.png"}),
             ToolCallOutcome::Error,
             ToolCallStatus::Finished,
-            Some("image exceeds the 5 MiB limit; downscale it first"),
+            "image exceeds the 5 MiB limit; downscale it first",
             "capture.png",
         ),
         (
             json!({"file_path": "capture.png"}),
             ToolCallOutcome::Denied,
             ToolCallStatus::Finished,
-            Some("image reads unavailable"),
+            "image reads unavailable",
             "capture.png",
         ),
         (
             json!({"file_path": "capture.png"}),
             ToolCallOutcome::Cancelled,
             ToolCallStatus::Interrupted,
-            Some("image read interrupted"),
+            "image read interrupted",
             "capture.png",
         ),
         (
             json!({"file_path": 42}),
             ToolCallOutcome::Error,
             ToolCallStatus::Finished,
-            Some("invalid file_path"),
+            "invalid file_path",
             "<invalid arguments>",
         ),
     ] {
         let message =
             assistant_message(vec![tool_call("image-read", None, "read_image", arguments)]);
-        let mut result = test_tool_result("image-read", "read_image", &summary);
-        result.content.push(image.to_tool_result_content());
-        result.is_error = !outcome.is_success();
-        let mut metadata = file_metadata("image-read", None, "read_image", outcome, Vec::new());
-        if let Some(diagnostic) = diagnostic {
-            metadata = metadata.with_diagnostic(diagnostic);
-            result.content = vec![ToolResultContent::text(format!(
-                "status: error\nerror: {diagnostic}"
-            ))];
-        }
+        let mut result = test_tool_result(
+            "image-read",
+            "read_image",
+            &format!("status: error\nerror: {diagnostic}"),
+        );
+        result.is_error = true;
+        let metadata = file_metadata("image-read", None, "read_image", outcome, Vec::new())
+            .with_diagnostic(diagnostic);
         let states = vec![Some(crate::app::ToolCallState {
             command_job: None,
             arguments: None,
@@ -854,20 +930,12 @@ fn read_image_renders_path_and_summary_without_image_payloads_or_error_envelopes
         layout_native_message(&message, Some(&states), &mut lines, 120, None);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
-            rendered.contains(&format!("read_image · {expected_path}")),
+            rendered.contains(&format!("read image · {expected_path}")),
             "{rendered}"
         );
-        assert!(!rendered.contains(&image.base64()));
+        assert!(rendered.contains(diagnostic), "{rendered}");
         assert!(!rendered.contains("status: error"));
-        if let Some(diagnostic) = diagnostic {
-            assert!(rendered.contains(diagnostic), "{rendered}");
-            assert!(!rendered.contains("[image]"));
-        } else {
-            for line in summary.lines() {
-                assert!(rendered.contains(line), "missing {line:?}: {rendered}");
-            }
-            assert!(rendered.contains("[image]"));
-        }
+        assert!(!rendered.contains("[image]"));
     }
 }
 

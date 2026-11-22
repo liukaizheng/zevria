@@ -17,12 +17,14 @@ mod native {
     };
     use rig_core::message::{
         AssistantContent, AssistantMessage, CallId, Message, ToolCall, ToolFunction, ToolName,
+        ToolResultContent, UserContent,
     };
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
         time::{Duration, SystemTime},
     };
+    use zevria_content::{ImageReadSummary, PromptImage};
     use zevria_desktop::{
         actions,
         controller::{Phase, SessionController},
@@ -32,8 +34,8 @@ mod native {
         CommandJobId, CommandJobMode, CommandJobNotice, CommandJobNoticeKind, CommandJobSnapshot,
         CommandJobStatus, CommandJobView, FileChange, FileChangeOutput, ModelProfileRef, ModelRole,
         QuestionOption, QuestionPrompt, QuestionPromptKind, QuestionRequest, QuestionRequestId,
-        SessionMode, SubtaskDescriptor, SubtaskId, SubtaskKind, SubtaskStatus, ToolCallOutcome,
-        ToolResultDetail, ToolResultMetadata, TurnId,
+        READ_IMAGE_TOOL_NAME, SessionMode, SubtaskDescriptor, SubtaskId, SubtaskKind,
+        SubtaskStatus, ToolCallOutcome, ToolResultDetail, ToolResultMetadata, TurnId,
     };
     use zevria_model::{ContextTokenSnapshot, ContextTokenSource, TokenUsage};
     use zevria_session_api::{
@@ -61,6 +63,7 @@ mod native {
         ThinkingUnsaved,
         WebSearch,
         WebSearchLive,
+        ImageRead,
         CodeHeavy,
         TranscriptFolds,
         Plan,
@@ -92,6 +95,7 @@ mod native {
                 Self::ThinkingUnsaved => "thinking-unsaved",
                 Self::WebSearch => "web-search",
                 Self::WebSearchLive => "web-search-live",
+                Self::ImageRead => "image-read",
                 Self::CodeHeavy => "code-heavy-answer",
                 Self::TranscriptFolds => "transcript-folds",
                 Self::Plan => "plan-review",
@@ -156,6 +160,7 @@ mod native {
                 Scene::Subtasks,
                 Scene::WebSearch,
                 Scene::WebSearchLive,
+                Scene::ImageRead,
                 Scene::ThinkingLive,
                 Scene::ThinkingRestored,
                 Scene::ThinkingInterrupted,
@@ -173,10 +178,10 @@ mod native {
                 capture(
                     scene,
                     width,
-                    if scene == Scene::TranscriptFolds {
-                        1600.
-                    } else {
-                        840.
+                    match scene {
+                        Scene::TranscriptFolds => 1600.,
+                        Scene::ImageRead => 1080.,
+                        _ => 840.,
                     },
                     zevria_theme::ZEVRIA_GRAPHITE,
                     &directory.join(format!("{}-{}.png", scene.name(), width as u32)),
@@ -186,6 +191,7 @@ mod native {
                 Scene::Working,
                 Scene::Jobs,
                 Scene::Subtasks,
+                Scene::ImageRead,
                 Scene::ThinkingLive,
                 Scene::ThinkingRestored,
                 Scene::ThinkingInterrupted,
@@ -199,7 +205,11 @@ mod native {
                 capture(
                     scene,
                     width,
-                    840.,
+                    if scene == Scene::ImageRead {
+                        1080.
+                    } else {
+                        840.
+                    },
                     light,
                     &directory.join(format!("{}-light-{}.png", scene.name(), width as u32)),
                 )?;
@@ -373,6 +383,12 @@ mod native {
                     cx.notify();
                 });
             }
+            if scene == Scene::ImageRead {
+                controller.update(cx, |c, cx| {
+                    c.model.root.conversation.restore(image_read_items());
+                    cx.notify();
+                });
+            }
             if scene == Scene::TranscriptFolds {
                 controller.update(cx, |c, cx| {
                     c.model.root.conversation.restore(fold_items());
@@ -443,6 +459,37 @@ mod native {
             Ok((window,controller))
         })?;
         settle(&mut cx, window)?;
+        if scene == Scene::ImageRead {
+            cx.update_window(window, |_, window, cx| {
+                window.dispatch_action(Box::new(actions::JumpToBeginning), cx);
+            })?;
+            settle(&mut cx, window)?;
+            // Close the first read through its normal disclosure; leave the other cases open.
+            let block = cx.update_window(window, |_, window, cx| {
+                // The prompt also has a disclosure; scope the click to the first tool row.
+                let output = window
+                    .find_all("copy-output")
+                    .into_iter()
+                    .next()
+                    .expect("the first image read has an output action");
+                let block = output
+                    .path()
+                    .iter()
+                    .rev()
+                    .find(|id| matches!(id, gpui_kit::ElementId::View(_)))
+                    .expect("copy output belongs to a block view")
+                    .clone();
+                window.within(block.clone()).click("block-disclosure", cx);
+                block
+            })?;
+            settle(&mut cx, window)?;
+            cx.update_window(window, |_, window, _| {
+                assert_eq!(
+                    window.within(block).find("block-disclosure").expanded(),
+                    Some(false)
+                );
+            })?;
+        }
         if scene == Scene::Jobs && width == 1240. {
             // Show a docked inspector at 1240 px and an overlay at 720 px.
             cx.update_window(window, |_, window, cx| {
@@ -489,6 +536,105 @@ mod native {
         println!("{}", output.display());
         Ok(())
     }
+    fn image_read_items() -> Vec<zevria_transcript::transcript::TranscriptItem> {
+        use zevria_transcript::transcript::TranscriptItem as T;
+
+        let capture = image_read_raster(1440, 900, zevria_theme::ZEVRIA_GRAPHITE);
+        let resized = image_read_raster(2048, 1536, zevria_theme::ZEVRIA_GRAPHITE_LIGHT);
+        let mut calls = Vec::new();
+        let mut results = Vec::new();
+        let mut metadata = Vec::new();
+        for (file, image, original) in [
+            ("overview.png", Some(&capture), None),
+            ("capture.png", Some(&capture), None),
+            (
+                "big.png",
+                Some(&resized),
+                Some(((4000, 3000), 6 * 1024 * 1024)),
+            ),
+            ("missing.png", None, None),
+        ] {
+            let file_path = format!("docs/shots/{file}");
+            let call = ToolCall::new(
+                CallId::from_wire(file),
+                ToolFunction::new(
+                    ToolName::new(READ_IMAGE_TOOL_NAME).unwrap(),
+                    serde_json::json!({"file_path": file_path}),
+                ),
+            );
+            let path = format!("/Users/engineer/codes/rust/zevria/{file_path}");
+            let (content, outcome, diagnostic) = if let Some(image) = image {
+                let summary = ImageReadSummary {
+                    path,
+                    mime: image.mime_type().into(),
+                    dimensions: image.dimensions(),
+                    bytes: image.encoded_len(),
+                    original,
+                };
+                (
+                    vec![
+                        ToolResultContent::text(summary.to_string()),
+                        image.to_tool_result_content(),
+                    ],
+                    ToolCallOutcome::Success,
+                    None,
+                )
+            } else {
+                let diagnostic =
+                    format!("failed to resolve {path}: No such file or directory (os error 2)");
+                (
+                    vec![ToolResultContent::text(format!(
+                        "status: error\nerror: {diagnostic}"
+                    ))],
+                    ToolCallOutcome::Error,
+                    Some(diagnostic),
+                )
+            };
+            let mut result = call.result(content);
+            result.is_error = !outcome.is_success();
+            results.push(UserContent::ToolResult(result));
+            calls.push(AssistantContent::ToolCall(call));
+            metadata.push(ToolResultMetadata {
+                id: file.into(),
+                call_id: None,
+                tool_name: READ_IMAGE_TOOL_NAME.into(),
+                outcome,
+                diagnostic,
+                detail: None,
+            });
+        }
+        vec![
+            T::Message(Message::user("Inspect the screenshots in docs/shots.")),
+            T::Message(Message::Assistant(AssistantMessage::new(calls))),
+            T::ToolResults {
+                message: Message::User { content: results },
+                metadata,
+                skill_applications: vec![],
+            },
+        ]
+    }
+
+    // A deterministic miniature editor screenshot with a gutter, a header,
+    // and syntax bands. Use different themes to make the two rasters distinct.
+    fn image_read_raster(width: u32, height: u32, t: zevria_theme::ZevriaTheme) -> PromptImage {
+        let pixels = image::RgbaImage::from_fn(width, height, |x, y| {
+            let color = match (x * 100 / width, y * 100 / height) {
+                (_, 0..=10) | (0..=19, _) => t.surfaces.panel,
+                (20, _) | (_, 11) => t.surfaces.border,
+                (28..=65, 24..=27) => t.syntax.keyword,
+                (34..=91, 34..=37) => t.syntax.function,
+                (34..=81, 44..=47) => t.syntax.string,
+                (34..=57, 54..=57) => t.syntax.constant,
+                (28..=73, 64..=67) => t.syntax.keyword,
+                (_, 91..=99) => t.workflow.build,
+                _ => t.surfaces.canvas,
+            };
+            let (r, g, b) = zevria_theme::rgb_channels(color);
+            image::Rgba([r, g, b, 255])
+        });
+        PromptImage::from_rgba(width as usize, height as usize, pixels.as_raw()).unwrap()
+    }
+
     fn fold_items() -> Vec<zevria_transcript::transcript::TranscriptItem> {
         use zevria_transcript::transcript::TranscriptItem as T;
         let thought = |text: &str| {

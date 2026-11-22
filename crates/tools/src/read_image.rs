@@ -13,7 +13,10 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use zevria_content::PromptImage;
-use zevria_content::image_preparation::{self, MAX_IMAGE_SOURCE_BYTES};
+use zevria_content::{
+    ImageReadSummary,
+    image_preparation::{self, MAX_IMAGE_SOURCE_BYTES},
+};
 use zevria_foundation::READ_IMAGE_TOOL_NAME;
 
 use crate::FileToolError;
@@ -86,20 +89,20 @@ impl ReadImageTool {
             ))
         })?;
         let image = prepared.image;
-        let (width, height) = image.dimensions();
-        let mut summary = format!(
-            "image: {}\nformat: {}\ndimensions: {width}×{height}\nbytes: {}",
-            path.display(),
-            image.mime_type(),
-            image.encoded_len()
-        );
-        if let Some(preparation) = prepared.preparation {
-            let (ow, oh) = preparation.original_dimensions;
-            let original_bytes = preparation.original_bytes.expect("file source length");
-            summary.push_str(&format!("\nprepared: {ow}×{oh}, {original_bytes} bytes → {width}×{height}, {} bytes (original file unchanged)", image.encoded_len()));
-        }
+        let summary = ImageReadSummary {
+            path: path.display().to_string(),
+            mime: image.mime_type().into(),
+            dimensions: image.dimensions(),
+            bytes: image.encoded_len(),
+            original: prepared.preparation.map(|preparation| {
+                (
+                    preparation.original_dimensions,
+                    preparation.original_bytes.expect("file source length"),
+                )
+            }),
+        };
         ToolOutput::content(vec![
-            ToolResultContent::text(summary),
+            ToolResultContent::text(summary.to_string()),
             image.to_tool_result_content(),
         ])
         .map_err(|error| FileToolError::io(error.to_string()))

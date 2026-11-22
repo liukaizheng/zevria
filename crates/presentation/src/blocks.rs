@@ -5,8 +5,8 @@
 //! native Zevria and ACP transcripts the same selection, copying, styling,
 //! and cache invalidation rules.
 
-use rig_core::message::{ProviderCallId, Reasoning, ToolCall, ToolResult};
-use zevria_content::{CitedSource, HostedActivity, HostedActivityStatus};
+use rig_core::message::{ProviderCallId, Reasoning, ToolCall, ToolResult, ToolResultContent};
+use zevria_content::{CitedSource, HostedActivity, HostedActivityStatus, ImageReadSummary};
 use zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME;
 use zevria_foundation::ToolCallOutcome;
 use zevria_foundation::ToolResultMetadata;
@@ -393,6 +393,31 @@ pub fn native_tool_status(state: &NativeToolState) -> PresentedToolStatus {
         }
         NativeToolCallStatus::Finished => PresentedToolStatus::Unknown,
     }
+}
+
+/// Project the first text block of a successful image read, without copying the raster.
+pub fn image_read_summary(state: &NativeToolState) -> Option<ImageReadSummary> {
+    let result = state.result.as_ref()?;
+    if result.is_error
+        || state.status != NativeToolCallStatus::Finished
+        || native_tool_status(state).unsuccessful()
+    {
+        return None;
+    }
+    ImageReadSummary::parse(result.content.iter().find_map(ToolResultContent::as_text)?)
+}
+
+pub fn image_facts_label(summary: &ImageReadSummary) -> String {
+    let mime = summary.mime.trim_start_matches("image/");
+    let (width, height) = summary.dimensions;
+    let bytes = crate::jobs::byte_label(summary.bytes);
+    format!("{mime} · {width}×{height} · {bytes}")
+}
+
+pub fn image_resized_label(summary: &ImageReadSummary) -> Option<String> {
+    let ((width, height), bytes) = summary.original?;
+    let bytes = crate::jobs::byte_label(bytes);
+    Some(format!("resized from {width}×{height} · {bytes}"))
 }
 
 /// Decode the historical answer and optional choice note from the correlated tool result.
@@ -1084,8 +1109,6 @@ pub fn provider_call_id(provider: Option<&ProviderCallId>) -> Option<&str> {
 }
 
 pub fn tool_result_plain_text(result: &ToolResult) -> String {
-    use rig_core::message::ToolResultContent;
-
     result
         .content
         .iter()
@@ -1321,5 +1344,72 @@ fn unavailable_decision_disposition_label(
         UnavailableDecisionDisposition::ObjectivelyInapplicable { .. } => {
             "objectively inapplicable"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rig_core::message::{CallId, ToolName};
+    use zevria_foundation::READ_IMAGE_TOOL_NAME;
+
+    use super::*;
+
+    #[test]
+    fn image_summary_requires_a_successful_result() {
+        let path = "/project/capture.png";
+        let args = serde_json::json!({"file_path":"capture.png"});
+        let mut state = NativeToolState::new(NativeToolCallStatus::Finished, &args);
+        assert_eq!(image_read_summary(&state), None);
+
+        state.result = Some(ToolResult {
+            call: CallId::from_wire("image-read"),
+            name: ToolName::new(READ_IMAGE_TOOL_NAME).unwrap(),
+            content: vec![ToolResultContent::text(format!(
+                "image: {path}\nformat: image/png\ndimensions: 1440×900\nbytes: 312013"
+            ))],
+            is_error: false,
+        });
+        assert_eq!(image_read_summary(&state).unwrap().path, path);
+        state.result.as_mut().unwrap().is_error = true;
+        assert_eq!(image_read_summary(&state), None);
+        state.result.as_mut().unwrap().is_error = false;
+
+        for outcome in [
+            ToolCallOutcome::Success,
+            ToolCallOutcome::Error,
+            ToolCallOutcome::Denied,
+            ToolCallOutcome::Cancelled,
+        ] {
+            state.metadata = Some(ToolResultMetadata {
+                id: "image-read".into(),
+                call_id: None,
+                tool_name: READ_IMAGE_TOOL_NAME.into(),
+                outcome,
+                diagnostic: None,
+                detail: None,
+            });
+            assert_eq!(image_read_summary(&state).is_some(), outcome.is_success());
+        }
+        state.metadata = None;
+        state.status = NativeToolCallStatus::Interrupted;
+        assert_eq!(image_read_summary(&state), None);
+    }
+
+    #[test]
+    fn image_labels_use_human_readable_byte_counts() {
+        let mut summary = ImageReadSummary {
+            path: "/project/capture.png".into(),
+            mime: "image/png".into(),
+            dimensions: (1440, 900),
+            bytes: 312_013,
+            original: None,
+        };
+        assert_eq!(image_facts_label(&summary), "png · 1440×900 · 304.7 KiB");
+        assert_eq!(image_resized_label(&summary), None);
+        summary.original = Some(((4000, 3000), 6 * 1024 * 1024));
+        assert_eq!(
+            image_resized_label(&summary).as_deref(),
+            Some("resized from 4000×3000 · 6.0 MiB")
+        );
     }
 }

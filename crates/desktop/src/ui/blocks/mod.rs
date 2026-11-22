@@ -19,7 +19,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::*, *};
 use std::{ops::Range, sync::Arc, time::SystemTime};
-use zevria_foundation::{CommandJobId, CommandJobSnapshot, CommandJobStatus};
+use zevria_content::{
+    ImageReadSummary, decode_image_base64, readable::sanitize_readable, tool_result_image,
+};
+use zevria_foundation::{CommandJobId, CommandJobSnapshot, CommandJobStatus, READ_IMAGE_TOOL_NAME};
 use zevria_presentation::{
     blocks::*,
     conversation::HistoryEntry,
@@ -35,7 +38,8 @@ pub fn tool_label(name: &str) -> &str {
         "edit" => "Edit",
         "write" => "Write",
         "delete" => "Delete",
-        "read" | "read_image" | "skill_read" => "Read",
+        "read" | "skill_read" => "Read",
+        READ_IMAGE_TOOL_NAME => "Image",
         "web_search" => "Search",
         "question" => "Question",
         "create_plan" | "update_plan" | "read_plan" | "submit_plan" => "Plan draft",
@@ -91,7 +95,8 @@ pub struct ToolMeta {
     pub added: usize,
     pub removed: usize,
     pub background: bool,
-    pub job: Option<JobMeta>,
+    pub job: Option<Arc<JobMeta>>,
+    pub image: Option<ImageReadSummary>,
 }
 #[derive(Clone, Debug)]
 pub struct JobMeta {
@@ -296,26 +301,40 @@ impl BlockData {
                 match tool {
                     PresentedTool::Native { call, state } => {
                         let status = native_header_status(call, state);
-                        let mut summary =
-                            tools::tool_summary(&call.function.name, state.arguments.as_ref());
-                        if let Some(list) = block.readable_list_copy() {
+                        let name = call.function.name.as_str();
+                        let is_image_read = name == READ_IMAGE_TOOL_NAME;
+                        let mut summary = tools::tool_summary(name, state.arguments.as_ref());
+                        let image = is_image_read.then(|| image_read_summary(state)).flatten();
+                        if is_image_read {
+                            data.plain = true;
+                            data.body.clear();
+                            if native_tool_status(state).unsuccessful()
+                                || state.result.as_ref().is_some_and(|result| result.is_error)
+                            {
+                                data.body = state
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|metadata| metadata.diagnostic.as_deref())
+                                    .or(data.secondary.as_deref())
+                                    .map(sanitize_readable)
+                                    .unwrap_or_default();
+                            }
+                        } else if let Some(list) = block.readable_list_copy() {
                             data.body = list;
                             data.plain = true;
-                        } else if call.function.name.as_str() == "command" {
+                        } else if name == "command" {
                             data.body = format!(
                                 "```sh\n{}\n```",
                                 tool_argument(state, "command")
                                     .unwrap_or_else(|| data.primary.clone())
                             );
-                        } else if let Some((body, plain)) =
-                            tools::details(&call.function.name, state)
-                        {
+                        } else if let Some((body, plain)) = tools::details(name, state) {
                             data.body = body;
                             data.plain = plain;
                         } else {
                             data.body = format!("```json\n{}\n```", bounded(&data.primary));
                         }
-                        if let Some(metadata) = &state.metadata {
+                        if !is_image_read && let Some(metadata) = &state.metadata {
                             data.changes = metadata.file_changes().to_vec();
                             if !data.changes.is_empty() {
                                 data.body = format!("```json\n{}\n```", bounded(&data.primary));
@@ -350,7 +369,7 @@ impl BlockData {
                             }
                         }
                         let (added, removed) = tools::counts(&data.changes);
-                        let highlights = if call.function.name.as_str() == "command" {
+                        let highlights = if name == "command" {
                             let display = shell::display(&summary);
                             summary = display.text;
                             display.spans
@@ -359,14 +378,18 @@ impl BlockData {
                         };
                         data.kind = BlockKind::Tool {
                             status,
-                            name: call.function.name.to_string(),
+                            name: name.to_owned(),
                             summary,
                             highlights,
                             meta: ToolMeta {
                                 added,
                                 removed,
                                 background: state.is_background_command(),
-                                job: state.command_job.as_ref().map(JobMeta::from),
+                                job: state
+                                    .command_job
+                                    .as_ref()
+                                    .map(|job| Arc::new(JobMeta::from(job))),
+                                image,
                             },
                         };
                         data.gutter = Gutter::Glyph(status);
@@ -401,13 +424,7 @@ impl BlockData {
                     label: image.label(*ordinal),
                 };
                 data.body.clear();
-                let format = match image.mime_type() {
-                    "image/png" => Some(ImageFormat::Png),
-                    "image/jpeg" => Some(ImageFormat::Jpeg),
-                    "image/webp" => Some(ImageFormat::Webp),
-                    "image/gif" => Some(ImageFormat::Gif),
-                    _ => None,
-                };
+                let format = image_format(image.mime_type());
                 data.image =
                     format.map(|f| Arc::new(Image::from_bytes(f, image.encoded_bytes().to_vec())));
             }
@@ -695,6 +712,27 @@ fn plain_html(text: &str) -> String {
             .replace('\n', "<br>")
     )
 }
+fn image_format(mime: &str) -> Option<ImageFormat> {
+    match mime {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" => Some(ImageFormat::Jpeg),
+        "image/webp" => Some(ImageFormat::Webp),
+        "image/gif" => Some(ImageFormat::Gif),
+        _ => None,
+    }
+}
+
+fn image_preview(image: &Arc<Image>, cx: &App) -> Img {
+    img(image.clone())
+        .w_full()
+        .max_h(px(240.))
+        .max_w(px(480.))
+        .object_fit(ObjectFit::Contain)
+        .rounded(px(6.))
+        .border_1()
+        .border_color(tones(cx).hairline)
+}
+
 pub struct BlockView {
     data: BlockData,
     text: Entity<TextViewState>,
@@ -705,6 +743,8 @@ pub struct BlockView {
     diff: Option<Entity<DiffState>>,
     diff_error: Option<String>,
     diff_task: Option<Task<()>>,
+    preview: Option<Arc<Image>>,
+    preview_task: Option<Task<()>>,
     _text: Subscription,
     _output: Subscription,
     _clock: Subscription,
@@ -804,6 +844,8 @@ impl BlockView {
             diff: None,
             diff_error: None,
             diff_task: None,
+            preview: None,
+            preview_task: None,
             _text: watch,
             _output: watch_output,
             _clock: clock,
@@ -814,9 +856,10 @@ impl BlockView {
             focus_subscriptions: Vec::new(),
             controller,
         };
-        if this.shows_details() {
-            this.prepare_diff(cx);
+        if matches!(&this.data.kind, BlockKind::Tool { name, .. } if name == READ_IMAGE_TOOL_NAME) {
+            cx.on_release(Self::clear_preview).detach();
         }
+        this.prepare_details(cx);
         this
     }
     pub fn sync(&mut self, data: BlockData, compact: bool, cx: &mut Context<Self>) {
@@ -836,15 +879,20 @@ impl BlockView {
             || data.sources != self.data.sources
             || matches!((&self.data.kind, &data.kind),
                 (BlockKind::Web(old), BlockKind::Web(new)) if old != new);
+        if data.revision != self.data.revision
+            || data.key != self.data.key
+            || !data.expanded
+            || data.message.is_some_and(|message| message.folded)
+        {
+            self.clear_preview(cx);
+        }
         if data.revision == self.data.revision
             && data.body == self.data.body
             && data.secondary == self.data.secondary
         {
             self.data = data;
             if metadata_changed {
-                if self.shows_details() {
-                    self.prepare_diff(cx);
-                }
+                self.prepare_details(cx);
                 cx.notify();
             }
             return;
@@ -884,13 +932,63 @@ impl BlockView {
             self.diff_error = None;
             self.diff_task = None;
         }
-        if self.shows_details() {
-            self.prepare_diff(cx);
-        }
+        self.prepare_details(cx);
         cx.notify();
     }
     fn shows_details(&self) -> bool {
         self.data.expanded && !self.data.message.is_some_and(|message| message.folded)
+    }
+    fn prepare_details(&mut self, cx: &mut Context<Self>) {
+        if self.shows_details() {
+            self.prepare_diff(cx);
+            self.prepare_preview(cx);
+        }
+    }
+    fn clear_preview(&mut self, cx: &mut App) {
+        self.preview_task = None;
+        if let Some(image) = self.preview.take() {
+            // GPUI caches the decoded raster even after its element is gone.
+            image.remove_asset(cx);
+        }
+    }
+    fn prepare_preview(&mut self, cx: &mut Context<Self>) {
+        if self.preview.is_some()
+            || self.preview_task.is_some()
+            || !matches!(&self.data.kind, BlockKind::Tool { meta, .. } if meta.image.is_some())
+        {
+            return;
+        }
+        let Some(source) = self.data.source else {
+            return;
+        };
+        // A live tail that has not been committed can still show its caption.
+        let conversation = &self.controller.read(cx).model.visible().conversation;
+        let Some(HistoryEntry::Conversation(entry)) = conversation.entry(self.data.row) else {
+            return;
+        };
+        let result = entry
+            .blocks
+            .iter()
+            .find(|block| block.id == source)
+            .and_then(PresentationBlock::native_tool)
+            .and_then(|(_, state)| state.result.as_ref());
+        let Some((mime, data)) = result.and_then(tool_result_image) else {
+            return;
+        };
+        let Some(format) = image_format(mime) else {
+            return;
+        };
+        let data = data.to_owned();
+        let job = cx.background_executor().spawn(async move {
+            decode_image_base64(&data).map(|bytes| Arc::new(Image::from_bytes(format, bytes)))
+        });
+        self.preview_task = Some(cx.spawn(async move |owner, cx| {
+            let preview = job.await;
+            let _ = owner.update(cx, |this, cx| {
+                this.preview = preview;
+                cx.notify();
+            });
+        }));
     }
     fn prepare_diff(&mut self, cx: &mut Context<Self>) {
         if self.diff.is_some() || self.diff_task.is_some() || self.data.changes.is_empty() {
@@ -1597,7 +1695,10 @@ impl Render for BlockView {
                 highlights,
                 meta,
             } => {
-                let path = matches!(name.as_str(), "edit" | "write" | "read" | "delete");
+                let path = matches!(
+                    name.as_str(),
+                    "edit" | "write" | "read" | "delete" | READ_IMAGE_TOOL_NAME
+                );
                 let displayed = if path {
                     super::sidebar::middle_path(summary, 64)
                 } else {
@@ -1655,6 +1756,14 @@ impl Render for BlockView {
                             .truncate()
                             .child(StyledText::new(displayed).with_highlights(header_highlights)),
                     );
+                if let Some(image) = &meta.image {
+                    row = row.child(
+                        style::meta()
+                            .flex_shrink_0()
+                            .text_color(t.text.muted)
+                            .child(image_facts_label(image)),
+                    );
+                }
                 if meta.added > 0 {
                     row = row.child(
                         style::meta()
@@ -1722,7 +1831,37 @@ impl Render for BlockView {
                 }
                 row = row.child(self.actions(window, cx));
                 content = content.child(row);
-                if self.data.expanded {
+                if name == READ_IMAGE_TOOL_NAME && self.shows_details() {
+                    if let Some(image) = &meta.image {
+                        let mut details = div()
+                            .pl(px(36.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .children(self.preview.as_ref().map(|image| image_preview(image, cx)))
+                            .child(
+                                style::mono()
+                                    .text_color(t.text.muted)
+                                    .child(image.path.clone()),
+                            );
+                        if let Some(mut resized) = image_resized_label(image) {
+                            resized[..1].make_ascii_uppercase();
+                            details = details.child(
+                                style::meta()
+                                    .text_color(t.text.secondary)
+                                    .child(format!("{resized} · original unchanged")),
+                            );
+                        }
+                        content = content.child(details);
+                    } else if !self.data.body.is_empty() {
+                        content = content.child(
+                            style::mono()
+                                .pl(px(36.))
+                                .text_color(style::glyph_color(*status, ink, cx))
+                                .child(self.data.body.clone()),
+                        );
+                    }
+                } else if name != READ_IMAGE_TOOL_NAME && self.data.expanded {
                     let mut well = div()
                         .w_full()
                         .p(px(12.))
@@ -1918,16 +2057,7 @@ impl Render for BlockView {
                 if self.data.expanded
                     && let Some(image) = &self.data.image
                 {
-                    content = content.child(
-                        img(image.clone())
-                            .w_full()
-                            .max_h(px(240.))
-                            .max_w(px(480.))
-                            .object_fit(ObjectFit::Contain)
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(tones(cx).hairline),
-                    );
+                    content = content.child(image_preview(image, cx));
                 }
             }
             BlockKind::Jobs { finished, running } => {
@@ -2091,9 +2221,122 @@ impl Render for BlockView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[::core::prelude::v1::test]
-    fn image_reads_have_a_read_label() {
-        assert_eq!(tool_label("read_image"), "Read");
+    fn image_reads_have_an_image_label() {
+        assert_eq!(tool_label(READ_IMAGE_TOOL_NAME), "Image");
+    }
+
+    fn image_read_block(
+        arguments: &str,
+        content: Vec<rig_core::message::ToolResultContent>,
+        outcome: zevria_foundation::ToolCallOutcome,
+        diagnostic: Option<&str>,
+    ) -> PresentationBlock {
+        use rig_core::message::{ToolFunction, ToolName};
+
+        let call = zevria_content::message::tool_call_from_wire_text(
+            "fc_image_read",
+            "image-read",
+            ToolFunction::new(
+                ToolName::new(READ_IMAGE_TOOL_NAME).unwrap(),
+                serde_json::from_str(arguments).unwrap(),
+            ),
+            arguments.to_owned(),
+        );
+        let mut state = NativeToolState::new(
+            NativeToolCallStatus::Finished,
+            &call.function.arguments_value(),
+        );
+        let mut result = call.result(content);
+        result.is_error = !outcome.is_success();
+        state.result = Some(result);
+        state.metadata = Some(zevria_foundation::ToolResultMetadata {
+            id: "image-read".into(),
+            call_id: None,
+            tool_name: READ_IMAGE_TOOL_NAME.into(),
+            outcome,
+            diagnostic: diagnostic.map(str::to_owned),
+            detail: None,
+        });
+        PresentationBlock {
+            id: PresentationBlockId(1),
+            revision: 0,
+            role: Some(PresentationRole::Assistant),
+            prompt_group: None,
+            prompt: None,
+            visibility: BlockVisibility::Always,
+            kind: PresentationBlockKind::Tool(PresentedTool::Native {
+                call: Box::new(call),
+                state: Box::new(state),
+            }),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn image_read_projects_facts_without_a_body_or_eager_preview_and_preserves_copy() {
+        let arguments = r#"{ "file_path": "docs/capture.png" }"#;
+        let image = zevria_content::PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+        let summary = format!(
+            "image: /project/docs/capture.png\nformat: image/png\ndimensions: 1×1\nbytes: {}",
+            image.encoded_len()
+        );
+        let block = image_read_block(
+            arguments,
+            vec![
+                rig_core::message::ToolResultContent::text(&summary),
+                image.to_tool_result_content(),
+            ],
+            zevria_foundation::ToolCallOutcome::Success,
+            None,
+        );
+        let data = BlockData::block("epoch", &block);
+        let BlockKind::Tool {
+            status,
+            summary: target,
+            meta,
+            ..
+        } = data.kind
+        else {
+            panic!("expected an image read tool row");
+        };
+        assert_eq!(status, StatusIcon::Done);
+        assert_eq!(target, "docs/capture.png");
+        assert_eq!(meta.image, ImageReadSummary::parse(&summary));
+        assert!(meta.image.is_some());
+        assert!(data.body.is_empty() && data.plain);
+        assert!(data.image.is_none());
+        assert_eq!(data.primary, arguments);
+        assert_eq!(data.secondary, Some(format!("{summary}\n[image]")));
+    }
+
+    #[::core::prelude::v1::test]
+    fn failed_image_read_projects_a_plain_diagnostic_without_changing_copy() {
+        let arguments = r#"{ "file_path": "missing.png" }"#;
+        let diagnostic = "failed to resolve /project/missing.png: No such file";
+        let raw = format!("status: error\nerror: {diagnostic}");
+        let styled = format!("\x1b[31m{diagnostic}\x1b[0m");
+        for (detail, expected) in [(Some(styled.as_str()), diagnostic), (None, raw.as_str())] {
+            let block = image_read_block(
+                arguments,
+                vec![rig_core::message::ToolResultContent::text(&raw)],
+                zevria_foundation::ToolCallOutcome::Error,
+                detail,
+            );
+            let data = BlockData::block("epoch", &block);
+            assert!(matches!(
+                data.kind,
+                BlockKind::Tool {
+                    status: StatusIcon::Failed,
+                    meta: ToolMeta { image: None, .. },
+                    ..
+                }
+            ));
+            assert!(data.plain);
+            assert_eq!(data.body, expected);
+            assert_eq!(data.primary, arguments);
+            assert_eq!(data.secondary.as_deref(), Some(raw.as_str()));
+        }
     }
 
     #[::core::prelude::v1::test]

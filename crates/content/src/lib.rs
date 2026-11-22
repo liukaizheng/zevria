@@ -7,6 +7,8 @@ pub use citations::CitedSource;
 pub mod image_diagnostics;
 pub mod image_facts;
 pub mod image_preparation;
+pub mod image_read;
+pub use image_read::{ImageReadSummary, decode_image_base64, tool_result_image};
 pub mod prompt;
 pub mod readable;
 pub mod reasoning;

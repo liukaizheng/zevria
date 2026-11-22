@@ -136,11 +136,18 @@ During ordinary root **Build** and **Plan** turns, the model can call
 `read_image` with `{ "file_path": "capture.png" }` to inspect a local screenshot,
 diagram, or UI capture. The result contains a readable summary (canonical path,
 MIME format, dimensions, and byte count) followed by a real image content block,
-not base64 text. The TUI shows `read_image · capture.png`, the summary, and
-`[image]`; ACP clients receive an image-output omission placeholder rather than
-the payload. Explore children, Build children, and ensemble workers do not
-register this tool. Ensemble root synthesis keeps its narrower explicit tool
-allow-lists and does not enable it.
+not base64 text. The TUI shows a compact line such as
+`◆ read image · capture.png ✓ · png · 1440×900 · 304.7 KiB`, with an indented
+`resized from …` line if the image was prepared. Desktop shows an **Image** row
+with the requested path and image facts. Expand it to see the returned image
+(up to 480×240), its canonical path, and the original size if it was resized.
+Failures show a diagnostic instead of a preview. Raw tool input and output
+copies are unchanged in both frontends.
+
+ACP clients receive an image-output omission placeholder rather than the
+payload. Explore children, Build children, and ensemble workers do not register
+this tool. Ensemble root synthesis keeps its narrower explicit tool allow-lists
+and does not enable it.
 
 Relative paths resolve against the tool's startup workspace. Absolute paths may
 point **anywhere readable**, including outside that workspace; symlinks are
