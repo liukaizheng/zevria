@@ -19,6 +19,7 @@ use rig_agent::tool::server::ToolServerHandle;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc::Receiver};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 use zevria_content::assistant_plain_text;
 use zevria_core::SessionEngine;
 use zevria_foundation::SessionMode;
@@ -107,18 +108,21 @@ fn build_policies(child_workspace: &Path, startup_workspace: &Path) -> SessionPo
 }
 
 /// Spawn the supervisor task. Children overlap freely: each request gets its
-/// own worker. Aborting the returned handle cancels the accept loop and, by
-/// dropping its `JoinSet`, every still-running child worker (whose dropped
-/// oneshots fail the awaiting tool calls).
+/// own worker. Cancelling `shutdown` (or dropping all launchers) stops the
+/// accept loop, closes the request channel, and drains running workers;
+/// aborting the returned handle drops the `JoinSet` immediately.
 pub(crate) fn spawn_supervisor(
     mut requests: Receiver<SubtaskLaunchRequest>,
     config: SubtaskSupervisorConfig,
+    shutdown: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut workers = JoinSet::new();
         let permits = Arc::new(Semaphore::new(config.max_concurrent_subtasks.max(1)));
         loop {
             tokio::select! {
+                biased;
+                () = shutdown.cancelled() => break,
                 request = requests.recv() => match request {
                     Some(request) => {
                         let permits = permits.clone();
@@ -141,6 +145,8 @@ pub(crate) fn spawn_supervisor(
                 Some(_) = workers.join_next() => {}
             }
         }
+        requests.close();
+        drop(requests);
         while workers.join_next().await.is_some() {}
     })
 }
@@ -667,6 +673,7 @@ mod tests {
                 events_tx,
                 subsessions_dir.clone(),
             ),
+            CancellationToken::new(),
         );
         let (metadata, outcome) = channels
             .launcher
@@ -730,7 +737,7 @@ mod tests {
         let mut config =
             test_supervisor_config("ws://127.0.0.1:1".into(), events, subsessions.clone());
         config.guidance = snapshot;
-        let supervisor = spawn_supervisor(channels.requests, config);
+        let supervisor = spawn_supervisor(channels.requests, config, CancellationToken::new());
         // A repaired global file is deliberately not retried; a removed project
         // file does not remove the inherited contribution from late children.
         std::fs::write(global.join("AGENTS.md"), "REPAIRED_MUST_NOT_LOAD").unwrap();
@@ -786,6 +793,7 @@ mod tests {
                 events_tx,
                 workspace.path().join("subsessions"),
             ),
+            CancellationToken::new(),
         );
         let (_metadata, outcome) = channels
             .launcher
@@ -832,6 +840,7 @@ mod tests {
                 events_tx,
                 workspace.path().join("subsessions"),
             ),
+            CancellationToken::new(),
         );
         let cancellation = tokio_util::sync::CancellationToken::new();
         let parent_turn =
@@ -883,5 +892,45 @@ mod tests {
         .expect("cancelled status should be published promptly");
         supervisor.abort();
         let _ = supervisor.await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_token_stops_supervisor_while_launcher_is_still_held() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (events_tx, _events_rx) = session_event_channel(32);
+        let channels = subtask_channels("root-id", events_tx.clone());
+        let shutdown = CancellationToken::new();
+        let supervisor = spawn_supervisor(
+            channels.requests,
+            test_supervisor_config(
+                "ws://127.0.0.1:1".into(),
+                events_tx,
+                workspace.path().join("subsessions"),
+            ),
+            shutdown.clone(),
+        );
+
+        // Keep `channels.launcher` alive across shutdown (mirroring a shared
+        // `ToolServerHandle` clone held by another subsystem such as MCP).
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), supervisor)
+            .await
+            .expect("explicit shutdown must not wait for all launcher clones to drop")
+            .expect("supervisor exits cleanly");
+
+        let error = channels
+            .launcher
+            .launch(
+                "late-call",
+                0,
+                "late task",
+                SubtaskKind::Explore,
+                "after shutdown",
+                turn(),
+                None,
+            )
+            .await
+            .expect_err("closed supervisor rejects subsequent launches");
+        assert!(error.to_string().contains("supervisor"));
     }
 }

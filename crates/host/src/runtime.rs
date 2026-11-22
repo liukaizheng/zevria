@@ -435,8 +435,11 @@ pub(crate) fn transcript_recovery_notice(path: &Path, malformed_lines: usize) ->
     })
 }
 
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+const MCP_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 async fn join_with_grace(mut task: tokio::task::JoinHandle<()>, name: &str) -> anyhow::Result<()> {
-    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+    match tokio::time::timeout(SHUTDOWN_GRACE, &mut task).await {
         Ok(result) => result.with_context(|| format!("{name} task failed")),
         Err(_) => {
             tracing::warn!(target: "zevria::runtime",
@@ -529,6 +532,11 @@ pub struct RuntimeTaskExit {
     pub error: Option<String>,
 }
 
+pub(super) struct SubtaskSupervisor {
+    pub(super) shutdown: tokio_util::sync::CancellationToken,
+    pub(super) task: tokio::task::JoinHandle<()>,
+}
+
 /// Complete running-session ownership. Frontends receive cloned command
 /// senders and take the sole event receiver, while this handle retains task,
 /// transcript, and shutdown ownership.
@@ -551,7 +559,7 @@ pub struct RunningSession {
     event_rx: Option<SessionEventReceiver>,
     exit_rx: Option<UnboundedReceiver<RuntimeTaskExit>>,
     engine_task: Option<tokio::task::JoinHandle<()>>,
-    supervisor_task: Option<tokio::task::JoinHandle<()>>,
+    supervisor: Option<SubtaskSupervisor>,
 }
 
 impl RunningSession {
@@ -610,10 +618,12 @@ impl RunningSession {
             .context("running session background-exit receiver was already taken")
     }
 
-    /// Preserve the established ownership sequence: signal Shutdown, drop
-    /// command and event endpoints, await engine, await supervisor, then remove
-    /// an eligible existing abandoned transcript best-effort. An absent pending
-    /// transcript is normal and shutdown does not materialize it.
+    /// Preserve the two-phase ownership sequence: signal Shutdown, drop
+    /// command and event endpoints, await the engine first, then concurrently
+    /// shut down the independent leaf subsystems (subtask supervisor, command
+    /// jobs, and MCP manager), and finally remove an eligible existing
+    /// abandoned transcript best-effort. An absent pending transcript is normal
+    /// and shutdown does not materialize it.
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
         if let Some(command_tx) = self.command_tx.take() {
             let _ = command_tx.send(SessionCommand::Control(
@@ -625,28 +635,39 @@ impl RunningSession {
         self.event_tx.take();
         self.exit_rx.take();
 
+        // Phase 1: Stop the coordinator (engine) first so transcript durability
+        // completes and no new subtasks, command jobs, or MCP calls can start.
         let engine_shutdown = if let Some(engine_task) = self.engine_task.take() {
             join_with_grace(engine_task, "session engine").await
         } else {
             Ok(())
         };
-        // Completion publication cannot schedule work after the engine exits.
-        if let Some(jobs) = &self.command_jobs {
-            jobs.close();
-        }
-        let supervisor_shutdown = if let Some(supervisor_task) = self.supervisor_task.take() {
-            join_with_grace(supervisor_task, "subtask supervisor").await
-        } else {
-            Ok(())
-        };
 
-        if let Some(jobs) = self.command_jobs.take() {
-            jobs.shutdown(std::time::Duration::from_secs(5)).await;
-        }
+        // Phase 2: Tear down all remaining independent leaf subsystems concurrently.
+        let supervisor = self.supervisor.take();
+        let command_jobs = self.command_jobs.take();
+        let mcp = self.mcp.take();
 
-        if let Some(mcp) = self.mcp.take() {
-            mcp.shutdown(std::time::Duration::from_secs(5)).await;
-        }
+        let (supervisor_shutdown, (), ()) = tokio::join!(
+            async {
+                if let Some(supervisor) = supervisor {
+                    supervisor.shutdown.cancel();
+                    join_with_grace(supervisor.task, "subtask supervisor").await
+                } else {
+                    Ok(())
+                }
+            },
+            async {
+                if let Some(jobs) = command_jobs {
+                    jobs.shutdown(SHUTDOWN_GRACE).await;
+                }
+            },
+            async {
+                if let Some(mcp) = mcp {
+                    mcp.shutdown(MCP_SHUTDOWN_GRACE).await;
+                }
+            },
+        );
 
         let transcript_is_empty = self.cleanup_abandoned_history
             && transcript::is_abandoned_root(&self.restoration.transcript_path);
@@ -935,7 +956,7 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(worker.restoration.plan_state, PlanWorkflowState::Idle);
         assert_eq!(worker.restoration.selected_mode, SessionMode::Build);
-        assert!(worker.supervisor_task.is_none());
+        assert!(worker.supervisor.is_none());
         assert!(crate::session_lease::RootSessionLease::acquire(&path).is_err());
         assert!(
             transcript::list_sessions(&transcript::sessions_dir(workspace.path()))
@@ -1266,7 +1287,10 @@ mod tests {
             event_rx: Some(event_rx),
             exit_rx: Some(exit_rx),
             engine_task: Some(engine_task),
-            supervisor_task: Some(supervisor_task),
+            supervisor: Some(SubtaskSupervisor {
+                shutdown: tokio_util::sync::CancellationToken::new(),
+                task: supervisor_task,
+            }),
         };
 
         running.shutdown().await.expect("clean shutdown");
@@ -1337,7 +1361,10 @@ mod tests {
             event_rx: Some(event_rx),
             exit_rx: Some(exit_rx),
             engine_task: Some(engine_task),
-            supervisor_task: Some(supervisor_task),
+            supervisor: Some(SubtaskSupervisor {
+                shutdown: tokio_util::sync::CancellationToken::new(),
+                task: supervisor_task,
+            }),
         };
 
         let error = running
@@ -1345,5 +1372,38 @@ mod tests {
             .await
             .expect_err("engine panic must propagate through cleanup");
         assert!(error.to_string().contains("session engine task failed"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_mcp_exits_promptly_without_waiting_for_supervisor_grace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = crate::config::test_config();
+        config.mcp.enabled = true;
+        config.mcp.servers.insert(
+            "disabled".parse().unwrap(),
+            zevria_mcp::config::McpServerConfig {
+                enabled: false,
+                command: Some("disabled-mcp".into()),
+                ..Default::default()
+            },
+        );
+        let running = start_session(
+            &config,
+            workspace.path(),
+            SessionStart::New {
+                inherited_models: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(running.mcp.is_some());
+        assert!(running.supervisor.is_some());
+        let path = running.restoration.transcript_path.clone();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), running.shutdown())
+            .await
+            .expect("shutdown with active McpManager must not stall for supervisor grace")
+            .expect("clean shutdown");
+        assert_session_lease_reclaimed(&path).await;
     }
 }

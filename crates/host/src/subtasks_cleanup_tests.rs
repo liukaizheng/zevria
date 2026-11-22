@@ -16,6 +16,7 @@ async fn cancellation_and_supervisor_abort_quiesce_commands_before_workspace_reu
         let supervisor = spawn_supervisor(
             channels.requests,
             supervisor_config(&config, root.path(), events, 1),
+            CancellationToken::new(),
         );
         let tool = LaunchSubtasksTool::new(channels.launcher.clone(), root.path().to_path_buf());
         let cancellation = CancellationToken::new();
@@ -208,6 +209,7 @@ async fn a_cancelled_permit_waiter_never_starts_and_releases_its_workspace() {
     let supervisor = spawn_supervisor(
         channels.requests,
         supervisor_config(&config, root.path(), events, 1),
+        CancellationToken::new(),
     );
     let workspace = |name: &str| {
         let path = root.path().join(name);
@@ -293,7 +295,7 @@ async fn build_tools_execute_with_inherited_guidance_and_persist_artifacts_and_b
     let channels = zevria_session_api::subtask_channels("root", events.clone());
     let mut child_config = supervisor_config(&config, root.path(), events, 1);
     child_config.guidance = snapshot;
-    let supervisor = spawn_supervisor(channels.requests, child_config);
+    let supervisor = spawn_supervisor(channels.requests, child_config, CancellationToken::new());
     std::fs::write(root.path().join("AGENTS.md"), "LATE_GUIDANCE_MUST_NOT_LOAD").unwrap();
     let tool = LaunchSubtasksTool::new(channels.launcher.clone(), root.path().to_path_buf());
     let call = tokio::spawn(async move {

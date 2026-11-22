@@ -3,10 +3,10 @@
 //! capabilities and dependent-task lifetime remain explicit profile choices.
 use super::{
     RestoredAgentRun, RestoredSubtask, RunningSession, SessionRestoration, SessionStart,
-    append_guidance_notices, build_explore_tools, build_session_policies, build_tools,
-    command_job_limits, ensure_worker_ignore_guard, guidance_roots, load_session_skills,
-    observe_task, observe_task_retaining, preflight_restoration, prepare_session_lease,
-    sessions_dir, transcript_recovery_notice, worker_policies, worker_tools,
+    SubtaskSupervisor, append_guidance_notices, build_explore_tools, build_session_policies,
+    build_tools, command_job_limits, ensure_worker_ignore_guard, guidance_roots,
+    load_session_skills, observe_task, observe_task_retaining, preflight_restoration,
+    prepare_session_lease, sessions_dir, transcript_recovery_notice, worker_policies, worker_tools,
 };
 use crate::{
     config::Config,
@@ -666,8 +666,9 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
     let model_snapshots = engine.restored_model_contexts()?;
     let (command_tx, command_rx) = unbounded_channel();
     let supervisor = match root {
-        Some(root) => Some((
-            spawn_supervisor(
+        Some(root) => {
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let task = spawn_supervisor(
                 root.requests,
                 SubtaskSupervisorConfig {
                     explore_factory: ProviderRouterFactory::new(
@@ -722,9 +723,10 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
                         .expect("root captured guidance")
                         .clone(),
                 },
-            ),
-            root.keepalive,
-        )),
+                shutdown.clone(),
+            );
+            Some((task, shutdown, root.keepalive))
+        }
         None => None,
     };
     let (exit_tx, exit_rx) = unbounded_channel();
@@ -734,10 +736,13 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
         let _lease = engine_lease;
         engine.run(command_rx, engine_events).await
     });
-    let (engine_task, supervisor_task) = match supervisor {
-        Some((supervisor, keepalive)) => (
+    let (engine_task, supervisor) = match supervisor {
+        Some((supervisor, shutdown, keepalive)) => (
             observe_task_retaining("session engine", engine_handle, exit_tx.clone(), keepalive),
-            Some(observe_task("subtask supervisor", supervisor, exit_tx)),
+            Some(SubtaskSupervisor {
+                shutdown,
+                task: observe_task("subtask supervisor", supervisor, exit_tx),
+            }),
         ),
         None => (observe_task("session engine", engine_handle, exit_tx), None),
     };
@@ -789,7 +794,7 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
         event_rx: Some(event_rx),
         exit_rx: Some(exit_rx),
         engine_task: Some(engine_task),
-        supervisor_task,
+        supervisor,
     })
 }
 

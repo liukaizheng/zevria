@@ -262,13 +262,33 @@ impl Transport<RoleClient> for StdioTransport {
 
     async fn close(&mut self) -> Result<(), Self::Error> {
         let _ = self.io.close().await;
-        if timeout(Duration::from_millis(750), self.child.wait())
-            .await
-            .is_err()
+        #[cfg(unix)]
         {
-            self.tree.kill();
-            let _ = self.child.wait().await;
+            if timeout(Duration::from_millis(250), self.child.wait())
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+            self.tree.terminate();
+            if timeout(Duration::from_millis(250), self.child.wait())
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
         }
+        #[cfg(not(unix))]
+        {
+            if timeout(Duration::from_millis(500), self.child.wait())
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        self.tree.kill();
+        let _ = self.child.wait().await;
         Ok(())
     }
 }

@@ -51,6 +51,9 @@ fn serve() {
         output.flush().unwrap();
     }
     std::fs::write("exit-marker", "stdin closed").unwrap();
+    if std::env::args().any(|arg| arg == "--ignore-eof") {
+        std::thread::sleep(Duration::from_secs(10));
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -101,6 +104,31 @@ async fn main() {
         "stdin closed"
     );
     assert!(!tools.snapshot().contains("mcp__stdio__env"));
+
+    // Verify a stdio server that ignores stdin EOF is still reaped promptly
+    // (SIGTERM on Unix, kill on Windows) without hanging for the full grace window.
+    let stubborn = McpConfigSource {
+        revision: "stubborn".into(),
+        config: serde_json::from_value(json!({
+            "startup_timeout_seconds": 5,
+            "servers": {
+                "stubborn": {"command":exe,"args":["--serve","--ignore-eof"],"cwd":"fixture","required":true}
+            }
+        }))
+        .unwrap(),
+    };
+    let manager = McpManager::start(stubborn, vec![], dir.path().into(), tools.clone(), None)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    manager.shutdown(Duration::from_secs(5)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "stubborn stdio server shutdown took {:?}",
+        started.elapsed()
+    );
+    assert!(!tools.snapshot().contains("mcp__stubborn__env"));
+
     assert!(
         McpManager::start(source(true), vec![], dir.path().into(), tools, None)
             .await

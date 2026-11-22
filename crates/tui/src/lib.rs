@@ -30,7 +30,7 @@ use app::{AppEffect, HistoryEntry, OperationKind, PlanChoice, Selection, ToolCal
 use ratatui::crossterm::event::{Event, KeyCode};
 #[cfg(test)]
 use rig_core::message::{AssistantContent, Message, UserContent};
-pub use runtime::{UiContext, UiOutcome, run_ui};
+pub use runtime::{TerminalEvents, UiContext, UiOutcome, run_ui};
 #[cfg(test)]
 use status::format_token_count;
 #[cfg(test)]

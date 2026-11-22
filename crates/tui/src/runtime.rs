@@ -3,9 +3,12 @@
 use crate::{
     app::UiAction,
     command::SlashCommand,
+    input::InputReader,
     workspace::{ClipboardOrigin, SessionViews},
 };
+use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -20,6 +23,76 @@ use zevria_workflow::PlanHandoff;
 mod session_replacement_tests;
 
 const MAX_EVENT_BURST: usize = 64;
+const MAX_STARTUP_EVENT_BUFFER: usize = 64;
+
+/// Long-lived terminal event reader shared across session startup, UI runs,
+/// and session replacements so `Ctrl-C` can interrupt startup without dropping
+/// typeahead or spawning duplicate crossterm reader threads. The shared reader
+/// also reassembles Windows paste bursts before they reach either consumer.
+pub struct TerminalEvents {
+    reader: InputReader,
+    buffered: VecDeque<Event>,
+}
+
+impl Default for TerminalEvents {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TerminalEvents {
+    pub fn new() -> Self {
+        Self {
+            reader: InputReader::new(),
+            buffered: VecDeque::new(),
+        }
+    }
+
+    /// Wait for a normalized `Ctrl-C` key press (or input stream EOF) while
+    /// buffering other events for replay when `run_ui` starts.
+    pub async fn wait_for_interrupt(&mut self) -> anyhow::Result<()> {
+        if let Some(pos) = self.buffered.iter().position(is_ctrl_c) {
+            self.buffered.drain(..=pos);
+            return Ok(());
+        }
+        loop {
+            match self.reader.next().await {
+                Some(Ok(event)) => {
+                    if buffer_or_interrupt(&mut self.buffered, event) {
+                        return Ok(());
+                    }
+                }
+                Some(Err(error)) => return Err(error.into()),
+                None => return Ok(()),
+            }
+        }
+    }
+
+    async fn next(&mut self) -> Option<std::io::Result<Event>> {
+        if let Some(event) = self.buffered.pop_front() {
+            return Some(Ok(event));
+        }
+        self.reader.next().await
+    }
+}
+
+fn is_ctrl_c(event: &Event) -> bool {
+    matches!(
+        crate::input::normalize(event.clone()),
+        crate::input::InputEvent::User(crate::input::UserInput::Key(key))
+            if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL
+    )
+}
+
+fn buffer_or_interrupt(buffered: &mut VecDeque<Event>, event: Event) -> bool {
+    if is_ctrl_c(&event) {
+        return true;
+    }
+    if buffered.len() < MAX_STARTUP_EVENT_BUFFER {
+        buffered.push_back(event);
+    }
+    false
+}
 
 fn send_turn_action(
     commands: &UnboundedSender<SessionCommand>,
@@ -136,12 +209,12 @@ pub enum UiOutcome {
 /// Run the terminal event loop until the user quits or switches sessions.
 pub async fn run_ui(
     terminal: &mut ratatui::DefaultTerminal,
+    events: &mut TerminalEvents,
     mut views: SessionViews,
     commands: &UnboundedSender<SessionCommand>,
     updates_rx: &mut SessionEventReceiver,
     context: &UiContext,
 ) -> anyhow::Result<UiOutcome> {
-    let mut events = crate::input::InputReader::new();
     let mut engine_done = false;
     let mut clipboard = crate::clipboard::ClipboardService::new();
     let mut files = crate::workspace_files::FileSearchService::new(
@@ -397,4 +470,53 @@ fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
         crossterm::clipboard::CopyToClipboard::to_clipboard_from(text)
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod startup_interrupt_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyEventKind};
+
+    #[test]
+    fn startup_interrupt_recognizes_normalized_ctrl_c_and_buffers_other_events() {
+        let mut buffered = VecDeque::new();
+        let typed = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let resize = Event::Resize(120, 40);
+        let pasted = Event::Paste("first\nsecond".into());
+        let release_ctrl_c = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ));
+        let super_ctrl_c = Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SUPER,
+        ));
+        assert!(!buffer_or_interrupt(&mut buffered, typed.clone()));
+        assert!(!buffer_or_interrupt(&mut buffered, resize.clone()));
+        assert!(!buffer_or_interrupt(&mut buffered, pasted.clone()));
+        assert!(!buffer_or_interrupt(&mut buffered, release_ctrl_c.clone()));
+        assert!(!buffer_or_interrupt(&mut buffered, super_ctrl_c.clone()));
+        assert_eq!(buffered.len(), 5);
+        assert_eq!(buffered[0], typed);
+        assert_eq!(buffered[1], resize);
+        assert_eq!(buffered[2], pasted);
+
+        for press in [
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL)),
+        ] {
+            assert!(buffer_or_interrupt(&mut buffered, press));
+        }
+        assert_eq!(buffered.len(), 5);
+    }
+
+    #[test]
+    fn startup_event_buffer_is_bounded() {
+        let mut buffered = VecDeque::new();
+        for _ in 0..(MAX_STARTUP_EVENT_BUFFER + 16) {
+            assert!(!buffer_or_interrupt(&mut buffered, Event::Resize(80, 24)));
+        }
+        assert_eq!(buffered.len(), MAX_STARTUP_EVENT_BUFFER);
+    }
 }

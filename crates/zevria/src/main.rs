@@ -22,7 +22,7 @@ use crossterm::event::{
 };
 use zevria_foundation::logging;
 use zevria_transcript::transcript;
-use zevria_tui::{App, SessionViews, UiContext, UiOutcome, run_ui};
+use zevria_tui::{App, SessionViews, TerminalEvents, UiContext, UiOutcome, run_ui};
 use zevria_tui_widgets::render_startup_frame;
 
 use crate::config::Config;
@@ -265,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut terminal = ratatui::try_init()?;
+    let mut terminal_events = TerminalEvents::new();
     let mut alternate_scroll = AlternateScrollGuard::enable();
     let mut bracketed_paste = BracketedPasteGuard::enable();
     let mut keyboard_enhancement = KeyboardEnhancementGuard::push();
@@ -274,7 +275,15 @@ async fn main() -> anyhow::Result<()> {
     // fresh root with the approved Plan handoff. Both replacements retain the
     // source root's committed Build/Plan selections, not its conversation.
     let session_outcome = loop {
-        match run_session(&mut terminal, &app_config, &workspace, next_start).await {
+        match run_session(
+            &mut terminal,
+            &mut terminal_events,
+            &app_config,
+            &workspace,
+            next_start,
+        )
+        .await
+        {
             Ok(outcome) => match replacement_start(outcome) {
                 Some(start) => next_start = start,
                 None => break Ok(()),
@@ -282,6 +291,7 @@ async fn main() -> anyhow::Result<()> {
             Err(error) => break Err(error),
         }
     };
+    drop(terminal_events);
     keyboard_enhancement.pop();
     bracketed_paste.disable();
     alternate_scroll.disable();
@@ -311,6 +321,7 @@ fn replacement_start(outcome: UiOutcome) -> Option<runtime::SessionStart> {
 /// function restores only terminal presentation and drives the UI frontend.
 async fn run_session(
     terminal: &mut ratatui::DefaultTerminal,
+    terminal_events: &mut TerminalEvents,
     app_config: &Config,
     workspace: &Path,
     start: runtime::SessionStart,
@@ -325,7 +336,18 @@ async fn run_session(
         },
     )?;
 
-    let mut running = runtime::start_session(app_config, workspace, start).await?;
+    let mut running = {
+        let starting = runtime::start_session(app_config, workspace, start);
+        tokio::pin!(starting);
+        tokio::select! {
+            biased;
+            interrupted = terminal_events.wait_for_interrupt() => {
+                interrupted?;
+                return Ok(UiOutcome::Quit);
+            }
+            started = &mut starting => started?,
+        }
+    };
     let restoration = running.take_restored();
     let model_profiles = zevria_foundation::ModelRole::ALL.into_iter().map(|role| {
         (
@@ -383,7 +405,14 @@ async fn run_session(
     }
 
     let active_exit = {
-        let ui = run_ui(terminal, views, &command_tx, &mut event_rx, &ui_context);
+        let ui = run_ui(
+            terminal,
+            terminal_events,
+            views,
+            &command_tx,
+            &mut event_rx,
+            &ui_context,
+        );
         tokio::pin!(ui);
         tokio::select! {
             biased;
@@ -402,7 +431,17 @@ async fn run_session(
     drop(command_tx);
     drop(event_rx);
     drop(exit_rx);
-    let cleanup = running.shutdown().await;
+    let cleanup = {
+        let shutdown = running.shutdown();
+        tokio::pin!(shutdown);
+        tokio::select! {
+            result = &mut shutdown => result,
+            () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                let _ = draw_status_frame(terminal, "Shutting down…");
+                shutdown.await
+            }
+        }
+    };
     if let Err(error) = cleanup {
         if outcome.is_ok() {
             return Err(error);

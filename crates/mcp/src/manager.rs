@@ -780,10 +780,15 @@ fn supervise(
         };
         let waiting = service.waiting();
         tokio::pin!(waiting);
+        let mut exited = false;
         tokio::select! {
-            _ = &mut waiting => {}
-            _ = stop.cancelled() => { token.cancel(); let _ = waiting.await; }
-            _ = jobs => { token.cancel(); let _ = waiting.await; }
+            _ = &mut waiting => { exited = true; }
+            _ = stop.cancelled() => {}
+            _ = jobs => {}
+        }
+        if !exited {
+            token.cancel();
+            let _ = waiting.await;
         }
         drop(done);
         signal(&changes);

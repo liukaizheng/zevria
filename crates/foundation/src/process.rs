@@ -34,6 +34,14 @@ impl ProcessTree {
             Ok((command.spawn()?, Self {}))
         }
     }
+    pub fn terminate(&self) {
+        #[cfg(windows)]
+        self.job.kill();
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-self.group, libc::SIGTERM);
+        }
+    }
     pub fn kill(&self) {
         #[cfg(windows)]
         self.job.kill();
@@ -131,5 +139,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output.stdout, b"foreground");
+    }
+
+    #[tokio::test]
+    async fn process_tree_terminate_delivers_sigterm() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let marker = dir.path().join("sigterm");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "trap 'printf term > \"$MARKER\"; exit 0' TERM; printf ready > \"$READY\"; while :; do sleep 0.05; done",
+            ])
+            .env("READY", &ready)
+            .env("MARKER", &marker);
+        let (mut child, tree) = ProcessTree::spawn(&mut command).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child should install trap");
+        tree.terminate();
+        let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("child should exit on SIGTERM")
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "term");
     }
 }

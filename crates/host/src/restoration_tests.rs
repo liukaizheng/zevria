@@ -54,7 +54,7 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
         event_rx: None,
         exit_rx: None,
         engine_task: None,
-        supervisor_task: None,
+        supervisor: None,
     };
     let restored = running.take_restored();
     assert_eq!(restored.transcript_items.len(), 1);

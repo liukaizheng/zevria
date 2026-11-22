@@ -647,6 +647,7 @@ async fn production_build_rejects_builder_launch_before_workspace_or_child_provi
     let supervisor = spawn_supervisor(
         channels.requests,
         supervisor_config(&config, root.path(), events.clone(), 1),
+        CancellationToken::new(),
     );
     let tools = build_tools(
         root.path(),
@@ -773,6 +774,7 @@ async fn ten_real_response_launches_share_limits_and_return_original_slots() {
         let supervisor = spawn_supervisor(
             channels.requests,
             supervisor_config(&config, root.path(), events.clone(), limit),
+            CancellationToken::new(),
         );
         let tools = build_tools(
             root.path(),
