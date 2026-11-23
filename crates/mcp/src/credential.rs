@@ -23,7 +23,7 @@ enum Source {
     Command(Arc<CommandSource>),
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandConfig {
     command: String,
@@ -54,6 +54,18 @@ struct Cache {
     generation: u64,
     value: Option<(Instant, HeaderValue)>,
 }
+
+impl PartialEq for McpCredentialSource {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Source::Literal(left), Source::Literal(right)) => left == right,
+            (Source::Command(left), Source::Command(right)) => left.config == right.config,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for McpCredentialSource {}
 
 impl fmt::Debug for McpCredentialSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

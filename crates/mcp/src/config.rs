@@ -36,7 +36,7 @@ impl Default for McpConfig {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct McpServerConfig {
     pub enabled: bool,

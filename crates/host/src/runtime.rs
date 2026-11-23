@@ -1,6 +1,7 @@
 //! Frontend-neutral ownership of one Zevria session and its pending or saved transcript.
 
 use std::{
+    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -438,8 +439,12 @@ pub(crate) fn transcript_recovery_notice(path: &Path, malformed_lines: usize) ->
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 const MCP_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-async fn join_with_grace(mut task: tokio::task::JoinHandle<()>, name: &str) -> anyhow::Result<()> {
-    match tokio::time::timeout(SHUTDOWN_GRACE, &mut task).await {
+async fn join_with_grace(
+    mut task: tokio::task::JoinHandle<()>,
+    name: &str,
+    grace: std::time::Duration,
+) -> anyhow::Result<()> {
+    match tokio::time::timeout(grace, &mut task).await {
         Ok(result) => result.with_context(|| format!("{name} task failed")),
         Err(_) => {
             tracing::warn!(target: "zevria::runtime",
@@ -638,7 +643,7 @@ impl RunningSession {
         // Phase 1: Stop the coordinator (engine) first so transcript durability
         // completes and no new subtasks, command jobs, or MCP calls can start.
         let engine_shutdown = if let Some(engine_task) = self.engine_task.take() {
-            join_with_grace(engine_task, "session engine").await
+            join_with_grace(engine_task, "session engine", SHUTDOWN_GRACE).await
         } else {
             Ok(())
         };
@@ -652,7 +657,7 @@ impl RunningSession {
             async {
                 if let Some(supervisor) = supervisor {
                     supervisor.shutdown.cancel();
-                    join_with_grace(supervisor.task, "subtask supervisor").await
+                    join_with_grace(supervisor.task, "subtask supervisor", SHUTDOWN_GRACE).await
                 } else {
                     Ok(())
                 }
@@ -680,7 +685,10 @@ impl RunningSession {
             );
         }
 
-        engine_shutdown.and(supervisor_shutdown)
+        match (engine_shutdown, supervisor_shutdown) {
+            (Err(engine), Err(supervisor)) => Err(anyhow::anyhow!("{engine:#}; {supervisor:#}")),
+            (result, Ok(())) | (Ok(()), result) => result,
+        }
     }
 }
 
@@ -711,39 +719,80 @@ impl RuntimeTaskOutcome for Result<(), zevria_transcript::SessionReplayError> {
     }
 }
 
-fn observe_task<T: RuntimeTaskOutcome + Send + 'static>(
+fn spawn_observed<F, T, G>(
     component: &'static str,
-    task: tokio::task::JoinHandle<T>,
-    exits: UnboundedSender<RuntimeTaskExit>,
-) -> tokio::task::JoinHandle<()> {
-    observe_task_retaining(component, task, exits, ())
-}
-
-fn observe_task_retaining<T: RuntimeTaskOutcome + Send + 'static, G: Send + 'static>(
-    component: &'static str,
-    task: tokio::task::JoinHandle<T>,
+    future: F,
     exits: UnboundedSender<RuntimeTaskExit>,
     guard: G,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let _guard = guard;
-        match task.await {
-            Ok(outcome) => {
-                let _ = exits.send(RuntimeTaskExit {
-                    component,
-                    error: outcome.error(),
+) -> tokio::task::JoinHandle<()>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: RuntimeTaskOutcome,
+    G: Send + 'static,
+{
+    struct ExitGuard<G> {
+        component: &'static str,
+        exits: UnboundedSender<RuntimeTaskExit>,
+        reported: bool,
+        _retained: G,
+    }
+
+    impl<G> Drop for ExitGuard<G> {
+        fn drop(&mut self) {
+            if !self.reported {
+                let _ = self.exits.send(RuntimeTaskExit {
+                    component: self.component,
+                    error: Some(format!("{} task aborted or panicked", self.component)),
                 });
-            }
-            Err(error) => {
-                let detail = error.to_string();
-                let _ = exits.send(RuntimeTaskExit {
-                    component,
-                    error: Some(detail.clone()),
-                });
-                panic!("{component} task failed: {detail}");
             }
         }
+    }
+
+    // Construct the guard outside the task so aborting it before its first
+    // poll still reports an exit and releases retained resources.
+    let mut guard = ExitGuard {
+        component,
+        exits,
+        reported: false,
+        _retained: guard,
+    };
+    tokio::spawn(async move {
+        let error = future.await.error();
+        guard.reported = true;
+        let _ = guard.exits.send(RuntimeTaskExit { component, error });
     })
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn shutdown_timeout_drops_the_observed_future_and_guard() {
+    let (exits, mut received) = unbounded_channel();
+    let future_resource = Arc::new(());
+    let guard_resource = Arc::new(());
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let task = spawn_observed(
+        "test",
+        {
+            let resource = future_resource.clone();
+            async move {
+                let _resource = resource;
+                let _ = started.send(());
+                std::future::pending::<()>().await;
+            }
+        },
+        exits,
+        guard_resource.clone(),
+    );
+    ready.await.unwrap();
+    join_with_grace(task, "test", std::time::Duration::from_millis(10))
+        .await
+        .unwrap();
+    assert_eq!(Arc::strong_count(&future_resource), 1);
+    assert_eq!(Arc::strong_count(&guard_resource), 1);
+    let exit = received.recv().await.unwrap();
+    assert_eq!(exit.component, "test");
+    assert!(exit.error.unwrap().contains("aborted or panicked"));
+    assert!(received.recv().await.is_none());
 }
 
 #[cfg(all(test, unix))]
@@ -988,29 +1037,67 @@ mod tests {
         assert!(!workspace.path().join(".zevria/agent-runs").exists());
     }
 
+    #[tokio::test]
+    async fn invalid_local_startup_does_not_open_mcp_connections() {
+        let workspace = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = crate::config::test_config();
+        config.ensemble.max_concurrent_agents = 0;
+        config.mcp = serde_json::from_value(serde_json::json!({
+            "servers": { "fixture": { "url": format!("http://{}/mcp", listener.local_addr().unwrap()) } },
+        })).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            start_session(
+                &config,
+                workspace.path(),
+                SessionStart::New {
+                    inherited_models: None,
+                },
+            ),
+        )
+        .await
+        .expect("local validation must not wait for the MCP handshake");
+        let Err(error) = result else {
+            panic!("invalid ensemble config was accepted");
+        };
+        assert!(
+            error.to_string().contains("ensemble.max_concurrent_agents"),
+            "{error:#}"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn engine_fatal_exit_precedes_dependent_supervisor_channel_exhaustion() {
         for _ in 0..20 {
             let (requests, mut receive) = unbounded_channel::<()>();
             let keepalive = requests.clone();
             let (exits, mut observed) = unbounded_channel();
-            let engine = observe_task_retaining(
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let engine = spawn_observed(
                 "engine",
-                tokio::spawn(async move {
+                async move {
                     drop(requests);
                     Err(zevria_transcript::SessionReplayError::Plan(
                         "original failure".into(),
                     ))
-                }),
+                },
                 exits.clone(),
-                keepalive,
+                (keepalive, shutdown.clone().drop_guard()),
             );
-            let supervisor = observe_task(
+            let supervisor = spawn_observed(
                 "supervisor",
-                tokio::spawn(async move {
+                async move {
+                    shutdown.cancelled().await;
                     assert!(receive.recv().await.is_none());
-                }),
+                },
                 exits,
+                (),
             );
             let first = observed.recv().await.unwrap();
             assert_eq!(first.component, "engine");
@@ -1044,14 +1131,7 @@ mod tests {
             };
             let expected = error.to_string();
             let (exits, mut receive) = unbounded_channel();
-            let observer = observe_task(
-                "session engine",
-                tokio::spawn(async move {
-                    let _lease = lease;
-                    Err(error)
-                }),
-                exits,
-            );
+            let observer = spawn_observed("session engine", async { Err(error) }, exits, lease);
             observer
                 .await
                 .expect("returned fatal error is not a task panic");
@@ -1126,8 +1206,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_frontend_or_aborting_observer_keeps_a_surviving_engine_leased() {
-        for abort_observer in [false, true] {
+    async fn engine_lease_survives_frontend_drop_but_not_engine_abort() {
+        for abort_engine in [false, true] {
             let workspace = tempfile::tempdir().unwrap();
             let mut worker = start_session_with_profile(
                 &crate::config::test_config(),
@@ -1144,12 +1224,7 @@ mod tests {
             let commands = worker.command_sender();
             let _events = worker.take_event_receiver().unwrap();
             let lease = Arc::downgrade(worker._lease.as_ref().unwrap());
-            let mut observer = worker.engine_task.take();
-            if abort_observer {
-                let task = observer.take().unwrap();
-                task.abort();
-                assert!(task.await.unwrap_err().is_cancelled());
-            }
+            let task = worker.engine_task.take().unwrap();
             drop(worker);
             assert_eq!(lease.strong_count(), 1, "only the engine retains ownership");
             assert!(sidecar.exists());
@@ -1157,17 +1232,18 @@ mod tests {
                 prepare_session_lease(&path).await.is_err(),
                 "startup sweep must preserve the engine"
             );
-            commands
-                .send(SessionCommand::Control(
-                    zevria_session_api::ControlCommand::Shutdown,
-                ))
-                .unwrap();
-            // On this current-thread executor, channel closure is observed only
-            // after the engine future and its lease have finished dropping.
-            commands.closed().await;
-            if let Some(observer) = observer {
-                observer.await.unwrap();
+            if abort_engine {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                commands
+                    .send(SessionCommand::Control(
+                        zevria_session_api::ControlCommand::Shutdown,
+                    ))
+                    .unwrap();
+                task.await.unwrap();
             }
+            assert!(commands.is_closed());
             assert_eq!(lease.strong_count(), 0);
             assert_session_lease_reclaimed(&path).await;
             assert!(!sidecar.exists());

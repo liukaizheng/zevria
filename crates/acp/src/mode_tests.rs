@@ -20,6 +20,47 @@ impl SessionRuntimeLifecycle for NoopLifecycle {
     }
 }
 
+struct GatedLifecycle {
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+impl SessionRuntimeLifecycle for GatedLifecycle {
+    fn shutdown(
+        self: Box<Self>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+        Box::pin(async move {
+            self.started.send(()).unwrap();
+            self.release.await.unwrap();
+            Ok(())
+        })
+    }
+}
+
+async fn gate_shutdown(live: &LiveSession) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (started, teardown_started) = oneshot::channel();
+    let (release_teardown, release) = oneshot::channel();
+    *live.lifecycle.lock().await = Some(Box::new(GatedLifecycle { started, release }));
+    (teardown_started, release_teardown)
+}
+
+async fn assert_shutdown_waits(live: &Arc<LiveSession>, release: oneshot::Sender<()>) {
+    let mut shutdown = std::pin::pin!(live.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(
+            shutdown.as_mut().poll(cx).is_pending(),
+            "shutdown returned before lifecycle teardown"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(live.permit.lock().unwrap().is_some());
+    release.send(()).unwrap();
+    shutdown.await.unwrap();
+    assert!(live.is_closed());
+    assert!(live.permit.lock().unwrap().is_none());
+}
+
 async fn exercise<F, Fut>(
     profile: ExecutionProfile,
     selected_mode: SessionMode,
@@ -518,13 +559,14 @@ async fn mismatched_ack_fails_closed_instead_of_admitting_unknown_selection() {
 }
 
 #[tokio::test]
-async fn background_exit_fails_a_waiting_mode_ack_with_original_diagnostic() {
+async fn background_exit_fails_a_waiting_mode_ack_and_tears_down_the_runtime() {
     let updates = exercise(
         ExecutionProfile::Interactive,
         SessionMode::Build,
         PlanWorkflowState::Idle,
         async move |live, mut commands| {
-            let (_events, receiver) = session_event_channel(8);
+            let (started, release) = gate_shutdown(&live).await;
+            let (events, receiver) = session_event_channel(8);
             let (exit, exited) = oneshot::channel();
             live.start_event_loop(receiver, Box::pin(async move { exited.await.unwrap() }));
             let pending = live.set_mode(SessionMode::Plan)?;
@@ -538,11 +580,38 @@ async fn background_exit_fails_a_waiting_mode_ack_with_original_diagnostic() {
             assert!(error.to_string().contains("original background failure"));
             assert_eq!(live.mode(), SessionMode::Build);
             assert!(live.set_mode(SessionMode::Plan).is_err());
+            started.await.unwrap();
+            assert_shutdown_waits(&live, release).await;
+            assert!(commands.is_closed());
+            assert!(events.try_send(SessionEvent::EngineIdle).is_err());
             Ok(())
         },
     )
     .await;
     assert!(selected_updates(&updates).is_empty());
+}
+
+#[tokio::test]
+async fn cancelling_the_first_shutdown_waiter_does_not_interrupt_teardown() {
+    exercise(
+        ExecutionProfile::Interactive,
+        SessionMode::Build,
+        PlanWorkflowState::Idle,
+        async move |live, commands| {
+            let (started, release) = gate_shutdown(&live).await;
+            let first = tokio::spawn({
+                let live = live.clone();
+                async move { live.shutdown().await }
+            });
+            started.await.unwrap();
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            assert_shutdown_waits(&live, release).await;
+            assert!(commands.is_closed());
+            Ok(())
+        },
+    )
+    .await;
 }
 
 #[tokio::test]

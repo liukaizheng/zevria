@@ -1,6 +1,6 @@
 //! One root session owns its connections and stages catalog changes until a turn boundary.
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     path::PathBuf,
     pin::Pin,
@@ -47,6 +47,8 @@ struct State {
     entries: BTreeMap<McpServerName, Entry>,
     managed: HashMap<String, ManagedToolToken>,
     generation: u64,
+    // SetEnabled can change the live catalog before reaching its final commit.
+    sync_needed: bool,
 }
 
 struct Entry {
@@ -254,6 +256,7 @@ impl McpManager {
                 entries: BTreeMap::new(),
                 managed: HashMap::new(),
                 generation: 0,
+                sync_needed: false,
             }),
             mutations: tokio::sync::Mutex::new(()),
             changes,
@@ -265,7 +268,11 @@ impl McpManager {
             this: this.clone(),
             stop: CancellationToken::new(),
         });
-        let entries = manager.open_all(&source.config).boxed().await?;
+        manager.validate_delegation(&source.config)?;
+        let entries = manager
+            .open_servers(&source.config, manager.server_configs(&source.config))
+            .boxed()
+            .await;
         let required_failures: Vec<_> = entries
             .values()
             .filter_map(|entry| {
@@ -305,28 +312,35 @@ impl McpManager {
         Ok(())
     }
 
-    async fn open_all(&self, config: &McpConfig) -> anyhow::Result<BTreeMap<McpServerName, Entry>> {
-        self.validate_delegation(config)?;
-        Ok(join_all(
-            config
-                .servers
-                .iter()
-                .map(|(name, spec)| (name, spec, McpServerOrigin::Config))
-                .chain(
-                    self.delegated
-                        .iter()
-                        .map(|(name, spec)| (name, spec, McpServerOrigin::Acp)),
-                )
-                .map(|(name, spec, origin)| async move {
-                    (
-                        name.clone(),
-                        self.open(name.clone(), spec.clone(), origin, config).await,
-                    )
-                }),
-        )
+    fn server_configs<'a>(
+        &'a self,
+        config: &'a McpConfig,
+    ) -> impl Iterator<Item = (&'a McpServerName, &'a McpServerConfig, McpServerOrigin)> {
+        config
+            .servers
+            .iter()
+            .map(|(name, spec)| (name, spec, McpServerOrigin::Config))
+            .chain(
+                self.delegated
+                    .iter()
+                    .map(|(name, spec)| (name, spec, McpServerOrigin::Acp)),
+            )
+    }
+
+    async fn open_servers<'a>(
+        &self,
+        global: &McpConfig,
+        servers: impl IntoIterator<Item = (&'a McpServerName, &'a McpServerConfig, McpServerOrigin)>,
+    ) -> BTreeMap<McpServerName, Entry> {
+        join_all(servers.into_iter().map(|(name, spec, origin)| async move {
+            (
+                name.clone(),
+                self.open(name.clone(), spec.clone(), origin, global).await,
+            )
+        }))
         .await
         .into_iter()
-        .collect())
+        .collect()
     }
 
     async fn open(
@@ -355,7 +369,7 @@ impl McpManager {
         let startup_timeout = entry.config.startup_timeout(global);
         let deadline = start + startup_timeout;
         let stop = self.stop.child_token();
-        let result = timeout_at(deadline, async {
+        let opening = timeout_at(deadline, async {
             let service = transport::connect(
                 &entry.server,
                 &entry.config,
@@ -373,8 +387,14 @@ impl McpManager {
             )
             .await?;
             Ok::<_, anyhow::Error>((service, catalog))
-        })
-        .await;
+        });
+        // Dropping the handshake drops the transport; cancellation does not
+        // have to wait for the server or hold the mutation lock until timeout.
+        let result = tokio::select! {
+            biased;
+            () = stop.cancelled() => return entry,
+            result = opening => result,
+        };
         entry.connect_ms = Some(start.elapsed().as_millis() as u64);
         match result {
             Ok(Ok((service, catalog))) => {
@@ -439,6 +459,10 @@ impl McpManager {
 
     fn sync(&self) -> bool {
         let mut state = self.state.write().unwrap();
+        if self.stop.is_cancelled() {
+            // Leave connection handles for shutdown to await.
+            return false;
+        }
         let mut changed = false;
         for entry in state.entries.values_mut() {
             let Some(conn) = &entry.connection else {
@@ -463,11 +487,16 @@ impl McpManager {
             state.generation += 1;
             self.publish_registry(&mut state);
         }
-        changed
+        std::mem::take(&mut state.sync_needed) || changed
     }
 
     pub async fn shutdown(&self, grace: Duration) {
-        self.stop.cancel();
+        {
+            // Linearize cancellation against the state-locked mutation commit,
+            // without waiting for a mutation that is still opening connections.
+            let _state = self.state.write().unwrap();
+            self.stop.cancel();
+        }
         let _operation = self.mutations.lock().await;
         let conns = {
             let mut state = self.state.write().unwrap();
@@ -555,10 +584,37 @@ impl McpManager {
         self.open(name, config, origin, global).await
     }
 
+    async fn commit_opened(
+        &self,
+        entries: impl IntoIterator<Item = (McpServerName, Entry)>,
+        update: impl FnOnce(&mut State),
+    ) -> McpManagementResult {
+        {
+            let mut state = self.state.write().unwrap();
+            if !self.stop.is_cancelled() {
+                update(&mut state);
+                state.entries.extend(entries);
+                state.generation += 1;
+                // Changed already tells the engine to invalidate its plan.
+                state.sync_needed = false;
+                self.publish_registry(&mut state);
+                return state.changed(false);
+            }
+        }
+        // Other servers may already have opened successfully while one was
+        // cancelled. Await their closure; they were never installed in state.
+        let retiring = entries
+            .into_iter()
+            .filter_map(|(_, entry)| entry.connection)
+            .map(|conn| (conn.stop.clone(), conn.closed.clone()));
+        close_connections(retiring, Duration::from_secs(5)).await;
+        closed()
+    }
+
     async fn mutate(&self, request: McpManagementRequest) -> McpManagementResult {
         let _operation = self.mutations.lock().await;
         if self.stop.is_cancelled() {
-            return McpManagementResult::error("closed", "The MCP session is shutting down.");
+            return closed();
         }
         match request {
             McpManagementRequest::Reload => {
@@ -591,25 +647,40 @@ impl McpManager {
                         format!("Could not reload MCP configuration: {error}"),
                     );
                 }
-                let conns = self
-                    .state
-                    .read()
-                    .unwrap()
-                    .entries
-                    .values()
-                    .filter_map(|entry| entry.connection.as_ref())
-                    .map(|conn| (conn.stop.clone(), conn.closed.clone()))
-                    .collect::<Vec<_>>();
-                close_connections(conns, Duration::from_secs(5)).await;
-                let Ok(entries) = self.open_all(&source.config).await else {
-                    unreachable!("validated delegation")
+                let mut preserved = BTreeSet::new();
+                let mut reopen = Vec::new();
+                let retiring = {
+                    let state = self.state.read().unwrap();
+                    for (name, spec, origin) in self.server_configs(&source.config) {
+                        if source.config.enabled
+                            && state.entries.get(name).is_some_and(|entry| {
+                                entry.config == *spec
+                                    && entry.origin == origin
+                                    && spec.startup_timeout(&source.config)
+                                        == spec.startup_timeout(&state.source.config)
+                                    && entry.connection.as_ref().is_some_and(Connection::live)
+                            })
+                        {
+                            preserved.insert(name.clone());
+                        } else {
+                            reopen.push((name, spec, origin));
+                        }
+                    }
+                    state
+                        .entries
+                        .iter()
+                        .filter(|(name, _)| !preserved.contains(*name))
+                        .filter_map(|(_, entry)| entry.connection.as_ref())
+                        .map(|conn| (conn.stop.clone(), conn.closed.clone()))
+                        .collect::<Vec<_>>()
                 };
-                let mut state = self.state.write().unwrap();
-                state.source = source;
-                state.entries = entries;
-                state.generation += 1;
-                self.publish_registry(&mut state);
-                state.changed(false)
+                close_connections(retiring, Duration::from_secs(5)).await;
+                let entries = self.open_servers(&source.config, reopen).await;
+                self.commit_opened(entries, |state| {
+                    state.source = source;
+                    state.entries.retain(|name, _| preserved.contains(name));
+                })
+                .await
             }
             McpManagementRequest::Reconnect { server } => {
                 let (source, config, origin) = {
@@ -631,11 +702,7 @@ impl McpManager {
                 let entry = self
                     .reconnect(&source.config, server.clone(), config, origin)
                     .await;
-                let mut state = self.state.write().unwrap();
-                state.entries.insert(server, entry);
-                state.generation += 1;
-                self.publish_registry(&mut state);
-                state.changed(false)
+                self.commit_opened([(server, entry)], |_| {}).await
             }
             McpManagementRequest::SetEnabled {
                 expected_revision,
@@ -689,27 +756,75 @@ impl McpManager {
                     }
                 };
                 if source.revision == revision {
-                    return self.state.read().unwrap().changed(true);
+                    let state = self.state.read().unwrap();
+                    return if self.stop.is_cancelled() {
+                        closed()
+                    } else {
+                        state.changed(true)
+                    };
                 }
                 let config = source.config.servers[&server].clone();
+                let retiring = {
+                    // The write has committed. Publish the persisted revision
+                    // and configuration before waiting on any network work.
+                    let mut state = self.state.write().unwrap();
+                    state.source = source.clone();
+                    let entry = state.entries.get_mut(&server).expect("validated server");
+                    entry.config = config.clone();
+                    if self.stop.is_cancelled() {
+                        // Keep the committed configuration, but let shutdown
+                        // own the old connection and registry cleanup.
+                        return closed();
+                    }
+                    let conn = entry.connection.take();
+                    entry.status = if source.config.enabled && config.enabled {
+                        McpServerStatus::Disconnected
+                    } else {
+                        McpServerStatus::Disabled
+                    };
+                    entry.connect_ms = None;
+                    entry.stderr = StderrTail::default();
+                    entry.set_catalog(Catalog::default());
+                    self.publish_registry(&mut state);
+                    if conn.is_some() {
+                        // A cancelled request won't return Changed. Keep the
+                        // catalog invalidation pending for the next engine sync.
+                        state.generation += 1;
+                        state.sync_needed = true;
+                    }
+                    conn
+                };
+                if let Some(conn) = retiring {
+                    signal(&self.changes);
+                    close_connections(
+                        [(conn.stop.clone(), conn.closed.clone())],
+                        Duration::from_secs(5),
+                    )
+                    .await;
+                }
                 let entry = self
-                    .reconnect(
-                        &source.config,
+                    .open(
                         server.clone(),
                         config,
                         McpServerOrigin::Config,
+                        &source.config,
                     )
                     .await;
-                let mut state = self.state.write().unwrap();
-                state.source = source;
-                state.entries.insert(server, entry);
-                state.generation += 1;
-                self.publish_registry(&mut state);
-                state.changed(false)
+                self.commit_opened([(server, entry)], |_| {}).await
             }
             query => self.query_view(&query),
         }
     }
+}
+
+impl Drop for McpManager {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+fn closed() -> McpManagementResult {
+    McpManagementResult::error("closed", "The MCP session is shutting down.")
 }
 
 fn conflict() -> McpManagementResult {

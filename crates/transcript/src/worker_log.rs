@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zevria_workflow::ensemble::*;
+use zevria_workflow::{WorkerReviewEvent, ensemble::*};
 /// Versioned first line in every worker transcript. Environment values and
 /// process command arguments are deliberately absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,28 +442,22 @@ impl AgentRunTranscriptReader {
 
     fn read_line_bounded(&mut self) -> std::io::Result<Option<bool>> {
         self.buffer.clear();
-        let mut read_any = false;
-        let mut oversized = false;
         loop {
             let available = self.reader.fill_buf()?;
             if available.is_empty() {
-                return Ok(read_any.then_some(oversized));
+                return Ok((!self.buffer.is_empty()).then_some(false));
             }
-            read_any = true;
             let newline = available.iter().position(|byte| *byte == b'\n');
             let consumed = newline.map_or(available.len(), |index| index + 1);
-            if !oversized {
-                let remaining = MAX_AGENT_RUN_RECORD_BYTES.saturating_sub(self.buffer.len());
-                if consumed <= remaining {
-                    self.buffer.extend_from_slice(&available[..consumed]);
-                } else {
-                    self.buffer.extend_from_slice(&available[..remaining]);
-                    oversized = true;
-                }
+            if consumed > MAX_AGENT_RUN_RECORD_BYTES - self.buffer.len() {
+                // The iterator stops at an oversized record. There is no
+                // later line to recover, so do not drain the rest of this one.
+                return Ok(Some(true));
             }
+            self.buffer.extend_from_slice(&available[..consumed]);
             self.reader.consume(consumed);
             if newline.is_some() {
-                return Ok(Some(oversized));
+                return Ok(Some(false));
             }
         }
     }
@@ -593,56 +587,18 @@ fn unsupported_worker_tail(line: &[u8], validation: &AgentRunValidation) -> bool
     }
     if let Some(value) = partial_json_field(line, &["event", "event", "transition"])
         && !value.as_str().is_some_and(|transition| {
-            matches!(
-                transition,
-                "input_accepted"
-                    | "dispatched"
-                    | "interrupted"
-                    | "recovering"
-                    | "settled"
-                    | "connection"
-                    | "payload_checked"
-                    | "cancel_requested"
-                    | "confirmed"
-                    | "withdrawn"
-                    | "abandoned"
-                    | "sealed"
-            )
+            WorkerReviewEvent::KNOWN_WIRE_TRANSITIONS.contains(&transition)
+                // Synthetic transitions are known to the workflow reducer,
+                // but never written as raw worker review records.
+                && !matches!(transition, "fatal" | "published" | "removed" | "decisions")
         })
     {
         return true;
     }
     if let Some(value) = partial_json_field(line, &["event", "type"]) {
-        let known = value.as_str().is_some_and(|kind| {
-            matches!(
-                kind,
-                "status"
-                    | "response_display"
-                    | "review"
-                    | "session_established"
-                    | "session_allocated"
-                    | "prompt"
-                    | "user_message"
-                    | "agent_message"
-                    | "thought"
-                    | "tool_call"
-                    | "tool_call_update"
-                    | "plan"
-                    | "native_plan_captured"
-                    | "plan_removed"
-                    | "mode_changed"
-                    | "config_options_changed"
-                    | "session_info"
-                    | "usage"
-                    | "permission"
-                    | "elicitation"
-                    | "stderr"
-                    | "protocol"
-                    | "replay_boundary"
-                    | "unsupported"
-                    | "failure"
-            )
-        });
+        let known = value
+            .as_str()
+            .is_some_and(|kind| AgentRunEvent::KNOWN_WIRE_TYPES.contains(&kind));
         if !known {
             return true;
         }
@@ -1919,6 +1875,80 @@ mod tests {
                 event: AgentRunEvent::Stderr { text }
             } if text == "after recovery"
         ));
+    }
+
+    #[test]
+    fn recognized_worker_events_can_be_recovered_from_a_torn_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("worker.jsonl");
+        let header = AgentRunTranscriptHeader {
+            version: AGENT_RUN_TRANSCRIPT_VERSION,
+            ensemble_run_id: EnsembleRunId::new(),
+            workflow: EnsembleWorkflow::Plan,
+            descriptor: descriptor("Codex"),
+            prompt: "plan".into(),
+        };
+        drop(AgentRunTranscriptWriter::create(path.clone(), header.clone()).unwrap());
+        let committed = std::fs::read(&path).unwrap();
+        let tails = [
+            (
+                r#"{"record":"event","event":{"type":"review","event":{"transition":"baseline_marked","receipt":{"#,
+                true,
+            ),
+            (
+                r#"{"record":"event","event":{"type":"review","event":{"transition":"baseline_cleared","request_id":"#,
+                true,
+            ),
+            (
+                r#"{"record":"event","event":{"type":"review","event":{"transition":"image_capability","supported":tr"#,
+                true,
+            ),
+            (
+                r#"{"record":"event","event":{"type":"user_image","image":{"#,
+                true,
+            ),
+            (
+                r#"{"record":"event","event":{"type":"tool_result_metadata","metadata":{"#,
+                true,
+            ),
+            (
+                r#"{"record":"event","event":{"type":"future_event","payload":{"#,
+                false,
+            ),
+            (
+                r#"{"record":"event","event":{"type":"review","event":{"transition":"future_transition","payload":{"#,
+                false,
+            ),
+            (
+                r#"{"record":"event","event":{"type":"review","event":{"transition":"published","plan":{"#,
+                false,
+            ),
+        ];
+        for (tail, recoverable) in tails {
+            let mut torn = committed.clone();
+            torn.extend_from_slice(tail.as_bytes());
+            std::fs::write(&path, &torn).unwrap();
+            let writer = AgentRunTranscriptWriter::append_to(path.clone());
+            if recoverable {
+                drop(writer.unwrap_or_else(|error| panic!("could not recover {tail}: {error}")));
+                assert_eq!(std::fs::read(&path).unwrap(), committed);
+            } else {
+                assert!(writer.is_err(), "accepted {tail}");
+                assert_eq!(std::fs::read(&path).unwrap(), torn);
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_worker_record_stops_without_draining_to_eof() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.jsonl");
+        let length = 3 * MAX_AGENT_RUN_RECORD_BYTES as u64;
+        File::create(&path).unwrap().set_len(length).unwrap();
+        let mut reader = AgentRunTranscriptReader::open(&path).unwrap();
+        assert!(reader.next().unwrap().is_err());
+        assert!(reader.next().is_none());
+        assert!(reader.reader.stream_position().unwrap() <= MAX_AGENT_RUN_RECORD_BYTES as u64);
     }
 
     #[test]

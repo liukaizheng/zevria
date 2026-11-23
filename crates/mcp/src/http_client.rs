@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use futures_util::stream::BoxStream;
+use futures_util::{StreamExt as _, stream::BoxStream};
 use http::{HeaderName, HeaderValue, StatusCode};
 use rmcp::{
     model::ClientJsonRpcMessage,
@@ -15,6 +15,7 @@ use rmcp::{
     },
 };
 use sse_stream::{Error as SseError, Sse};
+use tokio_util::sync::CancellationToken;
 
 use crate::credential::McpCredentialSource;
 
@@ -27,6 +28,7 @@ pub(crate) struct AuthenticatingHttpClient {
     client: reqwest::Client,
     credentials: Arc<Vec<(HeaderName, McpCredentialSource)>>,
     bearer_token: Option<McpCredentialSource>,
+    stop: CancellationToken,
 }
 
 impl AuthenticatingHttpClient {
@@ -34,6 +36,7 @@ impl AuthenticatingHttpClient {
         client: reqwest::Client,
         headers: &BTreeMap<String, McpCredentialSource>,
         bearer_token: Option<McpCredentialSource>,
+        stop: CancellationToken,
     ) -> anyhow::Result<Self> {
         let credentials = headers
             .iter()
@@ -43,6 +46,7 @@ impl AuthenticatingHttpClient {
             client,
             credentials: Arc::new(credentials),
             bearer_token,
+            stop,
         })
     }
 
@@ -164,7 +168,7 @@ impl StreamableHttpClient for AuthenticatingHttpClient {
         headers: Headers,
         limits: StreamableHttpResponseLimits,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
-        self.with_auth(headers, auth, |headers, auth| {
+        let post = self.with_auth(headers, auth, |headers, auth| {
             self.client.post_message_with_response_limits(
                 uri.clone(),
                 message.clone(),
@@ -173,8 +177,23 @@ impl StreamableHttpClient for AuthenticatingHttpClient {
                 headers,
                 limits,
             )
+        });
+        // The SDK worker's bootstrap POST runs before its cancellation loop.
+        // Cover both waiting for the response and reading its event stream.
+        let response = tokio::select! {
+            biased;
+            () = self.stop.cancelled() => return Err(HttpError::TransportChannelClosed),
+            result = post => result?,
+        };
+        Ok(match response {
+            StreamableHttpPostResponse::Sse(events, session) => StreamableHttpPostResponse::Sse(
+                events
+                    .take_until(self.stop.clone().cancelled_owned())
+                    .boxed(),
+                session,
+            ),
+            response => response,
         })
-        .await
     }
 
     async fn get_stream(

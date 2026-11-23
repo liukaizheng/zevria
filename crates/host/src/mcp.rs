@@ -157,15 +157,16 @@ pub async fn probe(
     for server in source.config.servers.values_mut() {
         server.required = false;
     }
-    let tools = rig_agent::tool::server::ToolServer::new().run();
-    let manager = McpManager::start(source, vec![], workspace, tools, None).await?;
-    let result = manager.query_view(&if inspect {
+    let request = if inspect {
         McpManagementRequest::Inspect {
             server: server.context("inspect requires a server")?,
         }
     } else {
         McpManagementRequest::List
-    });
+    };
+    let tools = rig_agent::tool::server::ToolServer::new().run();
+    let manager = McpManager::start(source, vec![], workspace, tools, None).await?;
+    let result = manager.query_view(&request);
     manager.shutdown(Duration::from_secs(5)).await;
     match result {
         McpManagementResult::View { view } => Ok(view),

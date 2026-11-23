@@ -1,14 +1,20 @@
 //! A real child process speaking JSON-RPC over pipes, without a shell or Node.
 use std::{
+    future::poll_fn,
     io::{BufRead as _, Write as _},
+    path::Path,
+    sync::{Arc, Mutex},
+    task::Poll,
     time::Duration,
 };
 
 use rig_agent::tool::server::ToolServer;
 use rig_core::tool::ToolContext;
 use serde_json::{Value, json};
-use zevria_foundation::{McpManagementRequest, McpManagementResult, McpServerStatus};
-use zevria_mcp::{McpConfigSource, McpManager};
+use zevria_foundation::{
+    McpManagementRequest, McpManagementResult, McpManagementView, McpServerName, McpServerStatus,
+};
+use zevria_mcp::{McpConfigPersister, McpConfigSource, McpManager};
 use zevria_session_api::mcp::McpSessionService;
 
 fn serve() {
@@ -20,6 +26,14 @@ fn serve() {
         );
         std::process::exit(2);
     }
+    if std::env::args().any(|arg| arg == "--count") {
+        let mut launches = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("launches")
+            .unwrap();
+        writeln!(launches, "started").unwrap();
+    }
     let mut output = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
@@ -28,6 +42,10 @@ fn serve() {
         };
         let result = match msg["method"].as_str().unwrap_or_default() {
             "initialize" => {
+                if std::env::args().any(|arg| arg == "--park") {
+                    std::fs::write("handshake-marker", "initialize received").unwrap();
+                    std::thread::sleep(Duration::from_secs(60));
+                }
                 json!({"protocolVersion":"2025-11-25","serverInfo":{"name":"stdio-fixture","version":"1"},"capabilities":{"tools":{}},"instructions":"Use fixture"})
             }
             "tools/list" => {
@@ -134,4 +152,278 @@ async fn main() {
             .await
             .is_err()
     );
+    reload_preserves_unchanged_server().await;
+    shutdown_interrupts_pending_handshake().await;
+    shutdown_rejects_reload_and_enable_commits().await;
+    aborted_disable_keeps_catalog_invalidation_pending().await;
+}
+
+struct Store(Mutex<McpConfigSource>);
+
+impl McpConfigPersister for Store {
+    fn load(&self) -> anyhow::Result<McpConfigSource> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
+    fn set_enabled(
+        &self,
+        revision: &str,
+        server: &McpServerName,
+        enabled: bool,
+    ) -> anyhow::Result<McpConfigSource> {
+        let mut source = self.0.lock().unwrap();
+        assert_eq!(source.revision, revision);
+        source.config.servers.get_mut(server).unwrap().enabled = enabled;
+        source.revision = "persisted".into();
+        Ok(source.clone())
+    }
+}
+
+async fn reload_preserves_unchanged_server() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["same", "changed", "removed"] {
+        std::fs::create_dir(dir.path().join(name)).unwrap();
+    }
+    let exe = std::env::current_exe().unwrap();
+    let source = McpConfigSource {
+        revision: "original".into(),
+        config: serde_json::from_value(json!({
+            "servers": {
+                "same": {"command":exe,"args":["--serve","--count"],"cwd":"same"},
+                "changed": {"command":exe,"args":["--serve","--count"],"cwd":"changed"},
+                "removed": {"command":exe,"args":["--serve","--count"],"cwd":"removed"}
+            }
+        }))
+        .unwrap(),
+    };
+    let store = Arc::new(Store(Mutex::new(source.clone())));
+    let manager = McpManager::start(
+        source,
+        vec![],
+        dir.path().into(),
+        ToolServer::new().run(),
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+    {
+        let mut source = store.0.lock().unwrap();
+        source.config.servers.remove(&"removed".parse().unwrap());
+        source
+            .config
+            .servers
+            .get_mut(&"changed".parse().unwrap())
+            .unwrap()
+            .args
+            .push("new-arg".into());
+        source.revision = "edited".into();
+    }
+    assert!(matches!(
+        manager.manage(McpManagementRequest::Reload).await,
+        McpManagementResult::Changed {
+            connected: 2,
+            total: 2,
+            ..
+        }
+    ));
+    for (name, count) in [("same", 1), ("changed", 2), ("removed", 1)] {
+        let launches = std::fs::read_to_string(dir.path().join(name).join("launches")).unwrap();
+        assert_eq!(launches.lines().count(), count, "{name}");
+    }
+    manager.shutdown(Duration::from_secs(2)).await;
+}
+
+async fn wait_for_handshake(dir: &Path) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !dir.join("handshake-marker").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child received initialize");
+}
+
+fn list_view(manager: &McpManager) -> McpManagementView {
+    let McpManagementResult::View { view } = manager.query_view(&McpManagementRequest::List) else {
+        panic!("manager list");
+    };
+    view
+}
+
+async fn parked_manager(dir: &Path) -> (Arc<McpManager>, Arc<Store>) {
+    let source = McpConfigSource {
+        revision: "original".into(),
+        config: serde_json::from_value(json!({
+            "servers": {
+                "parked": {"command":std::env::current_exe().unwrap(),"args":["--serve","--park"],"enabled":false}
+            }
+        }))
+        .unwrap(),
+    };
+    let store = Arc::new(Store(Mutex::new(source.clone())));
+    let manager = McpManager::start(
+        source,
+        vec![],
+        dir.into(),
+        ToolServer::new().run(),
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+    (manager, store)
+}
+
+async fn shutdown_interrupts_pending_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, _) = parked_manager(dir.path()).await;
+    let server: McpServerName = "parked".parse().unwrap();
+    let view = list_view(&manager);
+    let change = tokio::spawn({
+        let manager = manager.clone();
+        let server = server.clone();
+        async move {
+            manager
+                .manage(McpManagementRequest::SetEnabled {
+                    expected_revision: view.revision,
+                    server,
+                    enabled: true,
+                })
+                .await
+        }
+    });
+    wait_for_handshake(dir.path()).await;
+    change.abort();
+    assert!(change.await.unwrap_err().is_cancelled());
+    let view = list_view(&manager);
+    assert!(view.revision.starts_with("persisted:"));
+    assert!(view.servers[0].enabled);
+
+    std::fs::remove_file(dir.path().join("handshake-marker")).unwrap();
+    assert_shutdown_interrupts_handshake(
+        &manager,
+        dir.path(),
+        McpManagementRequest::Reconnect { server },
+    )
+    .await;
+    assert_eq!(list_view(&manager).revision, view.revision);
+}
+
+async fn assert_shutdown_interrupts_handshake(
+    manager: &Arc<McpManager>,
+    dir: &Path,
+    request: McpManagementRequest,
+) {
+    let mutation = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.manage(request).await }
+    });
+    wait_for_handshake(dir).await;
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.shutdown(Duration::from_secs(1)),
+    )
+    .await
+    .expect("shutdown must not wait for the 30-second handshake deadline");
+    let result = tokio::time::timeout(Duration::from_secs(2), mutation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(result, McpManagementResult::Error { ref code, .. } if code == "closed"),
+        "{result:?}"
+    );
+}
+
+async fn shutdown_rejects_reload_and_enable_commits() {
+    for reload in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, store) = parked_manager(dir.path()).await;
+        let server = "parked".parse().unwrap();
+        let before = list_view(&manager);
+        let request = if reload {
+            let mut source = store.0.lock().unwrap();
+            source.config.servers.get_mut(&server).unwrap().enabled = true;
+            source.revision = "edited".into();
+            McpManagementRequest::Reload
+        } else {
+            McpManagementRequest::SetEnabled {
+                expected_revision: before.revision.clone(),
+                server,
+                enabled: true,
+            }
+        };
+        assert_shutdown_interrupts_handshake(&manager, dir.path(), request).await;
+        let after = list_view(&manager);
+        if reload {
+            assert_eq!(after.revision, before.revision);
+            assert!(!after.servers[0].enabled);
+        } else {
+            assert!(after.revision.starts_with("persisted:"));
+            assert!(after.servers[0].enabled);
+            assert_eq!(after.servers[0].status, McpServerStatus::Disconnected);
+        }
+    }
+}
+
+async fn aborted_disable_keeps_catalog_invalidation_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = McpConfigSource {
+        revision: "original".into(),
+        config: serde_json::from_value(json!({
+            "servers": {
+                "fixture": {"command":std::env::current_exe().unwrap(),"args":["--serve"],"required":true}
+            }
+        })).unwrap(),
+    };
+    let store = Arc::new(Store(Mutex::new(source.clone())));
+    let tools = ToolServer::new().run();
+    let manager = McpManager::start(
+        source,
+        vec![],
+        dir.path().into(),
+        tools.clone(),
+        Some(store),
+    )
+    .await
+    .unwrap();
+    let tool = "mcp__fixture__env";
+    assert!(tools.snapshot().contains(tool));
+    let mut changes = manager.changes();
+    let mut disable = manager.manage(McpManagementRequest::SetEnabled {
+        expected_revision: list_view(&manager).revision,
+        server: "fixture".parse().unwrap(),
+        enabled: false,
+    });
+    // On this current-thread runtime, observe retirement in the same poll
+    // that removes the tool, before the connection supervisor can finish.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        poll_fn(|cx| match disable.as_mut().poll(cx) {
+            Poll::Ready(result) => panic!("mutation completed before cancellation: {result:?}"),
+            Poll::Pending if !tools.snapshot().contains(tool) => Poll::Ready(()),
+            Poll::Pending => Poll::Pending,
+        }),
+    )
+    .await
+    .unwrap();
+    drop(disable);
+    assert!(
+        changes.has_changed().unwrap(),
+        "retirement must wake the engine"
+    );
+    changes.borrow_and_update();
+    assert_eq!(list_view(&manager).revision, "persisted:1");
+    assert!(
+        manager.sync_pending_updates().await,
+        "retirement still invalidates the request plan"
+    );
+    assert!(
+        !manager.sync_pending_updates().await,
+        "invalidation is consumed once"
+    );
+    tokio::time::timeout(Duration::from_secs(5), changes.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    manager.shutdown(Duration::from_secs(1)).await;
 }

@@ -1,21 +1,33 @@
 use crate::*;
 
 #[tokio::test]
-async fn idle_and_continuation_metadata_do_not_fence_an_unread_root_preview() {
+async fn non_turn_events_do_not_fence_an_unread_root_preview() {
     for event in [
         SessionEvent::EngineIdle,
         SessionEvent::JobContinuationChanged {
             mode: Some(SessionMode::Build),
+        },
+        SessionEvent::ModeResult {
+            request_id: "set-mode".into(),
+            result: ModeSelectionResult::rejected("busy", "turn in progress"),
+        },
+        SessionEvent::PersistenceChanged {
+            path: "session.jsonl".into(),
+            error: Some("fixture error".into()),
+        },
+        SessionEvent::SkillsChanged {
+            revision: "next".into(),
+            counts: crate::skill::SkillCatalogCounts::default(),
         },
     ] {
         let (sender, mut receiver) = session_event_channel(1);
         let reporter = ProgressReporter::new(sender.clone());
         reporter.stream_updated(Message::assistant("keep this preview"));
         sender.send(event.clone()).await.unwrap();
-        assert_eq!(receiver.recv().await, Some(SessionUpdate::Lifecycle(event)));
+        assert_eq!(receiver.try_recv(), Ok(SessionUpdate::Lifecycle(event)));
         assert!(matches!(
-            receiver.recv().await,
-            Some(SessionUpdate::Streams(SessionStreamBatch {
+            receiver.try_recv(),
+            Ok(SessionUpdate::Streams(SessionStreamBatch {
                 root: Some(SessionStreamState {
                     message: Some(Message::Assistant { .. }),
                     ..
@@ -395,6 +407,129 @@ async fn agent_previews_coalesce_and_lossless_updates_create_boundaries() {
         &batch.agent_runs.first().expect("one worker preview").event,
         AgentRunEvent::AgentMessage { text, .. } if text == "fresh"
     ));
+}
+
+#[test]
+fn terminal_subtask_evicts_stream_and_receiver_bookkeeping() {
+    let (sender, mut receiver) = session_event_channel(2);
+    let id = SubtaskId::new("child");
+    let turn_id = TurnId::new(1);
+    let status = |status| SessionEvent::SubtaskStatus {
+        id: id.clone(),
+        turn_id,
+        status,
+    };
+    sender.try_send(status(SubtaskStatus::Running)).unwrap();
+    receiver.try_recv().unwrap();
+    let preview = SessionStreamState {
+        revision: 0,
+        turn_id,
+        message: Some(Message::assistant("child preview")),
+        attempt: None,
+    };
+    sender.set_subtask_stream(id.clone(), preview.clone());
+    assert!(matches!(receiver.try_recv(), Ok(SessionUpdate::Streams(_))));
+    assert!(receiver.subtask_fences.contains_key(&id));
+    assert!(receiver.subtask_emitted.contains_key(&id));
+    sender.set_subtask_stream(id.clone(), preview);
+    sender.try_send(status(SubtaskStatus::Cancelled)).unwrap();
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(SessionUpdate::Lifecycle(status(SubtaskStatus::Cancelled)))
+    );
+    assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert!(!receiver.subtask_fences.contains_key(&id));
+    assert!(!receiver.subtask_emitted.contains_key(&id));
+    assert!(!receiver.streams.borrow().subtasks.contains_key(&id));
+}
+
+#[test]
+fn agent_finish_evicts_old_state_but_preserves_a_new_attempt() {
+    for new_attempt in [false, true] {
+        let (sender, mut receiver) = session_event_channel(4);
+        let turn_id = TurnId::new(1);
+        let ensemble_run_id = EnsembleRunId::new();
+        let id = AgentRunId::new();
+        let preview = |text: &str| {
+            sender.agent_run_preview(
+                turn_id,
+                ensemble_run_id.clone(),
+                id.clone(),
+                AgentRunEvent::AgentMessage {
+                    text: text.into(),
+                    message_id: None,
+                },
+            );
+        };
+        sender
+            .try_send(SessionEvent::AgentRunUpdated {
+                turn_id,
+                ensemble_run_id: ensemble_run_id.clone(),
+                agent_run_id: id.clone(),
+                event: AgentRunEvent::Status {
+                    status: AgentRunStatus::Running,
+                    detail: None,
+                },
+            })
+            .unwrap();
+        receiver.try_recv().unwrap();
+        assert!(
+            !receiver.streams.has_changed().unwrap(),
+            "a boundary with no preview does not wake the watch"
+        );
+        preview("first");
+        assert!(matches!(receiver.try_recv(), Ok(SessionUpdate::Streams(_))));
+        assert!(receiver.agent_run_fences.contains_key(&id));
+        assert_eq!(receiver.agent_run_emitted.len(), 1);
+        sender
+            .try_send(SessionEvent::AgentRunFinished {
+                turn_id,
+                ensemble_run_id: ensemble_run_id.clone(),
+                outcome: AgentRunOutcome {
+                    descriptor: zevria_workflow::AgentRunDescriptor {
+                        id: id.clone(),
+                        agent: "worker".into(),
+                        label: "Worker".into(),
+                        safe_mode: "read-only".into(),
+                    },
+                    status: AgentRunStatus::Completed,
+                    report: String::new(),
+                    plan: None,
+                    confirmation: None,
+                    partial: false,
+                    failure: None,
+                    usage: None,
+                    acp_session_id: None,
+                    user_decisions: vec![],
+                    decision_ids: vec![],
+                    unavailable_decisions: vec![],
+                },
+            })
+            .unwrap();
+        if new_attempt {
+            preview("next");
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionUpdate::Lifecycle(
+                SessionEvent::AgentRunFinished { .. }
+            ))
+        ));
+        assert!(receiver.agent_run_emitted.is_empty());
+        assert!(!receiver.agent_run_fences.contains_key(&id));
+        let expected = usize::from(new_attempt);
+        assert_eq!(receiver.streams.borrow().agent_runs.len(), expected);
+        assert_eq!(receiver.streams.borrow().active_agent_runs.len(), expected);
+        if new_attempt {
+            let Ok(SessionUpdate::Streams(batch)) = receiver.try_recv() else {
+                panic!("expected next preview");
+            };
+            assert!(
+                matches!(&batch.agent_runs[0].event, AgentRunEvent::AgentMessage { text, .. } if text == "next")
+            );
+        }
+        assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
 }
 
 #[tokio::test]

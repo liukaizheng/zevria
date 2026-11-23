@@ -6,12 +6,9 @@ mod mode_tests;
 mod retry_tests;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, atomic::Ordering},
 };
 
 use agent_client_protocol::schema::v1::{
@@ -19,7 +16,7 @@ use agent_client_protocol::schema::v1::{
     SessionUpdate as AcpSessionUpdate, StopReason,
 };
 use agent_client_protocol::{ConnectionTo, SentRequest};
-use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use zevria_foundation::QuestionResponse;
 use zevria_foundation::SessionMode;
@@ -45,6 +42,8 @@ use crate::project::{
 use crate::stream::StreamSegments;
 use crate::{ClientState, ExecutionProfile, RuntimeExit, SessionRuntimeLifecycle};
 
+type ShutdownOutcome = Option<Result<(), String>>;
+
 pub(crate) struct LiveSession {
     id: SessionId,
     workspace: PathBuf,
@@ -57,7 +56,8 @@ pub(crate) struct LiveSession {
     permit: Mutex<Option<OwnedSemaphorePermit>>,
     state: Mutex<State>,
     elicitations: Mutex<HashMap<String, CancellationToken>>,
-    closed: AtomicBool,
+    shutdown_owner: Mutex<Option<watch::Sender<ShutdownOutcome>>>,
+    shutdown_outcome: watch::Receiver<ShutdownOutcome>,
     next_management_request: std::sync::atomic::AtomicU64,
 }
 
@@ -232,6 +232,7 @@ impl LiveSession {
         } else {
             selected_mode
         };
+        let (shutdown_owner, shutdown_outcome) = watch::channel(None);
         Arc::new(Self {
             id: SessionId::new(id),
             workspace,
@@ -262,7 +263,8 @@ impl LiveSession {
                 context_usage: None,
             }),
             elicitations: Mutex::new(HashMap::new()),
-            closed: AtomicBool::new(false),
+            shutdown_owner: Mutex::new(Some(shutdown_owner)),
+            shutdown_outcome,
             next_management_request: std::sync::atomic::AtomicU64::new(1),
         })
     }
@@ -276,7 +278,10 @@ impl LiveSession {
     }
 
     pub(crate) fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
+        self.shutdown_owner
+            .lock()
+            .expect("ACP shutdown lock poisoned")
+            .is_none()
     }
 
     pub(crate) fn mode(&self) -> SessionMode {
@@ -296,14 +301,16 @@ impl LiveSession {
         events: SessionEventReceiver,
         background_exit: std::pin::Pin<Box<dyn std::future::Future<Output = RuntimeExit> + Send>>,
     ) {
-        let session = Arc::clone(self);
-        let task = tokio::spawn(async move {
-            session.run_event_loop(events, background_exit).await;
-        });
-        *self
+        let mut event_task = self
             .event_task
             .lock()
-            .expect("ACP event task lock poisoned") = Some(task);
+            .expect("ACP event task lock poisoned");
+        if !self.is_closed() {
+            let session = Arc::clone(self);
+            *event_task = Some(tokio::spawn(async move {
+                session.run_event_loop(events, background_exit).await;
+            }));
+        }
     }
 
     pub(crate) fn send_update(&self, update: AcpSessionUpdate) -> Result<(), AcpError> {
@@ -403,6 +410,7 @@ impl LiveSession {
                 // Worker runtimes reject root management. Their Plan/Review
                 // selection remains frontend-local and is carried by the turn.
                 state.mode = mode;
+                drop(state);
                 self.publish_mode(mode)?;
                 let _ = outcome.send(Ok(()));
                 return Ok(ModeWait {
@@ -470,6 +478,7 @@ impl LiveSession {
         let mut state = self.state.lock().expect("ACP session state poisoned");
         if state.mode != mode {
             state.mode = mode;
+            drop(state);
             self.publish_mode(mode)?;
         }
         Ok(())
@@ -506,6 +515,7 @@ impl LiveSession {
         match result {
             ModeSelectionResult::Accepted { mode, .. } => {
                 state.mode = mode;
+                drop(state);
                 let published = self.publish_mode(mode);
                 pending.resolve_waiter(published.clone());
                 published
@@ -856,26 +866,45 @@ impl LiveSession {
         }
     }
 
-    pub(crate) async fn shutdown(self: &Arc<Self>) -> anyhow::Result<()> {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        self.cancel();
-        self.finish_prompt(Ok(StopReason::Cancelled));
-        let event_task = {
-            self.event_task
-                .lock()
-                .expect("ACP event task lock poisoned")
-                .take()
-        };
-        if let Some(task) = event_task {
-            task.abort();
-            let _ = task.await;
-        }
-        self.shutdown_runtime().await
+    fn take_shutdown_owner(&self) -> Option<watch::Sender<ShutdownOutcome>> {
+        self.shutdown_owner
+            .lock()
+            .expect("ACP shutdown lock poisoned")
+            .take()
     }
 
-    async fn shutdown_runtime(&self) -> anyhow::Result<()> {
+    pub(crate) async fn shutdown(self: &Arc<Self>) -> anyhow::Result<()> {
+        if let Some(owner) = self.take_shutdown_owner() {
+            // Teardown belongs to the session, not to the request waiting for
+            // it. Dropping that request must not interrupt cleanup for others.
+            let session = Arc::clone(self);
+            tokio::spawn(async move {
+                session.cancel();
+                session.finish_prompt(Ok(StopReason::Cancelled));
+                let event_task = session
+                    .event_task
+                    .lock()
+                    .expect("ACP event task lock poisoned")
+                    .take();
+                if let Some(task) = event_task {
+                    task.abort();
+                    let _ = task.await;
+                }
+                let _ = session.shutdown_runtime(owner).await;
+            });
+        }
+        let mut completion = self.shutdown_outcome.clone();
+        let outcome = completion.wait_for(Option::is_some).await.map_err(|_| {
+            anyhow::anyhow!("ACP session teardown ended without reporting completion")
+        })?;
+        outcome
+            .as_ref()
+            .expect("waited for a shutdown outcome")
+            .clone()
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn shutdown_runtime(&self, owner: watch::Sender<ShutdownOutcome>) -> anyhow::Result<()> {
         self.discard_mode(
             None,
             AcpError::request_cancelled().data("session runtime is closing"),
@@ -907,6 +936,12 @@ impl LiveSession {
             .lock()
             .expect("ACP session permit lock poisoned")
             .take();
+        owner.send_replace(Some(
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}")),
+        ));
         result
     }
 
@@ -964,13 +999,17 @@ impl LiveSession {
                 }
             }
         }
-        let cleanup = Arc::clone(&self);
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            if let Err(error) = cleanup.shutdown().await {
-                tracing::warn!(%error, "failed to clean up an unavailable ACP session runtime");
-            }
-        });
+        // Close the receive side before awaiting teardown, so an exiting
+        // engine cannot be blocked trying to publish into a full queue.
+        drop(events);
+        drop(background_exit);
+        // External shutdown may already own cleanup. Otherwise do it here
+        // without aborting or joining this event task from within itself.
+        if let Some(owner) = self.take_shutdown_owner()
+            && let Err(error) = self.shutdown_runtime(owner).await
+        {
+            tracing::warn!(%error, "failed to clean up an unavailable ACP session runtime");
+        }
     }
 
     fn handle_update(self: &Arc<Self>, update: SessionUpdate) -> Result<(), AcpError> {
@@ -1726,19 +1765,18 @@ impl LiveSession {
             self.finish_prompt(Ok(StopReason::EndTurn));
             return Ok(());
         }
-        if self
-            .elicitations
-            .lock()
-            .expect("ACP elicitation lock poisoned")
-            .contains_key(KEY)
-        {
-            return Ok(());
-        }
-        let token = CancellationToken::new();
-        self.elicitations
-            .lock()
-            .expect("ACP elicitation lock poisoned")
-            .insert(KEY.to_string(), token.clone());
+        let token = {
+            let mut elicitations = self
+                .elicitations
+                .lock()
+                .expect("ACP elicitation lock poisoned");
+            let Entry::Vacant(entry) = elicitations.entry(KEY.to_string()) else {
+                return Ok(());
+            };
+            let token = CancellationToken::new();
+            entry.insert(token.clone());
+            token
+        };
         let request = plan_decision_request(&self.id, &artifact.title);
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {

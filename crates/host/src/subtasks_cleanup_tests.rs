@@ -179,11 +179,11 @@ async fn permit_wait_cancel_and_execution_failure_release_before_backpressured_t
         // its outcome and release ownership without room for the status event.
         let request = channels.requests.recv().await.unwrap();
         let terminal = tokio::spawn(async move {
+            let stop_delivery = CancellationToken::new();
             if preparation_failure {
-                let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
-                run_child(request, config, permit).await;
+                run_worker(request, config, Arc::new(Semaphore::new(1)), stop_delivery).await;
             } else {
-                finish_cancelled(request, &config).await;
+                finish_cancelled(request, &config, &stop_delivery).await;
             }
         });
         let outcome = outcome.await.unwrap();

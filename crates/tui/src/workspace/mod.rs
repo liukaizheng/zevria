@@ -253,8 +253,11 @@ pub struct SessionViews {
 }
 
 impl SessionViews {
-    /// Root follow-ups drain independently of which pane owns input.
+    /// Root follow-ups drain from any pane, but not while a modal captures input.
     pub(crate) fn dispatch_queued_root_work(&mut self) -> Option<UiAction> {
+        if self.overlays.snapshot(self.root.surface()).owner.captures {
+            return None;
+        }
         self.root
             .dispatch_next_queued()
             .or_else(|| self.root.dispatch_job_continuation())

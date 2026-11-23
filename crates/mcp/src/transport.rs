@@ -17,9 +17,8 @@ use rmcp::{
     transport::{
         Transport,
         async_rw::AsyncRwTransport,
-        streamable_http_client::{
-            StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
-        },
+        streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpClientWorker},
+        worker::WorkerTransport,
     },
 };
 use tokio::{
@@ -145,6 +144,8 @@ impl ClientHandler for ZevriaClientHandler {
 
 pub(crate) type Service = RunningService<RoleClient, ZevriaClientHandler>;
 
+/// Until the handshake finishes, this future owns the transport. Dropping
+/// it drops the stdio process tree or cancels the SDK HTTP transport worker.
 pub(crate) async fn connect(
     name: &McpServerName,
     config: &McpServerConfig,
@@ -200,27 +201,28 @@ pub(crate) async fn connect(
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?;
+            let stop = CancellationToken::new();
             let backend = AuthenticatingHttpClient::new(
                 client,
                 &config.headers,
                 config.bearer_token.clone(),
+                stop.clone(),
             )?;
             let settings = StreamableHttpClientTransportConfig::with_uri(
                 config.url.as_deref().expect("validated HTTP config"),
             )
             .reinit_on_expired_session(true)
             .max_error_response_size(4096);
-            handler
-                .serve(StreamableHttpClientTransport::with_client(
-                    backend, settings,
-                ))
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "Streamable HTTP MCP handshake failed: {}",
-                        safe_handshake_error(&error)
-                    )
-                })
+            let transport = WorkerTransport::spawn_with_ct(
+                StreamableHttpClientWorker::new(backend, settings),
+                stop,
+            );
+            handler.serve(transport).await.map_err(|error| {
+                anyhow::anyhow!(
+                    "Streamable HTTP MCP handshake failed: {}",
+                    safe_handshake_error(&error)
+                )
+            })
         }
     }
 }

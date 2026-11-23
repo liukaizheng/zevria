@@ -596,6 +596,37 @@ pub enum AgentRunEvent {
     },
 }
 
+impl_wire_types! {
+    AgentRunEvent, KNOWN_WIRE_TYPES;
+    Self::ResponseDisplay { .. } => "response_display",
+    Self::Review { .. } => "review",
+    Self::Status { .. } => "status",
+    Self::SessionAllocated { .. } => "session_allocated",
+    Self::SessionEstablished { .. } => "session_established",
+    Self::Prompt { .. } => "prompt",
+    Self::UserImage { .. } => "user_image",
+    Self::UserMessage { .. } => "user_message",
+    Self::AgentMessage { .. } => "agent_message",
+    Self::Thought { .. } => "thought",
+    Self::ToolCall { .. } => "tool_call",
+    Self::ToolCallUpdate { .. } => "tool_call_update",
+    Self::ToolResultMetadata { .. } => "tool_result_metadata",
+    Self::Plan { .. } => "plan",
+    Self::NativePlanCaptured { .. } => "native_plan_captured",
+    Self::PlanRemoved { .. } => "plan_removed",
+    Self::ModeChanged { .. } => "mode_changed",
+    Self::ConfigOptionsChanged { .. } => "config_options_changed",
+    Self::SessionInfo { .. } => "session_info",
+    Self::Usage { .. } => "usage",
+    Self::Permission { .. } => "permission",
+    Self::Elicitation { .. } => "elicitation",
+    Self::Stderr { .. } => "stderr",
+    Self::Protocol { .. } => "protocol",
+    Self::ReplayBoundary => "replay_boundary",
+    Self::Unsupported { .. } => "unsupported",
+    Self::Failure { .. } => "failure",
+}
+
 impl AgentRunEvent {
     /// Native ACP projection supplies both an attempt-scoped ID and origin.
     /// External agents continue to own their capabilities and correlations.

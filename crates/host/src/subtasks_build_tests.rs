@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     sync::{mpsc, oneshot},
+    task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 use zevria_foundation::TurnId;

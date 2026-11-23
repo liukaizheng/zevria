@@ -276,6 +276,18 @@ impl<P: ModelProvider> SessionEngine<P> {
         self
     }
 
+    /// Attach a live MCP catalog after local session setup, before running it.
+    pub fn with_mcp(
+        mut self,
+        service: Arc<dyn zevria_session_api::mcp::McpSessionService>,
+    ) -> Self {
+        self.capabilities.mcp = Some(service);
+        self.invalidate_request_plans();
+        self.invalidate_model_preview();
+        self.context.invalidate_prepared_count();
+        self
+    }
+
     pub fn with_incremental_tools(mut self, enabled: bool) -> Self {
         self.request_plans
             .get_mut()

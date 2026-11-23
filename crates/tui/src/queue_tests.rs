@@ -75,6 +75,47 @@ fn job_continuation_waits_for_queue_composer_and_barrier_and_ctrl_c_cancels_it()
 }
 
 #[test]
+fn capturing_overlays_pause_root_dispatch_until_dismissed() {
+    let mut app = busy();
+    enqueue(&mut app, "wait for overlay");
+    complete(&mut app, TEST_TURN_ID);
+    idle(&mut app);
+    let mut views = test_session_views(app);
+    views.open_session_picker(vec![]);
+    assert_eq!(views.dispatch_queued_root_work(), None);
+    views.handle_event(key(KeyCode::Esc));
+    assert!(matches!(
+        views.dispatch_queued_root_work(),
+        Some(UiAction::Submit { .. })
+    ));
+
+    let mut app = busy();
+    complete(&mut app, TEST_TURN_ID);
+    app.reduce_without_effects(SessionEvent::JobContinuationChanged {
+        mode: Some(SessionMode::Build),
+    });
+    idle(&mut app);
+    let mut views = test_session_views(app);
+    views
+        .overlays
+        .set_question(Some(crate::question::QuestionDialog::new(
+            TEST_TURN_ID,
+            question_request("dispatch-gate"),
+        )));
+    assert_eq!(views.dispatch_queued_root_work(), None);
+    views.apply(SessionEvent::QuestionClosed {
+        turn_id: TEST_TURN_ID,
+        request_id: QuestionRequestId::new("dispatch-gate"),
+    });
+    assert_eq!(
+        views.dispatch_queued_root_work(),
+        Some(UiAction::ContinueAfterJobs {
+            mode: SessionMode::Build
+        })
+    );
+}
+
+#[test]
 fn job_notice_is_a_compact_system_block_without_stream_output() {
     use zevria_foundation::*;
     let notice = CommandJobNotice::new(

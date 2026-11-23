@@ -493,8 +493,8 @@ impl SessionEventSender {
                         // the receiver has delivered it; otherwise a burst
                         // can overwrite an unread thought before lifecycle
                         // traffic is reduced.
-                        self.streams.send_modify(|snapshot| {
-                            snapshot.active_agent_runs.remove(agent_run_id);
+                        self.streams.send_if_modified(|snapshot| {
+                            snapshot.active_agent_runs.remove(agent_run_id).is_some()
                         });
                     }
                     permit.send(SequencedSessionEvent { sequence, event });
@@ -550,8 +550,8 @@ impl SessionEventSender {
                     if let Some(agent_run_id) = &agent_run_boundary
                         && !existing
                     {
-                        self.streams.send_modify(|snapshot| {
-                            snapshot.active_agent_runs.remove(agent_run_id);
+                        self.streams.send_if_modified(|snapshot| {
+                            snapshot.active_agent_runs.remove(agent_run_id).is_some()
                         });
                     }
                     permit.send(SequencedSessionEvent { sequence, event });
@@ -773,30 +773,22 @@ impl SessionEventReceiver {
     pub(super) fn lifecycle_update(&mut self, event: SequencedSessionEvent) -> SessionUpdate {
         let existing = hosted_activity_update(&event.event, &mut self.hosted_actions);
         match &event.event {
-            SessionEvent::ResponseAttemptUpdated { .. }
-            | SessionEvent::NetworkStatus { .. }
-            | SessionEvent::EngineIdle
-            | SessionEvent::CommandJobUpdated { .. }
-            | SessionEvent::JobContinuationChanged { .. }
-            | SessionEvent::CommandControlResult { .. }
-            | SessionEvent::McpResult { .. }
-            | SessionEvent::McpChanged { .. } => {}
+            SessionEvent::SubtaskStatus { id, status, .. } if status.is_terminal() => {
+                self.subtask_fences.remove(id);
+                self.subtask_emitted.remove(id);
+                self.stream_cleanup
+                    .send_if_modified(|snapshot| snapshot.subtasks.remove(id).is_some());
+            }
+            SessionEvent::SubtaskSession { event, .. } if !fences_turn_preview(event) => {}
+            SessionEvent::SubtaskSession { id, .. } | SessionEvent::SubtaskStatus { id, .. } => {
+                let fence = self.subtask_fences.entry(id.clone()).or_default();
+                *fence = (*fence).max(event.sequence);
+            }
             SessionEvent::AgentRunUpdated {
                 event: AgentRunEvent::ResponseDisplay { .. },
                 ..
             } => {}
             SessionEvent::AgentRunUpdated { .. } if existing => {}
-            SessionEvent::SubtaskSession { event, .. }
-                if matches!(
-                    event.as_ref(),
-                    SessionEvent::ResponseAttemptUpdated { .. }
-                        | SessionEvent::NetworkStatus { .. }
-                        | SessionEvent::EngineIdle
-                ) => {}
-            SessionEvent::SubtaskSession { id, .. } | SessionEvent::SubtaskStatus { id, .. } => {
-                let fence = self.subtask_fences.entry(id.clone()).or_default();
-                *fence = (*fence).max(event.sequence);
-            }
             SessionEvent::AgentRunUpdated { agent_run_id, .. } => {
                 let fence = self
                     .agent_run_fences
@@ -806,26 +798,32 @@ impl SessionEventReceiver {
                 self.prune_agent_previews(agent_run_id, event.sequence);
             }
             SessionEvent::AgentRunFinished { outcome, .. } => {
-                let fence = self
-                    .agent_run_fences
-                    .entry(outcome.descriptor.id.clone())
-                    .or_default();
-                *fence = (*fence).max(event.sequence);
-                self.prune_agent_previews(&outcome.descriptor.id, event.sequence);
+                let id = &outcome.descriptor.id;
+                self.agent_run_fences.remove(id);
+                self.agent_run_emitted
+                    .retain(|key, revision| &key.agent_run_id != id || *revision > event.sequence);
+                // Publication already closed the active segment. A newer
+                // segment may be queued for a later attempt of the same run.
+                self.prune_agent_previews(id, event.sequence);
             }
-            _ => self.root_fence = self.root_fence.max(event.sequence),
+            boundary if fences_turn_preview(boundary) => {
+                self.root_fence = self.root_fence.max(event.sequence);
+            }
+            _ => {}
         }
         SessionUpdate::Lifecycle(event.event)
     }
 
     pub(super) fn prune_agent_previews(&self, agent_run_id: &AgentRunId, through_sequence: u64) {
-        self.stream_cleanup.send_modify(|snapshot| {
-            let active = snapshot.active_agent_runs.get(agent_run_id).cloned();
+        self.stream_cleanup.send_if_modified(|snapshot| {
+            let before = snapshot.agent_runs.len();
+            let active = snapshot.active_agent_runs.get(agent_run_id);
             snapshot.agent_runs.retain(|key, state| {
                 &key.agent_run_id != agent_run_id
                     || state.revision > through_sequence
-                    || active.as_ref() == Some(key)
+                    || active == Some(key)
             });
+            before != snapshot.agent_runs.len()
         });
     }
 
@@ -893,6 +891,31 @@ impl SessionEventReceiver {
     }
 }
 
+/// Only events that replace or delimit the turn preview fence its stream.
+/// Parallel management and diagnostics must not hide a live preview.
+fn fences_turn_preview(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::TurnStarted { .. }
+            | SessionEvent::ModelCallStarted { .. }
+            | SessionEvent::Intermediate { .. }
+            | SessionEvent::ToolResults { .. }
+            | SessionEvent::TurnCompleted { .. }
+            | SessionEvent::TurnFailed { .. }
+            | SessionEvent::TurnCancelled { .. }
+            | SessionEvent::TurnRejected { .. }
+            | SessionEvent::TurnRecovered { .. }
+            | SessionEvent::CompactionStarted { .. }
+            | SessionEvent::CompactionCompleted { .. }
+            | SessionEvent::PlanHandoffStarted { .. }
+            | SessionEvent::JobContinuationStarted { .. }
+            | SessionEvent::CommandJobsReported { .. }
+            | SessionEvent::EnsembleStarted { .. }
+            | SessionEvent::EnsembleReportsReady { .. }
+            | SessionEvent::TurnRetrying { .. }
+    )
+}
+
 pub(super) fn agent_run_boundary(event: &SessionEvent) -> Option<&AgentRunId> {
     match event {
         SessionEvent::AgentRunUpdated { agent_run_id, .. } => Some(agent_run_id),
@@ -924,13 +947,17 @@ fn hosted_activity_update(
     event: &SessionEvent,
     known: &mut std::collections::HashSet<(AgentRunId, String)>,
 ) -> bool {
-    let SessionEvent::AgentRunUpdated {
-        agent_run_id,
-        event,
-        ..
-    } = event
-    else {
-        return false;
+    let (agent_run_id, event) = match event {
+        SessionEvent::AgentRunUpdated {
+            agent_run_id,
+            event,
+            ..
+        } => (agent_run_id, event),
+        SessionEvent::AgentRunFinished { outcome, .. } => {
+            known.retain(|(agent, _)| agent != &outcome.descriptor.id);
+            return false;
+        }
+        _ => return false,
     };
     if matches!(
         event,

@@ -2,11 +2,11 @@
 //! Read/validate every dependency before preparing a writable transcript. Root
 //! capabilities and dependent-task lifetime remain explicit profile choices.
 use super::{
-    RestoredAgentRun, RestoredSubtask, RunningSession, SessionRestoration, SessionStart,
-    SubtaskSupervisor, append_guidance_notices, build_explore_tools, build_session_policies,
-    build_tools, command_job_limits, ensure_worker_ignore_guard, guidance_roots,
-    load_session_skills, observe_task, observe_task_retaining, preflight_restoration,
-    prepare_session_lease, sessions_dir, transcript_recovery_notice, worker_policies, worker_tools,
+    MCP_SHUTDOWN_GRACE, RestoredAgentRun, RestoredSubtask, RunningSession, SessionRestoration,
+    SessionStart, SubtaskSupervisor, append_guidance_notices, build_explore_tools,
+    build_session_policies, build_tools, command_job_limits, ensure_worker_ignore_guard,
+    guidance_roots, load_session_skills, preflight_restoration, prepare_session_lease,
+    sessions_dir, spawn_observed, transcript_recovery_notice, worker_policies, worker_tools,
 };
 use crate::{
     config::Config,
@@ -14,7 +14,7 @@ use crate::{
     session_lease::RootSessionLease,
     session_models::ResolvedSessionModels,
     skills::LocalSkillService,
-    subtasks::{SubtaskSupervisorConfig, spawn_supervisor},
+    subtasks::{SubtaskSupervisorConfig, run_supervisor},
 };
 use anyhow::Context as _;
 use rig_agent::tool::server::ToolServerHandle;
@@ -93,8 +93,13 @@ struct SessionServices {
     responder: QuestionResponder,
     command_jobs: Option<CommandJobs>,
     startup_notices: Vec<String>,
-    mcp: Option<Arc<McpManager>>,
+    mcp: Option<McpStartup>,
     root: Option<RootServices>,
+}
+struct McpStartup {
+    source: McpConfigSource,
+    delegated: Vec<AcpMcpServerSpec>,
+    tools: ToolServerHandle,
 }
 struct RootTasks {
     requests: Receiver<SubtaskLaunchRequest>,
@@ -108,7 +113,7 @@ struct BuiltEngine {
     event_rx: SessionEventReceiver,
     command_jobs: Option<CommandJobs>,
     startup_notices: Vec<String>,
-    mcp: Option<Arc<McpManager>>,
+    mcp: Option<McpStartup>,
     root: Option<RootTasks>,
 }
 
@@ -385,7 +390,7 @@ async fn build_services(
         &resolved.model_config().session.preamble,
         &resolved.id,
     )?;
-    let mut startup_notices = startup_preflight(storage, &provider);
+    let startup_notices = startup_preflight(storage, &provider);
     let source = if let Some(path) = config.source_path.clone() {
         tokio::task::spawn_blocking(move || crate::mcp::load_mcp_config(&path)).await??
     } else {
@@ -397,24 +402,13 @@ async fn build_services(
     let mcp = if source.config.enabled
         && (!source.config.servers.is_empty() || !mcp_servers.is_empty())
     {
-        let store = config.source_path.clone().map(|path| {
-            Arc::new(crate::mcp::LocalMcpConfigStore::new(path))
-                as Arc<dyn zevria_mcp::McpConfigPersister>
-        });
-        let mcp = McpManager::start(
-            source,
-            mcp_servers,
-            resolved.workspace.clone(),
-            tools.clone(),
-            store,
-        )
-        .await?;
-        if let McpManagementResult::View { view } = mcp.query_view(&McpManagementRequest::List) {
-            startup_notices.extend(view.diagnostics);
-        }
         policies.policy_mut(SessionMode::Build).mcp_access = McpToolAccess::AllEnabled;
         policies.policy_mut(SessionMode::Plan).mcp_access = McpToolAccess::PlanScoped;
-        Some(mcp)
+        Some(McpStartup {
+            source,
+            delegated: mcp_servers,
+            tools: tools.clone(),
+        })
     } else {
         None
     };
@@ -586,9 +580,6 @@ async fn build_engine(
                 .with_question_responder(responder)
                 .with_ensemble_launcher(ensemble)
                 .with_plans_dir(transcript::plans_dir(&resolved.workspace));
-            if let Some(mcp) = &mcp {
-                engine = engine.with_mcp(mcp.clone());
-            }
             if let Some(jobs) = &command_jobs {
                 engine = engine
                     .with_command_jobs(jobs.clone())
@@ -649,13 +640,13 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
         ..
     } = storage;
     let BuiltEngine {
-        engine,
+        mut engine,
         skill_catalog,
         active_skills,
         event_tx,
         event_rx,
         command_jobs,
-        startup_notices,
+        mut startup_notices,
         mcp,
         root,
     } = built;
@@ -663,99 +654,133 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
     let transcript_items = engine.conversation().items().to_vec();
     let plan_state = engine.plan_state()?.clone();
     let selected_mode = engine.selected_mode();
-    let model_snapshots = engine.restored_model_contexts()?;
-    let (command_tx, command_rx) = unbounded_channel();
-    let supervisor = match root {
-        Some(root) => {
-            let shutdown = tokio_util::sync::CancellationToken::new();
-            let task = spawn_supervisor(
-                root.requests,
-                SubtaskSupervisorConfig {
-                    explore_factory: ProviderRouterFactory::new(
-                        ModelRole::Explore,
-                        resolved
-                            .model_config()
-                            .routing()
-                            .for_role(ModelRole::Explore)
-                            .clone(),
-                        resolved
-                            .model_config()
-                            .routing()
-                            .selection_for_role(ModelRole::Explore)
-                            .reasoning_level,
-                        &resolved.model_config().session.preamble,
-                    ),
-                    builder_factory: ProviderRouterFactory::new(
-                        ModelRole::Builder,
-                        resolved
-                            .model_config()
-                            .routing()
-                            .for_role(ModelRole::Builder)
-                            .clone(),
-                        resolved
-                            .model_config()
-                            .routing()
-                            .selection_for_role(ModelRole::Builder)
-                            .reasoning_level,
-                        &resolved.model_config().session.preamble,
-                    ),
-                    explore_tools: build_explore_tools(&resolved.workspace, config.command)?,
-                    startup_workspace: {
-                        #[cfg(windows)]
-                        {
-                            zevria_foundation::windows_io::checked_directory_path(
-                                &resolved.workspace,
-                            )?
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            std::fs::canonicalize(&resolved.workspace)?
-                        }
-                    },
-                    command_config: config.command,
-                    events: event_tx.clone(),
-                    subsessions_dir: transcript::subsessions_dir(&resolved.workspace, &resolved.id),
-                    compaction: models.compaction.clone(),
-                    max_concurrent_subtasks: config.session.max_concurrent_subtasks,
-                    incremental_tools: config.session.incremental_tools,
-                    guidance: engine
-                        .guidance_snapshot()
-                        .expect("root captured guidance")
+    let root = root
+        .map(|root| -> anyhow::Result<_> {
+            let config = SubtaskSupervisorConfig {
+                explore_factory: ProviderRouterFactory::new(
+                    ModelRole::Explore,
+                    resolved
+                        .model_config()
+                        .routing()
+                        .for_role(ModelRole::Explore)
                         .clone(),
+                    resolved
+                        .model_config()
+                        .routing()
+                        .selection_for_role(ModelRole::Explore)
+                        .reasoning_level,
+                    &resolved.model_config().session.preamble,
+                ),
+                builder_factory: ProviderRouterFactory::new(
+                    ModelRole::Builder,
+                    resolved
+                        .model_config()
+                        .routing()
+                        .for_role(ModelRole::Builder)
+                        .clone(),
+                    resolved
+                        .model_config()
+                        .routing()
+                        .selection_for_role(ModelRole::Builder)
+                        .reasoning_level,
+                    &resolved.model_config().session.preamble,
+                ),
+                explore_tools: build_explore_tools(&resolved.workspace, config.command)?,
+                startup_workspace: {
+                    #[cfg(windows)]
+                    {
+                        zevria_foundation::windows_io::checked_directory_path(&resolved.workspace)?
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        std::fs::canonicalize(&resolved.workspace)?
+                    }
                 },
-                shutdown.clone(),
-            );
-            Some((task, shutdown, root.keepalive))
-        }
-        None => None,
-    };
-    let (exit_tx, exit_rx) = unbounded_channel();
-    let engine_lease = lease.clone();
-    let engine_events = event_tx.clone();
-    let engine_handle = tokio::spawn(async move {
-        let _lease = engine_lease;
-        engine.run(command_rx, engine_events).await
-    });
-    let (engine_task, supervisor) = match supervisor {
-        Some((supervisor, shutdown, keepalive)) => (
-            observe_task_retaining("session engine", engine_handle, exit_tx.clone(), keepalive),
-            Some(SubtaskSupervisor {
-                shutdown,
-                task: observe_task("subtask supervisor", supervisor, exit_tx),
-            }),
-        ),
-        None => (observe_task("session engine", engine_handle, exit_tx), None),
-    };
+                command_config: config.command,
+                events: event_tx.clone(),
+                subsessions_dir: transcript::subsessions_dir(&resolved.workspace, &resolved.id),
+                compaction: models.compaction.clone(),
+                max_concurrent_subtasks: config.session.max_concurrent_subtasks,
+                incremental_tools: config.session.incremental_tools,
+                guidance: engine
+                    .guidance_snapshot()
+                    .expect("root captured guidance")
+                    .clone(),
+            };
+            Ok((root, config))
+        })
+        .transpose()?;
+    let (command_tx, command_rx) = unbounded_channel();
     let cleanup_abandoned_history = matches!(resolved.start, SessionStart::Resume(_));
     if let SessionStart::FromPlan { handoff, .. } = resolved.start {
+        // Queue the opening command while we still own the receiver and have
+        // not started any background services.
         command_tx
             .send(SessionCommand::Turn(
                 zevria_session_api::TurnCommand::StartFromPlan {
                     handoff: Box::new(handoff),
                 },
             ))
-            .map_err(|_| anyhow::anyhow!("the session engine stopped before its opening prompt"))?;
+            .expect("the opening command receiver is still held");
     }
+
+    // Start external processes only after the writer, guidance, ensemble and
+    // child workspace have all been prepared. No runtime tasks are spawned
+    // until the MCP-dependent restoration snapshot is ready.
+    let mcp = if let Some(McpStartup {
+        source,
+        delegated,
+        tools,
+    }) = mcp
+    {
+        let store = config.source_path.clone().map(|path| {
+            Arc::new(crate::mcp::LocalMcpConfigStore::new(path))
+                as Arc<dyn zevria_mcp::McpConfigPersister>
+        });
+        let manager =
+            McpManager::start(source, delegated, resolved.workspace.clone(), tools, store).await?;
+        if let McpManagementResult::View { view } = manager.query_view(&McpManagementRequest::List)
+        {
+            startup_notices.extend(view.diagnostics);
+        }
+        engine = engine.with_mcp(manager.clone());
+        Some(manager)
+    } else {
+        None
+    };
+    let model_snapshots = match engine.restored_model_contexts() {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            if let Some(mcp) = &mcp {
+                mcp.shutdown(MCP_SHUTDOWN_GRACE).await;
+            }
+            return Err(error.into());
+        }
+    };
+
+    let (exit_tx, exit_rx) = unbounded_channel();
+    let (supervisor, child_guard) = if let Some((root, config)) = root {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task = spawn_observed(
+            "subtask supervisor",
+            run_supervisor(root.requests, config, shutdown.clone()),
+            exit_tx.clone(),
+            (),
+        );
+        // An engine exit (including panic/abort) cancels children even when
+        // another owner retains a launcher or the original turn token.
+        let guard = (shutdown.clone().drop_guard(), root.keepalive);
+        (Some(SubtaskSupervisor { shutdown, task }), Some(guard))
+    } else {
+        (None, None)
+    };
+    let engine_events = event_tx.clone();
+    let engine_task = spawn_observed(
+        "session engine",
+        engine.run(command_rx, engine_events),
+        exit_tx,
+        (child_guard, lease.clone()),
+    );
     let mcp_prompts = mcp
         .as_ref()
         .map_or_else(Vec::new, |mcp| mcp.prompt_catalog());

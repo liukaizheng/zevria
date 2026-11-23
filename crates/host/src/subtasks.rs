@@ -18,7 +18,7 @@ use std::{
 use rig_agent::tool::server::ToolServerHandle;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc::Receiver};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use zevria_content::assistant_plain_text;
 use zevria_core::SessionEngine;
@@ -107,48 +107,75 @@ fn build_policies(child_workspace: &Path, startup_workspace: &Path) -> SessionPo
     SessionPolicies::new(policy.clone(), policy)
 }
 
-/// Spawn the supervisor task. Children overlap freely: each request gets its
-/// own worker. Cancelling `shutdown` (or dropping all launchers) stops the
-/// accept loop, closes the request channel, and drains running workers;
-/// aborting the returned handle drops the `JoinSet` immediately.
-pub(crate) fn spawn_supervisor(
+/// Own the workers in the actual supervisor task. Shutdown stops admission,
+/// cancels active and permit-waiting workers, and drains them. Dropping the
+/// future instead aborts the workers via its `JoinSet`.
+pub(crate) async fn run_supervisor(
     mut requests: Receiver<SubtaskLaunchRequest>,
     config: SubtaskSupervisorConfig,
     shutdown: CancellationToken,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut workers = JoinSet::new();
-        let permits = Arc::new(Semaphore::new(config.max_concurrent_subtasks.max(1)));
-        loop {
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => break,
-                request = requests.recv() => match request {
-                    Some(request) => {
-                        let permits = permits.clone();
-                        let worker_config = config.clone();
-                        workers.spawn(async move {
-                            let permit = tokio::select! {
-                                biased;
-                                () = request.turn.cancellation().cancelled() => None,
-                                permit = permits.acquire_owned() => permit.ok(),
-                            };
-                            if let Some(permit) = permit {
-                                run_child(request, worker_config, permit).await;
-                            } else {
-                                finish_cancelled(request, &worker_config).await;
-                            }
-                        });
-                    }
-                    None => break,
-                },
-                Some(_) = workers.join_next() => {}
-            }
+) {
+    let mut workers = JoinSet::new();
+    let permits = Arc::new(Semaphore::new(config.max_concurrent_subtasks.max(1)));
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            request = requests.recv() => match request {
+                Some(request) => {
+                    workers.spawn(run_worker(request, config.clone(), permits.clone(), shutdown.child_token()));
+                }
+                None => break,
+            },
+            Some(_) = workers.join_next() => {}
         }
-        requests.close();
-        drop(requests);
-        while workers.join_next().await.is_some() {}
-    })
+    }
+    requests.close();
+    drop(requests);
+    while workers.join_next().await.is_some() {}
+}
+
+async fn run_worker(
+    request: SubtaskLaunchRequest,
+    config: SubtaskSupervisorConfig,
+    permits: Arc<Semaphore>,
+    stop_delivery: CancellationToken,
+) {
+    // Keep execution and forwarding cancellable if the JoinSet aborts this
+    // worker. Ordinary turn cancellation still allows lifecycle delivery.
+    let _stop_on_drop = stop_delivery.clone().drop_guard();
+    let cancellation = stop_delivery.child_token();
+    let turn_cancellation = request.turn.cancellation().clone();
+    let run = async {
+        let permit = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => None,
+            permit = permits.acquire_owned() => permit.ok(),
+        };
+        if let Some(permit) = permit {
+            run_child(request, config, permit, &cancellation, &stop_delivery).await;
+        } else {
+            finish_cancelled(request, &config, &stop_delivery).await;
+        }
+    };
+    tokio::pin!(run);
+    tokio::select! {
+        biased;
+        () = turn_cancellation.cancelled() => {
+            cancellation.cancel();
+            run.await;
+        }
+        () = &mut run => {}
+    }
+}
+
+#[cfg(test)]
+fn spawn_supervisor(
+    requests: Receiver<SubtaskLaunchRequest>,
+    config: SubtaskSupervisorConfig,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_supervisor(requests, config, shutdown))
 }
 
 /// Run one child to its terminal state and always resolve the launch oneshot.
@@ -156,6 +183,8 @@ async fn run_child(
     mut request: SubtaskLaunchRequest,
     config: SubtaskSupervisorConfig,
     permit: OwnedSemaphorePermit,
+    cancellation: &CancellationToken,
+    stop_delivery: &CancellationToken,
 ) {
     let id = request.descriptor.id.clone();
     let kind = request.descriptor.kind;
@@ -167,10 +196,6 @@ async fn run_child(
     // aborts, execution so command process cleanup is awaited before reuse.
     // Rig's pinned ToolServerHandle directly awaits tool futures; none of the
     // five registered tools spawns detached mutations beyond command cleanup.
-    let cancellation = request.turn.cancellation().child_token();
-    let _cancel_execution = cancellation.clone().drop_guard();
-    let abandoned = tokio_util::sync::CancellationToken::new();
-    let _mark_abandoned = abandoned.clone().drop_guard();
     let child = ChildSession {
         descriptor: request.descriptor.clone(),
         prompt: request.prompt.clone(),
@@ -179,14 +204,15 @@ async fn run_child(
         turn: zevria_session_api::TurnContext::new(
             request.turn.id,
             SessionMode::Build,
-            cancellation,
+            cancellation.clone(),
         ),
         workspace: request.workspace.take(),
     };
     let execution_config = config.clone();
+    let stop_forwarding = stop_delivery.clone();
     let execution = tokio::spawn(async move {
         let _permit = permit;
-        let result = run_child_session(&child, &execution_config, abandoned).await;
+        let result = run_child_session(&child, &execution_config, stop_forwarding).await;
         // Retain ownership through engine/tool cleanup, but never through
         // terminal outcome/status publication (which may be backpressured).
         drop(child.workspace);
@@ -196,7 +222,7 @@ async fn run_child(
         Ok(result) => result,
         Err(error) => Err(anyhow::anyhow!("child execution failed: {error}")),
     };
-    let outcome = child_outcome(result, request.turn.is_cancelled());
+    let outcome = child_outcome(result, cancellation.is_cancelled());
     if let SubtaskOutcome::Failed { error } = &outcome {
         tracing::warn!(target: "zevria::subtasks", subtask = %id, %kind, "subtask failed: {error}");
     }
@@ -208,14 +234,7 @@ async fn run_child(
     // The awaiting tool call may have been dropped with its turn; the status
     // event still keeps the frontend row truthful.
     let _ = request.outcome.send(outcome);
-    let _ = config
-        .events
-        .send(SessionEvent::SubtaskStatus {
-            turn_id: request.turn.id,
-            id,
-            status,
-        })
-        .await;
+    send_status(&config.events, request.turn.id, id, status, stop_delivery).await;
 }
 
 fn child_outcome(result: anyhow::Result<String>, cancelled: bool) -> SubtaskOutcome {
@@ -230,18 +249,22 @@ fn child_outcome(result: anyhow::Result<String>, cancelled: bool) -> SubtaskOutc
     }
 }
 
-async fn finish_cancelled(mut request: SubtaskLaunchRequest, config: &SubtaskSupervisorConfig) {
+async fn finish_cancelled(
+    mut request: SubtaskLaunchRequest,
+    config: &SubtaskSupervisorConfig,
+    stop_delivery: &CancellationToken,
+) {
     let id = request.descriptor.id.clone();
     drop(request.workspace.take());
     let _ = request.outcome.send(SubtaskOutcome::Cancelled);
-    let _ = config
-        .events
-        .send(SessionEvent::SubtaskStatus {
-            turn_id: request.turn.id,
-            id,
-            status: SubtaskStatus::Cancelled,
-        })
-        .await;
+    send_status(
+        &config.events,
+        request.turn.id,
+        id,
+        SubtaskStatus::Cancelled,
+        stop_delivery,
+    )
+    .await;
 }
 
 struct ChildSession {
@@ -254,7 +277,7 @@ struct ChildSession {
 async fn run_child_session(
     request: &ChildSession,
     config: &SubtaskSupervisorConfig,
-    abandoned: tokio_util::sync::CancellationToken,
+    stop_delivery: CancellationToken,
 ) -> anyhow::Result<String> {
     let id = request.descriptor.id.clone();
     let transcript = TranscriptWriter::allocate_with_id(&config.subsessions_dir, id.as_str())?;
@@ -286,10 +309,14 @@ async fn run_child_session(
         }
     };
     let provider = factory.create(id.as_str())?;
-    tokio::select! {
-        () = abandoned.cancelled() => anyhow::bail!("subtask supervisor aborted"),
-        () = set_running(&id, request.turn.id, config) => {}
-    }
+    send_status(
+        &config.events,
+        request.turn.id,
+        id.clone(),
+        SubtaskStatus::Running,
+        &stop_delivery,
+    )
+    .await;
 
     let mut engine = SessionEngine::builder(
         provider,
@@ -328,19 +355,20 @@ async fn run_child_session(
                             }
                             _ => {}
                         }
-                        // Preserve normal forwarding/backpressure. Only an
-                        // abandoned worker bypasses UI delivery so cleanup
-                        // cannot be stranded after supervisor abort.
+                        // Preserve normal forwarding/backpressure, but do
+                        // not strand execution cleanup on a stopped runtime.
                         tokio::select! {
                             biased;
-                            () = abandoned.cancelled() => {},
+                            () = stop_delivery.cancelled() => {},
                             _ = parent_events.send(SessionEvent::SubtaskSession {
                                 id: id.clone(), event: Box::new(event),
                             }) => {}
                         }
                     }
                     SessionUpdate::Streams(batch) => {
-                        if let Some(stream) = batch.root {
+                        if let Some(stream) = batch.root
+                            && !stop_delivery.is_cancelled()
+                        {
                             parent_events.set_subtask_stream(id.clone(), stream);
                         }
                     }
@@ -388,19 +416,20 @@ fn child_session_result(
     }
 }
 
-async fn set_running(
-    id: &SubtaskId,
+async fn send_status(
+    events: &SessionEventSender,
     turn_id: zevria_foundation::TurnId,
-    config: &SubtaskSupervisorConfig,
+    id: SubtaskId,
+    status: SubtaskStatus,
+    stop_delivery: &CancellationToken,
 ) {
-    let _ = config
-        .events
-        .send(SessionEvent::SubtaskStatus {
-            turn_id,
-            id: id.clone(),
-            status: SubtaskStatus::Running,
-        })
-        .await;
+    tokio::select! {
+        biased;
+        // Send when immediately possible, even at shutdown, without letting
+        // a full frontend queue prevent the supervisor from draining.
+        _ = events.send(SessionEvent::SubtaskStatus { turn_id, id, status }) => {},
+        () = stop_delivery.cancelled() => {},
+    }
 }
 
 #[cfg(test)]
@@ -892,6 +921,59 @@ mod tests {
         .expect("cancelled status should be published promptly");
         supervisor.abort();
         let _ = supervisor.await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_shutdown_cancels_parked_child_with_a_full_event_queue() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (events_tx, mut events_rx) = session_event_channel(1);
+        let channels = subtask_channels("root-id", events_tx.clone());
+        let shutdown = CancellationToken::new();
+        let supervisor = spawn_supervisor(
+            channels.requests,
+            test_supervisor_config(
+                format!("ws://{address}"),
+                events_tx,
+                workspace.path().join("subsessions"),
+            ),
+            shutdown.clone(),
+        );
+        let parent = turn();
+        let parent_token = parent.cancellation().clone();
+        let (_, outcome) = channels
+            .launcher
+            .launch(
+                "call-1",
+                0,
+                "parked child",
+                SubtaskKind::Explore,
+                "wait",
+                parent,
+                None,
+            )
+            .await
+            .unwrap();
+        // Make room for Running, then stop reading so forwarding is backpressured.
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(SessionUpdate::Lifecycle(
+                SessionEvent::SubtaskLaunched { .. }
+            ))
+        ));
+        let (_parked, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(2), supervisor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.await.unwrap(), SubtaskOutcome::Cancelled);
+        assert!(!parent_token.is_cancelled());
     }
 
     #[tokio::test]

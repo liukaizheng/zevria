@@ -27,7 +27,11 @@ use rmcp::{
     },
 };
 use serde_json::json;
-use tokio::sync::Notify;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
+    sync::Notify,
+};
 use tokio_util::sync::CancellationToken;
 use zevria_foundation::*;
 use zevria_mcp::{McpConfigSource, McpManager};
@@ -355,6 +359,61 @@ async fn http_discovery_calls_policy_notifications_and_cleanup() {
     assert!(!tools.snapshot().contains("mcp__fixture__read"));
     assert_eq!(fixture.deletes.load(Ordering::Relaxed), 1);
     server.abort();
+}
+
+#[tokio::test]
+async fn aborting_startup_closes_a_parked_http_handshake_socket() {
+    for sse in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = McpConfigSource {
+            revision: "parked".into(),
+            config: serde_json::from_value(json!({
+                "servers": { "parked": { "url": format!("http://{address}/mcp") } }
+            }))
+            .unwrap(),
+        };
+        let startup = tokio::spawn(McpManager::start(
+            source,
+            vec![],
+            workspace.path().into(),
+            ToolServer::new().run(),
+            None,
+        ));
+        let mut socket = tokio::time::timeout(Duration::from_secs(5), async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut line = String::new();
+            assert!(socket.read_line(&mut line).await.unwrap() > 0);
+            assert!(line.starts_with("POST "));
+            loop {
+                line.clear();
+                assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            socket
+        })
+        .await
+        .expect("HTTP handshake reached the server");
+        if sse {
+            socket.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            // Let the client enter the event stream without an initialize response.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        startup.abort();
+        assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+        let closed =
+            tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut Vec::new()))
+                .await
+                .expect("aborting startup must drop the HTTP request, not only its observer");
+        assert!(
+            closed.is_ok()
+                || closed.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
+        );
+    }
 }
 
 #[cfg(unix)]

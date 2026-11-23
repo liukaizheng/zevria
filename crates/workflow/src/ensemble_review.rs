@@ -269,6 +269,29 @@ pub enum WorkerReviewEvent {
     Sealed,
 }
 
+impl_wire_types! {
+    WorkerReviewEvent, KNOWN_WIRE_TRANSITIONS;
+    Self::ImageCapability { .. } => "image_capability",
+    Self::Fatal { .. } => "fatal",
+    Self::InputAccepted { .. } => "input_accepted",
+    Self::Dispatched { .. } => "dispatched",
+    Self::Interrupted { .. } => "interrupted",
+    Self::Recovering { .. } => "recovering",
+    Self::Published { .. } => "published",
+    Self::Removed { .. } => "removed",
+    Self::Settled { .. } => "settled",
+    Self::Connection { .. } => "connection",
+    Self::PayloadChecked { .. } => "payload_checked",
+    Self::CancelRequested { .. } => "cancel_requested",
+    Self::Decisions { .. } => "decisions",
+    Self::Confirmed { .. } => "confirmed",
+    Self::BaselineMarked { .. } => "baseline_marked",
+    Self::BaselineCleared { .. } => "baseline_cleared",
+    Self::Withdrawn { .. } => "withdrawn",
+    Self::Abandoned { .. } => "abandoned",
+    Self::Sealed => "sealed",
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerReviewState {
