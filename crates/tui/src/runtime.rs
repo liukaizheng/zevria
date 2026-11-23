@@ -5,8 +5,6 @@ use crate::{
     command::SlashCommand,
     workspace::{ClipboardOrigin, SessionViews},
 };
-use futures_util::StreamExt as _;
-use ratatui::crossterm::event::EventStream;
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
@@ -142,7 +140,7 @@ pub async fn run_ui(
     updates_rx: &mut SessionEventReceiver,
     context: &UiContext,
 ) -> anyhow::Result<UiOutcome> {
-    let mut events = EventStream::new();
+    let mut events = crate::input::InputReader::new();
     let mut engine_done = false;
     let mut clipboard = crate::clipboard::ClipboardService::new();
     let mut files = crate::workspace_files::FileSearchService::new(

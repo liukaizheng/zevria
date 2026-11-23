@@ -71,7 +71,8 @@ impl Drop for KeyboardEnhancementGuard {
 /// Scoped bracketed-paste activation. Supporting terminals emit an atomic
 /// [`crossterm::event::Event::Paste`] payload instead of character and Enter
 /// key events; unsupported terminals and setup failures retain the multiline
-/// Enter fallback.
+/// Enter fallback. The Windows console API never reports pastes, so the TUI
+/// input reader reassembles key-record bursts into pastes there instead.
 struct BracketedPasteGuard {
     enabled: bool,
 }

@@ -5,7 +5,9 @@ mod keymap;
 pub(crate) use action::Action;
 pub(crate) use keymap::{ChordState, KeyContext};
 mod capabilities;
+mod paste_burst;
 pub(crate) use capabilities::{Capabilities, DisabledReason};
+pub(crate) use paste_burst::InputReader;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
