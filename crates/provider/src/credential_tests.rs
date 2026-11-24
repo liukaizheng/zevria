@@ -130,22 +130,32 @@ async fn output_contract_trims_newlines_crlf_bom_and_whitespace() {
 }
 
 #[tokio::test]
-async fn invalid_output_never_echoes_stdout() {
-    for script in [
-        "print('   ')",
-        "print('PRIVATE_OUTPUT\\nother-line')",
-        "sys.stdout.buffer.write(b'PRIVATE_OUTPUT\\x00')",
-        "sys.stdout.buffer.write(b'PRIVATE_OUTPUT\\xff')",
-        "sys.stdout.write('PRIVATE_OUTPUT' * 100000)",
-        "sys.stderr.write('x' * 1000000)",
+async fn invalid_output_is_terminal_and_never_echoes_stdout() {
+    for (script, reason) in [
+        ("print('   ')", "single-line HTTP header value"),
+        (
+            "print('PRIVATE_OUTPUT\\nother-line')",
+            "single-line HTTP header value",
+        ),
+        (
+            "sys.stdout.buffer.write(b'PRIVATE_OUTPUT\\x00')",
+            "single-line HTTP header value",
+        ),
+        (
+            "sys.stdout.buffer.write(b'PRIVATE_OUTPUT\\xff')",
+            "stdout must be UTF-8",
+        ),
+        (
+            "sys.stdout.write('PRIVATE_OUTPUT' * 100000)",
+            "65536-byte output limit",
+        ),
+        ("sys.stderr.write('x' * 1000000)", "65536-byte output limit"),
     ] {
         let fixture = KeyHelper::new(script);
-        let error = fixture
-            .source
-            .current("test")
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = fixture.source.current("test").await.unwrap_err();
+        assert!(!error.is_transient(), "{error}");
+        let error = error.to_string();
+        assert!(error.contains(reason), "{error}");
         assert!(
             error.contains("providers.test.api_key") && error.contains(PYTHON_COMMAND),
             "{error}"
@@ -156,18 +166,18 @@ async fn invalid_output_never_echoes_stdout() {
 }
 
 #[tokio::test]
-async fn failed_exit_and_missing_program_are_actionable_without_stdout_or_args() {
+async fn failed_exit_is_transient_and_missing_program_is_terminal() {
     let fixture = KeyHelper::new(
         "print('PRIVATE_STDOUT'); sys.stderr.write('login failed https://example.test/?PRIVATE_URL ' + 'x' * 10000); sys.exit(7)",
     );
-    let error = fixture
-        .source
-        .current("test")
-        .await
-        .unwrap_err()
-        .to_string();
+    let error = fixture.source.current("test").await.unwrap_err();
+    assert!(error.is_transient(), "{error}");
+    let error = error.to_string();
     assert!(
-        error.contains("7") && error.contains("login failed") && error.contains("[URL removed]"),
+        error.contains("(exit status: 7)")
+            && !error.contains("exit code:")
+            && error.contains("login failed")
+            && error.contains("[URL removed]"),
         "{error}"
     );
     assert!(
@@ -181,10 +191,14 @@ async fn failed_exit_and_missing_program_are_actionable_without_stdout_or_args()
         timeout_seconds: 1,
         refresh_interval_seconds: 300,
     });
-    let error = source.current("missing").await.unwrap_err().to_string();
+    let error = source.current("missing").await.unwrap_err();
+    assert!(!error.is_transient(), "{error}");
+    let error = error.to_string();
     assert!(
         error.contains("providers.missing.api_key")
             && error.contains("zevria-missing-credential-helper-7bfa")
+            && error.contains("could not start helper"),
+        "{error}"
     );
     assert!(!error.contains("PRIVATE_ARG"));
 }
@@ -268,9 +282,12 @@ async fn timeout_and_cancellation_kill_the_process_tree() {
             task.abort();
             assert!(task.await.unwrap_err().is_cancelled());
         } else {
-            let error = source.current("p").await.unwrap_err().to_string();
+            let error = source.current("p").await.unwrap_err();
+            assert!(error.is_transient(), "{error}");
             assert!(
-                error.contains("process timed out after 1 seconds"),
+                error
+                    .to_string()
+                    .contains("helper timed out after 1 seconds (timeout_seconds)"),
                 "{error}"
             );
         }

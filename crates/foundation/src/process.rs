@@ -1,10 +1,11 @@
 //! Bounded subprocess execution; no terminal or global environment changes.
 use std::{
+    fmt, io,
     process::{Output, Stdio},
     time::Duration,
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncRead, AsyncReadExt},
     process::{Child, Command},
 };
 
@@ -57,6 +58,52 @@ impl Drop for ProcessTree {
     }
 }
 
+/// Failure to run a subprocess and collect its bounded output.
+#[derive(Debug)]
+pub enum BoundedOutputError {
+    Spawn(io::Error),
+    TimedOut(Duration),
+    OutputLimit(usize),
+    Io(io::Error),
+}
+
+impl fmt::Display for BoundedOutputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spawn(error) | Self::Io(error) => write!(f, "{error}"),
+            Self::TimedOut(timeout) => {
+                write!(f, "process timed out after {} seconds", timeout.as_secs())
+            }
+            Self::OutputLimit(cap) => write!(f, "process exceeded its {cap}-byte output limit"),
+        }
+    }
+}
+
+impl std::error::Error for BoundedOutputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn(error) | Self::Io(error) => Some(error),
+            Self::TimedOut(_) | Self::OutputLimit(_) => None,
+        }
+    }
+}
+
+async fn read_output(
+    stream: impl AsyncRead + Unpin,
+    cap: usize,
+) -> Result<Vec<u8>, BoundedOutputError> {
+    let mut bytes = Vec::new();
+    stream
+        .take((cap as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(BoundedOutputError::Io)?;
+    if bytes.len() > cap {
+        return Err(BoundedOutputError::OutputLimit(cap));
+    }
+    Ok(bytes)
+}
+
 /// Run a non-interactive process with bounded runtime and stdout/stderr capture.
 /// Each stream is capped independently. The whole process tree is killed on
 /// completion, timeout, output overflow, or cancellation of this future.
@@ -64,39 +111,22 @@ pub async fn bounded_output(
     command: &mut Command,
     timeout: Duration,
     cap: usize,
-) -> anyhow::Result<Output> {
+) -> Result<Output, BoundedOutputError> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let (mut child, tree) = ProcessTree::spawn(command)?;
+    let (mut child, tree) = ProcessTree::spawn(command).map_err(BoundedOutputError::Spawn)?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let work = async {
-        let read = async |stream: tokio::process::ChildStdout| {
-            let mut bytes = Vec::new();
-            stream.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
-            anyhow::ensure!(
-                bytes.len() <= cap,
-                "process exceeded its {cap}-byte output limit"
-            );
-            Ok::<_, anyhow::Error>(bytes)
-        };
-        let err = async {
-            let mut bytes = Vec::new();
-            stderr.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
-            anyhow::ensure!(
-                bytes.len() <= cap,
-                "process exceeded its {cap}-byte output limit"
-            );
-            Ok::<_, anyhow::Error>(bytes)
-        };
         let wait = async {
             let status = child.wait().await;
             tree.kill();
-            status.map_err(anyhow::Error::from)
+            status.map_err(BoundedOutputError::Io)
         };
-        let (status, stdout, stderr) = tokio::try_join!(wait, read(stdout), err)?;
+        let (status, stdout, stderr) =
+            tokio::try_join!(wait, read_output(stdout, cap), read_output(stderr, cap))?;
         Ok(Output {
             status,
             stdout,
@@ -108,7 +138,7 @@ pub async fn bounded_output(
         Err(_) => {
             tree.kill();
             let _ = child.kill().await;
-            anyhow::bail!("process timed out after {} seconds", timeout.as_secs())
+            Err(BoundedOutputError::TimedOut(timeout))
         }
     }
 }
@@ -119,19 +149,34 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_output_enforces_limits_and_reaps_background_pipe_holders() {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf partial; sleep 10"]);
-        let error = bounded_output(&mut command, Duration::from_millis(100), 1024)
+        let directory = tempfile::tempdir().unwrap();
+        let mut command = Command::new(directory.path().join("missing-program"));
+        let error = bounded_output(&mut command, Duration::from_secs(2), 1024)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("timed out"));
+        assert!(
+            matches!(error, BoundedOutputError::Spawn(error) if error.kind() == io::ErrorKind::NotFound)
+        );
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf partial; sleep 10"]);
+        let timeout = Duration::from_millis(100);
+        let error = bounded_output(&mut command, timeout, 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "process timed out after 0 seconds");
+        assert!(matches!(error, BoundedOutputError::TimedOut(duration) if duration == timeout));
 
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "printf 123456789"]);
         let error = bounded_output(&mut command, Duration::from_secs(2), 4)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("output limit"));
+        assert_eq!(
+            error.to_string(),
+            "process exceeded its 4-byte output limit"
+        );
+        assert!(matches!(error, BoundedOutputError::OutputLimit(4)));
 
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "sleep 10 & printf foreground"]);
@@ -139,6 +184,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output.stdout, b"foreground");
+    }
+
+    #[tokio::test]
+    async fn bounded_output_classifies_pipe_read_errors() {
+        struct BrokenPipe;
+        impl AsyncRead for BrokenPipe {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                std::task::Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
+            }
+        }
+
+        let error = read_output(BrokenPipe, 1024).await.unwrap_err();
+        assert!(
+            matches!(error, BoundedOutputError::Io(error) if error.kind() == io::ErrorKind::BrokenPipe)
+        );
     }
 
     #[tokio::test]

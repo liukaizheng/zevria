@@ -16,7 +16,7 @@ use zevria_model::openai::ReasoningSummaryLevel;
 use crate::{
     config::{InputTokenCountConfig, ResolvedModelProfile, ResponsesCompatibilityConfig},
     credential::{
-        ApiKeyCommandError, ApiKeySource, Unauthorized, authenticated, rejected_after_refresh,
+        ApiKeyCommandError, ApiKeySource, CredentialRefresh, Unauthorized, rejected_after_refresh,
     },
     websocket_session::OpenAiWebSocketSession,
 };
@@ -211,10 +211,18 @@ pub(crate) struct OpenAiWebSocketConnection {
 
 impl OpenAiWebSocketConfig {
     pub(crate) async fn connect(&self) -> anyhow::Result<OpenAiWebSocketConnection> {
+        self.connect_with_refresh(&mut CredentialRefresh::default())
+            .await
+    }
+
+    async fn connect_with_refresh(
+        &self,
+        refresh: &mut CredentialRefresh,
+    ) -> anyhow::Result<OpenAiWebSocketConnection> {
         let started = std::time::Instant::now();
         let log_url = redacted_url_for_logging(&self.url);
         tracing::debug!(url = %log_url, "connecting to the OpenAI websocket");
-        let (socket, response) = authenticated(
+        let (socket, response) = refresh.exchange(
             &self.api_key,
             &self.provider,
             |lease| async move {
@@ -270,10 +278,11 @@ pub(crate) fn is_http_upgrade_required(error: &anyhow::Error) -> bool {
     )
 }
 
-/// Authentication and invalid routing/configuration are not recovery signals.
+/// Upstream auth rejection and invalid routing/configuration are not recovery
+/// signals. Local helper failures follow the helper's own classification.
 pub(crate) fn retryable_connect_error(error: &anyhow::Error) -> bool {
-    if error.is::<ApiKeyCommandError>() {
-        return false;
+    if let Some(helper) = error.downcast_ref::<ApiKeyCommandError>() {
+        return helper.is_transient();
     }
     match error.downcast_ref::<WebSocketError>() {
         Some(WebSocketError::Http(response)) => response.status().is_server_error(),
@@ -295,12 +304,21 @@ pub(crate) struct OpenAiParkedWebSocket {
 }
 
 impl OpenAiParkedWebSocket {
+    /// One-shot reconnect outside completion recovery.
+    pub(crate) async fn reconnect(&mut self) -> anyhow::Result<()> {
+        self.reconnect_with_refresh(&mut CredentialRefresh::default())
+            .await
+    }
+
     /// Replace the parked socket with a freshly connected one.
     /// Continuation IDs are socket-scoped, so a successful replacement starts
     /// a new generation and forces the next request to replay complete local
     /// history. A failed handshake leaves the old socket and all its state
     /// intact.
-    pub(crate) async fn reconnect(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn reconnect_with_refresh(
+        &mut self,
+        refresh: &mut CredentialRefresh,
+    ) -> anyhow::Result<()> {
         let next_generation = if self.session.terminal_status()
             == Some(crate::websocket_session::OpenAiWebSocketTerminalCategory::NotConnected)
         {
@@ -311,7 +329,7 @@ impl OpenAiParkedWebSocket {
                 anyhow::anyhow!("the OpenAI websocket generation counter was exhausted")
             })?
         };
-        let connection = self.config.connect().await?;
+        let connection = self.config.connect_with_refresh(refresh).await?;
         let session = OpenAiWebSocketSession::new(connection.socket, self.config.keepalive);
         self.session = session;
         self.socket_generation = next_generation;

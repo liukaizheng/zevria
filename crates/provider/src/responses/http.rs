@@ -8,13 +8,12 @@ use rig_core::error::ProviderError as CompletionError;
 use zevria_model::ModelResponse;
 use zevria_model::ProviderReplay;
 use zevria_responses::protocol::ResponseProgress;
-use zevria_session_api::ProgressReporter;
 use zevria_session_api::event::NetworkStatus;
 
 use crate::{
     accumulator::AttemptState,
     connection::{OpenAiProvider, OpenAiTransport, response_request_id},
-    credential::{authenticated, http_unauthorized, rejected_after_refresh},
+    credential::{CredentialRefresh, http_unauthorized, rejected_after_refresh},
 };
 
 use super::driver::RequestMode;
@@ -54,11 +53,12 @@ pub(super) async fn run_http_model_request(
     prepared: &PreparedRequest,
     openai: &mut OpenAiProvider,
     state: &mut AttemptState,
-    progress: &ProgressReporter,
+    refresh: &mut CredentialRefresh,
     policy: &RecoveryPolicy,
     attempt_progress: AttemptProgress<'_>,
     request_start_deadline: std::time::Duration,
 ) -> Result<ModelResponse, HttpAttemptError> {
+    let progress = attempt_progress.reporter;
     state.attempt = progress
         .records_attempts()
         .then(|| crate::attempt::AttemptStream::new(openai.profile.clone(), progress));
@@ -66,7 +66,7 @@ pub(super) async fn run_http_model_request(
         prepared,
         openai,
         state,
-        progress,
+        refresh,
         policy,
         attempt_progress,
         request_start_deadline,
@@ -100,11 +100,12 @@ pub(super) async fn run_http_model_request_inner(
     prepared: &PreparedRequest,
     openai: &mut OpenAiProvider,
     state: &mut AttemptState,
-    progress: &ProgressReporter,
+    refresh: &mut CredentialRefresh,
     policy: &RecoveryPolicy,
     attempt_progress: AttemptProgress<'_>,
     request_start_deadline: std::time::Duration,
 ) -> Result<ModelResponse, HttpAttemptError> {
+    let progress = attempt_progress.reporter;
     state.reset_result();
     let request_attempt = attempt_progress.attempt;
     let mut telemetry = crate::telemetry::RequestTelemetry::new();
@@ -128,34 +129,41 @@ pub(super) async fn run_http_model_request_inner(
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body.clone());
     Diagnostics::http_transmission(prepared, openai, &request, request_attempt)?;
-    let response = authenticated(
-        &openai.api_key,
-        &openai.profile.provider,
-        |lease| {
-            let request = request
-                .try_clone()
-                .expect("JSON request is cloneable")
-                .bearer_auth(lease.expose())
-                .send();
-            async move {
-                match attempt_progress
-                    .request_start(policy, request_start_deadline, request)
-                    .await
-                {
-                    Ok(Ok(response)) => Ok(response),
-                    Ok(Err(error)) => Err(HttpAttemptError::retryable(
-                        "request_error",
-                        anyhow::Error::new(error.without_url())
-                            .context("OpenAI HTTP request failed"),
-                    )),
-                    Err(error) => Err(HttpAttemptError::retryable("request_timeout", error)),
+    let response = refresh
+        .exchange(
+            &openai.api_key,
+            &openai.profile.provider,
+            |lease| {
+                let request = request
+                    .try_clone()
+                    .expect("JSON request is cloneable")
+                    .bearer_auth(lease.expose())
+                    .send();
+                async move {
+                    match attempt_progress
+                        .request_start(policy, request_start_deadline, request)
+                        .await
+                    {
+                        Ok(Ok(response)) => Ok(response),
+                        Ok(Err(error)) => Err(HttpAttemptError::retryable(
+                            "request_error",
+                            anyhow::Error::new(error.without_url())
+                                .context("OpenAI HTTP request failed"),
+                        )),
+                        Err(error) => Err(HttpAttemptError::retryable("request_timeout", error)),
+                    }
                 }
+            },
+            http_unauthorized,
+        )
+        .await
+        .map_err(|error| {
+            if error.is_transient() {
+                HttpAttemptError::retryable("credential_helper", error)
+            } else {
+                HttpAttemptError::terminal(error)
             }
-        },
-        http_unauthorized,
-    )
-    .await
-    .map_err(HttpAttemptError::terminal)??;
+        })??;
 
     let upstream_request_id = response_request_id(response.headers());
     let status = response.status();

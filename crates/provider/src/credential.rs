@@ -1,9 +1,11 @@
 //! Provider-owned credentials. Helpers are resolved only at authentication
 //! boundaries, never while parsing, validating, or preparing model routing.
 use std::{
+    collections::HashSet,
     fmt,
     future::Future,
     path::{Path, PathBuf},
+    process::Output,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -14,6 +16,9 @@ use serde::{
     de::{MapAccess, Visitor, value::MapAccessDeserializer},
 };
 use tokio::sync::Mutex;
+use zevria_foundation::process::{BoundedOutputError, bounded_output};
+
+use crate::http::{URL_REDACTION, diagnostic_detail, diagnostic_url_ranges};
 
 const OUTPUT_LIMIT: usize = 64 * 1024;
 
@@ -210,19 +215,27 @@ impl ApiKeySource {
                 }
                 // Never retain an expired secret after a failed refresh.
                 state.cached = None;
-                let value = source.run(provider).await?;
-                state.generation = state.generation.checked_add(1).ok_or_else(|| {
-                    source.error(
-                        provider,
-                        "unavailable",
-                        "credential generation exhausted",
-                        &[],
-                    )
-                })?;
-                let lease = ApiKeyLease {
-                    value,
-                    generation: state.generation,
+                let started = Instant::now();
+                let result = match state.generation.checked_add(1) {
+                    Some(generation) => source
+                        .run(provider)
+                        .await
+                        .map(|value| ApiKeyLease { value, generation }),
+                    None => {
+                        Err(source.error(provider, "credential generation exhausted", None, false))
+                    }
                 };
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                match &result {
+                    Ok(_) => {
+                        tracing::info!(provider, program = %source.config.command, elapsed_ms, "API key helper completed")
+                    }
+                    Err(error) => {
+                        tracing::warn!(provider, program = %source.config.command, elapsed_ms, transient = error.is_transient(), error = %error, "API key helper failed")
+                    }
+                }
+                let lease = result?;
+                state.generation = lease.generation;
                 state.cached = Some(CachedKey {
                     lease: lease.clone(),
                     obtained: Instant::now(),
@@ -308,11 +321,17 @@ impl fmt::Debug for ApiKeyLease {
     }
 }
 
-/// A terminal local authentication failure, distinguishable from transport
-/// failures without exposing helper arguments or any stdout.
+/// A local authentication failure, distinguishable from transport failures
+/// without exposing helper arguments or any stdout.
 #[derive(Debug)]
 pub(crate) struct ApiKeyCommandError {
     message: String,
+    transient: bool,
+}
+impl ApiKeyCommandError {
+    pub(crate) fn is_transient(&self) -> bool {
+        self.transient
+    }
 }
 impl fmt::Display for ApiKeyCommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -320,6 +339,60 @@ impl fmt::Display for ApiKeyCommandError {
     }
 }
 impl std::error::Error for ApiKeyCommandError {}
+
+pub(crate) fn is_transient_helper_failure(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ApiKeyCommandError>()
+        .is_some_and(ApiKeyCommandError::is_transient)
+}
+
+fn helper_stderr_excerpt(args: &[String], output: &Output) -> String {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Redaction {
+        None,
+        Argument,
+        Stdout,
+        Url,
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout_lines = stdout.lines().map(|line| {
+        (
+            line.trim_start_matches('\u{feff}').trim(),
+            Redaction::Stdout,
+        )
+    });
+    let arguments = args.iter().map(|arg| (arg.as_str(), Redaction::Argument));
+    // Mark spans on the original bytes. Replacing an echoed argument or key
+    // first can hide the scheme of a longer URL (including its query), and
+    // replacing the URL first can split an echoed secret that contains it.
+    let mut marks = vec![Redaction::None; stderr.len()];
+    let mut seen = HashSet::new();
+    for (secret, kind) in stdout_lines.chain(arguments) {
+        if !secret.is_empty() && seen.insert(secret) {
+            for (start, matched) in stderr.match_indices(secret) {
+                marks[start..start + matched.len()].fill(kind);
+            }
+        }
+    }
+    for range in diagnostic_url_ranges(&stderr) {
+        marks[range].fill(Redaction::Url);
+    }
+    let mut redacted = String::new();
+    let mut start = 0;
+    for run in marks.chunk_by(|a, b| a == b) {
+        let end = start + run.len();
+        redacted.push_str(match run[0] {
+            Redaction::None => &stderr[start..end],
+            Redaction::Argument => "[argument removed]",
+            Redaction::Stdout => "[stdout removed]",
+            Redaction::Url => URL_REDACTION,
+        });
+        start = end;
+    }
+    diagnostic_detail(&redacted)
+}
 
 impl CommandSource {
     fn durations(&self) -> (Duration, Duration) {
@@ -336,20 +409,23 @@ impl CommandSource {
     fn error(
         &self,
         provider: &str,
-        status: impl fmt::Display,
         reason: &str,
-        stderr: &[u8],
+        output: Option<&Output>,
+        transient: bool,
     ) -> ApiKeyCommandError {
-        let mut stderr = String::from_utf8_lossy(stderr).into_owned();
-        for arg in &self.config.args {
-            if !arg.is_empty() {
-                stderr = stderr.replace(arg, "[argument removed]");
-            }
-        }
-        let excerpt = crate::http::diagnostic_detail(&stderr);
-        let status = status.to_string();
-        let status = status.strip_prefix("exit status: ").unwrap_or(&status);
+        let (status, excerpt) = match output {
+            Some(output) => (
+                output.status.to_string(),
+                helper_stderr_excerpt(&self.config.args, output),
+            ),
+            None => ("unavailable".into(), String::new()),
+        };
+        let status = status
+            .strip_prefix("exit status: ")
+            .or_else(|| status.strip_prefix("exit code: "))
+            .unwrap_or(&status);
         ApiKeyCommandError {
+            transient,
             message: format!(
                 "providers.{provider}.api_key: helper {:?} failed (exit status: {status}): {reason}; stderr: {}",
                 self.config.command,
@@ -363,13 +439,19 @@ impl CommandSource {
     }
 
     async fn run(&self, provider: &str) -> Result<Arc<str>, ApiKeyCommandError> {
-        let started = Instant::now();
         let directory = self
             .directory
             .clone()
             .map(Ok)
             .unwrap_or_else(std::env::current_dir)
-            .map_err(|error| self.error(provider, "unavailable", &error.to_string(), &[]))?;
+            .map_err(|error| {
+                self.error(
+                    provider,
+                    &format!("working directory unavailable: {error}"),
+                    None,
+                    false,
+                )
+            })?;
         let program = Path::new(&self.config.command);
         let resolved =
             if program.is_relative() && self.config.command.chars().any(std::path::is_separator) {
@@ -379,31 +461,34 @@ impl CommandSource {
             };
         let mut command = tokio::process::Command::new(resolved);
         command.args(&self.config.args).current_dir(directory);
-        let output = zevria_foundation::process::bounded_output(
-            &mut command,
-            self.durations().0,
-            OUTPUT_LIMIT,
-        )
-        .await
-        .map_err(|error| self.error(provider, "unavailable", &error.to_string(), &[]))?;
-        // A helper may echo its own output in an error. Do not repeat any
-        // known stdout lines in the bounded stderr diagnostic either.
-        let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let line = line.trim_start_matches('\u{feff}').trim();
-            if !line.is_empty() {
-                stderr = stderr.replace(line, "[stdout removed]");
-            }
-        }
+        let output = bounded_output(&mut command, self.durations().0, OUTPUT_LIMIT)
+            .await
+            .map_err(|error| {
+                let (reason, transient) = match error {
+                    BoundedOutputError::Spawn(_) => {
+                        (format!("could not start helper: {error}"), false)
+                    }
+                    BoundedOutputError::TimedOut(timeout) => (
+                        format!(
+                            "helper timed out after {} seconds (timeout_seconds)",
+                            timeout.as_secs()
+                        ),
+                        true,
+                    ),
+                    BoundedOutputError::OutputLimit(_) => (error.to_string(), false),
+                    BoundedOutputError::Io(_) => (error.to_string(), true),
+                };
+                self.error(provider, &reason, None, transient)
+            })?;
         if !output.status.success() {
             return Err(self.error(
                 provider,
-                output.status,
                 "helper exited unsuccessfully",
-                stderr.as_bytes(),
+                Some(&output),
+                true,
             ));
         }
-        let invalid = |reason| self.error(provider, output.status, reason, stderr.as_bytes());
+        let invalid = |reason| self.error(provider, reason, Some(&output), false);
         let stdout =
             std::str::from_utf8(&output.stdout).map_err(|_| invalid("stdout must be UTF-8"))?;
         let key = stdout.strip_prefix('\u{feff}').unwrap_or(stdout).trim();
@@ -412,7 +497,6 @@ impl CommandSource {
                 "stdout must contain a non-empty single-line HTTP header value",
             ));
         }
-        tracing::info!(provider, program = %self.config.command, elapsed_ms = started.elapsed().as_millis() as u64, "API key helper completed");
         Ok(Arc::from(key))
     }
 }
@@ -436,36 +520,68 @@ pub(crate) fn response_unauthorized(response: &reqwest::Response) -> Option<Unau
     })
 }
 
-/// Refresh a rejected command key inside one exchange, outside all transport
-/// deadlines and recovery accounting. The caller reuses its prepared body.
+/// One-shot authentication for exchanges without completion recovery.
 pub(crate) async fn authenticated<T, F, Fut>(
     source: &ApiKeySource,
     provider: &str,
-    mut exchange: F,
+    exchange: F,
     unauthorized: impl Fn(&T) -> Option<Unauthorized>,
 ) -> Result<T, ApiKeyCommandError>
 where
     F: FnMut(ApiKeyLease) -> Fut,
     Fut: Future<Output = T>,
 {
-    let lease = source.current(provider).await?;
-    let result = exchange(lease.clone()).await;
-    if source.is_refreshable()
-        && let Some(rejected) = unauthorized(&result)
+    CredentialRefresh::default()
+        .exchange(source, provider, exchange, unauthorized)
+        .await
+}
+
+/// Exchange-local refresh phase. A failed helper leaves it pending so that
+/// completion recovery can finish the same one-time refresh without granting
+/// the replacement key another refresh. An exchange result clears the phase.
+#[derive(Default)]
+pub(crate) struct CredentialRefresh {
+    replacing_rejected_key: bool,
+}
+
+impl CredentialRefresh {
+    pub(crate) async fn exchange<T, F, Fut>(
+        &mut self,
+        source: &ApiKeySource,
+        provider: &str,
+        mut exchange: F,
+        unauthorized: impl Fn(&T) -> Option<Unauthorized>,
+    ) -> Result<T, ApiKeyCommandError>
+    where
+        F: FnMut(ApiKeyLease) -> Fut,
+        Fut: Future<Output = T>,
     {
-        tracing::info!(provider, upstream_request_id = ?rejected.upstream_request_id.as_deref().map(crate::connection::log_identifier), "command-provided API key rejected; refreshing once");
-        // Release the failed response/socket before re-running the helper.
-        drop(result);
-        source.reject(&lease).await;
-        let replacement = source.current(provider).await?;
-        let result = exchange(replacement.clone()).await;
-        if let Some(rejected) = unauthorized(&result) {
-            tracing::info!(provider, upstream_request_id = ?rejected.upstream_request_id.as_deref().map(crate::connection::log_identifier), "command-provided API key rejected after refresh");
-            source.reject(&replacement).await;
+        loop {
+            let lease = source.current(provider).await?;
+            let result = exchange(lease.clone()).await;
+            let replacing_rejected_key = std::mem::take(&mut self.replacing_rejected_key);
+            if !source.is_refreshable() {
+                return Ok(result);
+            }
+            let Some(rejected) = unauthorized(&result) else {
+                return Ok(result);
+            };
+            let request_id = rejected
+                .upstream_request_id
+                .as_deref()
+                .map(crate::connection::log_identifier);
+            if replacing_rejected_key {
+                tracing::info!(provider, upstream_request_id = ?request_id, "command-provided API key rejected after refresh");
+                source.reject(&lease).await;
+                return Ok(result);
+            }
+            tracing::info!(provider, upstream_request_id = ?request_id, "command-provided API key rejected; refreshing once");
+            // Release the failed response/socket before re-running the helper.
+            drop(result);
+            source.reject(&lease).await;
+            self.replacing_rejected_key = true;
         }
-        return Ok(result);
     }
-    Ok(result)
 }
 
 pub(crate) fn rejected_after_refresh(provider: &str) -> String {

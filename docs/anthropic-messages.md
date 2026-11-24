@@ -75,6 +75,8 @@ an explicit non-interactive `api_key` command object. The shared
 [command-provided API key contract](responses-compatible.md#command-provided-api-keys)
 also applies to Messages, including lazy execution, timed caching, and one
 refresh-and-repeat on HTTP 401 without a recovery attempt or restart.
+Transient helper failures enter completion recovery as `credential_helper`;
+terminal failures stop immediately, and both surface and log the redacted diagnostic.
 `base_url` must be a full HTTP(S) Messages endpoint, not just a host root.
 
 Gateway-specific `additional_params` are allowed except Zevria-owned fields:

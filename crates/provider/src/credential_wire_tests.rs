@@ -1,5 +1,8 @@
 use super::*;
-use crate::credential::test_support::KeyHelper;
+use crate::credential::{
+    ApiKeyCommandError,
+    test_support::{KeyHelper, PYTHON_COMMAND, retry_events},
+};
 use std::time::Duration;
 
 fn profile(url: String, websocket: bool, source: ApiKeySource) -> ResolvedModelProfile {
@@ -30,6 +33,16 @@ async fn runtime(profile: &ResolvedModelProfile) -> OpenAiProvider {
     .await
     .unwrap()
 }
+async fn preconnect(profile: &ResolvedModelProfile) -> anyhow::Result<OpenAiProvider> {
+    OpenAiProvider::connect(
+        profile,
+        ReasoningEffort::Medium,
+        "stable",
+        "session",
+        "stable-cache-key",
+    )
+    .await
+}
 fn parts() -> RequestParts {
     RequestParts {
         tools: zevria_model::ToolDeclarations::default(),
@@ -41,15 +54,28 @@ fn parts() -> RequestParts {
     }
 }
 fn assert_no_retry(receiver: &mut SessionEventReceiver) {
-    while let Ok(event) = receiver.try_recv() {
+    let retries = retry_events(receiver);
+    assert!(retries.is_empty(), "unexpected retries: {retries:?}");
+}
+fn assert_helper_retries(receiver: &mut SessionEventReceiver, count: usize, stderr: &str) {
+    let retries = retry_events(receiver);
+    assert_eq!(retries.len(), count, "{retries:?}");
+    for (i, (attempt, error)) in retries.into_iter().enumerate() {
+        assert_eq!(attempt, i + 2);
         assert!(
-            !matches!(
-                event,
-                SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { .. })
-            ),
-            "{event:?}"
+            error.starts_with("credential_helper: providers.command-provider.api_key"),
+            "{error}"
         );
+        assert!(error.contains(stderr), "{error}");
     }
+}
+async fn assert_no_connection(listener: &TcpListener) {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "unexpected upstream connection"
+    );
 }
 fn assert_rotated(requests: &[String], header: &str) {
     assert_eq!(requests.len(), 2);
@@ -141,6 +167,87 @@ async fn http_refresh_reuses_body_and_prompt_cache_key_without_recovery_or_secre
         !logs.contains("key-1") && !logs.contains("key-2") && !logs.contains("helper.py"),
         "{logs}"
     );
+}
+
+#[tokio::test]
+async fn helper_failure_logs_the_redacted_diagnostic() {
+    if isolate_log_test("tests::command_credentials::helper_failure_logs_the_redacted_diagnostic") {
+        return;
+    }
+    let _guard = CAPTURED_LOG_TEST_LOCK.lock().await;
+    let logs = CapturedLogs::default();
+    let subscriber = captured_log_subscriber(logs.clone());
+    let (diagnostic, displayed) = async {
+        let helper = KeyHelper::new(
+            r#"print('PRIVATE_STDOUT')
+print('private-api-key')
+print('https://stdout.example.test')
+sys.stderr.write('login failed ' + ' '.join(sys.argv) +
+    ' PRIVATE_STDOUT private-api-key https://example.test/issue?token=REDACTION_CANARY'
+    ' https://stdout.example.test/issue?token=STDOUT_URL_CANARY'
+    ' ARG_PREFIX_CANARY https://crossing.example.test/issue?token=CROSSING_URL_CANARY')
+sys.exit(7)"#,
+        );
+        let mut command = helper.source.as_command().unwrap().clone();
+        command.args.extend([
+            "PRIVATE_ARGUMENT".into(),
+            "https://example.test".into(),
+            "ARG_PREFIX_CANARY https://crossing.example.test".into(),
+        ]);
+        let source = ApiKeySource::command(command).with_config_directory(helper.directory.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let profile = profile(
+            format!("http://{}/responses", listener.local_addr().unwrap()),
+            false,
+            source,
+        );
+        let error = runtime(&profile)
+            .await
+            .complete(parts().request(), discard_updates())
+            .await
+            .unwrap_err();
+        let diagnostic = error
+            .downcast_ref::<ApiKeyCommandError>()
+            .unwrap()
+            .to_string();
+        (diagnostic, error.to_string())
+    }
+    .with_subscriber(subscriber)
+    .await;
+    let logs = logs.contents();
+    let warning = logs
+        .lines()
+        .find(|line| line.contains("API key helper failed"))
+        .expect("helper failure should be logged");
+    for expected in [
+        "WARN",
+        "provider=\"command-provider\"",
+        &format!("program={PYTHON_COMMAND}"),
+        "elapsed_ms=",
+        "transient=true",
+        &format!("error={diagnostic}"),
+        "stderr: login failed",
+        "[argument removed]",
+        "[stdout removed]",
+        "[URL removed]",
+    ] {
+        assert!(warning.contains(expected), "{logs}");
+    }
+    // Core publishes the completion error's Display in the transcript/UI.
+    assert!(displayed.contains(&diagnostic), "{displayed}");
+    for secret in [
+        "PRIVATE_STDOUT",
+        "private-api-key",
+        "PRIVATE_ARGUMENT",
+        "helper.py",
+        "REDACTION_CANARY",
+        "STDOUT_URL_CANARY",
+        "ARG_PREFIX_CANARY",
+        "CROSSING_URL_CANARY",
+    ] {
+        assert!(!logs.contains(secret), "{logs}");
+        assert!(!displayed.contains(secret), "{displayed}");
+    }
 }
 
 #[tokio::test]
@@ -318,8 +425,8 @@ async fn second_websocket_401_is_terminal_without_fallback() {
 }
 
 #[tokio::test]
-async fn helper_failure_is_terminal_before_network_during_http_websocket_and_preconnect() {
-    for (websocket, preconnect) in [(false, false), (true, false), (true, true)] {
+async fn transient_helper_failures_retry_without_network_or_fallback() {
+    for websocket in [false, true] {
         let helper = KeyHelper::new(
             "print('PRIVATE_STDOUT'); sys.stderr.write('login is required'); sys.exit(9)",
         );
@@ -329,50 +436,99 @@ async fn helper_failure_is_terminal_before_network_during_http_websocket_and_pre
             websocket,
             helper.source.clone(),
         );
+        let mut provider = runtime(&profile).await;
+        provider.recovery = fast_recovery_policy(4);
         let (sender, mut receiver) = session_event_channel(128);
-        let error = if preconnect {
-            OpenAiProvider::connect(
-                &profile,
-                ReasoningEffort::Medium,
-                "stable",
-                "session",
-                "cache-key",
-            )
+        let error = provider
+            .complete(parts().request(), ProgressReporter::new(sender))
             .await
-            .err()
-            .unwrap()
-        } else {
-            let mut provider = runtime(&profile).await;
-            provider.recovery.max_attempts = 3;
-            let error = provider
-                .complete(parts().request(), ProgressReporter::new(sender))
-                .await
-                .unwrap_err();
-            assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
-            error
-        };
+            .unwrap_err();
+        assert!(error.is::<ApiKeyCommandError>(), "{error:#}");
+        let error = error.to_string();
         assert!(
-            error.is::<crate::credential::ApiKeyCommandError>(),
-            "{error:#}"
+            error.contains("after 4 attempts")
+                && error.contains("credential_helper")
+                && error.contains("stderr: login is required"),
+            "{error}"
         );
-        let error = format!("{error:#}");
         assert!(
-            error.contains("providers.command-provider.api_key")
-                && error.contains("login is required")
+            !error.contains("PRIVATE_STDOUT") && !error.contains("helper.py"),
+            "{error}"
         );
-        assert!(!error.contains("PRIVATE_STDOUT") && !error.contains("helper.py"));
-        assert_eq!(helper.runs(), 1);
-        assert_no_retry(&mut receiver);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), listener.accept())
-                .await
-                .is_err()
-        );
+        assert_eq!(helper.runs(), 4);
+        assert_helper_retries(&mut receiver, 3, "stderr: login is required");
+        assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
+        assert!(provider.http_fallback.is_none());
+        assert_no_connection(&listener).await;
     }
 }
 
 #[tokio::test]
-async fn failed_helper_refresh_sends_no_second_request_and_never_recovers_or_falls_back() {
+async fn transient_helper_failure_during_preconnect_leaves_websocket_disconnected() {
+    let helper = KeyHelper::new("sys.stderr.write('login is required'); sys.exit(9)");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let profile = profile(
+        format!("http://{}/responses", listener.local_addr().unwrap()),
+        true,
+        helper.source.clone(),
+    );
+    let provider = preconnect(&profile).await.unwrap();
+    assert_eq!(provider.transport, OpenAiTransport::WebSocket);
+    assert!(provider.http_fallback.is_none());
+    assert_eq!(
+        provider.ws.session.terminal_status(),
+        Some(crate::websocket_session::OpenAiWebSocketTerminalCategory::StartupConnectFailed)
+    );
+    assert_eq!(helper.runs(), 1);
+    assert_no_connection(&listener).await;
+}
+
+#[tokio::test]
+async fn invalid_helper_output_is_terminal_during_http_websocket_and_preconnect() {
+    for (websocket, startup) in [(false, false), (true, false), (true, true)] {
+        let helper = KeyHelper::new("print('PRIVATE_STDOUT\\nother line')");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let profile = profile(
+            format!("http://{}/responses", listener.local_addr().unwrap()),
+            websocket,
+            helper.source.clone(),
+        );
+        let error = if startup {
+            preconnect(&profile)
+                .await
+                .err()
+                .expect("invalid output should fail preconnect")
+        } else {
+            let mut provider = runtime(&profile).await;
+            provider.recovery = fast_recovery_policy(3);
+            let (sender, mut receiver) = session_event_channel(128);
+            let error = provider
+                .complete(parts().request(), ProgressReporter::new(sender))
+                .await
+                .unwrap_err();
+            assert_no_retry(&mut receiver);
+            assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
+            assert!(provider.http_fallback.is_none());
+            error
+        };
+        assert!(error.is::<ApiKeyCommandError>(), "{error:#}");
+        let error = error.to_string();
+        assert!(
+            error.contains("providers.command-provider.api_key")
+                && error.contains("single-line HTTP header value"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("PRIVATE_STDOUT") && !error.contains("helper.py"),
+            "{error}"
+        );
+        assert_eq!(helper.runs(), 1);
+        assert_no_connection(&listener).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_helper_refresh_recovers_without_resending_the_rejected_key() {
     for websocket in [false, true] {
         let helper = KeyHelper::new(
             "if n == 1:\n    print('key-1')\nelse:\n    sys.stderr.write('login renewal failed')\n    sys.exit(2)",
@@ -398,29 +554,221 @@ async fn failed_helper_refresh_sends_no_second_request_and_never_recovers_or_fal
                 receive_http_request(&mut stream).await;
                 send_http_response(&mut stream, "401 Unauthorized", "application/json", "{}").await;
             }
-            assert!(
-                tokio::time::timeout(Duration::from_millis(200), listener.accept())
-                    .await
-                    .is_err()
-            );
+            listener
         });
         let mut provider = runtime(&profile).await;
-        provider.recovery.max_attempts = 3;
+        provider.recovery = fast_recovery_policy(3);
         let (sender, mut receiver) = session_event_channel(128);
         let error = provider
             .complete(parts().request(), ProgressReporter::new(sender))
             .await
             .unwrap_err();
+        assert!(error.is::<ApiKeyCommandError>(), "{error:#}");
+        let error = error.to_string();
         assert!(
-            error.is::<crate::credential::ApiKeyCommandError>(),
-            "{error:#}"
+            error.contains("credential_helper") && error.contains("login renewal failed"),
+            "{error}"
         );
-        assert!(format!("{error:#}").contains("login renewal failed"));
-        assert_eq!(helper.runs(), 2);
+        assert_eq!(
+            helper.runs(),
+            4,
+            "initial key, failed refresh, and two retries"
+        );
+        assert_helper_retries(&mut receiver, 2, "stderr: login renewal failed");
         assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
-        assert_no_retry(&mut receiver);
+        assert!(provider.http_fallback.is_none());
+        assert_no_connection(&server.await.unwrap()).await;
+    }
+}
+
+#[tokio::test]
+async fn second_401_is_terminal_after_an_interrupted_helper_refresh() {
+    for websocket in [false, true] {
+        let helper = KeyHelper::fail_once_during_refresh();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let profile = profile(
+            format!("http://{}/responses", listener.local_addr().unwrap()),
+            websocket,
+            helper.source.clone(),
+        );
+        let server = tokio::spawn(async move {
+            let mut first_body = None;
+            for key in ["key-1", "key-3"] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                if websocket {
+                    accept_hdr_async(stream, |request: &ServerRequest, _: ServerResponse| {
+                        assert_eq!(request.headers()["authorization"], format!("Bearer {key}"));
+                        Err(ServerResponse::builder()
+                            .status(401)
+                            .body(Some("invalid key".into()))
+                            .unwrap())
+                    })
+                    .await
+                    .expect_err("reject the handshake");
+                } else {
+                    let request = receive_http_request(&mut stream).await;
+                    let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+                    assert!(headers.contains(&format!("authorization: Bearer {key}")));
+                    if let Some(first_body) = &first_body {
+                        assert_eq!(body, first_body);
+                    } else {
+                        first_body = Some(body.to_owned());
+                    }
+                    send_http_response(&mut stream, "401 Unauthorized", "application/json", "{}")
+                        .await;
+                }
+            }
+            listener
+        });
+        let mut provider = runtime(&profile).await;
+        provider.recovery = fast_recovery_policy(3);
+        let (sender, mut receiver) = session_event_channel(128);
+        let error = provider
+            .complete(parts().request(), ProgressReporter::new(sender))
+            .await
+            .expect_err("the replacement key's 401 must be terminal")
+            .to_string();
+        assert!(error.contains("rejected after a refresh"), "{error}");
+        assert_helper_retries(&mut receiver, 1, "stderr: login renewal failed");
+        assert_eq!(helper.runs(), 3);
+        assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
+        assert!(provider.http_fallback.is_none());
+        assert_no_connection(&server.await.unwrap()).await;
+    }
+}
+
+#[tokio::test]
+async fn helper_failure_then_success_retries_with_the_same_prompt_cache_key() {
+    for websocket in [false, true] {
+        let helper = KeyHelper::new(
+            "if n == 1:\n    sys.stderr.write('request timed out')\n    sys.exit(1)\nprint('key-2')",
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let profile = profile(
+            format!("http://{}/responses", listener.local_addr().unwrap()),
+            websocket,
+            helper.source.clone(),
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = if websocket {
+                let mut socket = accept_hdr_async(
+                    stream,
+                    |request: &ServerRequest, response: ServerResponse| {
+                        assert_eq!(request.headers()["authorization"], "Bearer key-2");
+                        Ok(response)
+                    },
+                )
+                .await
+                .unwrap();
+                let request = receive_json(&mut socket).await;
+                send_json(&mut socket, completed_event("resp_1", "msg_1", "hello")).await;
+                request
+            } else {
+                let request = receive_http_json(&mut stream).await;
+                assert!(request.headers.contains("authorization: Bearer key-2"));
+                send_http_response(
+                    &mut stream,
+                    "200 OK",
+                    "text/event-stream",
+                    sse_data(completed_event("resp_1", "msg_1", "hello").to_string()),
+                )
+                .await;
+                request.body
+            };
+            assert_eq!(request["prompt_cache_key"], "stable-cache-key");
+            assert_no_connection(&listener).await;
+        });
+        let mut provider = runtime(&profile).await;
+        provider.recovery = fast_recovery_policy(3);
+        let (sender, mut receiver) = session_event_channel(128);
+        provider
+            .complete(parts().request(), ProgressReporter::new(sender))
+            .await
+            .unwrap();
+        assert_eq!(helper.runs(), 2);
+        assert_helper_retries(&mut receiver, 1, "stderr: request timed out");
+        assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
+        assert!(provider.http_fallback.is_none());
         server.await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn helper_failures_do_not_count_toward_fallback_or_disqualify_the_first_http_outcome() {
+    let helper = KeyHelper::new(
+        "if n in (1, 4):\n    sys.stderr.write('request timed out')\n    sys.exit(1)\nprint('key-' + str(n))",
+    );
+    let source = helper
+        .source
+        .with_config_directory(helper.directory.path())
+        .with_test_durations(Duration::from_secs(30), Duration::ZERO);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let profile = profile(
+        format!("http://{}/responses", listener.local_addr().unwrap()),
+        true,
+        source,
+    );
+    let server = tokio::spawn(async move {
+        // The first helper failure cannot spend either of these two handshakes.
+        for key in ["Bearer key-2", "Bearer key-3"] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut saw_websocket = false;
+            accept_hdr_async(stream, |request: &ServerRequest, _: ServerResponse| {
+                saw_websocket = true;
+                assert_eq!(request.headers()["authorization"], key);
+                Err(ServerResponse::builder().status(503).body(None).unwrap())
+            })
+            .await
+            .expect_err("reject the handshake");
+            assert!(
+                saw_websocket,
+                "credential errors must not cause early fallback"
+            );
+        }
+        // Another helper run fails after switching; this is the first real HTTP outcome.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = receive_http_json(&mut stream).await;
+        assert!(request.headers.contains("authorization: Bearer key-5"));
+        assert_eq!(request.body["prompt_cache_key"], "stable-cache-key");
+        send_http_response(
+            &mut stream,
+            "200 OK",
+            "text/event-stream",
+            sse_data(completed_event("resp_1", "msg_1", "hello").to_string()),
+        )
+        .await;
+    });
+    let mut provider = runtime(&profile).await;
+    provider.recovery = fast_recovery_policy(5);
+    let (sender, mut receiver) = session_event_channel(128);
+    provider
+        .complete(parts().request(), ProgressReporter::new(sender))
+        .await
+        .unwrap();
+    let retries = retry_events(&mut receiver);
+    let categories: Vec<_> = retries
+        .iter()
+        .map(|(_, error)| error.split_once(": ").unwrap().0)
+        .collect();
+    assert_eq!(
+        categories,
+        [
+            "credential_helper",
+            "connect_error",
+            "connect_error",
+            "credential_helper"
+        ]
+    );
+    assert_eq!(helper.runs(), 5);
+    assert_eq!(provider.transport, OpenAiTransport::Http);
+    assert_eq!(
+        provider.http_fallback,
+        Some(crate::connection::HttpFallback::Sticky(
+            "websocket_retries_exhausted"
+        ))
+    );
+    server.await.unwrap();
 }
 
 #[tokio::test]

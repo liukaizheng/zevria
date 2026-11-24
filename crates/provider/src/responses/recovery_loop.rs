@@ -2,8 +2,8 @@
 use crate::diagnostics::Diagnostics;
 use crate::http::HttpAttemptError;
 use crate::recovery::{
-    AttemptFailure, AttemptProgress, Decision, Recovery, RecoveryPolicy, ResponseIdleTimeout,
-    failure_class,
+    AttemptFailure, AttemptProgress, Decision, FailureClass, Recovery, RecoveryPolicy,
+    ResponseIdleTimeout, failure_class,
 };
 use zevria_model::ModelRequest;
 use zevria_model::ModelResponse;
@@ -16,6 +16,7 @@ use crate::{
         HttpFallback, OpenAiProvider, OpenAiTransport, is_http_upgrade_required, log_identifier,
         retryable_connect_error,
     },
+    credential::{CredentialRefresh, is_transient_helper_failure},
 };
 
 use super::errors::StaleResponseId;
@@ -59,6 +60,7 @@ pub(super) async fn run_prepared_with_recovery(
     policy: &RecoveryPolicy,
 ) -> anyhow::Result<ModelResponse> {
     let recovery = Recovery::new(policy);
+    let mut refresh = CredentialRefresh::default();
     let reprobe = openai.http_fallback == Some(HttpFallback::Provisional);
     if reprobe {
         openai.transport = OpenAiTransport::WebSocket;
@@ -89,19 +91,18 @@ pub(super) async fn run_prepared_with_recovery(
                 prepared,
                 openai,
                 state,
-                progress,
+                &mut refresh,
                 policy,
                 attempt_progress,
                 plan.request_start_deadline,
             )
             .await
         } else {
-            websocket_attempts += 1;
             let connected = if openai.ws.session.terminal_status().is_some() {
                 Diagnostics::disconnected_recovery(prepared, openai);
                 attempt_progress.status(NetworkStatus::Connecting).await;
                 openai.ws.config.connect_timeout = policy.connect_timeout;
-                let result = openai.ws.reconnect().await;
+                let result = openai.ws.reconnect_with_refresh(&mut refresh).await;
                 Diagnostics::connection(
                     openai,
                     if result.is_ok() {
@@ -119,6 +120,9 @@ pub(super) async fn run_prepared_with_recovery(
                     "websocket_upgrade_required",
                     error,
                 )),
+                Err(error) if is_transient_helper_failure(&error) => {
+                    Err(HttpAttemptError::retryable("credential_helper", error))
+                }
                 Err(error) if retryable_connect_error(&error) => {
                     Err(HttpAttemptError::retryable("connect_error", error))
                 }
@@ -195,8 +199,14 @@ pub(super) async fn run_prepared_with_recovery(
                 upstream_request_id,
             },
         };
-        if transport == OpenAiTransport::Http {
-            first_fallback_http = false;
+        // Local credential failures consume recovery attempts, but do not
+        // tell us whether either transport works.
+        let credential_failure = last.class == FailureClass::Credential;
+        if !credential_failure {
+            match transport {
+                OpenAiTransport::WebSocket => websocket_attempts += 1,
+                OpenAiTransport::Http => first_fallback_http = false,
+            }
         }
         Diagnostics::recovery(prepared, openai);
         state.reset_result();
@@ -229,6 +239,7 @@ pub(super) async fn run_prepared_with_recovery(
             return Err(recovery.exhausted_error(reason, last, &openai.profile.provider));
         };
         if transport == OpenAiTransport::WebSocket
+            && !credential_failure
             && last.category != "websocket_upgrade_required"
             && websocket_attempts >= if reprobe { 1 } else { 2 }
         {

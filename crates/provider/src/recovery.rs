@@ -64,6 +64,7 @@ pub(crate) enum FailureClass {
     RequestStart,
     Idle,
     Connectivity,
+    Credential,
     Server,
     RateLimited,
     Protocol,
@@ -75,6 +76,7 @@ pub(crate) fn failure_class(category: &str) -> FailureClass {
     match category {
         "request_timeout" | "request_start_timeout" => FailureClass::RequestStart,
         "response_idle_timeout" => FailureClass::Idle,
+        "credential_helper" => FailureClass::Credential,
         "request_error"
         | "transport"
         | "stream"
@@ -348,6 +350,9 @@ impl<'a> Recovery<'a> {
                 "The response stopped making progress; for quiet models increase providers.{provider_key}.network.response_idle_timeout_seconds"
             ),
             FailureClass::Connectivity => "Check the network or proxy connection".to_owned(),
+            FailureClass::Credential => format!(
+                "The API key helper kept failing; check providers.{provider_key}.api_key.command (login state, network, stderr above), its timeout_seconds, or use a positive refresh_interval_seconds"
+            ),
             FailureClass::Server | FailureClass::RateLimited => {
                 "The provider is unavailable or rate limited; check provider status and quota"
                     .to_owned()
@@ -546,6 +551,27 @@ mod tests {
             server_delay: None,
             upstream_request_id: None,
         }
+    }
+
+    #[test]
+    fn credential_helper_failures_have_a_provider_specific_hint() {
+        let last = failure("credential_helper");
+        assert_eq!(last.class, FailureClass::Credential);
+        let policy = RecoveryPolicy::default();
+        let recovery = Recovery::new(&policy);
+        recovery.start_attempt().unwrap();
+        let error = recovery.exhausted_error(ExhaustedReason::AttemptCap, last, "example");
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "The API key helper kept failing; check providers.example.api_key.command"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("timeout_seconds") && message.contains("refresh_interval_seconds"),
+            "{message}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

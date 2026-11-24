@@ -4,7 +4,7 @@ use crate::{
     AnthropicAuth, AnthropicEndpoint, AnthropicModelConfig, ProfileProtocol, ResolvedModelProfile,
     connection::{resolve_input_token_count_url_with_suffix, session_routing_headers},
     credential::{
-        ApiKeyLease, authenticated, http_unauthorized, rejected_after_refresh,
+        ApiKeyLease, CredentialRefresh, authenticated, http_unauthorized, rejected_after_refresh,
         response_unauthorized,
     },
     http::{bounded_http_error_body, retry_hint},
@@ -167,16 +167,18 @@ impl AnthropicProvider {
         &self,
         prepared: &PreparedRequest,
         encoded_body: &Bytes,
+        refresh: &mut CredentialRefresh,
         progress: AttemptProgress<'_>,
         request_start_deadline: Duration,
     ) -> Result<(FinishedMessage, Option<String>), (ApiError, Option<String>)> {
         let mut telemetry = crate::telemetry::RequestTelemetry::new();
         progress.status(NetworkStatus::Connecting).await;
-        let response = authenticated(
-            &self.endpoint.api_key,
-            &self.profile.provider,
-            |lease| async move {
-                progress
+        let response = refresh
+            .exchange(
+                &self.endpoint.api_key,
+                &self.profile.provider,
+                |lease| async move {
+                    progress
                     .request_start(
                         &self.recovery,
                         request_start_deadline,
@@ -206,20 +208,21 @@ impl AnthropicProvider {
                             None,
                         )
                     })
-            },
-            http_unauthorized,
-        )
-        .await
-        .map_err(|error| {
-            (
-                ApiError::with_source(
-                    ErrorKind::Terminal,
-                    "Anthropic credential helper failed",
-                    error,
-                ),
-                None,
+                },
+                http_unauthorized,
             )
-        })??;
+            .await
+            .map_err(|error| {
+                let kind = if error.is_transient() {
+                    ErrorKind::Retryable("credential_helper")
+                } else {
+                    ErrorKind::Terminal
+                };
+                (
+                    ApiError::new(kind, format!("Anthropic credential helper failed: {error}")),
+                    None,
+                )
+            })??;
         let request_id = response
             .headers()
             .get("request-id")
@@ -362,6 +365,7 @@ impl AnthropicProvider {
         drop(history);
         let mut encoded_body = Bytes::from(serde_json::to_vec(&prepared.body)?);
         let recovery = Recovery::new(&self.recovery);
+        let mut refresh = CredentialRefresh::default();
         let mut stripped_retry = false;
         while let Some(plan) = recovery.start_attempt() {
             let attempt_progress = AttemptProgress {
@@ -375,6 +379,7 @@ impl AnthropicProvider {
                 .attempt(
                     &prepared,
                     &encoded_body,
+                    &mut refresh,
                     attempt_progress,
                     plan.request_start_deadline,
                 )

@@ -2,9 +2,10 @@
 use futures_util::StreamExt;
 use reqwest::header::HeaderMap;
 use rig_core::error::ProviderError as CompletionError;
-use std::time::Duration;
+use std::{ops::Range, time::Duration};
 
 const HTTP_ERROR_BODY_LIMIT: usize = 4 * 1024;
+pub(crate) const URL_REDACTION: &str = "[URL removed]";
 
 #[derive(Debug, Default)]
 pub(crate) struct RetryHint {
@@ -140,18 +141,33 @@ pub(crate) fn with_http_response_request_id(
     }
 }
 
+/// Return URL spans in the original text, in order and without overlaps.
+pub(crate) fn diagnostic_url_ranges(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let delimiter = |ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>');
+    let mut offset = 0;
+    text.split_inclusive(delimiter).filter_map(move |part| {
+        let start = offset;
+        offset += part.len();
+        let url_start = ["https://", "http://", "wss://", "ws://"]
+            .into_iter()
+            .filter_map(|scheme| part.find(scheme))
+            .min()?;
+        Some(start + url_start..start + part.trim_end_matches(delimiter).len())
+    })
+}
+
 pub(crate) fn diagnostic_detail(text: &str) -> String {
-    let mut text = zevria_content::image_diagnostics::text_copy(text);
+    let text = zevria_content::image_diagnostics::text_copy(text);
     // Also redact URLs embedded in relay prose, beyond reqwest's without_url().
-    for scheme in ["https://", "http://", "wss://", "ws://"] {
-        while let Some(start) = text.find(scheme) {
-            let end = text[start..]
-                .find(|ch: char| ch.is_whitespace() || matches!(ch, '\"' | '\'' | '<' | '>'))
-                .map_or(text.len(), |len| start + len);
-            text.replace_range(start..end, "[URL removed]");
-        }
+    let mut redacted = String::new();
+    let mut start = 0;
+    for range in diagnostic_url_ranges(&text) {
+        redacted.push_str(&text[start..range.start]);
+        redacted.push_str(URL_REDACTION);
+        start = range.end;
     }
-    text.chars().take(HTTP_ERROR_BODY_LIMIT).collect()
+    redacted.push_str(&text[start..]);
+    redacted.chars().take(HTTP_ERROR_BODY_LIMIT).collect()
 }
 
 pub(crate) async fn bounded_http_error_body(response: reqwest::Response) -> String {

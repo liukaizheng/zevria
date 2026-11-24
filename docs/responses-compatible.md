@@ -525,21 +525,32 @@ non-interactive local helper instead of storing a literal secret:
   the same exchange with the same prepared body and `prompt_cache_key`. Concurrent
   stale rejections cannot invalidate a replacement key. A second 401 is terminal;
   403 does not refresh, so choose an interval shorter than the key's lifetime for
-  gateways that return 403 on expiry. This refresh is inside the HTTP exchange or
-  handshake: it consumes no recovery attempt or WebSocket fallback budget and
-  emits no `TurnRetrying` event. Literal-key 401s remain terminal.
+  gateways that return 403 on expiry. The 401 refresh itself is inside the HTTP
+  exchange or handshake and consumes no recovery or fallback budget. If its
+  helper fails transiently during a completion, `credential_helper` recovery
+  resumes fetching the replacement without granting it another refresh.
+  Literal-key 401s remain terminal.
 - Healthy WebSockets authenticate only at handshakes. Expiry does not close an
   open socket, rerun the helper for incremental messages, or alter continuation
   state. In-band WebSocket errors do not trigger this credential refresh policy.
   Key rotation needs **no `models.jsonc` edit and no restart**.
-- A missing program, nonzero exit, timeout, excessive output, or invalid stdout
-  stops the request immediately: no network send, recovery retry, or HTTP fallback
-  for that failed authentication. Errors identify `providers.<key>.api_key`, the
-  program, exit status when available, and a bounded stderr excerpt with URLs
-  removed. They do not include args or stdout; helpers must keep stderr free of
-  secrets too. Debug output redacts literals, arguments, leases, and cached keys.
-  Generated keys stay in memory and are never persisted in transcripts or logs;
-  logs record only provider/program/timing and rejection request IDs.
+- A nonzero exit, helper timeout, or pipe/wait I/O error after startup is transient.
+  Completions retry these as `credential_helper` under the normal recovery policy,
+  with visible `TurnRetrying` events. Failure to start (including an unavailable
+  working directory), excessive output, invalid stdout, and credential generation
+  exhaustion are terminal. Failed authentication sends no request with a missing
+  or stale key. Helper failures never count toward or trigger WebSocket fallback.
+  Token counting and remote compaction do not retry failed helpers.
+- Errors identify `providers.<key>.api_key`, the program, exit status when
+  available, and a bounded stderr excerpt with args, echoed stdout lines, and
+  URLs removed. Each failure logs this same redacted diagnostic at WARN with the
+  provider, program, elapsed time, and whether the failure was transient. Helpers
+  must still keep secrets off stderr. Debug output redacts literals, arguments,
+  leases, and cached keys. Generated keys stay in memory and are never persisted
+  in transcripts or logs.
+
+For network-backed helpers, use a positive `refresh_interval_seconds` shorter
+than the key's lifetime to avoid a network round trip for every request.
 
 **Security:** configuring a helper authorizes arbitrary local execution with
 Zevria's privileges, not a sandbox. Only configure helpers you trust in your
@@ -713,16 +724,18 @@ that input-size rejection and Responses `insufficient_quota` stay terminal.
 | Local header timeout | Retry with an escalating header deadline; inspect `request_start_timeout_seconds` |
 | Response inactivity | Retry; inspect `response_idle_timeout_seconds` for quiet models |
 | Connect, request, stream loss or upstream disconnect prose | Retry; check the network or proxy |
+| Command-provided API key: nonzero exit, helper timeout, or post-start I/O | Retry as `credential_helper`; check the helper's stderr, login state, network and `timeout_seconds` |
 | HTTP 408, 429 (except `insufficient_quota`), 5xx | Retry; provider unavailable/rate limited; honor server hints |
 | In-stream `server_error` / `rate_limit_exceeded`, including `response.failed` | Retry on HTTP and WebSocket |
 | Structured input-size rejection, ordinary other 4xx, malformed events, other semantic failures | Terminal; input size remains typed `ModelInputTooLarge` |
 
-WebSocket gets two attempts before HTTP fallback (one after a re-probe). HTTP
-426 selects sticky HTTP immediately. Otherwise, fallback is sticky only if its
-**first HTTP attempt succeeds**. If that attempt also fails retryably, HTTP is
-provisional for the rest of this request; the next request re-probes WebSocket
-with a fresh generation and full input. A later HTTP success in that same request
-does not commit it. HTTP-only configuration never re-probes.
+WebSocket gets two attempts before HTTP fallback (one after a re-probe), not
+counting helper failures. HTTP 426 selects sticky HTTP immediately. Otherwise,
+fallback is sticky only if its **first HTTP outcome is a success**, ignoring
+helper failures. If HTTP also fails retryably, fallback is provisional for the
+rest of this request; the next request re-probes WebSocket with a fresh generation
+and full input. A later HTTP success in that same request does not commit it.
+HTTP-only configuration never re-probes.
 
 Cancellation interrupts every wait. Exhaustion returns one self-contained
 Display error: attempts and elapsed time, stop reason (window, attempt cap,

@@ -1496,12 +1496,14 @@ helpers to the absolute `models.jsonc` directory before routing clones are made.
 Validation, routing, `/model` preparation, and revisions never execute helpers.
 Keys are resolved only for authenticated HTTP exchanges and WebSocket handshakes,
 not socket messages. One 401 refresh repeats the same prepared body within that
-exchange, outside transport deadlines and recovery accounting; helper failures
-are terminal, including during preconnect. All models and root/child factories
-share the entry's cache, while new/resumed sessions reload empty caches and
-ensemble subprocesses own independent caches. No credential or refresh state
-changes the cacheable prompt prefix, session/provider/model cache key, or healthy
-WebSocket continuation. See the
+exchange, outside transport deadlines and recovery accounting. Nonzero exits,
+helper timeouts, and post-start pipe/wait I/O failures enter completion recovery
+as `credential_helper`, without affecting WebSocket fallback; other helper
+failures are terminal. Each failure logs and surfaces the redacted diagnostic.
+All models and root/child factories share the entry's cache. New/resumed sessions
+reload empty caches, and ensemble subprocesses own independent caches. No
+credential or refresh state changes the cacheable prompt prefix,
+session/provider/model cache key, or healthy WebSocket continuation. See the
 [credential contract](responses-compatible.md#command-provided-api-keys).
 
 `ModelRouting` resolves all five required assignments (including `builder`, with
@@ -1543,11 +1545,12 @@ the remaining window stop immediately. HTTP headers initially have 30 seconds,
 escalating after local header timeouts to 60/120/180 (the idle cap). Longer header
 waits show quiet warnings. WebSocket write and connect defaults remain unchanged.
 
-WebSocket gets two attempts before fallback. HTTP 426 selects sticky HTTP
-immediately; other fallback becomes sticky only if its first HTTP attempt
-succeeds. If HTTP also fails retryably, fallback remains provisional for that
-request. The next request restores WebSocket with a fresh generation/full input,
-allowing one WebSocket attempt before fallback. One progress
+WebSocket gets two attempts before fallback, not counting helper failures. HTTP
+426 selects sticky HTTP immediately; other fallback becomes sticky only if its
+first HTTP outcome is a success, ignoring helper failures. If HTTP also fails
+retryably, fallback remains provisional for that request. The next request
+restores WebSocket with a fresh generation/full input, allowing one WebSocket
+attempt before fallback. One progress
 watchdog runs after request start, before the first event and throughout streaming:
 warn at 30 seconds of silence, abandon/finalize at 180. Arbitrary reads, keepalives,
 unknown metadata, duplicate statuses, and late prior-response events cannot keep

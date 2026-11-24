@@ -39,8 +39,10 @@ Credential sources resolve only at HTTP exchanges and WebSocket handshakes;
 healthy sockets never reacquire credentials for incremental messages. Command
 keys share a timed single-flight cache across a provider's models and root/child
 routers. A handshake 401 refreshes once inside that handshake without consuming
-recovery/fallback budget; helper failures are terminal, never fallback signals.
-The prepared body and prompt-cache key are unchanged. See
+recovery/fallback budget. A helper's nonzero exit, timeout, or post-start I/O
+failure enters completion recovery as `credential_helper`; other helper failures
+are terminal. Neither kind signals fallback. The prepared body and prompt-cache
+key are unchanged. See
 [command-provided API keys](responses-compatible.md#command-provided-api-keys).
 
 Constructing a root or child router performs no network I/O or helper execution. A slot initializes
@@ -208,16 +210,16 @@ in any attempt. Only retries whose delay fits the window are scheduled; the
 window never cancels an already running attempt. Initial dispatch, failed
 handshakes, stale-ID full resends and HTTP fallback share this one controller.
 
-WebSocket gets two attempts before HTTP fallback, without reserving a final
-attempt for HTTP. HTTP 426 selects sticky HTTP immediately. Otherwise, fallback
-is provisional until the **first HTTP attempt** succeeds. A retryable failure of
-that first HTTP attempt leaves fallback provisional for this entire request,
-even if a later HTTP attempt succeeds. The next request restores WebSocket with
-a fresh generation and full input; this re-probe gets only one WebSocket attempt
-before falling back again. HTTP-only configuration never re-probes, and other
-profile slots remain independent. Ordinary authentication/configuration errors,
-malformed protocol, non-transient semantic failures and input-size rejections
-remain terminal.
+WebSocket gets two attempts before HTTP fallback, not counting helper failures
+and without reserving a final attempt for HTTP. HTTP 426 selects sticky HTTP
+immediately. Otherwise, fallback is sticky only if the **first HTTP outcome is a
+success**, ignoring helper failures. A retryable HTTP failure leaves fallback
+provisional for this entire request, even if a later HTTP attempt succeeds. The
+next request restores WebSocket with a fresh generation and full input; this
+re-probe gets only one WebSocket attempt before falling back again. HTTP-only
+configuration never re-probes, and other profile slots remain independent.
+Ordinary authentication/configuration errors, malformed protocol, non-transient
+semantic failures and input-size rejections remain terminal.
 
 Connection establishment and request-start work each default to 30-second
 limits. Request start means the WebSocket write acknowledgement or HTTP response

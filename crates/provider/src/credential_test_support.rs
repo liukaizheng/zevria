@@ -1,5 +1,17 @@
 //! Cross-platform, non-interactive credential helper fixtures.
 use super::*;
+use zevria_session_api::{SessionEvent, SessionEventReceiver, SessionUpdate};
+
+pub(crate) fn retry_events(receiver: &mut SessionEventReceiver) -> Vec<(usize, String)> {
+    std::iter::from_fn(|| receiver.try_recv().ok())
+        .filter_map(|update| match update {
+            SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { attempt, error, .. }) => {
+                Some((attempt, error))
+            }
+            _ => None,
+        })
+        .collect()
+}
 
 pub(crate) const PYTHON_COMMAND: &str = if cfg!(windows) { "python" } else { "python3" };
 
@@ -25,6 +37,11 @@ impl KeyHelper {
     }
     pub(crate) fn rotating() -> Self {
         Self::new("print('key-' + str(n))")
+    }
+    pub(crate) fn fail_once_during_refresh() -> Self {
+        Self::new(
+            "if n == 2:\n    sys.stderr.write('login renewal failed')\n    sys.exit(2)\nprint('key-' + str(n))",
+        )
     }
     pub(crate) fn runs(&self) -> usize {
         std::fs::read_to_string(self.directory.path().join("counter"))
