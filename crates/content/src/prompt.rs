@@ -660,11 +660,14 @@ impl UserPrompt {
         Self(blocks)
     }
     pub fn validate(&self) -> Result<(), PromptError> {
-        let mut count = 0;
+        Self::validate_images(self.images())
+    }
+    pub fn validate_images<'a>(
+        images: impl IntoIterator<Item = &'a PromptImage>,
+    ) -> Result<(), PromptError> {
         let mut bytes = 0usize;
-        for image in self.images() {
-            count += 1;
-            if count > MAX_PROMPT_IMAGES {
+        for (index, image) in images.into_iter().enumerate() {
+            if index >= MAX_PROMPT_IMAGES {
                 return Err(PromptError("a prompt may contain at most eight images"));
             }
             bytes = bytes

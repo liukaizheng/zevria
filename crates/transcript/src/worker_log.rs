@@ -5,7 +5,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     fs::File,
-    io::{self, BufRead as _, BufReader, BufWriter, Seek as _, SeekFrom, Write as _},
+    io::{BufRead as _, BufReader, BufWriter, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -236,10 +236,12 @@ impl AgentRunValidation {
     }
 }
 
-const WRITER_UNUSABLE: &str = "agent-run writer is unusable after an I/O failure; reopen the log";
+const WRITER_UNUSABLE: &str =
+    "agent-run writer is unusable after an append or sync failure; reopen the log";
 
-/// Append-only JSONL worker transcript. A write or sync error may leave a
-/// partial or committed suffix; reopen the log rather than retry on this writer.
+/// Append-only JSONL worker transcript. An append or sync error poisons the
+/// writer. A write or sync error may leave a partial or committed suffix;
+/// reopen the log rather than retry on this writer.
 pub struct AgentRunTranscriptWriter {
     path: PathBuf,
     file: Option<BufWriter<File>>,
@@ -335,6 +337,14 @@ impl AgentRunTranscriptWriter {
     /// The ACP supervisor batches these writes on a blocking writer task and
     /// calls [`Self::sync`] before publishing their normalized events.
     pub fn append_buffered(&mut self, record: &AgentRunTranscriptRecord) -> anyhow::Result<usize> {
+        let result = self.stage_record(record);
+        if result.is_err() {
+            self.disarm();
+        }
+        result
+    }
+
+    fn stage_record(&mut self, record: &AgentRunTranscriptRecord) -> anyhow::Result<usize> {
         let file = self.file.as_mut().context(WRITER_UNUSABLE)?;
         let change = self.validation.prepare(record)?;
         let (len, write) = with_record_buffer(&mut self.line, |line| -> anyhow::Result<_> {
@@ -347,7 +357,7 @@ impl AgentRunTranscriptWriter {
             line.push(b'\n');
             Ok((line.len(), file.write_all(line)))
         })?;
-        self.finish_io(write).with_context(|| {
+        write.with_context(|| {
             format!("failed to append agent-run log at {}", self.path.display())
         })?;
         self.validation.commit(record, change);
@@ -358,19 +368,18 @@ impl AgentRunTranscriptWriter {
     pub fn sync(&mut self) -> anyhow::Result<()> {
         let file = self.file.as_mut().context(WRITER_UNUSABLE)?;
         let result = file.flush().and_then(|()| file.get_ref().sync_data());
-        self.finish_io(result)
-            .with_context(|| format!("failed to sync agent-run log at {}", self.path.display()))
+        if result.is_err() {
+            self.disarm();
+        }
+        result.with_context(|| format!("failed to sync agent-run log at {}", self.path.display()))
     }
 
-    fn finish_io(&mut self, result: io::Result<()>) -> io::Result<()> {
-        if result.is_err()
-            && let Some(file) = self.file.take()
-        {
-            // Dropping a BufWriter can retry a failed write. Discard any
-            // unflushed suffix instead and let reopen inspect the actual file.
+    fn disarm(&mut self) {
+        if let Some(file) = self.file.take() {
+            // Dropping a BufWriter can flush an unacknowledged batch or retry
+            // a failed write. Discard the buffer and let reopen inspect the file.
             let _ = file.into_parts();
         }
-        result
     }
 
     pub fn path(&self) -> &Path {
@@ -837,7 +846,9 @@ impl AgentRunProjection {
         self.apply_display(record);
     }
 
-    fn apply_display(&mut self, record: &AgentRunTranscriptRecord) {
+    /// Reduce report and outcome evidence without collecting a second review
+    /// journal. Use only for records that have already been validated.
+    pub fn apply_display(&mut self, record: &AgentRunTranscriptRecord) {
         match record {
             AgentRunTranscriptRecord::Header { header } => self.header = Some(header.clone()),
             AgentRunTranscriptRecord::Outcome { outcome } => {
@@ -1978,6 +1989,32 @@ mod tests {
     }
 
     #[test]
+    fn invalid_record_does_not_flush_the_preceding_buffered_batch_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.jsonl");
+        let header = AgentRunTranscriptHeader {
+            version: AGENT_RUN_TRANSCRIPT_VERSION,
+            ensemble_run_id: EnsembleRunId::new(),
+            workflow: EnsembleWorkflow::Review,
+            descriptor: descriptor("Codex"),
+            prompt: "review".into(),
+        };
+        let mut writer = AgentRunTranscriptWriter::create(path.clone(), header.clone()).unwrap();
+        writer
+            .append_buffered(&AgentRunTranscriptRecord::Event {
+                event: AgentRunEvent::Stderr {
+                    text: "staged but not synced".into(),
+                },
+            })
+            .unwrap();
+        let header = AgentRunTranscriptRecord::Header { header };
+        assert!(writer.append_buffered(&header).is_err());
+        assert_eq!(writer.sync().unwrap_err().to_string(), WRITER_UNUSABLE);
+        drop(writer);
+        assert_eq!(load_agent_run(&path).unwrap(), [header]);
+    }
+
+    #[test]
     fn reopening_repairs_an_invalid_utf8_crash_tail_before_append() {
         let directory = tempfile::tempdir().expect("tempdir");
         let run = EnsembleRunId::new();
@@ -2422,12 +2459,19 @@ mod tests {
                 event: AgentRunEvent::Prompt {
                     text: "repair".to_string(),
                     continuation: true,
-                    repair: Some(AgentRunRepair::MissingPlanProof),
+                    repair: Some(AgentRunRepair::EarlyStop {
+                        stop_reason: "max_tokens".into(),
+                    }),
                 },
             },
         ]);
         assert!(projection.recoverable_outcome().is_none());
-        assert_eq!(projection.repair, Some(AgentRunRepair::MissingPlanProof));
+        assert_eq!(
+            projection.repair,
+            Some(AgentRunRepair::EarlyStop {
+                stop_reason: "max_tokens".into()
+            })
+        );
     }
 
     #[test]

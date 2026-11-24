@@ -5,8 +5,8 @@ use zevria_transcript::transcript::TranscriptItem;
 use zevria_workflow::PlanRecord;
 
 use crate::project::{
-    KnownTools, diagnostic_update, project_completed_message, project_tool_calls,
-    project_tool_results,
+    KnownTools, complete_tool_results, diagnostic_update, project_completed_message,
+    project_tool_calls,
 };
 
 /// Project durable semantic conversation history into ordered ACP updates.
@@ -70,7 +70,9 @@ pub(crate) fn replay_transcript(
                 message, metadata, ..
             } => {
                 updates.extend(subtasks.results(metadata));
-                updates.extend(project_tool_results(message, metadata, workspace, &tools));
+                updates.extend(complete_tool_results(
+                    message, metadata, workspace, &mut tools,
+                ));
             }
             TranscriptItem::CommandJobNotice(notice) => {
                 updates.push(diagnostic_update(

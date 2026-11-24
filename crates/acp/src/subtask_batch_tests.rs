@@ -47,6 +47,41 @@ fn display(
 }
 
 #[test]
+fn only_announced_children_can_finish_after_the_turn_fence() {
+    let mut projection = SubtaskProjection::default();
+    let live = child(0);
+    let orphan = child(1);
+    let mut updates = vec![projection.launch("outer", 0, live.clone())];
+    assert!(
+        projection
+            .status(&orphan.id, SubtaskStatus::Running)
+            .is_none()
+    );
+    projection.prune_completed();
+    assert!(projection.early_statuses.is_empty());
+    assert!(
+        projection
+            .finish_detached(&orphan.id, SubtaskStatus::Cancelled)
+            .is_none()
+    );
+    updates.push(
+        projection
+            .finish_detached(&live.id, SubtaskStatus::Cancelled)
+            .unwrap(),
+    );
+    assert!(
+        projection
+            .finish_detached(&live.id, SubtaskStatus::Cancelled)
+            .is_none()
+    );
+    assert!(projection.children.is_empty());
+    assert_eq!(
+        display(&updates)["zevria-subtask-child-0"].1,
+        ToolCallStatus::Failed
+    );
+}
+
+#[test]
 fn duplicate_children_have_distinct_lifecycles_and_parent_finishes_only_at_batch_result() {
     let call = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
         AssistantContent::ToolCall(zevria_content::message::tool_call_from_wire(

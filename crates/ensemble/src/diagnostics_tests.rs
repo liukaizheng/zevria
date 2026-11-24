@@ -52,6 +52,11 @@ async fn finish_diagnostics(
         "truncation is not a worker failure"
     );
     let records = load_agent_run(log.path()).unwrap();
+    assert_eq!(
+        *log.writer.projection.lock().unwrap(),
+        AgentRunProjection::from_records(&records),
+        "the acknowledged in-memory projection matches the journal prefix"
+    );
     assert_eq!(records.iter().filter(|record| matches!(record,
         AgentRunTranscriptRecord::Event { event: AgentRunEvent::Unsupported { context, placeholder } }
         if context == "ACP raw diagnostics" && placeholder.contains("truncated")

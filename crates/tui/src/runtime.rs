@@ -216,6 +216,7 @@ pub async fn run_ui(
     context: &UiContext,
 ) -> anyhow::Result<UiOutcome> {
     let mut engine_done = false;
+    let mut dirty = true;
     let mut clipboard = crate::clipboard::ClipboardService::new();
     let mut files = crate::workspace_files::FileSearchService::new(
         views.startup_workspace.clone(),
@@ -228,9 +229,6 @@ pub async fn run_ui(
     views.overlays.skills.refresh();
 
     loop {
-        if engine_done {
-            views.root.engine_disconnected();
-        }
         views.overlays.jobs.inspector.tick(Instant::now());
         while let Some(command) = views.overlays.jobs.inspector.commands.pop_front() {
             commands
@@ -254,10 +252,14 @@ pub async fn run_ui(
         }
         if !engine_done && let Some(action) = views.dispatch_queued_root_work() {
             dispatch_turn_action(&mut views, commands, &mut engine_done, action)?;
+            dirty = true;
         }
         files.set_request(views.file_search_request());
-        views.observe_clock(Instant::now());
-        terminal.draw(|frame| views.render(frame))?;
+        if dirty {
+            views.observe_clock(Instant::now());
+            terminal.draw(|frame| views.render(frame))?;
+            dirty = false;
+        }
 
         tokio::select! {
             result = files.receiver.changed() => {
@@ -265,13 +267,16 @@ pub async fn run_ui(
                     let completion = files.receiver.borrow_and_update().clone();
                     if let Some(completion) = completion {
                         views.file_search_completed(completion);
+                        dirty = true;
                     }
                 }
             }
             _ = clock.tick(), if views.clock_required() || pending_paste.is_some() => {
+                dirty |= views.clock_required();
                 if pending_paste.as_ref().is_some_and(|(_, _, _, _, started)| started.elapsed() >= crate::clipboard::TIMEOUT)
                     && let Some((_, origin, generation, cursor, _)) = pending_paste.take()
                 {
+                    dirty = true;
                     views.clipboard_completed(origin, generation, cursor, crate::clipboard::ClipboardResult::Error("Clipboard read timed out. The draft is unchanged; retry after the native operation finishes.".into()));
                 }
             }
@@ -281,10 +286,12 @@ pub async fn run_ui(
                     && let Some((_, origin, generation, cursor, _)) = pending_paste.take()
                 {
                     views.clipboard_completed(origin, generation, cursor, result);
+                    dirty = true;
                 }
             }
             maybe_update = updates_rx.recv(), if !engine_done => match maybe_update {
                 Some(update) => {
+                    dirty = true;
                     if let Some(outcome) = apply_session_update(&mut views, update)? {
                         return Ok(outcome);
                     }
@@ -296,11 +303,13 @@ pub async fn run_ui(
                 }
                 None => {
                     engine_done = true;
+                    dirty = true;
                     views.root.engine_disconnected();
                 }
             },
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(event)) => {
+                    dirty = true;
                     match views.handle_event(event) {
                         Some(UiAction::ReadClipboard { generation, cursor }) => {
                             if let Some(origin) = views.clipboard_origin() {

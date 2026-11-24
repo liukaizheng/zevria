@@ -53,7 +53,6 @@ impl AgentTranscriptReducer {
                     WorkerPromptKind::Initial => PromptOrigin::Initial,
                     WorkerPromptKind::UserFeedback => PromptOrigin::Feedback,
                     WorkerPromptKind::RecoveryContinuation => PromptOrigin::Retry,
-                    WorkerPromptKind::SemanticRecovery => PromptOrigin::Recovery,
                 };
                 annotation.generation = Some(input.generation);
                 annotation.request_id = Some(input.request_id);
@@ -288,6 +287,7 @@ impl AgentTranscriptReducer {
         {
             block.prompt = Some(annotation.clone());
             block.touch();
+            conversation.touch_entry(location.history_index);
         }
     }
 
@@ -344,6 +344,7 @@ impl AgentTranscriptReducer {
             {
                 block.kind = PresentationBlockKind::Diagnostic(diagnostic);
                 block.touch();
+                conversation.touch_entry(location.history_index);
             }
             return;
         }
@@ -557,10 +558,9 @@ impl AgentTranscriptReducer {
             // A snapshot may arrive after a speculative no-publication notice.
             // Remove only this semantic notice; do not change other error rows.
             if let Some(location) = self.review.notices.remove(&key)
-                && let Some(HistoryEntry::Conversation(entry)) =
-                    conversation.entry_mut(location.history_index)
+                && conversation.remove_block(location.history_index, location.block_id)
             {
-                entry.blocks.retain(|block| block.id != location.block_id);
+                self.hosted_actions_dirty.insert(location.history_index);
             }
             return;
         };
@@ -681,5 +681,6 @@ impl AgentTranscriptReducer {
         if let Some(error) = &state.synthesis_error {
             self.review_independent_error(conversation, "payload", error);
         }
+        self.flush_projection_changes(conversation);
     }
 }

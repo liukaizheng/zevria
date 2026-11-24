@@ -1,8 +1,9 @@
 //! Committed conversation projection, correlation indexes, and selection.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -55,6 +56,13 @@ fn call_ids_match(left: Option<&str>, right: Option<&str>, exact_call_id: bool) 
 struct ToolCallLocation {
     history_index: usize,
     block_id: PresentationBlockId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SubtaskLocation {
+    parent: ToolCallLocation,
+    entry_index: usize,
+    row: PresentationBlockId,
 }
 
 /// One coherent worker row in an ensemble entry.
@@ -121,21 +129,28 @@ impl EnsembleHistory {
         )
     }
 
-    fn update_status(&mut self, id: &AgentRunId, status: AgentRunStatus, failure: Option<String>) {
+    fn update_status(
+        &mut self,
+        id: &AgentRunId,
+        status: AgentRunStatus,
+        failure: Option<String>,
+    ) -> bool {
         let Some(worker) = self
             .workers
             .iter_mut()
             .find(|worker| &worker.descriptor.id == id)
         else {
-            return;
+            return false;
         };
         if worker.review_authoritative || worker.status == AgentRunStatus::Abandoned {
-            return;
+            return false;
         }
+        let changed = worker.status != status || (failure.is_some() && worker.failure != failure);
         worker.status = status;
         if failure.is_some() {
             worker.failure = failure;
         }
+        changed
     }
 }
 
@@ -547,6 +562,7 @@ struct HostedAttempt {
     history_index: usize,
     attempt: zevria_content::ResponseAttempt,
     ids: HashMap<AttemptBlockKey, PresentationBlockId>,
+    owned_ids: HashSet<PresentationBlockId>,
     canonical: Option<Message>,
     acp_tools: HashMap<String, PresentationBlockKind>,
     tool_status: ToolCallStatus,
@@ -612,12 +628,31 @@ pub struct ConversationState {
     epoch: crate::presentation::ProjectionEpoch,
     block_ids: crate::presentation::BlockIdAllocator,
     history: Vec<HistoryEntry>,
+    // Parallel to history so immutable variants don't need their own wrapper.
+    entry_revisions: Vec<u64>,
+    entries_by_revision: BTreeMap<u64, usize>,
+    revision: u64,
+    structure_revision: u64,
+    block_hint: Option<(usize, usize, PresentationBlockId)>,
+    block_indices: Vec<OnceLock<HashMap<PresentationBlockId, usize>>>,
+    header_indices: HashMap<NativeHeader, usize>,
+    running_headers: HashMap<NativeHeader, Instant>,
+    timing_revision: u64,
+    prompt_count: usize,
+    call_counts: HashMap<DisplayTurn, usize>,
+    represented_headers: HashMap<NativeHeader, Vec<usize>>,
+    ensemble_indices: HashMap<EnsembleRunId, usize>,
+    plan_versions: HashSet<zevria_workflow::PlanVersion>,
+    command_call_locations: HashMap<String, ToolCallLocation>,
+    command_job_locations: HashMap<zevria_foundation::CommandJobId, ToolCallLocation>,
+    subtask_call_locations: HashMap<String, ToolCallLocation>,
+    subtask_locations: HashMap<SubtaskId, Vec<SubtaskLocation>>,
     headers: Vec<HeaderObservation>,
     executing_tool_calls: HashMap<String, Vec<ToolCallLocation>>,
     hosted_attempts: HashMap<String, HostedAttempt>,
     // An empty set of parts is explicit evidence of a non-final native round.
     // Keep IDs, not content ordinals: an ordered attempt can insert web rows.
-    response_answers: HashMap<usize, Vec<PresentationBlockId>>,
+    response_answers: HashMap<usize, HashSet<PresentationBlockId>>,
     agent_entry: Option<usize>,
     agent_previews: HashMap<usize, HashSet<PresentationBlockId>>,
     incomplete_agent_entries: HashSet<usize>,
@@ -632,27 +667,24 @@ impl ConversationState {
     }
 
     pub fn allocate_turn(&mut self) -> DisplayTurn {
-        let turn = DisplayTurn(
-            self.headers
-                .iter()
-                .filter(|entry| matches!(entry.header, NativeHeader::Prompt(_)))
-                .count()
-                + 1,
-        );
+        let turn = DisplayTurn(self.prompt_count + 1);
         self.observe_header(NativeHeader::Prompt(turn));
         turn
     }
 
     pub fn allocate_call(&mut self, turn: DisplayTurn) -> NativeHeader {
-        let call = self.headers.iter().filter(|entry| {
-            matches!(entry.header, NativeHeader::Assistant { turn: existing, .. } if existing == turn)
-        }).count() + 1;
+        let call = self.call_counts.get(&turn).copied().unwrap_or_default() + 1;
         let header = NativeHeader::Assistant { turn, call };
         self.observe_header(header);
         header
     }
 
     fn observe_header(&mut self, header: NativeHeader) {
+        self.header_indices.insert(header, self.headers.len());
+        match header {
+            NativeHeader::Prompt(_) => self.prompt_count += 1,
+            NativeHeader::Assistant { turn, .. } => *self.call_counts.entry(turn).or_default() += 1,
+        }
         self.headers.push(HeaderObservation {
             history_index: self.history.len(),
             header,
@@ -663,27 +695,44 @@ impl ConversationState {
     pub fn start_header(&mut self, header: NativeHeader, now: Instant) {
         if matches!(header, NativeHeader::Assistant { .. })
             && let Some(observation) = self
-                .headers
-                .iter_mut()
-                .rev()
-                .find(|entry| entry.header == header)
+                .header_indices
+                .get(&header)
+                .and_then(|&index| self.headers.get_mut(index))
         {
             // A duplicate observation must never reset a running or finished call.
-            observation.timing.get_or_insert(HeaderTiming::Running(now));
+            if observation.timing.is_none() {
+                observation.timing = Some(HeaderTiming::Running(now));
+                self.running_headers.insert(header, now);
+                self.timing_revision += 1;
+            }
         }
     }
 
     pub fn finish_header(&mut self, header: Option<NativeHeader>, now: Instant) {
         if let Some(header) = header
             && let Some(observation) = self
-                .headers
-                .iter_mut()
-                .rev()
-                .find(|entry| entry.header == header)
+                .header_indices
+                .get(&header)
+                .and_then(|&index| self.headers.get_mut(index))
             && let Some(timing @ HeaderTiming::Running(_)) = &mut observation.timing
         {
             *timing = HeaderTiming::Finished(timing.elapsed(now));
+            self.running_headers.remove(&header);
+            self.timing_revision += 1;
         }
+    }
+
+    pub fn header_timing_revision(&self) -> u64 {
+        self.timing_revision
+    }
+
+    pub fn running_header_seconds(
+        &self,
+        now: Instant,
+    ) -> impl Iterator<Item = (NativeHeader, u64)> + '_ {
+        self.running_headers.iter().map(move |(&header, &started)| {
+            (header, now.saturating_duration_since(started).as_secs())
+        })
     }
 
     /// Unknown starts (including restored headers) do not acquire a zero duration.
@@ -699,25 +748,28 @@ impl ConversationState {
         })
     }
 
+    pub fn represented_header_indices(&self, header: NativeHeader) -> &[usize] {
+        self.represented_headers
+            .get(&header)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn represented_header_index(&self, header: NativeHeader) -> Option<usize> {
+        self.represented_header_indices(header).last().copied()
+    }
+
     pub fn represents_header(&self, header: NativeHeader) -> bool {
-        self.history.iter().any(|entry| {
-            let HistoryEntry::Conversation(entry) = entry else {
-                return false;
-            };
-            entry.header == Some(header)
-                && entry.blocks.iter().any(|block| {
-                    block.role == Some(PresentationRole::Assistant) && block.visible(false)
-                })
+        self.represented_header_indices(header).iter().rev().any(|&index| {
+            matches!(&self.history[index], HistoryEntry::Conversation(entry)
+                if entry.blocks.iter().any(|block| block.role == Some(PresentationRole::Assistant) && block.visible(false)))
         })
     }
 
     pub fn ensemble_turn(&self, run_id: &EnsembleRunId) -> Option<DisplayTurn> {
-        self.history.iter().rev().find_map(|entry| match entry {
-            HistoryEntry::Ensemble(ensemble) if &ensemble.run_id == run_id => {
-                ensemble.header.map(NativeHeader::turn)
-            }
-            _ => None,
-        })
+        let HistoryEntry::Ensemble(entry) = self.entry(*self.ensemble_indices.get(run_id)?)? else {
+            return None;
+        };
+        entry.header.map(NativeHeader::turn)
     }
 
     pub fn history(&self) -> &[HistoryEntry] {
@@ -888,19 +940,150 @@ impl ConversationState {
     }
 
     pub(crate) fn complete_agent_entry(&mut self, index: usize) {
-        self.agent_previews.remove(&index);
-        self.incomplete_agent_entries.remove(&index);
+        let changed = self.agent_previews.remove(&index).is_some()
+            | self.incomplete_agent_entries.remove(&index);
+        let mut answer_changed = false;
         if let Some((_, FinalOutput::Answer(parts))) = self.final_output(index..index + 1, true) {
-            self.response_answers.insert(index, parts);
+            let parts = parts.into_iter().collect();
+            if self.response_answers.get(&index) != Some(&parts) {
+                self.response_answers.insert(index, parts);
+                answer_changed = true;
+            }
+        }
+        if changed || answer_changed {
+            self.touch_entry(index);
+            self.change_structure();
         }
     }
 
     pub(crate) fn mark_agent_entry_incomplete(&mut self, index: usize) {
-        self.response_answers.remove(&index);
-        self.incomplete_agent_entries.insert(index);
+        if self.response_answers.remove(&index).is_some()
+            | self.incomplete_agent_entries.insert(index)
+        {
+            self.touch_entry(index);
+            self.change_structure();
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn structure_revision(&self) -> u64 {
+        self.structure_revision
+    }
+
+    pub fn entry_revision(&self, index: usize) -> u64 {
+        self.entry_revisions[index]
+    }
+
+    /// Each extant entry is returned at most once, even if it was updated
+    /// repeatedly while the view was hidden. Projection replacement uses epoch.
+    pub fn changed_entries_since(&self, revision: u64) -> impl Iterator<Item = usize> + '_ {
+        self.entries_by_revision
+            .range((
+                std::ops::Bound::Excluded(revision),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(_, &index)| index)
+    }
+
+    pub(crate) fn touch_entry(&mut self, index: usize) {
+        self.revision += 1;
+        let previous = std::mem::replace(&mut self.entry_revisions[index], self.revision);
+        self.entries_by_revision.remove(&previous);
+        self.entries_by_revision.insert(self.revision, index);
+    }
+
+    pub(crate) fn change_structure(&mut self) {
+        self.structure_revision += 1;
+    }
+
+    pub(crate) fn invalidate_block_indices(&mut self, index: usize) {
+        if let Some(indices) = self.block_indices.get_mut(index) {
+            indices.take();
+        }
+    }
+
+    pub(crate) fn block_index(&self, index: usize, id: PresentationBlockId) -> Option<usize> {
+        let HistoryEntry::Conversation(entry) = self.entry(index)? else {
+            return None;
+        };
+        self.block_indices[index]
+            .get_or_init(|| {
+                entry
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, block)| (block.id, index))
+                    .collect()
+            })
+            .get(&id)
+            .copied()
+    }
+
+    pub(crate) fn append_entry_block(&mut self, index: usize, block: PresentationBlock) {
+        let HistoryEntry::Conversation(entry) = &mut self.history[index] else {
+            unreachable!()
+        };
+        if let Some(indices) = self.block_indices[index].get_mut() {
+            indices.insert(block.id, entry.blocks.len());
+        }
+        entry.blocks.push(block);
+        self.touch_entry(index);
+    }
+
+    pub(crate) fn hinted_block_mut(
+        &mut self,
+        history_index: usize,
+        block_id: PresentationBlockId,
+    ) -> Option<&mut PresentationBlock> {
+        let HistoryEntry::Conversation(entry) = self.history.get_mut(history_index)? else {
+            return None;
+        };
+        let block_index = if let Some((history, index, id)) = self.block_hint
+            && history == history_index
+            && id == block_id
+            && entry.blocks.get(index).is_some_and(|block| block.id == id)
+        {
+            index
+        } else {
+            match self.block_indices[history_index].get() {
+                Some(indices) => indices.get(&block_id).copied()?,
+                None => entry
+                    .blocks
+                    .iter()
+                    .rposition(|block| block.id == block_id)?,
+            }
+        };
+        self.block_hint = Some((history_index, block_index, block_id));
+        entry.blocks.get_mut(block_index)
+    }
+
+    pub(crate) fn remove_block(&mut self, index: usize, id: PresentationBlockId) -> bool {
+        let Some(position) = self.block_index(index, id) else {
+            return false;
+        };
+        let HistoryEntry::Conversation(entry) = &mut self.history[index] else {
+            unreachable!("only conversation entries contain blocks");
+        };
+        entry.blocks.remove(position);
+        self.invalidate_block_indices(index);
+        self.touch_entry(index);
+        self.change_structure();
+        true
+    }
+
+    pub(crate) fn entry_mut_untracked(&mut self, index: usize) -> Option<&mut HistoryEntry> {
+        self.history.get_mut(index)
     }
 
     pub fn entry_mut(&mut self, index: usize) -> Option<&mut HistoryEntry> {
+        if index >= self.history.len() {
+            return None;
+        }
+        self.touch_entry(index);
+        self.invalidate_block_indices(index);
         self.history.get_mut(index)
     }
 
@@ -909,11 +1092,29 @@ impl ConversationState {
     }
 
     pub fn push_entry(&mut self, mut entry: HistoryEntry) -> usize {
-        if let HistoryEntry::Conversation(conversation) = &mut entry {
-            self.block_ids.identify(conversation);
-        }
         let index = self.history.len();
+        match &mut entry {
+            HistoryEntry::Conversation(conversation) => {
+                self.block_ids.identify(conversation);
+                if let Some(header) = conversation.header {
+                    self.represented_headers
+                        .entry(header)
+                        .or_default()
+                        .push(index);
+                }
+            }
+            HistoryEntry::Ensemble(ensemble) => {
+                self.ensemble_indices.insert(ensemble.run_id.clone(), index);
+            }
+            HistoryEntry::PlanArtifact(artifact) => {
+                self.plan_versions.insert(artifact.version);
+            }
+            _ => {}
+        }
         self.history.push(entry);
+        self.entry_revisions.push(0);
+        self.block_indices.push(OnceLock::new());
+        self.touch_entry(index);
         index
     }
 
@@ -961,7 +1162,15 @@ impl ConversationState {
             && let HistoryEntry::Conversation(entry) = &mut self.history[attempt.history_index]
         {
             // Later dispatches and activity revisions cannot relabel earlier output.
-            entry.header = entry.header.or(header);
+            if entry.header.is_none()
+                && let Some(header) = header
+            {
+                entry.header = Some(header);
+                let index = attempt.history_index;
+                let indices = self.represented_headers.entry(header).or_default();
+                indices.insert(indices.partition_point(|&old| old < index), index);
+                self.touch_entry(index);
+            }
         }
     }
 
@@ -984,7 +1193,13 @@ impl ConversationState {
             {
                 return;
             }
+            let previous_answer = existing.projected_answer_item();
             existing.attempt = attempt;
+            if previous_answer != existing.projected_answer_item() {
+                let index = existing.history_index;
+                self.touch_entry(index);
+                self.change_structure();
+            }
         } else {
             let history_index = self.push_entry(HistoryEntry::Conversation(ConversationEntry {
                 header: None,
@@ -996,6 +1211,7 @@ impl ConversationState {
                     history_index,
                     attempt,
                     ids: HashMap::new(),
+                    owned_ids: HashSet::new(),
                     canonical: None,
                     acp_tools: HashMap::new(),
                     tool_status: ToolCallStatus::Finished,
@@ -1063,7 +1279,6 @@ impl ConversationState {
         } else {
             None
         };
-        self.attach_pending_subtasks();
         index
     }
 
@@ -1074,15 +1289,32 @@ impl ConversationState {
         let attempt = &state.attempt;
         let mut desired = Vec::new();
         let mut ordered = std::collections::BTreeMap::new();
+        enum Item<'a> {
+            Part(&'a zevria_content::AssistantPresentationPart),
+            Action(&'a zevria_content::HostedActivity),
+        }
         for part in &attempt.presentation {
             ordered.insert(
                 (part.source.output_index, Some(part.source.part)),
-                Some(part),
+                Item::Part(part),
             );
         }
         for action in &attempt.hosted_activity {
-            ordered.insert((action.output_index, None), None);
+            ordered.insert((action.output_index, None), Item::Action(action));
         }
+        let native_calls: HashMap<_, _> = match &state.canonical {
+            Some(Message::Assistant(assistant)) => assistant
+                .content
+                .iter()
+                .filter_map(|item| {
+                    let AssistantContent::ToolCall(call) = item else {
+                        return None;
+                    };
+                    Some((call.id.to_string(), call))
+                })
+                .collect(),
+            _ => HashMap::new(),
+        };
         let mut pending = Vec::new();
         let flush = |pending: &mut Vec<&zevria_content::HostedActivity>, desired: &mut Vec<_>| {
             if let Some(first) = pending.first() {
@@ -1095,26 +1327,23 @@ impl ConversationState {
                 pending.clear();
             }
         };
-        for ((output, _), part) in ordered {
-            let Some(part) = part else {
-                let action = attempt
-                    .hosted_activity
-                    .iter()
-                    .find(|action| action.output_index == output)
-                    .expect("indexed action");
-                if action.details().is_empty() {
-                    pending.push(action);
-                } else {
-                    flush(&mut pending, &mut desired);
-                    desired.push((
-                        AttemptBlockKey::Action(output),
-                        PresentationBlockKind::WebActivity(WebActivityPresentation::from_actions(
-                            attempt,
-                            &[action],
-                        )),
-                    ));
+        for ((output, _), item) in ordered {
+            let part = match item {
+                Item::Part(part) => part,
+                Item::Action(action) => {
+                    if action.details().is_empty() {
+                        pending.push(action);
+                    } else {
+                        flush(&mut pending, &mut desired);
+                        desired.push((
+                            AttemptBlockKey::Action(output),
+                            PresentationBlockKind::WebActivity(
+                                WebActivityPresentation::from_actions(attempt, &[action]),
+                            ),
+                        ));
+                    }
+                    continue;
                 }
-                continue;
             };
             let kind = match &part.content {
                 Content::Reasoning { text } if !text.trim().is_empty() => {
@@ -1131,19 +1360,7 @@ impl ConversationState {
                     }
                 }
                 Content::NativeTool { call_id } => {
-                    let call = state.canonical.as_ref().and_then(|message| match message {
-                        Message::Assistant(assistant) => {
-                            assistant.content.iter().find_map(|content| match content {
-                                AssistantContent::ToolCall(call)
-                                    if call.id.wire().as_ref() == call_id.as_str() =>
-                                {
-                                    Some(call)
-                                }
-                                _ => None,
-                            })
-                        }
-                        _ => None,
-                    });
+                    let call = native_calls.get(call_id.as_str()).copied();
                     if let Some(call) = call {
                         PresentationBlockKind::Tool(PresentedTool::Native {
                             call: Box::new(call.clone()),
@@ -1174,16 +1391,25 @@ impl ConversationState {
             return;
         };
         let old_blocks = std::mem::take(&mut entry.blocks);
+        let old_ids: Vec<_> = old_blocks.iter().map(|block| block.id).collect();
+        let index = state.history_index;
+        let native_before = native_tool_keys(&old_blocks, &state.owned_ids);
+        let mut changed = false;
         let insertion = old_blocks
             .iter()
-            .position(|block| state.ids.values().any(|id| *id == block.id))
+            .position(|block| state.owned_ids.contains(&block.id))
             .unwrap_or(old_blocks.len());
         let mut before = Vec::new();
         let mut after = Vec::new();
         let mut previous = HashMap::new();
+        let mut children: HashMap<_, Vec<_>> = HashMap::new();
         for (index, block) in old_blocks.into_iter().enumerate() {
-            if state.ids.values().any(|id| *id == block.id) {
+            if state.owned_ids.contains(&block.id) {
                 previous.insert(block.id, block);
+            } else if let PresentationBlockKind::Subtask { parent, .. } = &block.kind
+                && state.owned_ids.contains(parent)
+            {
+                children.entry(*parent).or_default().push(block);
             } else if index < insertion {
                 before.push(block);
             } else {
@@ -1196,6 +1422,7 @@ impl ConversationState {
                 .ids
                 .entry(key)
                 .or_insert_with(|| self.block_ids.allocate());
+            state.owned_ids.insert(block_id);
             let mut block = PresentationBlock {
                 id: block_id,
                 revision: 0,
@@ -1213,12 +1440,20 @@ impl ConversationState {
                     block.revision = old.revision;
                     if old.kind != block.kind {
                         block.touch();
+                        changed = true;
                     }
                 }
             }
             entry.blocks.push(block);
+            if let Some(rows) = children.remove(&block_id) {
+                entry.blocks.extend(rows);
+            }
         }
         entry.blocks.extend(after);
+        let removed = !previous.is_empty() || !children.is_empty();
+        let order_changed = !entry.blocks.iter().map(|block| block.id).eq(old_ids);
+        let native_after = native_tool_keys(&entry.blocks, &state.owned_ids);
+        let mut commitment_changed = false;
         if state.canonical.is_some() {
             use zevria_content::ResponseAttemptOutcome::{Failed, Interrupted};
             let answer_item = (state.final_answer
@@ -1233,45 +1468,70 @@ impl ConversationState {
                     _ => None,
                 })
                 .collect();
-            self.response_answers.insert(state.history_index, parts);
-        }
-        let launch_blocks: Vec<_> = entry
-            .blocks
-            .iter()
-            .filter_map(|block| {
-                block
-                    .native_tool()
-                    .filter(|(_, tool)| !tool.subtasks.is_empty())
-                    .map(|_| block.id)
-            })
-            .collect();
-        for parent in launch_blocks {
-            sync_subtask_rows(entry, parent, &mut self.block_ids);
-        }
-        self.executing_tool_calls
-            .values_mut()
-            .for_each(|locations| {
-                locations.retain(|location| location.history_index != state.history_index)
-            });
-        self.executing_tool_calls
-            .retain(|_, locations| !locations.is_empty());
-        for block in &entry.blocks {
-            if let Some((call, tool)) = block.native_tool()
-                && tool.status == ToolCallStatus::Executing
-            {
-                self.executing_tool_calls
-                    .entry(call.id.to_string())
-                    .or_default()
-                    .push(ToolCallLocation {
-                        history_index: state.history_index,
-                        block_id: block.id,
-                    });
+            if self.response_answers.get(&index) != Some(&parts) {
+                self.response_answers.insert(index, parts);
+                commitment_changed = true;
             }
+        }
+        if order_changed {
+            self.invalidate_block_indices(index);
+        }
+        if native_before != native_after {
+            let removed_tools: HashSet<_> = previous
+                .values()
+                .filter_map(|block| block.native_tool().map(|_| block.id))
+                .collect();
+            if !removed_tools.is_empty() {
+                let live = |location: &ToolCallLocation| {
+                    location.history_index != index || !removed_tools.contains(&location.block_id)
+                };
+                self.command_call_locations
+                    .retain(|_, location| live(location));
+                self.command_job_locations
+                    .retain(|_, location| live(location));
+                self.subtask_call_locations
+                    .retain(|_, location| live(location));
+                self.subtask_locations.retain(|_, locations| {
+                    locations.retain(|location| live(&location.parent));
+                    !locations.is_empty()
+                });
+            }
+            for (call, block_id, status) in native_before {
+                if status == ToolCallStatus::Executing {
+                    self.remove_executing(
+                        &call,
+                        ToolCallLocation {
+                            history_index: index,
+                            block_id,
+                        },
+                    );
+                }
+            }
+            for (call, block_id, status) in native_after {
+                if status == ToolCallStatus::Executing {
+                    self.executing_tool_calls
+                        .entry(call)
+                        .or_default()
+                        .push(ToolCallLocation {
+                            history_index: index,
+                            block_id,
+                        });
+                }
+            }
+            self.index_native_locations(index);
+        }
+        if changed || order_changed || commitment_changed {
+            self.touch_entry(index);
+        }
+        if removed || commitment_changed {
+            self.change_structure();
         }
     }
 
     pub fn bind_attempt_tools(&mut self, id: &str, tools: HashMap<String, PresentationBlockKind>) {
-        if let Some(attempt) = self.hosted_attempts.get_mut(id) {
+        if let Some(attempt) = self.hosted_attempts.get_mut(id)
+            && attempt.acp_tools != tools
+        {
             attempt.acp_tools = tools;
             self.reconcile_attempt(id);
         }
@@ -1287,21 +1547,23 @@ impl ConversationState {
         if state.history_index == history_index {
             return;
         }
-        let Some(HistoryEntry::Conversation(source)) = self.history.get_mut(state.history_index)
-        else {
+        if !matches!(
+            self.history.get(history_index),
+            Some(HistoryEntry::Conversation(_))
+        ) {
+            return;
+        }
+        let from = state.history_index;
+        let HistoryEntry::Conversation(source) = &mut self.history[from] else {
             return;
         };
-        let mut blocks = Vec::new();
-        source.blocks.retain(|block| {
-            if state.ids.values().any(|id| *id == block.id) {
-                blocks.push(block.clone());
-                false
-            } else {
-                true
-            }
-        });
-        let Some(HistoryEntry::Conversation(target)) = self.history.get_mut(history_index) else {
-            return;
+        let original = std::mem::take(&mut source.blocks);
+        let (blocks, remaining): (Vec<_>, Vec<_>) = original
+            .into_iter()
+            .partition(|block| state.owned_ids.contains(&block.id));
+        source.blocks = remaining;
+        let HistoryEntry::Conversation(target) = &mut self.history[history_index] else {
+            unreachable!()
         };
         let position = target
             .blocks
@@ -1310,6 +1572,11 @@ impl ConversationState {
             .unwrap_or(target.blocks.len());
         target.blocks.splice(position..position, blocks);
         state.history_index = history_index;
+        self.invalidate_block_indices(from);
+        self.invalidate_block_indices(history_index);
+        self.touch_entry(from);
+        self.touch_entry(history_index);
+        self.change_structure();
     }
 
     pub fn selection_identity(&self, selection: Selection) -> Option<PresentationBlockId> {
@@ -1342,8 +1609,10 @@ impl ConversationState {
         if let Some(attempt) = self.hosted_attempts.get(attempt_id)
             && let Some(id) = attempt.ids.get(&AttemptBlockKey::Action(output))
         {
-            self.identity_aliases
-                .insert(old, (attempt.history_index, *id));
+            let target = (attempt.history_index, *id);
+            if old != target && self.identity_aliases.insert(old, target) != Some(target) {
+                self.change_structure();
+            }
         }
     }
 
@@ -1358,8 +1627,10 @@ impl ConversationState {
                 .ids
                 .get(&AttemptBlockKey::Part(source.output_index, source.part))
         {
-            self.identity_aliases
-                .insert(old, (attempt.history_index, *id));
+            let target = (attempt.history_index, *id);
+            if old != target && self.identity_aliases.insert(old, target) != Some(target) {
+                self.change_structure();
+            }
         }
     }
 
@@ -1369,13 +1640,7 @@ impl ConversationState {
         id: PresentationBlockId,
     ) -> Option<Selection> {
         let (history_index, id) = self.resolved_identity((history_index, id));
-        let HistoryEntry::Conversation(entry) = self.entry(history_index)? else {
-            return None;
-        };
-        entry
-            .blocks
-            .iter()
-            .position(|block| block.id == id)
+        self.block_index(history_index, id)
             .map(|content_index| Selection {
                 history_index,
                 content_index,
@@ -1383,20 +1648,17 @@ impl ConversationState {
     }
 
     pub fn push_error(&mut self, error: String) {
-        self.history.push(HistoryEntry::Error(error));
+        self.push_entry(HistoryEntry::Error(error));
     }
 
     pub fn push_plan_artifact(&mut self, artifact: PlanArtifact) {
-        let visible = self.history.iter().any(|entry| {
-            matches!(entry, HistoryEntry::PlanArtifact(existing) if existing.version == artifact.version)
-        });
-        if !visible {
-            self.history.push(HistoryEntry::PlanArtifact(artifact));
+        if !self.plan_versions.contains(&artifact.version) {
+            self.push_entry(HistoryEntry::PlanArtifact(artifact));
         }
     }
 
     pub fn push_plan_handoff(&mut self, handoff: PlanHandoff, turn: DisplayTurn) {
-        self.history.push(HistoryEntry::PlanHandoff(
+        self.push_entry(HistoryEntry::PlanHandoff(
             handoff,
             Some(NativeHeader::Prompt(turn)),
         ));
@@ -1407,11 +1669,11 @@ impl ConversationState {
         notice: zevria_foundation::CommandJobNotice,
         header: Option<NativeHeader>,
     ) {
-        self.history.push(HistoryEntry::JobNotice(notice, header));
+        self.push_entry(HistoryEntry::JobNotice(notice, header));
     }
 
     pub fn push_compaction_divider(&mut self) {
-        self.history.push(HistoryEntry::CompactionDivider);
+        self.push_entry(HistoryEntry::CompactionDivider);
     }
 
     pub fn push_user_turn(&mut self, message: Message, turn: DisplayTurn) {
@@ -1453,6 +1715,7 @@ impl ConversationState {
                 }
             }
         }
+        self.index_native_locations(history_index);
         Some(history_index)
     }
 
@@ -1476,8 +1739,7 @@ impl ConversationState {
         };
         entry
             .blocks
-            .iter()
-            .find(|block| block.id == location.block_id)?
+            .get(self.block_index(location.history_index, location.block_id)?)?
             .native_tool()
             .map(|(call, _)| call)
     }
@@ -1512,27 +1774,15 @@ impl ConversationState {
         result: &ToolResult,
         metadata: Option<&ToolResultMetadata>,
     ) {
-        if let Some(candidates) = self
-            .executing_tool_calls
-            .get_mut(result.call.wire().as_ref())
-        {
-            candidates.retain(|candidate| *candidate != location);
-            if candidates.is_empty() {
-                self.executing_tool_calls
-                    .remove(result.call.wire().as_ref());
-            }
-        }
-        let Some(HistoryEntry::Conversation(entry)) = self.history.get_mut(location.history_index)
-        else {
+        self.remove_executing(result.call.wire().as_ref(), location);
+        let index = location.history_index;
+        let Some(block_index) = self.block_index(index, location.block_id) else {
             return;
         };
-        let Some(block) = entry
-            .blocks
-            .iter_mut()
-            .find(|block| block.id == location.block_id)
-        else {
+        let HistoryEntry::Conversation(entry) = &mut self.history[index] else {
             return;
         };
+        let block = &mut entry.blocks[block_index];
         let Some((call, state)) = block.native_tool_mut() else {
             return;
         };
@@ -1567,8 +1817,32 @@ impl ConversationState {
                 }
             }
         }
+        let has_children = !state.subtasks.is_empty();
+        let job_id = state
+            .metadata
+            .as_ref()
+            .filter(|_| call.function.name == zevria_foundation::COMMAND_TOOL_NAME)
+            .and_then(ToolResultMetadata::command_job)
+            .map(|job| job.id.clone());
         block.touch();
-        sync_subtask_rows(entry, location.block_id, &mut self.block_ids);
+        if let Some(id) = job_id {
+            insert_newest(&mut self.command_job_locations, id, location);
+        }
+        if has_children {
+            sync_subtask_rows(entry, location.block_id, &mut self.block_ids);
+            self.invalidate_block_indices(index);
+            self.index_subtask_descriptors(location);
+        }
+        self.touch_entry(index);
+    }
+
+    fn remove_executing(&mut self, call_id: &str, location: ToolCallLocation) {
+        if let Some(candidates) = self.executing_tool_calls.get_mut(call_id) {
+            candidates.retain(|candidate| *candidate != location);
+            if candidates.is_empty() {
+                self.executing_tool_calls.remove(call_id);
+            }
+        }
     }
 
     /// Return only headers whose last executing tool was settled by these results.
@@ -1622,19 +1896,18 @@ impl ConversationState {
     pub fn interrupt_executing_tool_calls(&mut self) {
         for locations in std::mem::take(&mut self.executing_tool_calls).into_values() {
             for location in locations {
-                let Some(HistoryEntry::Conversation(entry)) =
-                    self.history.get_mut(location.history_index)
-                else {
+                let index = location.history_index;
+                let Some(block_index) = self.block_index(index, location.block_id) else {
                     continue;
                 };
-                if let Some(block) = entry
-                    .blocks
-                    .iter_mut()
-                    .find(|block| block.id == location.block_id)
-                    && let Some((_, state)) = block.native_tool_mut()
-                {
+                let HistoryEntry::Conversation(entry) = &mut self.history[index] else {
+                    continue;
+                };
+                let block = &mut entry.blocks[block_index];
+                if let Some((_, state)) = block.native_tool_mut() {
                     state.status = ToolCallStatus::Interrupted;
                     block.touch();
+                    self.touch_entry(index);
                 }
             }
         }
@@ -1649,65 +1922,59 @@ impl ConversationState {
         if let Some(status) = self.subtask_statuses.get(&descriptor.id) {
             descriptor.status = *status;
         }
-        for entry in self.history.iter_mut().rev() {
-            let HistoryEntry::Conversation(entry) = entry else {
-                continue;
-            };
-            for block in &mut entry.blocks {
-                let Some((call, state)) = block.native_tool_mut() else {
-                    continue;
-                };
-                if call.id.wire().as_ref() != call_id
-                    || call.function.name != zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME
-                {
-                    continue;
+        if let Some(&location) = self.subtask_call_locations.get(call_id)
+            && let Some(block_index) = self.block_index(location.history_index, location.block_id)
+            && let HistoryEntry::Conversation(entry) = &mut self.history[location.history_index]
+            && let Some((_, state)) = entry.blocks[block_index].native_tool_mut()
+        {
+            if let Some(existing) = state.subtasks.get(&entry_index) {
+                if existing.id != descriptor.id {
+                    return;
                 }
-                if let Some(existing) = state.subtasks.get(&entry_index) {
-                    if existing.id != descriptor.id {
-                        return;
-                    }
-                    if existing.status.is_terminal() || descriptor.status == SubtaskStatus::Starting
-                    {
-                        descriptor.status = existing.status;
-                    }
+                if existing.status.is_terminal() || descriptor.status == SubtaskStatus::Starting {
+                    descriptor.status = existing.status;
                 }
-                state.subtasks.insert(entry_index, descriptor);
-                let parent = block.id;
-                block.touch();
-                sync_subtask_rows(entry, parent, &mut self.block_ids);
-                return;
-            }
-        }
-        let pending = self.pending_subtasks.entry(call_id.into()).or_default();
-        pending.retain(|(index, _)| *index != entry_index);
-        pending.push((entry_index, descriptor));
-    }
-
-    pub fn update_command_job(&mut self, job: &zevria_foundation::CommandJobSnapshot) {
-        for entry in self.history.iter_mut().rev() {
-            let HistoryEntry::Conversation(entry) = entry else {
-                continue;
-            };
-            for block in &mut entry.blocks {
-                let Some((call, state)) = block.native_tool_mut() else {
-                    continue;
-                };
-                if call.function.name == zevria_foundation::COMMAND_TOOL_NAME
-                    && (job.call_id.as_deref() == Some(call.id.wire().as_ref())
-                        || state
-                            .metadata
-                            .as_ref()
-                            .and_then(|m| m.detail.as_ref())
-                            .and_then(|d| d.command_job())
-                            .is_some_and(|d| d.id == job.id))
-                {
-                    if state.command_job.as_ref() != Some(job) {
-                        state.command_job = Some(job.clone());
-                        block.touch();
-                    }
+                if existing == &descriptor {
                     return;
                 }
             }
+            state.subtasks.insert(entry_index, descriptor);
+            entry.blocks[block_index].touch();
+            sync_subtask_rows(entry, location.block_id, &mut self.block_ids);
+            self.invalidate_block_indices(location.history_index);
+            self.index_subtask_descriptors(location);
+            self.touch_entry(location.history_index);
+        } else {
+            let pending = self.pending_subtasks.entry(call_id.into()).or_default();
+            pending.retain(|(index, _)| *index != entry_index);
+            pending.push((entry_index, descriptor));
+        }
+    }
+
+    pub fn update_command_job(&mut self, job: &zevria_foundation::CommandJobSnapshot) {
+        let by_call = job
+            .call_id
+            .as_ref()
+            .and_then(|id| self.command_call_locations.get(id));
+        let by_job = self.command_job_locations.get(&job.id);
+        let Some((location, block_index)) = by_call
+            .into_iter()
+            .chain(by_job)
+            .filter_map(|&loc| Some((loc, self.block_index(loc.history_index, loc.block_id)?)))
+            .max_by_key(|(loc, position)| (loc.history_index, std::cmp::Reverse(*position)))
+        else {
+            return;
+        };
+        let index = location.history_index;
+        if let HistoryEntry::Conversation(entry) = &mut self.history[index]
+            && let Some((call, state)) = entry.blocks[block_index].native_tool_mut()
+            && call.function.name.as_str() == zevria_foundation::COMMAND_TOOL_NAME
+            && state.command_job.as_ref() != Some(job)
+        {
+            state.command_job = Some(job.clone());
+            entry.blocks[block_index].touch();
+            insert_newest(&mut self.command_job_locations, job.id.clone(), location);
+            self.touch_entry(index);
         }
     }
 
@@ -1719,37 +1986,101 @@ impl ConversationState {
             *current = status;
         }
         let status = *current;
-        for entry in self.history.iter_mut().rev() {
-            let HistoryEntry::Conversation(entry) = entry else {
-                continue;
-            };
-            let mut changed = Vec::new();
-            for block in &mut entry.blocks {
-                let Some((_, state)) = block.native_tool_mut() else {
-                    continue;
-                };
-                if let Some(descriptor) = state
-                    .subtasks
-                    .values_mut()
-                    .find(|descriptor| &descriptor.id == id)
+        let Some(locations) = self.subtask_locations.get(id).cloned() else {
+            return;
+        };
+        for SubtaskLocation {
+            parent,
+            entry_index,
+            row,
+        } in locations
+        {
+            let index = parent.history_index;
+            let row = self.block_index(index, row);
+            if let Some(block_index) = self.block_index(index, parent.block_id)
+                && let HistoryEntry::Conversation(entry) = &mut self.history[index]
+                && let Some((_, state)) = entry.blocks[block_index].native_tool_mut()
+                && let Some(descriptor) = state.subtasks.get_mut(&entry_index)
+                && &descriptor.id == id
+                && !descriptor.status.is_terminal()
+                && descriptor.status != status
+            {
+                descriptor.status = status;
+                entry.blocks[block_index].touch();
+                if let Some(row) = row.map(|row| &mut entry.blocks[row])
+                    && let PresentationBlockKind::Subtask { descriptor, .. } = &mut row.kind
                 {
-                    if !descriptor.status.is_terminal() {
-                        descriptor.status = status;
-                    }
-                    changed.push(block.id);
-                    block.touch();
+                    descriptor.status = status;
+                    row.touch();
                 }
-            }
-            for parent in changed {
-                sync_subtask_rows(entry, parent, &mut self.block_ids);
+                self.touch_entry(index);
             }
         }
     }
 
-    fn attach_pending_subtasks(&mut self) {
-        for (call, entries) in std::mem::take(&mut self.pending_subtasks) {
-            for (index, descriptor) in entries {
-                self.attach_subtask_launch(&call, index, descriptor);
+    fn index_subtask_descriptors(&mut self, location: ToolCallLocation) {
+        let index = location.history_index;
+        let Some(block_index) = self.block_index(index, location.block_id) else {
+            return;
+        };
+        if let HistoryEntry::Conversation(entry) = &self.history[index] {
+            for block in &entry.blocks[block_index + 1..] {
+                if !matches!(&block.kind, PresentationBlockKind::Subtask { parent, .. } if *parent == location.block_id)
+                {
+                    break;
+                }
+                index_subtask_row(&mut self.subtask_locations, index, block);
+            }
+        }
+    }
+
+    fn index_native_locations(&mut self, index: usize) {
+        let HistoryEntry::Conversation(entry) = &self.history[index] else {
+            return;
+        };
+        let mut accepted = Vec::new();
+        // Reverse insertion preserves the original first-block tie breaker.
+        for block in entry.blocks.iter().rev() {
+            index_subtask_row(&mut self.subtask_locations, index, block);
+            let Some((call, state)) = block.native_tool() else {
+                continue;
+            };
+            let location = ToolCallLocation {
+                history_index: index,
+                block_id: block.id,
+            };
+            match call.function.name.as_str() {
+                zevria_foundation::COMMAND_TOOL_NAME => {
+                    insert_newest(
+                        &mut self.command_call_locations,
+                        call.id.to_string(),
+                        location,
+                    );
+                    if let Some(job) = state
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.detail.as_ref())
+                        .and_then(|d| d.command_job())
+                    {
+                        insert_newest(&mut self.command_job_locations, job.id.clone(), location);
+                    }
+                    if let Some(job) = &state.command_job {
+                        insert_newest(&mut self.command_job_locations, job.id.clone(), location);
+                    }
+                }
+                zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME => {
+                    let call_id = call.id.to_string();
+                    insert_newest(&mut self.subtask_call_locations, call_id.clone(), location);
+                    if let Some(pending) = self.pending_subtasks.remove(&call_id) {
+                        accepted.push((call_id, pending));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (id, pending) in accepted {
+            for (index, descriptor) in pending {
+                self.attach_subtask_launch(&id, index, descriptor);
             }
         }
     }
@@ -1760,32 +2091,28 @@ impl ConversationState {
         status: AgentRunStatus,
         header: Option<NativeHeader>,
     ) {
-        self.history
-            .push(HistoryEntry::Ensemble(EnsembleHistory::new(
-                start, status, header,
-            )));
+        self.push_entry(HistoryEntry::Ensemble(EnsembleHistory::new(
+            start, status, header,
+        )));
     }
 
     pub fn has_ensemble(&self, run_id: &EnsembleRunId) -> bool {
-        self.history.iter().rev().any(
-            |entry| matches!(entry, HistoryEntry::Ensemble(ensemble) if &ensemble.run_id == run_id),
-        )
+        self.ensemble_indices.contains_key(run_id)
     }
 
-    fn ensemble_mut(&mut self, run_id: &EnsembleRunId) -> Option<&mut EnsembleHistory> {
-        self.history.iter_mut().rev().find_map(|entry| match entry {
-            HistoryEntry::Ensemble(ensemble) if &ensemble.run_id == run_id => Some(ensemble),
-            _ => None,
-        })
+    fn ensemble_mut(&mut self, run_id: &EnsembleRunId) -> Option<(usize, &mut EnsembleHistory)> {
+        let index = *self.ensemble_indices.get(run_id)?;
+        let HistoryEntry::Ensemble(ensemble) = &mut self.history[index] else {
+            return None;
+        };
+        Some((index, ensemble))
     }
 
     pub fn ensemble_baseline(&self, run_id: &EnsembleRunId) -> Option<&AgentRunId> {
-        self.history.iter().rev().find_map(|entry| match entry {
-            HistoryEntry::Ensemble(ensemble) if &ensemble.run_id == run_id => {
-                ensemble.baseline.as_ref()
-            }
-            _ => None,
-        })
+        let HistoryEntry::Ensemble(entry) = self.entry(*self.ensemble_indices.get(run_id)?)? else {
+            return None;
+        };
+        entry.baseline.as_ref()
     }
 
     pub fn update_ensemble_baseline(
@@ -1794,7 +2121,7 @@ impl ConversationState {
         worker_id: &AgentRunId,
         selected: bool,
     ) {
-        if let Some(ensemble) = self.ensemble_mut(run_id) {
+        if let Some((index, ensemble)) = self.ensemble_mut(run_id) {
             if ensemble.workers.iter().any(|worker| {
                 worker.review_authoritative
                     && (&worker.descriptor.id == worker_id
@@ -1802,6 +2129,7 @@ impl ConversationState {
             }) {
                 return;
             }
+            let previous = ensemble.baseline.clone();
             if selected
                 && ensemble.workflow == EnsembleWorkflow::Plan
                 && ensemble.workers.iter().any(|worker| {
@@ -1811,6 +2139,9 @@ impl ConversationState {
                 ensemble.baseline = Some(worker_id.clone());
             } else if ensemble.baseline.as_ref() == Some(worker_id) {
                 ensemble.baseline = None;
+            }
+            if previous != ensemble.baseline {
+                self.touch_entry(index);
             }
         }
     }
@@ -1822,12 +2153,16 @@ impl ConversationState {
         status: AgentRunStatus,
         failure: Option<String>,
     ) {
-        if let Some(ensemble) = self.ensemble_mut(run_id) {
-            ensemble.update_status(agent_run_id, status, failure);
+        if let Some((index, ensemble)) = self.ensemble_mut(run_id) {
+            let mut changed = ensemble.update_status(agent_run_id, status, failure);
             if status == AgentRunStatus::Abandoned
                 && ensemble.baseline.as_ref() == Some(agent_run_id)
             {
                 ensemble.baseline = None;
+                changed = true;
+            }
+            if changed {
+                self.touch_entry(index);
             }
         }
     }
@@ -1846,7 +2181,7 @@ impl ConversationState {
             mut failure,
         } = completion;
         self.update_ensemble_baseline(run_id, &worker_id, baseline);
-        let Some(ensemble) = self.ensemble_mut(run_id) else {
+        let Some((index, ensemble)) = self.ensemble_mut(run_id) else {
             return;
         };
         if status == AgentRunStatus::Completed
@@ -1861,7 +2196,9 @@ impl ConversationState {
                 }
             });
         }
-        ensemble.update_status(&worker_id, status, failure);
+        if ensemble.update_status(&worker_id, status, failure) {
+            self.touch_entry(index);
+        }
     }
 
     pub fn project_worker_review(
@@ -1874,7 +2211,7 @@ impl ConversationState {
         if &state.descriptor.id != worker_id {
             return;
         }
-        let Some(ensemble) = self.ensemble_mut(run_id) else {
+        let Some((index, ensemble)) = self.ensemble_mut(run_id) else {
             return;
         };
         if ensemble.workflow != EnsembleWorkflow::Plan {
@@ -1898,6 +2235,9 @@ impl ConversationState {
         {
             return;
         }
+        let previous_status = worker.status;
+        let mut changed = !worker.review_authoritative || worker.failure != state.diagnostic;
+        let previous_baseline = ensemble.baseline.clone();
         worker.review_authoritative = true;
         worker.status = state.status();
         if mode == crate::projection::ProjectionMode::Restored
@@ -1911,11 +2251,15 @@ impl ConversationState {
         {
             worker.status = AgentRunStatus::Interrupted;
         }
+        changed |= previous_status != worker.status;
         worker.failure.clone_from(&state.diagnostic);
         if confirmed.is_some_and(|plan| plan.baseline.is_some()) && !state.abandoned {
             ensemble.baseline = Some(worker_id.clone());
         } else if ensemble.baseline.as_ref() == Some(worker_id) {
             ensemble.baseline = None;
+        }
+        if changed || previous_baseline != ensemble.baseline {
+            self.touch_entry(index);
         }
     }
 
@@ -1924,19 +2268,15 @@ impl ConversationState {
         run_id: &EnsembleRunId,
         worker_id: &AgentRunId,
     ) -> Option<AgentRunStatus> {
-        self.history.iter().find_map(|entry| {
-            let HistoryEntry::Ensemble(ensemble) = entry else {
-                return None;
-            };
-            if &ensemble.run_id != run_id {
-                return None;
-            }
-            ensemble
-                .workers
-                .iter()
-                .find(|worker| &worker.descriptor.id == worker_id && worker.review_authoritative)
-                .map(|worker| worker.status)
-        })
+        let HistoryEntry::Ensemble(ensemble) = self.entry(*self.ensemble_indices.get(run_id)?)?
+        else {
+            return None;
+        };
+        ensemble
+            .workers
+            .iter()
+            .find(|worker| &worker.descriptor.id == worker_id && worker.review_authoritative)
+            .map(|worker| worker.status)
     }
 
     pub fn update_unfinished_ensemble_workers(
@@ -1944,13 +2284,21 @@ impl ConversationState {
         run_id: &EnsembleRunId,
         status: AgentRunStatus,
     ) {
-        let Some(ensemble) = self.ensemble_mut(run_id) else {
+        let Some((index, ensemble)) = self.ensemble_mut(run_id) else {
             return;
         };
+        let mut changed = false;
         for worker in &mut ensemble.workers {
-            if !worker.review_authoritative && !worker.status.is_terminal() {
+            if !worker.review_authoritative
+                && !worker.status.is_terminal()
+                && worker.status != status
+            {
                 worker.status = status;
+                changed = true;
             }
+        }
+        if changed {
+            self.touch_entry(index);
         }
     }
 
@@ -1973,16 +2321,46 @@ impl ConversationState {
                     .position(|entry| entry.history_index >= target_index)
             });
         if let Some(cutoff) = cutoff {
-            self.headers.truncate(cutoff);
+            self.timing_revision += 1;
+            for observation in self.headers.drain(cutoff..) {
+                self.header_indices.remove(&observation.header);
+                self.running_headers.remove(&observation.header);
+                match observation.header {
+                    NativeHeader::Prompt(_) => self.prompt_count -= 1,
+                    NativeHeader::Assistant { turn, .. } => {
+                        let count = self.call_counts.get_mut(&turn).expect("observed turn");
+                        *count -= 1;
+                        if *count == 0 {
+                            self.call_counts.remove(&turn);
+                        }
+                    }
+                }
+            }
         }
+        let target_index = target_index.min(self.history.len());
+        for revision in self.entry_revisions.drain(target_index..) {
+            self.entries_by_revision.remove(&revision);
+        }
+        self.block_indices.truncate(target_index);
+        self.represented_headers.retain(|_, indices| {
+            indices.truncate(indices.partition_point(|&index| index < target_index));
+            !indices.is_empty()
+        });
+        self.ensemble_indices
+            .retain(|_, index| *index < target_index);
+        self.revision += 1;
+        self.change_structure();
         let removed = self.history.split_off(target_index.min(self.history.len()));
         let mut change = ConversationChange::replaced_from(target_index);
         change.removed_ensemble_runs = removed
             .into_iter()
             .filter_map(|entry| match entry {
                 HistoryEntry::Ensemble(ensemble) => Some(ensemble.run_id),
+                HistoryEntry::PlanArtifact(artifact) => {
+                    self.plan_versions.remove(&artifact.version);
+                    None
+                }
                 HistoryEntry::Conversation(_)
-                | HistoryEntry::PlanArtifact(_)
                 | HistoryEntry::PlanHandoff(..)
                 | HistoryEntry::JobNotice(..)
                 | HistoryEntry::CompactionDivider
@@ -1990,7 +2368,7 @@ impl ConversationState {
             })
             .collect();
         if compacted {
-            self.history.push(HistoryEntry::CompactionDivider);
+            self.push_entry(HistoryEntry::CompactionDivider);
         }
         self.executing_tool_calls.clear();
         self.hosted_attempts.clear();
@@ -2003,6 +2381,13 @@ impl ConversationState {
         self.identity_aliases.clear();
         self.pending_subtasks.clear();
         self.subtask_statuses.clear();
+        self.command_call_locations.clear();
+        self.command_job_locations.clear();
+        self.subtask_call_locations.clear();
+        self.subtask_locations.clear();
+        for index in 0..self.history.len() {
+            self.index_native_locations(index);
+        }
         change
     }
 
@@ -2444,7 +2829,7 @@ impl ConversationState {
                     // The preceding no-tool response was an orchestration
                     // round, not a successful answer to the request.
                     if let Some(index) = last_response.take() {
-                        self.response_answers.insert(index, Vec::new());
+                        self.response_answers.insert(index, HashSet::new());
                     }
                 }
                 TranscriptItem::SessionModels(_)
@@ -2559,7 +2944,7 @@ impl ConversationState {
                     | EnsembleRecord::Completed { .. } => {}
                 },
                 TranscriptItem::Compaction(_) => {
-                    self.history.push(HistoryEntry::CompactionDivider);
+                    self.push_entry(HistoryEntry::CompactionDivider);
                 }
                 TranscriptItem::Error { error } => {
                     if error == crate::blocks::TURN_CANCELLED {
@@ -2592,6 +2977,58 @@ impl ConversationState {
     }
 }
 
+fn index_subtask_row(
+    locations: &mut HashMap<SubtaskId, Vec<SubtaskLocation>>,
+    history_index: usize,
+    block: &PresentationBlock,
+) {
+    if let PresentationBlockKind::Subtask {
+        parent,
+        entry_index,
+        descriptor,
+    } = &block.kind
+    {
+        let location = SubtaskLocation {
+            parent: ToolCallLocation {
+                history_index,
+                block_id: *parent,
+            },
+            entry_index: *entry_index,
+            row: block.id,
+        };
+        let rows = locations.entry(descriptor.id.clone()).or_default();
+        if !rows.contains(&location) {
+            rows.push(location);
+        }
+    }
+}
+
+fn insert_newest<K: std::hash::Hash + Eq>(
+    index: &mut HashMap<K, ToolCallLocation>,
+    key: K,
+    location: ToolCallLocation,
+) {
+    let existing = index.entry(key).or_insert(location);
+    if location.history_index >= existing.history_index {
+        *existing = location;
+    }
+}
+
+fn native_tool_keys(
+    blocks: &[PresentationBlock],
+    owned: &HashSet<PresentationBlockId>,
+) -> Vec<(String, PresentationBlockId, ToolCallStatus)> {
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let (call, state) = block.native_tool()?;
+            owned
+                .contains(&block.id)
+                .then(|| (call.id.to_string(), block.id, state.status))
+        })
+        .collect()
+}
+
 /// Materialize one selectable row per accepted child in input order, retaining
 /// existing block IDs so selection and fold state survive insertion/reordering.
 fn sync_subtask_rows(
@@ -2599,48 +3036,62 @@ fn sync_subtask_rows(
     parent: PresentationBlockId,
     ids: &mut crate::presentation::BlockIdAllocator,
 ) {
-    let children = entry
+    let Some(position) = entry.blocks.iter().position(|block| block.id == parent) else {
+        return;
+    };
+    let Some((_, state)) = entry.blocks[position].native_tool() else {
+        return;
+    };
+    let children = state.subtasks.clone();
+    // Reconciliation can move the tool while leaving its previous child rows in
+    // place. Collect them in a single pass before splicing the desired order.
+    let mut previous = HashMap::new();
+    let original = std::mem::take(&mut entry.blocks);
+    for block in original {
+        if let PresentationBlockKind::Subtask {
+            parent: owner,
+            entry_index,
+            ..
+        } = &block.kind
+            && *owner == parent
+        {
+            previous.insert(*entry_index, block);
+        } else {
+            entry.blocks.push(block);
+        }
+    }
+    let position = entry
         .blocks
         .iter()
-        .find(|block| block.id == parent)
-        .and_then(PresentationBlock::native_tool)
-        .map(|(_, state)| state.subtasks.clone())
-        .unwrap_or_default();
-    let mut rows = Vec::new();
-    for (entry_index, descriptor) in children {
-        let existing = entry.blocks.iter().position(|block| matches!(&block.kind, PresentationBlockKind::Subtask { parent: owner, entry_index: index, .. } if *owner == parent && *index == entry_index));
-        let mut row = if let Some(position) = existing {
-            entry.blocks.remove(position)
-        } else {
-            let id = ids.allocate();
-            PresentationBlock {
-                id,
-                revision: 0,
-                role: Some(PresentationRole::Assistant),
-                prompt_group: None,
-                prompt: None,
-                visibility: BlockVisibility::Always,
-                kind: PresentationBlockKind::Subtask {
-                    parent,
-                    entry_index,
-                    descriptor: descriptor.clone(),
-                },
+        .position(|block| block.id == parent)
+        .expect("parent retained");
+    entry.blocks.splice(
+        position + 1..position + 1,
+        children.into_iter().map(|(entry_index, descriptor)| {
+            let kind = PresentationBlockKind::Subtask {
+                parent,
+                entry_index,
+                descriptor,
+            };
+            if let Some(mut row) = previous.remove(&entry_index) {
+                if row.kind != kind {
+                    row.kind = kind;
+                    row.touch();
+                }
+                row
+            } else {
+                PresentationBlock {
+                    id: ids.allocate(),
+                    revision: 0,
+                    role: Some(PresentationRole::Assistant),
+                    prompt_group: None,
+                    prompt: None,
+                    visibility: BlockVisibility::Always,
+                    kind,
+                }
             }
-        };
-        let kind = PresentationBlockKind::Subtask {
-            parent,
-            entry_index,
-            descriptor,
-        };
-        if row.kind != kind {
-            row.kind = kind;
-            row.touch();
-        }
-        rows.push(row);
-    }
-    if let Some(position) = entry.blocks.iter().position(|block| block.id == parent) {
-        entry.blocks.splice(position + 1..position + 1, rows);
-    }
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -2648,6 +3099,74 @@ mod tests {
     use super::*;
     use zevria_workflow::AgentRunDescriptor;
     use zevria_workflow::EnsembleRunId;
+
+    #[test]
+    fn late_command_result_does_not_replace_the_newer_job_location() {
+        use rig_core::message::{CallId, ToolFunction, ToolName};
+        use zevria_foundation::{
+            COMMAND_TOOL_NAME, CommandJobDetail, CommandJobDisposition, CommandJobId,
+            ToolCallOutcome, ToolResultDetail,
+        };
+
+        let mut conversation = ConversationState::default();
+        let command = ToolName::new(COMMAND_TOOL_NAME).unwrap();
+        let job_id = CommandJobId::new("job-shared");
+        for id in ["older", "newer"] {
+            let call = ToolCall::from_wire(
+                id,
+                ToolFunction::new(command.clone(), serde_json::json!({})),
+            );
+            conversation.push_message(
+                Message::from(vec![AssistantContent::ToolCall(call)]),
+                ToolCallStatus::Executing,
+            );
+        }
+        for id in ["newer", "older"] {
+            conversation.finish_tool_results(
+                &Message::tool_result(CallId::from_wire(id), command.clone(), "job started"),
+                &[ToolResultMetadata {
+                    id: id.into(),
+                    call_id: None,
+                    tool_name: COMMAND_TOOL_NAME.into(),
+                    outcome: ToolCallOutcome::Success,
+                    diagnostic: None,
+                    detail: Some(ToolResultDetail::CommandJob(CommandJobDetail {
+                        id: job_id.clone(),
+                        disposition: CommandJobDisposition::StartedInBackground,
+                    })),
+                }],
+            );
+        }
+
+        assert!(!conversation.has_executing_tool_calls());
+        assert_eq!(conversation.command_job_locations[&job_id].history_index, 1);
+    }
+
+    #[test]
+    fn shared_header_representation_survives_empty_entry_and_edit() {
+        let mut conversation = ConversationState::default();
+        let turn = conversation.allocate_turn();
+        let header = conversation.allocate_call(turn);
+        let visible = conversation
+            .push_numbered_message(
+                Message::assistant("earlier response"),
+                ToolCallStatus::Finished,
+                Some(header),
+            )
+            .unwrap();
+        let empty = conversation.push_entry(HistoryEntry::Conversation(ConversationEntry {
+            header: Some(header),
+            blocks: Vec::new(),
+        }));
+        assert_eq!(
+            conversation.represented_header_indices(header),
+            &[visible, empty]
+        );
+        assert!(conversation.represents_header(header));
+        conversation.commit_edit(empty, false);
+        assert_eq!(conversation.represented_header_indices(header), &[visible]);
+        assert!(conversation.represents_header(header));
+    }
 
     #[test]
     fn turn_targets_preserve_block_identity_and_reject_replacement_epochs() {

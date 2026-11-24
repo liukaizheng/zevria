@@ -285,27 +285,39 @@ enum SpanAnswer {
 }
 
 impl SpanAnswer {
+    /// `None` removes the answer; otherwise report whether its anchors changed.
     fn reconcile(
-        self,
+        &mut self,
         conversation: &ConversationState,
         range: RangeInclusive<usize>,
-    ) -> Option<Self> {
+    ) -> Option<bool> {
         match self {
             Self::Answer(ids) => {
-                let mut resolved = ids.into_iter().map(|identity| {
+                let resolve = |identity| {
                     let (row, id) = conversation.resolved_identity(identity);
                     (range.contains(&row) && conversation.selection_for_identity(row, id).is_some())
                         .then_some((row, id))
+                };
+                // The first part owns the preview. Don't promote another part
+                // if that anchor was deleted.
+                resolve(*ids.first()?)?;
+                let mut changed = false;
+                ids.retain_mut(|identity| {
+                    let Some(resolved) = resolve(*identity) else {
+                        changed = true;
+                        return false;
+                    };
+                    changed |= *identity != resolved;
+                    *identity = resolved;
+                    true
                 });
-                let first = resolved.next()??;
-                Some(Self::Answer(
-                    std::iter::once(first).chain(resolved.flatten()).collect(),
-                ))
+                Some(changed)
             }
-            Self::Plan(row) => {
-                matches!(conversation.entry(row), Some(HistoryEntry::PlanArtifact(_)))
-                    .then_some(Self::Plan(row))
-            }
+            Self::Plan(row) => matches!(
+                conversation.entry(*row),
+                Some(HistoryEntry::PlanArtifact(_))
+            )
+            .then_some(false),
         }
     }
 
@@ -356,8 +368,9 @@ enum BulkFold {
 
 /// Membership records user intent, even when a body currently fits one row.
 /// New items are always expanded; turn folding never changes a global default.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct FoldState {
+    revision: u64,
     folded: HashSet<FoldKey>,
     bulk: HashMap<FoldKey, BulkFold>,
     stream: Option<StreamSnapshotId>,
@@ -366,7 +379,25 @@ pub struct FoldState {
     spans: BTreeMap<usize, SpanFold>,
 }
 
+impl PartialEq for FoldState {
+    fn eq(&self, other: &Self) -> bool {
+        self.folded == other.folded
+            && self.bulk == other.bulk
+            && self.spans == other.spans
+            && self.stream == other.stream
+    }
+}
+impl Eq for FoldState {}
+
 impl FoldState {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn has_spans(&self) -> bool {
+        !self.spans.is_empty()
+    }
+
     pub fn contains(&self, key: FoldKey) -> bool {
         match key {
             FoldKey::Span { start, end } => {
@@ -414,22 +445,22 @@ impl FoldState {
                 self.spans.remove(&old_start);
             }
             self.spans.insert(start, SpanFold { end, answer: None });
+            self.revision += 1;
         } else if !self.contains(key) {
             self.folded.insert(key);
+            self.revision += 1;
         }
     }
 
     pub fn unfold(&mut self, key: FoldKey) {
-        match key {
+        let changed = match key {
             FoldKey::Span { start, .. } => {
-                if self.contains(key) {
-                    self.spans.remove(&start);
-                }
+                self.contains(key) && self.spans.remove(&start).is_some()
             }
-            _ => {
-                self.folded.remove(&key);
-                self.bulk.remove(&key);
-            }
+            _ => self.folded.remove(&key) | self.bulk.remove(&key).is_some(),
+        };
+        if changed {
+            self.revision += 1;
         }
     }
 
@@ -441,6 +472,7 @@ impl FoldState {
         diagnostics_visible: bool,
         fold: TurnFold,
     ) {
+        self.revision += 1;
         self.spans.clear();
         self.bulk.clear();
         self.stream = None;
@@ -547,7 +579,10 @@ impl FoldState {
     }
 
     pub(crate) fn fold_stream(&mut self, snapshot: Option<StreamSnapshotId>) {
-        self.stream = snapshot;
+        if self.stream != snapshot {
+            self.stream = snapshot;
+            self.revision += 1;
+        }
     }
 
     pub fn stream_is_folded(&self, snapshot: Option<StreamSnapshotId>) -> bool {
@@ -722,20 +757,41 @@ impl FoldState {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+            && self.folded.is_empty()
+            && self.bulk.is_empty()
+            && self.stream.is_none()
+    }
+
     pub fn reconcile(&mut self, conversation: &ConversationState) {
+        // The stream fold is keyed by its own snapshot identity, not by
+        // committed history. It cannot require structural reconciliation.
+        if self.spans.is_empty() && self.folded.is_empty() && self.bulk.is_empty() {
+            return;
+        }
+        let mut changed = false;
         let history = conversation.history();
         self.spans.retain(|&start, span| {
-            if let Some(answer) = span.answer.take() {
-                span.answer = answer.reconcile(conversation, start..=span.end);
-            }
-            history.get(start..=span.end).is_some_and(|entries| {
+            let live = history.get(start..=span.end).is_some_and(|entries| {
                 entries
                     .iter()
                     .any(|entry| entry.selectable_upper_bound() > 0)
                     && !entries
                         .iter()
                         .any(|entry| matches!(entry, HistoryEntry::CompactionDivider))
-            })
+            });
+            changed |= !live;
+            if live && let Some(answer) = &mut span.answer {
+                match answer.reconcile(conversation, start..=span.end) {
+                    Some(updated) => changed |= updated,
+                    None => {
+                        span.answer = None;
+                        changed = true;
+                    }
+                }
+            }
+            live
         });
         let resolve = |key| match key {
             FoldKey::Span { .. } => unreachable!("only local folds are stored here"),
@@ -761,24 +817,58 @@ impl FoldState {
                 })
                 .then_some(key),
         };
-        self.folded = self.folded.drain().filter_map(resolve).collect();
-        self.bulk = self
-            .bulk
-            .drain()
-            .filter_map(|(key, intent)| {
-                let key = resolve(key)?;
-                if intent == BulkFold::Provisional
-                    && let FoldKey::Block { history_index, id } = key
-                    && conversation.is_committed_answer(history_index, id)
-                {
-                    return None;
-                }
-                Some((key, intent))
-            })
-            .collect();
+        let mut moved = Vec::new();
+        self.folded.retain(|&old| match resolve(old) {
+            Some(key) if key == old => true,
+            Some(key) => {
+                changed = true;
+                moved.push(key);
+                false
+            }
+            None => {
+                changed = true;
+                false
+            }
+        });
+        self.folded.extend(moved);
+        let mut moved = Vec::new();
+        self.bulk.retain(|&old, &mut intent| {
+            let Some(key) = resolve(old) else {
+                changed = true;
+                return false;
+            };
+            if intent == BulkFold::Provisional
+                && let FoldKey::Block { history_index, id } = key
+                && conversation.is_committed_answer(history_index, id)
+            {
+                changed = true;
+                return false;
+            }
+            if old != key {
+                changed = true;
+                moved.push((key, intent));
+                false
+            } else {
+                true
+            }
+        });
+        for (key, intent) in moved {
+            // Persistent summary intent wins over a provisional fold regardless
+            // of which alias carried it or how the hash map was traversed.
+            let merged = self.bulk.entry(key).or_insert(intent);
+            if intent == BulkFold::Summary {
+                *merged = intent;
+            }
+        }
+        if changed {
+            self.revision += 1;
+        }
     }
 
     pub fn clear(&mut self) {
+        if !self.is_empty() {
+            self.revision += 1;
+        }
         self.folded.clear();
         self.bulk.clear();
         self.spans.clear();
@@ -823,6 +913,10 @@ impl EntryFolds<'_> {
         } else {
             SpanRole::Hidden { start }
         })
+    }
+
+    pub fn stream_is_folded(self) -> bool {
+        self.stream_summary
     }
 
     pub fn is_message_folded(self) -> bool {

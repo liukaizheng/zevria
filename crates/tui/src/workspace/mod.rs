@@ -844,7 +844,6 @@ impl SessionViews {
     /// pane, everything else into the root pane.
     pub fn apply(&mut self, event: SessionEvent) {
         self.apply_event(event);
-        self.file_search_request();
     }
 
     fn apply_event(&mut self, event: SessionEvent) {
@@ -1073,6 +1072,7 @@ impl SessionViews {
                         let anchor = pane.app.presentation_selection_anchor();
                         pane.transcript
                             .apply_review_snapshot(pane.app.conversation_projection_mut(), &state);
+                        pane.app.reconcile_fold_structure();
                         pane.app.restore_presentation_selection(anchor);
                     }
                     pane.app.bind_worker_review(target.clone(), state.clone());
@@ -1089,24 +1089,43 @@ impl SessionViews {
                 agent_run_id,
                 event,
             } => {
-                if let Some(index) = self.agents.iter().position(|pane| {
-                    pane.id == agent_run_id && pane.ensemble_run_id == ensemble_run_id
-                }) {
-                    let pane = &mut self.agents[index];
+                let status = match &event {
+                    AgentRunEvent::Status { status, .. } => Some(*status),
+                    _ => None,
+                };
+                let root_status = if let AgentRunEvent::Status { status, detail } = &event {
+                    Some(AgentRunEvent::Status {
+                        status: *status,
+                        detail: detail.clone(),
+                    })
+                } else {
+                    None
+                };
+                if let Some(pane) = self
+                    .agents
+                    .iter_mut()
+                    .find(|pane| pane.id == agent_run_id && pane.ensemble_run_id == ensemble_run_id)
+                {
                     if pane.status != AgentRunStatus::Abandoned {
-                        if let AgentRunEvent::Status { status, .. } = &event {
-                            pane.status = *status;
+                        let refresh =
+                            status.is_some() || matches!(&event, AgentRunEvent::Usage { .. });
+                        if let Some(status) = status {
+                            pane.status = status;
                         }
-                        pane.apply_transcript_event(event.clone());
+                        pane.apply_transcript_event(event);
+                        if refresh {
+                            pane.refresh_pane_metadata();
+                        }
                     }
-                    pane.refresh_pane_metadata();
                 }
-                self.apply_root_event(SessionEvent::AgentRunUpdated {
-                    turn_id,
-                    ensemble_run_id,
-                    agent_run_id,
-                    event,
-                });
+                if let Some(event) = root_status {
+                    self.apply_root_event(SessionEvent::AgentRunUpdated {
+                        turn_id,
+                        ensemble_run_id,
+                        agent_run_id,
+                        event,
+                    });
+                }
             }
             SessionEvent::AgentRunFinished {
                 turn_id,
@@ -1136,9 +1155,6 @@ impl SessionViews {
                     }
                     pane.status = outcome.status;
                     pane.app.freeze_worker();
-                    if let Some(usage) = &outcome.usage {
-                        pane.usage = Some(external_context_usage(usage));
-                    }
                     pane.reconcile_outcome_evidence(
                         &outcome.report,
                         outcome.plan.as_ref(),
@@ -1170,8 +1186,23 @@ impl SessionViews {
     }
 
     fn apply_root_event(&mut self, event: SessionEvent) {
+        let sync_agents = matches!(
+            &event,
+            SessionEvent::EnsembleStarted { .. }
+                | SessionEvent::EnsembleReportsReady { .. }
+                | SessionEvent::AgentRunFinished { .. }
+                | SessionEvent::WorkerReviewUpdated { .. }
+                | SessionEvent::AgentRunUpdated {
+                    event: AgentRunEvent::Status { .. },
+                    ..
+                }
+        );
         let effects = self.root.reduce(event);
+        let sync_agents = sync_agents || !effects.is_empty();
         self.consume_root_effects(effects);
+        if !sync_agents {
+            return;
+        }
         // A single root ID drives every badge, including panes without a live
         // review binding. Sidecar text never changes current selection.
         for pane in &mut self.agents {
@@ -1212,6 +1243,7 @@ impl SessionViews {
         let run_ids: HashSet<_> = run_ids.into_iter().collect();
         self.agents
             .retain(|pane| !run_ids.contains(&pane.ensemble_run_id));
+        self.baseline_workers.retain(|id, _| !run_ids.contains(id));
         self.set_visible(self.visible.filter(|pane| self.contains_pane(*pane)));
         self.last_entered = self.last_entered.filter(|pane| self.contains_pane(*pane));
     }

@@ -18,22 +18,26 @@ impl RunLog {
             descriptor: descriptor.clone(),
             prompt: start.prompt.clone(),
         };
-        let io_path = path.clone();
+        #[cfg(test)]
+        let log_path = path.clone();
+        let io_path = path;
         let (writer, projection) = tokio::task::spawn_blocking(move || {
             if resume && io_path.exists() {
                 AgentRunTranscriptWriter::reopen(io_path, &header)
             } else {
+                let record = AgentRunTranscriptRecord::Header { header };
+                let projection = AgentRunProjection::from_records(std::slice::from_ref(&record));
+                let AgentRunTranscriptRecord::Header { header } = record else {
+                    unreachable!()
+                };
                 Ok((
                     AgentRunTranscriptWriter::create(io_path, header)?,
-                    AgentRunProjection::default(),
+                    projection,
                 ))
             }
         })
         .await
         .context("agent-run log initialization task failed")??;
-        let evidence = Arc::new(Mutex::new(WorkerEvidenceState::from_projection(
-            &projection,
-        )));
         let failure = Arc::new(Mutex::new(None));
         let publication = RunLogPublication {
             events,
@@ -41,13 +45,16 @@ impl RunLog {
             ensemble_run_id: start.run_id.clone(),
             agent_run_id: descriptor.id.clone(),
         };
-        let writer = spawn_run_log_writer(writer, publication, failure.clone());
+        let writer =
+            spawn_seeded_run_log_writer(writer, publication, failure.clone(), projection.clone());
         Ok((
             Self {
-                path,
+                #[cfg(test)]
+                path: log_path,
                 writer,
                 failure,
-                evidence,
+                last_permission: Default::default(),
+                ignore_recovered_repair: Default::default(),
                 review_publication: Arc::new(Mutex::new(None)),
                 event_order: Arc::new(tokio::sync::Mutex::new(())),
             },
@@ -66,15 +73,71 @@ impl RunLog {
         } else {
             (None, None)
         };
+        let review = if matches!(
+            &event,
+            AgentRunEvent::ReplayBoundary
+                | AgentRunEvent::Review { .. }
+                | AgentRunEvent::Prompt { .. }
+                | AgentRunEvent::SessionEstablished { .. }
+                | AgentRunEvent::Plan { .. }
+                | AgentRunEvent::NativePlanCaptured { .. }
+                | AgentRunEvent::PlanRemoved { .. }
+                | AgentRunEvent::Elicitation {
+                    outcome: AgentElicitationOutcome::Accepted,
+                    ..
+                }
+        ) {
+            self.review_publication
+                .lock()
+                .expect("review publication poisoned")
+                .clone()
+        } else {
+            None
+        };
+        let permission = match &event {
+            AgentRunEvent::Permission {
+                tool_kind,
+                decision,
+                option_id,
+            } => Some(Some(PersistedPermissionDecision {
+                tool_kind: tool_kind.clone(),
+                decision: decision.clone(),
+                option_id: option_id.clone(),
+            })),
+            // ToolCallUpdate alone can be the terminal response to a denial;
+            // only a subsequent semantic action makes that inference stale.
+            AgentRunEvent::Prompt { .. }
+            | AgentRunEvent::SessionEstablished { .. }
+            | AgentRunEvent::UserMessage { .. }
+            | AgentRunEvent::AgentMessage { .. }
+            | AgentRunEvent::Thought { .. }
+            | AgentRunEvent::ToolCall { .. }
+            | AgentRunEvent::Plan { .. }
+            | AgentRunEvent::NativePlanCaptured { .. }
+            | AgentRunEvent::PlanRemoved { .. }
+            | AgentRunEvent::Elicitation { .. }
+            | AgentRunEvent::ReplayBoundary
+            | AgentRunEvent::Unsupported { .. } => Some(None),
+            _ => None,
+        };
+        let new_repair_boundary = matches!(
+            &event,
+            AgentRunEvent::Prompt {
+                continuation: false,
+                ..
+            } | AgentRunEvent::Prompt {
+                repair: Some(_),
+                ..
+            }
+        );
+        let event = Arc::new(event);
+        let observed = review.map(|review| (review, event.clone()));
         self.writer
-            .send(RunLogWriteCommand::Record(Box::new(RunLogRecordCommand {
-                record: AgentRunTranscriptRecord::Event {
-                    event: event.clone(),
-                },
-                publication: Some(event.clone()),
-                force_sync,
+            .sender
+            .send(RunLogWriteCommand::Event {
+                event,
                 acknowledgement,
-            })))
+            })
             .await
             .map_err(|_| anyhow::anyhow!(self.writer_failure("agent-run writer stopped")))?;
         if let Some(receiver) = receiver {
@@ -83,16 +146,17 @@ impl RunLog {
                 .map_err(|_| anyhow::anyhow!(self.writer_failure("agent-run writer stopped")))?
                 .map_err(anyhow::Error::msg)?;
         }
-        self.evidence
-            .lock()
-            .expect("worker evidence lock poisoned")
-            .apply(&event);
-        let review = self
-            .review_publication
-            .lock()
-            .expect("review publication poisoned")
-            .clone();
-        if let Some(review) = review {
+        if new_repair_boundary {
+            self.ignore_recovered_repair
+                .store(false, AtomicOrdering::Release);
+        }
+        if let Some(permission) = permission {
+            *self
+                .last_permission
+                .lock()
+                .expect("permission evidence lock poisoned") = permission;
+        }
+        if let Some((review, event)) = observed {
             review.observe(&event).await?;
         }
         Ok(())
@@ -101,9 +165,10 @@ impl RunLog {
     pub(super) async fn append_outcome(&self, outcome: AgentRunOutcome) -> anyhow::Result<()> {
         let (acknowledgement, receiver) = oneshot::channel();
         self.writer
+            .sender
             .send(RunLogWriteCommand::Record(Box::new(RunLogRecordCommand {
                 record: AgentRunTranscriptRecord::Outcome { outcome },
-                publication: None,
+                publish: false,
                 force_sync: true,
                 acknowledgement: Some(acknowledgement),
             })))
@@ -118,6 +183,7 @@ impl RunLog {
     pub(super) async fn barrier(&self) -> anyhow::Result<()> {
         let (acknowledgement, receiver) = oneshot::channel();
         self.writer
+            .sender
             .send(RunLogWriteCommand::Barrier { acknowledgement })
             .await
             .map_err(|_| anyhow::anyhow!(self.writer_failure("agent-run writer stopped")))?;
@@ -127,6 +193,7 @@ impl RunLog {
             .map_err(anyhow::Error::msg)
     }
 
+    #[cfg(test)]
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
@@ -146,26 +213,70 @@ impl RunLog {
             .clone()
     }
 
+    pub(super) fn forget_repair(&self) {
+        self.ignore_recovered_repair
+            .store(true, AtomicOrdering::Release);
+    }
+
     pub(super) fn repair(&self) -> Option<AgentRunRepair> {
-        self.evidence
+        if self.ignore_recovered_repair.load(AtomicOrdering::Acquire) {
+            return None;
+        }
+        self.writer
+            .projection
             .lock()
-            .expect("worker evidence lock poisoned")
+            .expect("worker projection lock poisoned")
             .repair
             .clone()
     }
 
+    #[cfg(test)]
     pub(super) fn has_plan_proof(&self) -> bool {
-        self.evidence
+        self.writer
+            .projection
             .lock()
-            .expect("worker evidence lock poisoned")
-            .has_plan_proof()
+            .expect("worker projection lock poisoned")
+            .plan
+            .as_ref()
+            .is_some_and(AgentStructuredPlan::has_markdown_proof)
     }
 
     pub(super) fn denied_permission_repair(&self) -> Option<AgentRunRepair> {
-        self.evidence
+        self.last_permission
             .lock()
-            .expect("worker evidence lock poisoned")
-            .denied_permission_repair()
+            .expect("permission evidence lock poisoned")
+            .as_ref()
+            .and_then(PersistedPermissionDecision::repair)
+    }
+
+    /// Read only the evidence required by an outcome. Callers await a barrier
+    /// first; a failed batch is never included, even if its write partly succeeded.
+    pub(super) fn outcome_evidence(
+        &self,
+        descriptor: AgentRunDescriptor,
+        status: AgentRunStatus,
+        partial: bool,
+        failure: Option<String>,
+    ) -> AgentRunOutcome {
+        let evidence = self
+            .writer
+            .projection
+            .lock()
+            .expect("worker projection lock poisoned");
+        AgentRunOutcome {
+            descriptor,
+            status,
+            partial,
+            failure,
+            confirmation: None,
+            report: evidence.report.clone(),
+            plan: evidence.plan.clone(),
+            usage: evidence.usage.clone(),
+            acp_session_id: evidence.acp_session_id.clone(),
+            user_decisions: evidence.user_decisions.clone(),
+            decision_ids: evidence.decision_ids.clone(),
+            unavailable_decisions: evidence.unavailable_decisions.clone(),
+        }
     }
 
     pub(super) fn writer_failure(&self, fallback: &str) -> String {
@@ -173,107 +284,118 @@ impl RunLog {
     }
 }
 
+#[cfg(test)]
 pub(super) fn spawn_run_log_writer<W: RunLogWriter>(
+    writer: W,
+    publication: RunLogPublication,
+    failure: Arc<Mutex<Option<String>>>,
+) -> RunLogWriterHandle {
+    spawn_seeded_run_log_writer(writer, publication, failure, AgentRunProjection::default())
+}
+
+fn spawn_seeded_run_log_writer<W: RunLogWriter>(
     mut writer: W,
     publication: RunLogPublication,
     failure: Arc<Mutex<Option<String>>>,
-) -> mpsc::Sender<RunLogWriteCommand> {
+    mut seed: AgentRunProjection,
+) -> RunLogWriterHandle {
     let (sender, mut receiver) = mpsc::channel(RUN_LOG_QUEUE_CAPACITY);
     let runtime = tokio::runtime::Handle::current();
+    // The transcript writer already validates review transitions. This view
+    // only serves report, usage and outcome evidence after durable writes.
+    seed.review = None;
+    seed.review_error = None;
+    let projection = Arc::new(Mutex::new(seed));
+    let durable = projection.clone();
     tokio::task::spawn_blocking(move || {
+        let mut records = Vec::new();
+        let mut acknowledgements = Vec::new();
         while let Some(first) = receiver.blocking_recv() {
-            let mut publications = Vec::new();
-            let mut acknowledgements = Vec::new();
             let mut bytes = 0usize;
-            let mut force_sync = false;
-            let first_result = process_run_log_command(
-                &mut writer,
-                first,
-                &mut publications,
-                &mut acknowledgements,
-                &mut bytes,
-                &mut force_sync,
-            );
-            if let Err(error) = first_result {
-                fail_run_log_writer(&failure, &mut acknowledgements, error);
-                break;
-            }
-
-            if !force_sync && bytes < RUN_LOG_BATCH_BYTES {
-                std::thread::sleep(RUN_LOG_BATCH_WINDOW);
-                while bytes < RUN_LOG_BATCH_BYTES && !force_sync {
-                    let command = match receiver.try_recv() {
-                        Ok(command) => command,
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => break,
-                    };
-                    if let Err(error) = process_run_log_command(
-                        &mut writer,
-                        command,
-                        &mut publications,
-                        &mut acknowledgements,
-                        &mut bytes,
-                        &mut force_sync,
-                    ) {
+            let deadline = tokio::time::Instant::now() + RUN_LOG_BATCH_WINDOW;
+            let mut command = first;
+            loop {
+                let force = match command {
+                    RunLogWriteCommand::Event {
+                        event,
+                        acknowledgement,
+                    } => {
+                        let force = acknowledgement.is_some();
+                        acknowledgements.extend(acknowledgement);
+                        records.push((
+                            AgentRunTranscriptRecord::Event {
+                                event: Arc::unwrap_or_clone(event),
+                            },
+                            true,
+                        ));
+                        force
+                    }
+                    RunLogWriteCommand::Record(command) => {
+                        let RunLogRecordCommand {
+                            record,
+                            publish,
+                            force_sync,
+                            acknowledgement,
+                        } = *command;
+                        acknowledgements.extend(acknowledgement);
+                        records.push((record, publish));
+                        force_sync
+                    }
+                    RunLogWriteCommand::Barrier { acknowledgement } => {
+                        acknowledgements.push(acknowledgement);
+                        break;
+                    }
+                };
+                match writer.append_buffered(&records.last().expect("record staged").0) {
+                    Ok(written) => bytes = bytes.saturating_add(written),
+                    Err(error) => {
                         fail_run_log_writer(&failure, &mut acknowledgements, error);
                         return;
                     }
                 }
+                if force || bytes >= RUN_LOG_BATCH_BYTES {
+                    break;
+                }
+                // The receiver is the wakeup: a barrier or forced record ends a
+                // batch immediately instead of waiting out the batching window.
+                let next = runtime.block_on(async {
+                    tokio::time::timeout_at(deadline, receiver.recv())
+                        .await
+                        .ok()
+                        .flatten()
+                });
+                let Some(next) = next else { break };
+                command = next;
             }
-
-            if bytes > 0
+            if !records.is_empty()
                 && let Err(error) = writer.sync()
             {
                 fail_run_log_writer(&failure, &mut acknowledgements, error);
                 break;
             }
-            for event in publications {
-                let _ = runtime.block_on(publication.events.send(SessionEvent::AgentRunUpdated {
-                    turn_id: publication.turn_id,
-                    ensemble_run_id: publication.ensemble_run_id.clone(),
-                    agent_run_id: publication.agent_run_id.clone(),
-                    event,
-                }));
+            if !records.is_empty() {
+                let mut durable = durable.lock().expect("worker projection lock poisoned");
+                for (record, _) in &records {
+                    durable.apply_display(record);
+                }
             }
-            for acknowledgement in acknowledgements {
+            for (record, publish) in records.drain(..) {
+                if publish && let AgentRunTranscriptRecord::Event { event } = record {
+                    let _ =
+                        runtime.block_on(publication.events.send(SessionEvent::AgentRunUpdated {
+                            turn_id: publication.turn_id,
+                            ensemble_run_id: publication.ensemble_run_id.clone(),
+                            agent_run_id: publication.agent_run_id.clone(),
+                            event,
+                        }));
+                }
+            }
+            for acknowledgement in acknowledgements.drain(..) {
                 let _ = acknowledgement.send(Ok(()));
             }
         }
     });
-    sender
-}
-
-pub(super) fn process_run_log_command<W: RunLogWriter>(
-    writer: &mut W,
-    command: RunLogWriteCommand,
-    publications: &mut Vec<AgentRunEvent>,
-    acknowledgements: &mut Vec<oneshot::Sender<Result<(), String>>>,
-    bytes: &mut usize,
-    force_sync: &mut bool,
-) -> anyhow::Result<()> {
-    match command {
-        RunLogWriteCommand::Record(command) => {
-            let RunLogRecordCommand {
-                record,
-                publication,
-                force_sync: record_force_sync,
-                acknowledgement,
-            } = *command;
-            if let Some(acknowledgement) = acknowledgement {
-                acknowledgements.push(acknowledgement);
-            }
-            *bytes = bytes.saturating_add(writer.append_buffered(&record)?);
-            if let Some(publication) = publication {
-                publications.push(publication);
-            }
-            *force_sync |= record_force_sync;
-        }
-        RunLogWriteCommand::Barrier { acknowledgement } => {
-            acknowledgements.push(acknowledgement);
-            *force_sync = true;
-        }
-    }
-    Ok(())
+    RunLogWriterHandle { sender, projection }
 }
 
 pub(super) fn fail_run_log_writer(

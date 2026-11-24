@@ -524,8 +524,12 @@ impl AcpToolPresentation {
         }
     }
 
+    pub fn is_hosted_search(&self) -> bool {
+        zevria_content::response::is_hosted_search_input(&self.id, self.raw_input.as_ref())
+    }
+
     pub fn hosted_activity(&self) -> Option<WebActivityPresentation> {
-        if !zevria_content::response::is_hosted_search_input(&self.id, self.raw_input.as_ref()) {
+        if !self.is_hosted_search() {
             return None;
         }
         let activity = HostedActivity {

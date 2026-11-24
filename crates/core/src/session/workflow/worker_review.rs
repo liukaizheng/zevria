@@ -51,23 +51,22 @@ impl<P: ModelProvider> SessionEngine<P> {
         turn: &TurnContext,
     ) -> Result<Vec<AgentRunOutcome>, Failure> {
         let (mut states, mut results) = match self
-            .recover_worker_review(launcher.as_ref(), start, resume, events, turn)
+            .recover_worker_review(&launcher, start, resume, events, turn)
             .await?
         {
             WorkerReviewPreparation::Completed(outcomes) => return Ok(outcomes),
             WorkerReviewPreparation::Interactive { states, results } => (states, results),
         };
-        let mut execution = launcher
-            .start_review(
-                EnsembleLaunchRequest {
-                    start: start.clone(),
-                    resume,
-                },
-                states.clone(),
-                events.clone(),
-                turn.clone(),
-            )
-            .map_err(review_launch_error)?;
+        let request = EnsembleLaunchRequest {
+            start: start.clone(),
+            resume,
+        };
+        let execution = if resume {
+            launcher.start_recovered_review(request, states.clone(), events.clone(), turn.clone())
+        } else {
+            launcher.start_review(request, states.clone(), events.clone(), turn.clone())
+        };
+        let mut execution = execution.map_err(review_launch_error)?;
         let (registration, mut controls) = self
             .capabilities
             .worker_controls
@@ -100,7 +99,7 @@ impl<P: ModelProvider> SessionEngine<P> {
 
     async fn recover_worker_review(
         &mut self,
-        launcher: &dyn EnsembleLauncher,
+        launcher: &Arc<dyn EnsembleLauncher>,
         start: &EnsembleStart,
         resume: bool,
         events: &SessionEventSender,
@@ -208,10 +207,15 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .map_err(|error| review_launch_error(error).into());
         }
         if resume {
-            for update in launcher
-                .recover_review(start, &history)
-                .map_err(|error| review_preflight_blocked(&error))?
-            {
+            let recovery_launcher = launcher.clone();
+            let recovery_start = start.clone();
+            let recovered = tokio::task::spawn_blocking(move || {
+                recovery_launcher.recover_review(&recovery_start, &history)
+            })
+            .await
+            .map_err(|error| review_preflight_blocked(&error.into()))?
+            .map_err(|error| review_preflight_blocked(&error))?;
+            for update in recovered {
                 let state = states
                     .iter_mut()
                     .find(|state| state.descriptor.id == update.worker_id)
@@ -402,34 +406,47 @@ impl<P: ModelProvider> SessionEngine<P> {
                         Ok(transition) => transition,
                         Err(detail) => { let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&detail) }).await; continue; }
                     };
-                    let mut proposed = states.clone();
-                    let affected = if let Some(event) = &transition {
-                        match apply_worker_review_event(&mut proposed, &control.target.worker_id, event) {
-                            Ok(affected) => affected,
+                    let mut replacements = Vec::new();
+                    let mut affected = vec![control.target.worker_id.clone()];
+                    if let Some(event) = &transition {
+                        let changes = match zevria_workflow::validate_worker_review_event(states, &control.target.worker_id, event) {
+                            Ok(changes) => changes,
                             Err(error) => {
                                 let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&error) }).await;
                                 continue;
                             }
+                        };
+                        let mut target = states[changes.target].clone();
+                        target.apply_validated_transition(event);
+                        replacements.push((changes.target, target));
+                        if let Some(clear) = &changes.clear {
+                            for other in changes.displaced {
+                                let mut displaced = states[other].clone();
+                                displaced.apply_validated_transition(clear);
+                                affected.push(displaced.descriptor.id.clone());
+                                replacements.push((other, displaced));
+                            }
                         }
-                    } else { vec![control.target.worker_id.clone()] };
+                    }
+                    let mut proposed = states.iter().collect::<Vec<_>>();
+                    for (i, state) in &replacements { proposed[*i] = state; }
                     if matches!(control.action, WorkerControlAction::Confirm { .. } | WorkerControlAction::Baseline { .. })
                         && let Err(error) = zevria_workflow::validate_worker_synthesis_payload(EnsembleWorkflow::Plan, &proposed[index].outcome(), launcher.max_synthesis_bytes_per_agent()) {
                         let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&error.to_string()) }).await;
                         continue;
                     }
-                    let participates = |state: &WorkerReviewState| !state.abandoned;
-                    let seals = proposed.iter().any(participates)
+                    let seals = proposed.iter().any(|state| !state.abandoned)
                         && proposed.iter().all(|state| state.abandoned || state.confirmed_plan().is_some());
                     if seals || matches!(control.action, WorkerControlAction::SendFeedback { .. } | WorkerControlAction::Confirm { .. } | WorkerControlAction::Baseline { .. } | WorkerControlAction::Retry) {
                         let preflight = if seals {
-                            let outcomes = proposed.iter().map(WorkerReviewState::outcome).collect::<Vec<_>>();
-                            match zevria_workflow::ensemble::build_synthesis_prompt_with_feedback(start.workflow, &start.prompt, &outcomes, &proposed, launcher.max_synthesis_bytes_per_agent()) {
+                            let outcomes = proposed.iter().copied().map(WorkerReviewState::outcome).collect::<Vec<_>>();
+                            match zevria_workflow::ensemble::build_synthesis_prompt_with_feedback(start.workflow, &start.prompt, &outcomes, proposed.iter().copied(), launcher.max_synthesis_bytes_per_agent()) {
                                 Ok(message) if start.publishes_confirmed_worker_plan() || zevria_content::prompt::message_has_images(&message) => self.preflight_synthesis_message(start, &message, &outcomes, turn).await,
                                 Ok(_) => Ok(()),
                                 Err(error) => Err(error),
                             }
                         } else {
-                            self.preflight_potential_synthesis(start, &proposed, launcher.max_synthesis_bytes_per_agent(), turn).await
+                            self.preflight_potential_synthesis(start, proposed.iter().copied(), launcher.max_synthesis_bytes_per_agent(), turn).await
                         };
                         if let Err(error) = preflight {
                             let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&format!("synthesis evidence preflight: {error}")) }).await;
@@ -456,13 +473,13 @@ impl<P: ModelProvider> SessionEngine<P> {
                         result.detail.push_str(&format!(" Replaced baseline {} ({}); its confirmation was retained.", previous.descriptor.label, previous.descriptor.id));
                     }
                     if seals {
-                        let outcomes = proposed.iter().map(WorkerReviewState::outcome).collect::<Vec<_>>();
+                        let outcomes = proposed.iter().copied().map(WorkerReviewState::outcome).collect::<Vec<_>>();
                         validate_frozen_workers(start, &outcomes).map_err(anyhow::Error::msg)?;
                         for outcome in outcomes.iter().filter(|outcome| outcome.status != AgentRunStatus::Abandoned) { zevria_workflow::validate_worker_synthesis_payload(EnsembleWorkflow::Plan, outcome, launcher.max_synthesis_bytes_per_agent())?; }
                         // The final explicit receipt and the complete ordered frozen
                         // set have ONE durability boundary, never sampled booleans.
                         self.commit(TranscriptItem::Ensemble(Box::new(EnsembleRecord::WorkersConfirmed { run_id: start.run_id.clone(), final_confirmation: result.clone(), outcomes: outcomes.clone() })))?;
-                        *states = proposed;
+                        for (index, state) in replacements { states[index] = state; }
                         for worker_id in affected.iter().filter(|id| *id != &control.target.worker_id) {
                             if let Some(actor) = execution.commands.get(worker_id) {
                                 let _ = actor.send(WorkerActorCommand::Mirror(WorkerReviewEvent::BaselineCleared { request_id: control.request_id.clone() }));
@@ -486,7 +503,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                             run_id: start.run_id.clone(), worker_id: control.target.worker_id.clone(),
                             event: Box::new(event.clone()), result: Some(result.clone()),
                         })))?;
-                        *states = proposed;
+                        for (index, state) in replacements { states[index] = state; }
                         for worker_id in &affected {
                             let mirror = if worker_id == &control.target.worker_id { event.clone() }
                                 else { WorkerReviewEvent::BaselineCleared { request_id: control.request_id.clone() } };
@@ -594,17 +611,18 @@ impl<P: ModelProvider> SessionEngine<P> {
         event: WorkerReviewEvent,
         result: Option<WorkerControlResult>,
     ) -> Result<(), Failure> {
-        let mut next = state.clone();
-        next.apply(&event).map_err(anyhow::Error::msg)?;
+        state
+            .validate_transition(&event)
+            .map_err(anyhow::Error::msg)?;
         self.commit(TranscriptItem::Ensemble(Box::new(
             EnsembleRecord::WorkerReview {
                 run_id: start.run_id.clone(),
                 worker_id: state.descriptor.id.clone(),
-                event: Box::new(event),
+                event: Box::new(event.clone()),
                 result,
             },
         )))?;
-        *state = next;
+        state.apply_validated_transition(&event);
         Ok(())
     }
 }

@@ -688,6 +688,9 @@ fn worker_outcome_validation_is_per_prompt_not_global() {
             },
         };
         assert!(writer.append(&status).is_err());
+        // Reopen the synced prefix after the rejected append poisons the writer.
+        drop(writer);
+        writer = AgentRunTranscriptWriter::append_to(path.clone()).unwrap();
         writer
             .append(&AgentRunTranscriptRecord::Outcome {
                 outcome: worker_outcome(&header),

@@ -35,8 +35,8 @@ use zevria_workflow::PlanWorkflowState;
 
 use crate::elicitation::{PlanChoice, plan_choice, plan_decision_request, question_form};
 use crate::project::{
-    KnownTools, ResponseUsageSnapshot, diagnostic_update, plan_artifact_update,
-    plan_ready_instructions, project_tool_calls, project_tool_results, usage_update,
+    KnownTools, ResponseUsageSnapshot, complete_tool_results, diagnostic_update,
+    plan_artifact_update, plan_ready_instructions, project_tool_calls, usage_update,
     worker_plan_update,
 };
 use crate::stream::StreamSegments;
@@ -82,12 +82,16 @@ struct State {
 }
 
 impl State {
+    fn turn_is_terminal(&self, turn_id: TurnId) -> bool {
+        self.last_terminal_turn.is_some_and(|last| turn_id <= last)
+    }
+
     fn accept_network(&mut self, turn_id: TurnId, call: usize, attempt: usize) -> bool {
         if !self
             .pending
             .as_ref()
             .is_some_and(|pending| pending.turn_id == Some(turn_id))
-            || self.last_terminal_turn.is_some_and(|last| turn_id <= last)
+            || self.turn_is_terminal(turn_id)
             || !self
                 .network_scope
                 .is_some_and(|(id, current_call, current_attempt)| {
@@ -976,6 +980,14 @@ impl LiveSession {
         >,
     ) {
         loop {
+            let preview_deadline = self
+                .state
+                .lock()
+                .expect("ACP session state poisoned")
+                .streams
+                .values()
+                .filter_map(StreamSegments::preview_deadline)
+                .min();
             tokio::select! {
                 biased;
                 exit = &mut background_exit => {
@@ -986,6 +998,23 @@ impl LiveSession {
                     let _ = self.send_update(diagnostic_update(None, "runtime-exit", &detail));
                     self.runtime_unavailable(detail);
                     break;
+                }
+                _ = async { tokio::time::sleep_until(preview_deadline.expect("pending preview")).await }, if preview_deadline.is_some() => {
+                    let updates = {
+                        let now = tokio::time::Instant::now();
+                        let mut state = self.state.lock().expect("ACP session state poisoned");
+                        let mut updates = Vec::new();
+                        for streams in state.streams.values_mut() {
+                            if streams.preview_deadline().is_some_and(|deadline| now >= deadline) {
+                                streams.flush_preview(now, &mut updates);
+                            }
+                        }
+                        updates
+                    };
+                    if let Err(error) = self.send_updates(updates) {
+                        self.runtime_unavailable(format!("failed to publish ACP preview: {error}"));
+                        break;
+                    }
                 }
                 update = events.recv() => {
                     let Some(update) = update else {
@@ -1016,27 +1045,13 @@ impl LiveSession {
         match update {
             SessionUpdate::Streams(batch) => {
                 if let Some(root) = batch.root {
-                    let updates = {
-                        let mut state = self.state.lock().expect("ACP session state poisoned");
-                        let mut updates = root
-                            .attempt
-                            .as_ref()
-                            .map_or_else(Vec::new, |attempt| state.hosted_search.update(attempt));
-                        let streams = state.streams.entry(root.turn_id).or_default();
-                        if root.message.is_some() || root.attempt.is_some() {
-                            updates.extend(streams.display_snapshot(
-                                root.turn_id,
-                                zevria_content::AssistantStreamSnapshot {
-                                    message: root.message,
-                                    attempt: root.attempt,
-                                },
-                            ));
-                        } else {
-                            streams.reset();
-                        }
-                        updates
-                    };
-                    self.send_updates(updates)?;
+                    self.handle_assistant_snapshot(
+                        root.turn_id,
+                        zevria_content::AssistantStreamSnapshot {
+                            message: root.message,
+                            attempt: root.attempt,
+                        },
+                    )?;
                 }
             }
             SessionUpdate::Lifecycle(event) => self.handle_event(event)?,
@@ -1044,7 +1059,80 @@ impl LiveSession {
         Ok(())
     }
 
+    fn handle_assistant_snapshot(
+        &self,
+        turn_id: TurnId,
+        snapshot: zevria_content::AssistantStreamSnapshot,
+    ) -> Result<(), AcpError> {
+        let updates = {
+            let mut state = self.state.lock().expect("ACP session state poisoned");
+            if state.turn_is_terminal(turn_id) {
+                return Ok(());
+            }
+            if snapshot.message.is_none() && snapshot.attempt.is_none() {
+                state
+                    .streams
+                    .get_mut(&turn_id)
+                    .map_or_else(Vec::new, StreamSegments::reset)
+            } else {
+                let mut updates = snapshot
+                    .attempt
+                    .as_ref()
+                    .map_or_else(Vec::new, |attempt| state.hosted_search.update(attempt));
+                updates.extend(
+                    state
+                        .streams
+                        .entry(turn_id)
+                        .or_default()
+                        .display_snapshot(turn_id, snapshot),
+                );
+                updates
+            }
+        };
+        self.send_updates(updates)
+    }
+
     fn handle_event(self: &Arc<Self>, event: SessionEvent) -> Result<(), AcpError> {
+        // Question closure and detached child completion are independently
+        // correlated, even after the turn that opened them has ended.
+        let turn = match &event {
+            SessionEvent::ResponseAttemptUpdated { turn_id, .. }
+            | SessionEvent::AssistantStreamUpdated { turn_id, .. }
+            | SessionEvent::ModelCallStarted { turn_id, .. }
+            | SessionEvent::TurnStarted { turn_id, .. }
+            | SessionEvent::StreamCleared { turn_id }
+            | SessionEvent::Intermediate { turn_id, .. }
+            | SessionEvent::ToolResults { turn_id, .. }
+            | SessionEvent::UsageUpdated { turn_id, .. }
+            | SessionEvent::ContextUsageUpdated { turn_id, .. }
+            | SessionEvent::TurnCompleted { turn_id, .. }
+            | SessionEvent::TurnRecovered { turn_id }
+            | SessionEvent::TurnCancelled { turn_id }
+            | SessionEvent::TurnFailed { turn_id, .. }
+            | SessionEvent::TurnRejected { turn_id, .. }
+            | SessionEvent::NetworkStatus { turn_id, .. }
+            | SessionEvent::TurnRetrying { turn_id, .. }
+            | SessionEvent::JobContinuationStarted { turn_id, .. }
+            | SessionEvent::CommandJobsReported { turn_id, .. }
+            | SessionEvent::CompactionStarted { turn_id, .. }
+            | SessionEvent::CompactionCompleted { turn_id, .. }
+            | SessionEvent::PlanHandoffStarted { turn_id, .. }
+            | SessionEvent::QuestionAsked { turn_id, .. }
+            | SessionEvent::SubtaskLaunched { turn_id, .. }
+            | SessionEvent::EnsembleStarted { turn_id, .. }
+            | SessionEvent::EnsembleReportsReady { turn_id, .. }
+            | SessionEvent::AgentRunUpdated { turn_id, .. }
+            | SessionEvent::AgentRunFinished { turn_id, .. } => Some(*turn_id),
+            _ => None,
+        };
+        if turn.is_some_and(|id| {
+            self.state
+                .lock()
+                .expect("ACP session state poisoned")
+                .turn_is_terminal(id)
+        }) {
+            return Ok(());
+        }
         match event {
             SessionEvent::EngineIdle | SessionEvent::JobContinuationChanged { .. } => {}
             SessionEvent::CommandJobsReported { turn_id, notice }
@@ -1059,37 +1147,16 @@ impl LiveSession {
                 ))?;
             }
             SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
-                let updates = {
-                    let mut state = self.state.lock().expect("ACP session state poisoned");
-                    let mut updates = state.hosted_search.update(&attempt);
-                    updates.extend(state.streams.entry(turn_id).or_default().display_snapshot(
-                        turn_id,
-                        zevria_content::AssistantStreamSnapshot {
-                            message: None,
-                            attempt: Some(attempt),
-                        },
-                    ));
-                    updates
-                };
-                self.send_updates(updates)?;
+                self.handle_assistant_snapshot(
+                    turn_id,
+                    zevria_content::AssistantStreamSnapshot {
+                        message: None,
+                        attempt: Some(attempt),
+                    },
+                )?;
             }
             SessionEvent::AssistantStreamUpdated { turn_id, snapshot } => {
-                let updates = {
-                    let mut state = self.state.lock().expect("ACP session state poisoned");
-                    let mut updates = snapshot
-                        .attempt
-                        .as_ref()
-                        .map_or_else(Vec::new, |attempt| state.hosted_search.update(attempt));
-                    updates.extend(
-                        state
-                            .streams
-                            .entry(turn_id)
-                            .or_default()
-                            .display_snapshot(turn_id, snapshot),
-                    );
-                    updates
-                };
-                self.send_updates(updates)?;
+                self.handle_assistant_snapshot(turn_id, snapshot)?;
             }
             // Model management is local TUI traffic, never assistant/tool content.
             SessionEvent::ModelsResult { .. }
@@ -1147,24 +1214,21 @@ impl LiveSession {
                 let mut state = self.state.lock().expect("ACP session state poisoned");
                 // ModeChanged owns explicit workflow selection. A turn's
                 // execution mode is not a replacement for that selection.
-                state.streams.entry(turn_id).or_default().reset();
+                let updates = state
+                    .streams
+                    .get_mut(&turn_id)
+                    .map_or_else(Vec::new, StreamSegments::reset);
                 state.network_scope = Some((turn_id, 1, 0));
                 state.network_status = None;
                 if let Some(pending) = &mut state.pending {
                     pending.turn_id = Some(turn_id);
                     pending.mode = mode;
                 }
+                drop(state);
+                self.send_updates(updates)?;
             }
             SessionEvent::StreamCleared { turn_id } => {
-                if let Some(streams) = self
-                    .state
-                    .lock()
-                    .expect("ACP session state poisoned")
-                    .streams
-                    .get_mut(&turn_id)
-                {
-                    streams.reset();
-                }
+                self.handle_assistant_snapshot(turn_id, Default::default())?;
             }
             SessionEvent::Intermediate {
                 turn_id,
@@ -1173,12 +1237,10 @@ impl LiveSession {
             } => {
                 let (stream_updates, tool_updates) = {
                     let mut state = self.state.lock().expect("ACP session state poisoned");
-                    let stream_updates = state.streams.entry(turn_id).or_default().terminal_bound(
-                        turn_id,
-                        &message,
-                        attempt_id.as_deref(),
-                    );
-                    state.streams.entry(turn_id).or_default().reset();
+                    let streams = state.streams.entry(turn_id).or_default();
+                    let mut stream_updates =
+                        streams.terminal_bound(turn_id, &message, attempt_id.as_deref());
+                    stream_updates.extend(streams.reset());
                     let tool_updates =
                         project_tool_calls(&message, &self.workspace, &mut state.known_tools);
                     (stream_updates, tool_updates)
@@ -1202,11 +1264,11 @@ impl LiveSession {
                         pending.successful_plan_submit = true;
                     }
                     let mut updates = state.subtasks.results(&metadata);
-                    updates.extend(project_tool_results(
+                    updates.extend(complete_tool_results(
                         &message,
                         &metadata,
                         &self.workspace,
-                        &state.known_tools,
+                        &mut state.known_tools,
                     ));
                     updates
                 };
@@ -1262,13 +1324,11 @@ impl LiveSession {
             } => {
                 let updates = {
                     let mut state = self.state.lock().expect("ACP session state poisoned");
-                    let updates = state.streams.entry(turn_id).or_default().terminal_bound(
+                    state.streams.entry(turn_id).or_default().terminal_bound(
                         turn_id,
                         &message,
                         attempt_id.as_deref(),
-                    );
-                    state.streams.entry(turn_id).or_default().reset();
-                    updates
+                    )
                 };
                 self.send_updates(updates)?;
                 self.handle_turn_terminal(turn_id, false, None)?;
@@ -1280,12 +1340,10 @@ impl LiveSession {
                 self.handle_turn_terminal(turn_id, true, None)?;
             }
             SessionEvent::TurnRejected { turn_id, error } => {
-                self.send_update(diagnostic_update(Some(turn_id), "rejection", &error))?;
-                self.handle_turn_terminal(turn_id, false, Some(error))?;
+                self.handle_turn_terminal(turn_id, false, Some(("rejection", error)))?;
             }
             SessionEvent::TurnFailed { turn_id, error } => {
-                self.send_update(diagnostic_update(Some(turn_id), "failure", &error))?;
-                self.handle_turn_terminal(turn_id, false, Some(error))?;
+                self.handle_turn_terminal(turn_id, false, Some(("failure", error)))?;
             }
             SessionEvent::NetworkStatus {
                 turn_id,
@@ -1372,6 +1430,7 @@ impl LiveSession {
                     }
                     state.network_status = None;
                 }
+                self.handle_assistant_snapshot(turn_id, Default::default())?;
                 self.send_update(retry_diagnostic(
                     turn_id,
                     attempt,
@@ -1379,15 +1438,6 @@ impl LiveSession {
                     retrying_for,
                     &error,
                 ))?;
-                if let Some(streams) = self
-                    .state
-                    .lock()
-                    .expect("ACP session state poisoned")
-                    .streams
-                    .get_mut(&turn_id)
-                {
-                    streams.reset();
-                }
             }
             SessionEvent::PlanStateChanged { state } => {
                 self.handle_plan_state(state)?;
@@ -1478,13 +1528,19 @@ impl LiveSession {
                     .launch(&call_id, entry_index, descriptor);
                 self.send_update(update)?;
             }
-            SessionEvent::SubtaskStatus { id, status, .. } => {
-                let update = self
-                    .state
-                    .lock()
-                    .expect("ACP session state poisoned")
-                    .subtasks
-                    .status(&id, status);
+            SessionEvent::SubtaskStatus {
+                turn_id,
+                id,
+                status,
+            } => {
+                let update = {
+                    let mut state = self.state.lock().expect("ACP session state poisoned");
+                    if state.turn_is_terminal(turn_id) {
+                        state.subtasks.finish_detached(&id, status)
+                    } else {
+                        state.subtasks.status(&id, status)
+                    }
+                };
                 if let Some(update) = update {
                     self.send_update(update)?;
                 }
@@ -1528,15 +1584,26 @@ impl LiveSession {
         self: &Arc<Self>,
         turn_id: TurnId,
         cancelled: bool,
-        failure: Option<String>,
+        failure: Option<(&str, String)>,
     ) -> Result<(), AcpError> {
         let mut start_decision = None;
-        let outcome = {
+        let mut updates = Vec::new();
+        let outcome = 'terminal: {
             let mut state = self.state.lock().expect("ACP session state poisoned");
-            if state.last_terminal_turn.is_some_and(|id| turn_id <= id) {
+            if state.turn_is_terminal(turn_id) {
                 return Ok(());
             }
             state.last_terminal_turn = Some(turn_id);
+            if let Some(streams) = state.streams.get_mut(&turn_id) {
+                streams.flush_preview(tokio::time::Instant::now(), &mut updates);
+            }
+            state.streams.retain(|&id, _| id > turn_id);
+            if let Some((category, error)) = &failure {
+                updates.push(diagnostic_update(Some(turn_id), category, error));
+            }
+            state.known_tools.clear();
+            state.hosted_search.clear();
+            state.subtasks.prune_completed();
             if state.network_scope.is_some_and(|(id, _, _)| id == turn_id) {
                 state.network_scope = None;
                 state.network_status = None;
@@ -1546,16 +1613,16 @@ impl LiveSession {
                 _ => None,
             };
             let Some(pending) = &mut state.pending else {
-                return Ok(());
+                break 'terminal None;
             };
             if pending.turn_id.is_some_and(|id| id != turn_id)
                 || (pending.turn_id.is_none() && failure.is_none() && !cancelled)
             {
-                return Ok(());
+                break 'terminal None;
             }
             if cancelled || pending.cancel_requested {
                 Some(Ok(StopReason::Cancelled))
-            } else if let Some(error) = failure {
+            } else if let Some((_, error)) = failure {
                 Some(Err(AcpError::internal_error().data(error)))
             } else if pending.mode == SessionMode::Plan
                 && (pending.successful_plan_submit
@@ -1580,6 +1647,7 @@ impl LiveSession {
                 Some(Ok(StopReason::EndTurn))
             }
         };
+        self.send_updates(updates)?;
         if let Some(outcome) = outcome {
             self.finish_prompt(outcome);
         }

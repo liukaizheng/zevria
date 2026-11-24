@@ -27,6 +27,7 @@ pub(crate) struct ViewState {
     /// changes the logical top but not these destination rows.
     turn_positions: Vec<(TurnStartTarget, usize)>,
     turn_geometry_valid: bool,
+    measured_turn_revision: Option<u64>,
     /// Preserve input order until a usable layout can resolve strict row
     /// comparisons; ordinary navigation and replacement retire these intents.
     pending_turn_jumps: Vec<TurnDirection>,
@@ -50,6 +51,7 @@ impl Default for ViewState {
             turn_alignment: None,
             turn_positions: Vec::new(),
             turn_geometry_valid: false,
+            measured_turn_revision: None,
             pending_turn_jumps: Vec::new(),
             composer_width: 0,
             composer_viewport: Viewport::default(),
@@ -79,6 +81,22 @@ impl ViewState {
         self.turn_alignment = self
             .turn_alignment
             .and_then(|target| conversation.reconcile_turn_start(target));
+    }
+
+    pub(crate) fn refresh_current_turn_positions(
+        &mut self,
+        conversation: &super::conversation::ConversationState,
+        diagnostics_visible: bool,
+        content: Rect,
+    ) {
+        let revision = self.conversation.geometry_revision();
+        if content.width > 0 && content.height > 0 && self.measured_turn_revision == Some(revision)
+        {
+            self.turn_geometry_valid = true;
+            return;
+        }
+        self.refresh_turn_positions(&conversation.turn_starts(diagnostics_visible), content);
+        self.measured_turn_revision = self.turn_geometry_valid.then_some(revision);
     }
 
     /// Called only after refreshing the cache for this frame. Zero-sized panes
@@ -264,6 +282,7 @@ impl ViewState {
     pub(crate) fn reset_conversation(&mut self) {
         self.retire_turn_alignment();
         self.turn_positions.clear();
+        self.measured_turn_revision = None;
         self.invalidate_rendered_geometry();
         self.conversation_viewport = Viewport::default();
         self.conversation_rows = 0;

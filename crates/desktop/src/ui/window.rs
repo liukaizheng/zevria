@@ -83,7 +83,7 @@ impl DesktopWindow {
                     InputEvent::Change => {
                         let draft = input.read(cx).value().to_string();
                         this.controller.update(cx, |controller, cx| {
-                            controller.edit_draft(draft, cx);
+                            controller.edit_composer_draft(draft, cx);
                         });
                         this.completion_selected = 0;
                         this.completion_dismissed = None;
@@ -172,7 +172,8 @@ impl DesktopWindow {
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         super::theme::follow_appearance(window, cx);
         let controller = self.controller.read(cx);
-        let draft = controller.draft.clone();
+        let draft = (self.composer.read(cx).value().as_ref() != controller.draft.as_str())
+            .then(|| controller.draft.clone());
         let mode = controller.model.root.next_mode();
         let live = controller.phase == Phase::Live;
         let inspecting = controller.model.selected_child.is_some();
@@ -210,7 +211,7 @@ impl DesktopWindow {
                 )
             });
         }
-        if self.composer.read(cx).value().as_ref() != draft {
+        if let Some(draft) = draft {
             self.composer.update(cx, |input, cx| {
                 let end = draft.len();
                 input.set_value(draft, window, cx);

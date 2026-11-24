@@ -81,8 +81,6 @@ use zevria_workflow::CLAUDE_PLAN_HANDOFF_PLAN_ID;
 use zevria_workflow::EnsembleRunId;
 use zevria_workflow::EnsembleWorkflow;
 use zevria_workflow::MAX_NORMALIZED_USER_DECISION_BYTES;
-use zevria_workflow::reduce_agent_plan_event;
-use zevria_workflow::validate_worker_synthesis_payload;
 
 #[path = "ensemble_interactive.rs"]
 mod interactive;
@@ -246,56 +244,16 @@ impl EnsembleSupervisor {
                 return failed_outcome(descriptor, AgentRunStatus::Interrupted, error.to_string());
             }
         };
-        let mut recovery_repair = None;
-        let mut durable_recovery_session_id = previous.acp_session_id.clone();
+        debug_assert_eq!(start.workflow, EnsembleWorkflow::Review);
         if resume && let Some(outcome) = previous.recoverable_outcome() {
-            if durable_recovery_session_id.is_none() {
-                durable_recovery_session_id.clone_from(&outcome.acp_session_id);
-            }
-            // A root crash can happen after every worker durably finished but
-            // before the root ReportsReady was committed.
-            // Review remains evidence-tolerant. Plan completion is terminal
-            // only when its durable final Markdown proof is present.
-            if start.workflow == EnsembleWorkflow::Review || outcome.has_plan_proof() {
-                return outcome;
-            }
-            if let Some(repair) = &previous.repair {
-                return self
-                    .finish_worker(
-                        &log,
-                        start.workflow,
-                        descriptor,
-                        AgentRunStatus::Failed,
-                        true,
-                        Some(format!(
-                            "Plan worker recovery found no final Markdown proof after its one semantic repair was already consumed ({repair:?})"
-                        )),
-                    )
-                    .await;
-            }
-            if durable_recovery_session_id.is_none() {
-                return self
-                    .finish_worker(
-                        &log,
-                        start.workflow,
-                        descriptor,
-                        AgentRunStatus::Failed,
-                        true,
-                        Some(
-                            "Plan worker recovery found no final Markdown proof and no ACP session ID is available for the one repair attempt"
-                                .to_string(),
-                        ),
-                    )
-                    .await;
-            }
-            recovery_repair = Some(AgentRunRepair::MissingPlanProof);
+            return outcome;
         }
+        let durable_recovery_session_id = previous.acp_session_id;
         let Some(agent_config) = self.config.agents.get(&descriptor.agent).cloned() else {
             let agent = descriptor.agent.clone();
             return self
                 .finish_worker(
                     &log,
-                    start.workflow,
                     descriptor,
                     AgentRunStatus::Failed,
                     true,
@@ -324,7 +282,6 @@ impl EnsembleSupervisor {
             return self
                 .finish_worker(
                     &log,
-                    start.workflow,
                     descriptor,
                     AgentRunStatus::Cancelled,
                     true,
@@ -336,36 +293,12 @@ impl EnsembleSupervisor {
         // Root cancellation propagates into every child token, while a mode
         // or permission violation cancels only this worker.
         let cancellation = turn.cancellation().child_token();
-        let plan_handoff = if start.workflow == EnsembleWorkflow::Plan
-            && agent_config.plan_handoff_transport
-                == Some(PlanHandoffTransport::ClaudeCodeExitPlanMode)
-        {
-            match ClaudePlanHandoff::new(&agent_config, &self.workspace) {
-                Ok(handoff) => Some(handoff),
-                Err(error) => {
-                    return self
-                        .finish_worker(
-                            &log,
-                            start.workflow,
-                            descriptor,
-                            AgentRunStatus::Failed,
-                            true,
-                            Some(format!(
-                                "cannot enforce configured Claude plan handoff: {error:#}"
-                            )),
-                        )
-                        .await;
-                }
-            }
-        } else {
-            None
-        };
-        let base_prompt = worker_prompt(start.workflow, &start.prompt, plan_handoff.is_some());
+        let base_prompt = worker_prompt(EnsembleWorkflow::Review, &start.prompt, false);
         let diagnostics = RawDiagnosticSink::spawn(&log);
         let mut attempt_mode = if resume {
             WorkerAttemptMode::DurableRecovery {
                 session_id: durable_recovery_session_id,
-                repair: recovery_repair,
+                repair: None,
             }
         } else {
             WorkerAttemptMode::Fresh
@@ -384,7 +317,7 @@ impl EnsembleSupervisor {
                     mode: attempt_mode,
                     log: &log,
                     cancellation: &cancellation,
-                    plan_handoff: plan_handoff.as_ref(),
+                    plan_handoff: None,
                     transient_recovery: &transient_recovery,
                     turn: &turn,
                     diagnostics: diagnostics.sender(),
@@ -443,11 +376,6 @@ impl EnsembleSupervisor {
             ..
         } = final_attempt;
         let log_failure = log.failure();
-        // Unfinished artifacts are semantic validation, not a policy violation.
-        // They must never hide an ACP error or change cancellation/timeout status.
-        let unresolved = plan_handoff
-            .as_ref()
-            .and_then(ClaudePlanHandoff::unresolved_violation);
         let semantic_end_observed = semantic_end.is_some();
         let connection_result = semantic_end.map(Ok).or(connection_result);
         let (status, partial, failure) = if let Some(error) = log_failure {
@@ -486,38 +414,11 @@ impl EnsembleSupervisor {
             )
         } else {
             match connection_result.expect("classified absent connection result") {
-                Ok(WorkerEnd::NativeHandoffFailed(error)) => (AgentRunStatus::Failed, true, Some(error)),
-                Ok(WorkerEnd::NativeHandoffCompleted) if log.has_plan_proof() => {
+                Ok(WorkerEnd::NativeHandoffCompleted | WorkerEnd::NativeHandoffFailed(_)) => {
+                    unreachable!("Review has no native handoff")
+                }
+                Ok(WorkerEnd::PromptResponse { stop_reason }) if stop_reason == "end_turn" => {
                     (AgentRunStatus::Completed, false, None)
-                }
-                Ok(WorkerEnd::NativeHandoffCompleted) => (
-                    AgentRunStatus::Failed,
-                    true,
-                    Some(
-                        "validated native handoff completed without a persisted nonempty Markdown plan"
-                            .to_string(),
-                    ),
-                ),
-                Ok(WorkerEnd::PromptResponse { .. }) if unresolved.is_some() => {
-                    (AgentRunStatus::Failed, true, unresolved.clone())
-                }
-                Ok(WorkerEnd::PromptResponse { stop_reason })
-                    if stop_reason == "end_turn"
-                        && (start.workflow == EnsembleWorkflow::Review
-                            || log.has_plan_proof()) =>
-                {
-                    (AgentRunStatus::Completed, false, None)
-                }
-                Ok(WorkerEnd::PromptResponse { stop_reason })
-                    if stop_reason == "end_turn" =>
-                {
-                    (
-                        AgentRunStatus::Failed,
-                        true,
-                        Some(format!(
-                            "Plan worker ended with stop reason {stop_reason:?} without a persisted nonempty inline Markdown plan after the one semantic repair opportunity"
-                        )),
-                    )
                 }
                 Ok(WorkerEnd::PromptResponse { stop_reason }) => (
                     AgentRunStatus::Failed,
@@ -559,22 +460,17 @@ impl EnsembleSupervisor {
             }
         };
         let failure_context = [
-            unresolved,
             transient_recovery
                 .lock()
                 .expect("transient recovery lock poisoned")
                 .failure_context(&agent_config.login_hint),
             recovery_context,
-            plan_handoff
-                .as_ref()
-                .and_then(ClaudePlanHandoff::abandoned_preparations),
         ]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
         self.finish_worker_with_context(
             &log,
-            start.workflow,
             descriptor,
             status,
             partial,
@@ -616,7 +512,7 @@ impl EnsembleSupervisor {
             questions: self.questions.clone(),
         };
         let progress = Arc::new(WorkerAttemptProgress::default());
-        let interactions = Arc::new(AtomicU64::new(0));
+        let interactions = Arc::new(interactive::InteractionCounter::default());
         let permission_interactions = interactions.clone();
         let elicitation_interactions = interactions.clone();
 
@@ -1000,13 +896,12 @@ impl EnsembleSupervisor {
     async fn finish_worker(
         &self,
         log: &RunLog,
-        workflow: EnsembleWorkflow,
         descriptor: AgentRunDescriptor,
         status: AgentRunStatus,
         partial: bool,
         failure: Option<String>,
     ) -> AgentRunOutcome {
-        self.finish_worker_with_context(log, workflow, descriptor, status, partial, failure, &[])
+        self.finish_worker_with_context(log, descriptor, status, partial, failure, &[])
             .await
     }
 
@@ -1014,7 +909,6 @@ impl EnsembleSupervisor {
     async fn finish_worker_with_context(
         &self,
         log: &RunLog,
-        workflow: EnsembleWorkflow,
         descriptor: AgentRunDescriptor,
         mut status: AgentRunStatus,
         mut partial: bool,
@@ -1029,29 +923,6 @@ impl EnsembleSupervisor {
                 format!("failed to flush the durable worker report: {error:#}"),
             );
         }
-        let path = log.path().to_path_buf();
-        let projection =
-            match tokio::task::spawn_blocking(move || load_agent_run_projection(&path)).await {
-                Ok(Ok(projection)) => projection,
-                Ok(Err(error)) => {
-                    status = AgentRunStatus::Failed;
-                    partial = true;
-                    merge_failure(
-                        &mut failure,
-                        format!("failed to project the durable worker report: {error:#}"),
-                    );
-                    AgentRunProjection::default()
-                }
-                Err(error) => {
-                    status = AgentRunStatus::Failed;
-                    partial = true;
-                    merge_failure(
-                        &mut failure,
-                        format!("durable worker projection task failed: {error}"),
-                    );
-                    AgentRunProjection::default()
-                }
-            };
         if status == AgentRunStatus::Completed && partial {
             status = AgentRunStatus::Failed;
             merge_failure(
@@ -1059,35 +930,7 @@ impl EnsembleSupervisor {
                 "internal worker classification attempted a partial Completed outcome".to_string(),
             );
         }
-        let mut outcome = AgentRunOutcome {
-            descriptor,
-            status,
-            report: projection.report,
-            plan: projection.plan,
-            confirmation: None,
-            partial,
-            failure,
-            usage: projection.usage,
-            acp_session_id: projection.acp_session_id,
-            user_decisions: projection.user_decisions,
-            decision_ids: projection.decision_ids,
-            unavailable_decisions: projection.unavailable_decisions,
-        };
-        if outcome.status == AgentRunStatus::Completed
-            && workflow == EnsembleWorkflow::Plan
-            && let Err(error) = validate_worker_synthesis_payload(
-                workflow,
-                &outcome,
-                self.config.max_synthesis_bytes_per_agent,
-            )
-        {
-            outcome.status = AgentRunStatus::Failed;
-            outcome.partial = true;
-            merge_failure(
-                &mut outcome.failure,
-                format!("Plan worker final proof cannot enter synthesis: {error:#}"),
-            );
-        }
+        let mut outcome = log.outcome_evidence(descriptor, status, partial, failure);
         if outcome.status != AgentRunStatus::Completed {
             for context in failure_context {
                 merge_failure(&mut outcome.failure, context.clone());
@@ -1189,43 +1032,52 @@ impl EnsembleLauncher for EnsembleSupervisor {
         start: &zevria_workflow::EnsembleStart,
         history: &[(AgentRunId, WorkerReviewEvent)],
     ) -> anyhow::Result<Vec<WorkerActorUpdate>> {
-        preflight_existing_logs(&self.agent_runs_root, start)?;
+        let mut by_worker: HashMap<_, Vec<_>> = HashMap::new();
+        for (id, event) in history {
+            by_worker.entry(id).or_default().push(event);
+        }
         let mut recovered = Vec::new();
+        let mut conflict = None;
         for descriptor in &start.agents {
-            let path = agent_run_path(&self.agent_runs_root, &start.run_id, &descriptor.id);
-            if !path.try_exists()? {
+            let Some(projection) = load_existing_worker(&self.agent_runs_root, start, descriptor)?
+            else {
+                continue;
+            };
+            // A later invalid header/log still wins over an earlier journal
+            // conflict, as it did with the separate preflight pass.
+            if conflict.is_some() {
                 continue;
             }
-            let projection = load_agent_run_projection(&path)?;
-            let root = history
+            let root = by_worker.get(&descriptor.id).map_or(&[][..], Vec::as_slice);
+            let abandoned = root
                 .iter()
-                .filter(|(id, _)| id == &descriptor.id)
-                .map(|(_, event)| event.clone())
-                .collect::<Vec<_>>();
-            if root
-                .iter()
-                .any(|event| matches!(event, WorkerReviewEvent::Abandoned { .. }))
-            {
-                if let Some(journal) = &projection.review {
-                    journal.reconcile(&root).map_err(anyhow::Error::msg)?;
-                }
-                continue;
-            }
-            anyhow::ensure!(
-                !projection
+                .any(|event| matches!(event, WorkerReviewEvent::Abandoned { .. }));
+            if !abandoned
+                && projection
                     .outcome
                     .as_ref()
-                    .is_some_and(|outcome| outcome.status == AgentRunStatus::Completed),
-                "worker completion exists without an authoritative root all-worker seal"
-            );
+                    .is_some_and(|outcome| outcome.status == AgentRunStatus::Completed)
+            {
+                conflict = Some(
+                    "worker completion exists without an authoritative root all-worker seal"
+                        .to_string(),
+                );
+                continue;
+            }
             if let Some(journal) = projection.review {
-                for event in journal.reconcile(&root).map_err(anyhow::Error::msg)? {
-                    recovered.push(WorkerActorUpdate {
-                        worker_id: descriptor.id.clone(),
-                        event,
-                    });
+                match journal.reconcile_events(root.iter().copied()) {
+                    Ok(events) => {
+                        recovered.extend(events.into_iter().map(|event| WorkerActorUpdate {
+                            worker_id: descriptor.id.clone(),
+                            event,
+                        }))
+                    }
+                    Err(error) => conflict = Some(error),
                 }
             }
+        }
+        if let Some(error) = conflict {
+            anyhow::bail!(error);
         }
         Ok(recovered)
     }
@@ -1237,7 +1089,21 @@ impl EnsembleLauncher for EnsembleSupervisor {
         events: SessionEventSender,
         turn: TurnContext,
     ) -> anyhow::Result<EnsembleReviewExecution> {
-        self.start_interactive_review(request, states, events, turn)
+        self.start_interactive_review(request, states, events, turn, true)
+    }
+
+    fn start_recovered_review(
+        &self,
+        request: EnsembleLaunchRequest,
+        states: Vec<WorkerReviewState>,
+        events: SessionEventSender,
+        turn: TurnContext,
+    ) -> anyhow::Result<EnsembleReviewExecution> {
+        anyhow::ensure!(
+            request.resume,
+            "recovered review must resume its validated run"
+        );
+        self.start_interactive_review(request, states, events, turn, false)
     }
 
     fn finalize_review<'a>(
@@ -1313,10 +1179,12 @@ impl EnsembleLauncher for EnsembleSupervisor {
 
 #[derive(Clone)]
 struct RunLog {
+    #[cfg(test)]
     path: PathBuf,
-    writer: mpsc::Sender<RunLogWriteCommand>,
+    writer: RunLogWriterHandle,
     failure: Arc<Mutex<Option<String>>>,
-    evidence: Arc<Mutex<WorkerEvidenceState>>,
+    last_permission: Arc<Mutex<Option<PersistedPermissionDecision>>>,
+    ignore_recovered_repair: Arc<AtomicBool>,
     review_publication: Arc<Mutex<Option<interactive::ReviewPublication>>>,
     event_order: Arc<tokio::sync::Mutex<()>>,
 }
@@ -1328,97 +1196,28 @@ struct PersistedPermissionDecision {
     option_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct WorkerEvidenceState {
-    plan: Option<AgentStructuredPlan>,
-    repair: Option<AgentRunRepair>,
-    last_permission: Option<PersistedPermissionDecision>,
-}
-
-impl WorkerEvidenceState {
-    fn from_projection(projection: &AgentRunProjection) -> Self {
-        Self {
-            plan: projection.plan.clone(),
-            repair: projection.repair.clone(),
-            last_permission: None,
-        }
-    }
-
-    fn apply(&mut self, event: &AgentRunEvent) {
-        reduce_agent_plan_event(&mut self.plan, event);
-        match event {
-            AgentRunEvent::Prompt {
-                continuation: false,
-                repair,
-                ..
-            } => {
-                self.plan = None;
-                self.repair.clone_from(repair);
-                self.last_permission = None;
+impl PersistedPermissionDecision {
+    fn repair(&self) -> Option<AgentRunRepair> {
+        matches!(self.decision.as_str(), "reject_once" | "reject_always").then(|| {
+            AgentRunRepair::HostDeniedPermission {
+                tool_kind: self.tool_kind.clone(),
+                option_id: self.option_id.clone(),
             }
-            AgentRunEvent::Prompt {
-                continuation: true,
-                repair,
-                ..
-            } => {
-                if repair.is_some() {
-                    self.repair.clone_from(repair);
-                }
-                self.last_permission = None;
-            }
-            AgentRunEvent::Permission {
-                tool_kind,
-                decision,
-                option_id,
-            } => {
-                self.last_permission = Some(PersistedPermissionDecision {
-                    tool_kind: tool_kind.clone(),
-                    decision: decision.clone(),
-                    option_id: option_id.clone(),
-                });
-            }
-            // A rejected tool can immediately report its terminal update before
-            // the prompt returns `cancelled`, so ToolCallUpdate deliberately
-            // preserves causality. Later semantic output, a new action, or a
-            // session/replay boundary makes the rejection too stale to infer
-            // why a subsequent cancellation occurred.
-            AgentRunEvent::SessionEstablished { .. }
-            | AgentRunEvent::UserMessage { .. }
-            | AgentRunEvent::AgentMessage { .. }
-            | AgentRunEvent::Thought { .. }
-            | AgentRunEvent::ToolCall { .. }
-            | AgentRunEvent::Plan { .. }
-            | AgentRunEvent::NativePlanCaptured { .. }
-            | AgentRunEvent::PlanRemoved { .. }
-            | AgentRunEvent::Elicitation { .. }
-            | AgentRunEvent::ReplayBoundary
-            | AgentRunEvent::Unsupported { .. } => {
-                self.last_permission = None;
-            }
-            _ => {}
-        }
-    }
-
-    fn has_plan_proof(&self) -> bool {
-        self.plan
-            .as_ref()
-            .is_some_and(AgentStructuredPlan::has_markdown_proof)
-    }
-
-    fn denied_permission_repair(&self) -> Option<AgentRunRepair> {
-        let permission = self.last_permission.as_ref()?;
-        matches!(
-            permission.decision.as_str(),
-            "reject_once" | "reject_always"
-        )
-        .then(|| AgentRunRepair::HostDeniedPermission {
-            tool_kind: permission.tool_kind.clone(),
-            option_id: permission.option_id.clone(),
         })
     }
 }
 
+#[derive(Clone)]
+struct RunLogWriterHandle {
+    sender: mpsc::Sender<RunLogWriteCommand>,
+    projection: Arc<Mutex<AgentRunProjection>>,
+}
+
 enum RunLogWriteCommand {
+    Event {
+        event: Arc<AgentRunEvent>,
+        acknowledgement: Option<oneshot::Sender<Result<(), String>>>,
+    },
     Record(Box<RunLogRecordCommand>),
     Barrier {
         acknowledgement: oneshot::Sender<Result<(), String>>,
@@ -1427,7 +1226,7 @@ enum RunLogWriteCommand {
 
 struct RunLogRecordCommand {
     record: AgentRunTranscriptRecord,
-    publication: Option<AgentRunEvent>,
+    publish: bool,
     force_sync: bool,
     acknowledgement: Option<oneshot::Sender<Result<(), String>>>,
 }
@@ -1447,30 +1246,36 @@ pub fn preflight_existing_logs(
     start: &zevria_workflow::EnsembleStart,
 ) -> anyhow::Result<()> {
     for descriptor in &start.agents {
-        let path = agent_run_path(root, &start.run_id, &descriptor.id);
-        match std::fs::metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-            Ok(_) => {}
-        }
-        let projection = load_agent_run_projection(&path)?;
-        let expected = AgentRunTranscriptHeader {
-            version: AGENT_RUN_TRANSCRIPT_VERSION,
-            ensemble_run_id: start.run_id.clone(),
-            workflow: start.workflow,
-            descriptor: descriptor.clone(),
-            prompt: start.prompt.clone(),
-        };
-        if projection.header.as_ref() != Some(&expected) {
-            return Err(zevria_transcript::transcript::UnsupportedHistory::new(
-                &path,
-                Some(1),
-                "worker identity matching the root ensemble start",
-            )
-            .into());
-        }
+        load_existing_worker(root, start, descriptor)?;
     }
     Ok(())
+}
+
+fn load_existing_worker(
+    root: &Path,
+    start: &zevria_workflow::EnsembleStart,
+    descriptor: &AgentRunDescriptor,
+) -> anyhow::Result<Option<AgentRunProjection>> {
+    let path = agent_run_path(root, &start.run_id, &descriptor.id);
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let projection = load_agent_run_projection(&path)?;
+    if !projection.header.as_ref().is_some_and(|header| {
+        header.version == AGENT_RUN_TRANSCRIPT_VERSION
+            && header.ensemble_run_id == start.run_id
+            && header.workflow == start.workflow
+            && &header.descriptor == descriptor
+            && header.prompt == start.prompt
+    }) {
+        return Err(zevria_transcript::transcript::UnsupportedHistory::new(
+            &path,
+            Some(1),
+            "worker identity matching the root ensemble start",
+        )
+        .into());
+    }
+    Ok(Some(projection))
 }
 
 #[derive(Clone)]
@@ -1877,11 +1682,10 @@ async fn handle_notification(
         configuration_expectation,
         plan_handoff,
     } = context;
-    let session_id = notification.session_id.to_string();
     let session_result = session_gate
         .lock()
         .expect("ACP session gate lock poisoned")
-        .observe_notification(&session_id);
+        .observe_notification(notification.session_id.0.as_ref());
     if let Err(error) = session_result {
         set_violation(violation, error.clone());
         cancellation.cancel();
@@ -1894,10 +1698,20 @@ async fn handle_notification(
         return Ok(());
     }
 
-    if let Some(error) = session_configuration_violation(
+    let config_violation = if matches!(
         &notification.update,
-        &clone_mutex(configuration_expectation),
+        AcpSessionUpdate::CurrentModeUpdate(_) | AcpSessionUpdate::ConfigOptionUpdate(_)
     ) {
+        session_configuration_violation(
+            &notification.update,
+            &configuration_expectation
+                .lock()
+                .expect("ACP configuration poisoned"),
+        )
+    } else {
+        None
+    };
+    if let Some(error) = config_violation {
         set_violation(violation, error.clone());
         cancellation.cancel();
         log.emit(AgentRunEvent::Failure { error })
@@ -1986,7 +1800,13 @@ where
     }
 
     if let Some(plan_handoff) = plan_handoff {
-        match plan_handoff.permission(&request) {
+        let (permission, ticket) = plan_handoff
+            .queue_permission(
+                &request,
+                attempt_id.expect("native handoff has a connection attempt"),
+            )
+            .await;
+        match permission {
             ClaudeHandoffPermission::Ordinary => {}
             ClaudeHandoffPermission::ArtifactMutation => {
                 let Some(option) = artifact_mutation_permission_option(&request.options) else {
@@ -2003,24 +1823,7 @@ where
                     .await;
                 };
                 let option_id = option.option_id.clone();
-                let ticket = match plan_handoff.register_permission(
-                    &request,
-                    attempt_id.expect("native handoff has a connection attempt"),
-                ) {
-                    Ok(ticket) => ticket,
-                    Err(error) => {
-                        return reject_invalid_permission(
-                            request,
-                            responder,
-                            connection,
-                            log,
-                            cancellation,
-                            violation,
-                            error,
-                        )
-                        .await;
-                    }
-                };
+                let ticket = ticket.expect("artifact permission is queued");
                 let context = ArtifactPermissionContext {
                     log: log.clone(),
                     cancellation: cancellation.clone(),
@@ -2212,7 +2015,9 @@ async fn handle_artifact_permission<R: PermissionResponder>(
                 .bound_id()
                 == Some(ticket.key.session_id.as_str());
             let admission = if session_matches {
-                ticket.try_admit(&request, || context.is_cancelled())
+                ticket
+                    .try_admit_async(&request, || context.is_cancelled())
+                    .await
             } else {
                 Err("queued Claude plan permission no longer matches the ACP session".to_string())
             };
@@ -3015,10 +2820,6 @@ fn continuation_prompt(
 ) -> zevria_content::UserPrompt {
     // The loaded session already owns the original input. Do not duplicate its images.
     live_continuation_prompt(workflow, None).into()
-}
-
-fn clone_mutex<T: Clone>(target: &Arc<Mutex<T>>) -> T {
-    target.lock().expect("ACP state lock poisoned").clone()
 }
 
 fn take_mutex<T>(target: &Arc<Mutex<Option<T>>>) -> Option<T> {

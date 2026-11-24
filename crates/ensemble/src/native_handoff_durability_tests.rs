@@ -181,7 +181,10 @@ async fn native_cancellation_after_rejection_never_approves_or_captures() {
     ))
     .unwrap();
     cancel.await.unwrap_or_else(|error| {
-        panic!("cancellation after rejection: {error}; {}", fixture_diagnostics(&outcomes[0], &records))
+        panic!(
+            "cancellation after rejection: {error}; {}",
+            fixture_diagnostics(&outcomes[0], &records)
+        )
     });
     assert_eq!(
         outcomes[0].status,
@@ -233,7 +236,8 @@ fn native_test_log(writer: NativeSyncWriter) -> (RunLog, zevria_session_api::Ses
             path: "unused-native-log".into(),
             writer,
             failure,
-            evidence: Arc::new(Mutex::new(WorkerEvidenceState::default())),
+            last_permission: Default::default(),
+            ignore_recovered_repair: Default::default(),
             review_publication: Arc::new(Mutex::new(None)),
             event_order: Arc::new(tokio::sync::Mutex::new(())),
         },

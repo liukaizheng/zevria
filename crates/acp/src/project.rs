@@ -26,7 +26,7 @@ use zevria_model::ContextTokenSnapshot;
 use zevria_model::TokenUsage;
 use zevria_workflow::PlanArtifact;
 
-use crate::stream::assistant_reasoning_text;
+use crate::stream::reasoning_text;
 
 const DIAGNOSTIC_MAX_CHARS: usize = 4_096;
 
@@ -54,7 +54,8 @@ pub(crate) struct SubtaskProjection {
         zevria_foundation::SubtaskId,
         (String, usize, zevria_foundation::SubtaskDescriptor),
     >,
-    statuses: HashMap<zevria_foundation::SubtaskId, zevria_foundation::SubtaskStatus>,
+    // Status-before-launch observations are scoped to the active turn.
+    early_statuses: HashMap<zevria_foundation::SubtaskId, zevria_foundation::SubtaskStatus>,
 }
 
 impl SubtaskProjection {
@@ -64,14 +65,11 @@ impl SubtaskProjection {
         index: usize,
         mut child: zevria_foundation::SubtaskDescriptor,
     ) -> AcpSessionUpdate {
-        if let Some(status) = self.statuses.get(&child.id) {
-            child.status = *status;
+        if let Some(status) = self.early_statuses.remove(&child.id) {
+            child.status = merge_subtask_status(status, child.status);
         }
-        if let Some((_, _, previous)) = self.children.get(&child.id)
-            && (previous.status.is_terminal()
-                || child.status == zevria_foundation::SubtaskStatus::Starting)
-        {
-            child.status = previous.status;
+        if let Some((_, _, previous)) = self.children.get(&child.id) {
+            child.status = merge_subtask_status(previous.status, child.status);
         }
         let previous = self
             .children
@@ -103,12 +101,15 @@ impl SubtaskProjection {
         id: &zevria_foundation::SubtaskId,
         status: zevria_foundation::SubtaskStatus,
     ) -> Option<AcpSessionUpdate> {
-        let current = self.statuses.entry(id.clone()).or_insert(status);
-        if !current.is_terminal() && status != zevria_foundation::SubtaskStatus::Starting {
-            *current = status;
-        }
-        let (call, index, mut child) = self.children.get(id)?.clone();
-        child.status = *current;
+        let Some((call, index, child)) = self.children.get(id) else {
+            self.early_statuses
+                .entry(id.clone())
+                .and_modify(|current| *current = merge_subtask_status(*current, status))
+                .or_insert(status);
+            return None;
+        };
+        let (call, index, mut child) = (call.clone(), *index, child.clone());
+        child.status = merge_subtask_status(child.status, status);
         Some(self.launch(&call, index, child))
     }
 
@@ -119,7 +120,6 @@ impl SubtaskProjection {
                 let Some(launch) = &entry.launch else {
                     continue;
                 };
-                self.statuses.insert(launch.id.clone(), entry.status);
                 updates.push(self.launch(
                     &batch.id,
                     entry.index,
@@ -136,6 +136,39 @@ impl SubtaskProjection {
         }
         updates
     }
+
+    /// A cancelled turn can drop its awaiting tool before the child stops.
+    /// Settle only children already announced to ACP; never recreate stale
+    /// projections or retain unmatched statuses after the turn fence.
+    pub(crate) fn finish_detached(
+        &mut self,
+        id: &zevria_foundation::SubtaskId,
+        status: zevria_foundation::SubtaskStatus,
+    ) -> Option<AcpSessionUpdate> {
+        if !status.is_terminal() || !self.children.contains_key(id) {
+            return None;
+        }
+        let update = self.status(id, status);
+        self.children.remove(id);
+        update
+    }
+
+    pub(crate) fn prune_completed(&mut self) {
+        self.children
+            .retain(|_, (_, _, child)| !child.status.is_terminal());
+        self.early_statuses.clear();
+    }
+}
+
+fn merge_subtask_status(
+    current: zevria_foundation::SubtaskStatus,
+    incoming: zevria_foundation::SubtaskStatus,
+) -> zevria_foundation::SubtaskStatus {
+    if current.is_terminal() || incoming == zevria_foundation::SubtaskStatus::Starting {
+        current
+    } else {
+        incoming
+    }
 }
 
 fn subtask_status(status: zevria_foundation::SubtaskStatus) -> ToolCallStatus {
@@ -150,16 +183,55 @@ fn subtask_status(status: zevria_foundation::SubtaskStatus) -> ToolCallStatus {
 
 /// Kept separate from local function correlations, including in replay.
 #[derive(Default)]
-pub(crate) struct HostedSearchProjection(HashMap<String, (String, zevria_content::HostedActivity)>);
+pub(crate) struct HostedSearchProjection(HashMap<String, HostedAttemptProjection>);
+
+struct HostedAttemptProjection {
+    revision: u64,
+    outcome: zevria_content::ResponseAttemptOutcome,
+    response_id: Option<String>,
+    activities: HashMap<u64, zevria_content::HostedActivity>,
+}
+
 impl HostedSearchProjection {
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
     pub(crate) fn update(
         &mut self,
         attempt: &zevria_content::ResponseAttempt,
     ) -> Vec<AcpSessionUpdate> {
+        if attempt.hosted_activity.is_empty() {
+            return Vec::new();
+        }
+        if self
+            .0
+            .get(&attempt.id)
+            .is_some_and(|prior| prior.revision >= attempt.revision)
+        {
+            return Vec::new();
+        }
+        let prior = self
+            .0
+            .entry(attempt.id.clone())
+            .or_insert_with(|| HostedAttemptProjection {
+                revision: attempt.revision,
+                outcome: attempt.outcome,
+                response_id: attempt.response_id.clone(),
+                activities: HashMap::new(),
+            });
+        let context_changed =
+            prior.outcome != attempt.outcome || prior.response_id != attempt.response_id;
+        prior.revision = attempt.revision;
+        prior.outcome = attempt.outcome;
+        prior.response_id.clone_from(&attempt.response_id);
         attempt.hosted_activity.iter().filter_map(|activity| {
+            let entry = prior.activities.entry(activity.output_index);
+            if !context_changed && matches!(&entry, std::collections::hash_map::Entry::Occupied(old) if old.get() == activity) { return None; }
+            let previous = matches!(entry, std::collections::hash_map::Entry::Occupied(_));
+            entry.insert_entry(activity.clone());
             let id = activity.client_id(&attempt.id);
-            // Keep the existing standard ACP lifecycle projection. Richer
-            // confirmed/unconfirmed evidence is carried only in response_display.
+            // Closing an attempt is not evidence of the hosted action's success.
             let projected_status = if activity.status.is_terminal() { activity.status } else {
                 match attempt.outcome {
                     zevria_content::ResponseAttemptOutcome::InProgress => activity.status,
@@ -168,7 +240,6 @@ impl HostedSearchProjection {
                 }
             };
             let title = format!("{} · {} · attempt {:?}", activity.label(), projected_status.label(), attempt.outcome);
-            if self.0.get(&id).is_some_and(|prior| prior == &(title.clone(), activity.clone())) { return None; }
             let kind = match activity.action_kind() { Some("open_page") => ToolKind::Fetch, Some("search" | "find_in_page") => ToolKind::Search, _ => ToolKind::Other };
             let status = match projected_status {
                 zevria_content::HostedActivityStatus::InProgress | zevria_content::HostedActivityStatus::Searching => ToolCallStatus::InProgress,
@@ -176,8 +247,7 @@ impl HostedSearchProjection {
                 zevria_content::HostedActivityStatus::Failed | zevria_content::HostedActivityStatus::Interrupted => ToolCallStatus::Failed,
             };
             let raw = json!({"origin":"provider_hosted_web_search","attempt_id":attempt.id,"provider":attempt.profile.provider,"model":attempt.profile.model,"response_id":attempt.response_id,"action":activity.action});
-            let previous = self.0.insert(id.clone(), (title.clone(), activity.clone()));
-            Some(if previous.is_none() {
+            Some(if !previous {
                 AcpSessionUpdate::ToolCall(AcpToolCall::new(id, title).kind(kind).status(status).raw_input(raw))
             } else {
                 AcpSessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id, ToolCallUpdateFields::new().title(title).kind(kind).status(status).raw_input(raw)))
@@ -231,12 +301,11 @@ pub(crate) fn project_completed_message(
                         )));
                         text_index += 1;
                     }
-                    AssistantContent::Reasoning(_) => {
-                        let reasoning =
-                            assistant_reasoning_text(&Message::from(vec![item.clone()]));
+                    AssistantContent::Reasoning(reasoning) => {
+                        let reasoning = reasoning_text(reasoning);
                         if !reasoning.is_empty() {
                             updates.push(AcpSessionUpdate::AgentThoughtChunk(content_chunk(
-                                &reasoning,
+                                reasoning,
                                 format!("{message_id_prefix}-thought-{thought_index}"),
                             )));
                             thought_index += 1;
@@ -299,16 +368,15 @@ pub(crate) fn project_tool_results(
     workspace: &Path,
     known_tools: &KnownTools,
 ) -> Vec<AcpSessionUpdate> {
-    let outputs = tool_outputs(message);
+    let mut outputs = tool_outputs(message);
     metadata
         .iter()
         .map(|metadata| {
-            let output = outputs.get(&metadata.id);
+            let output = outputs.remove(metadata.id.as_str()).map(tool_output);
             let known = known_tools.get(&metadata.id);
             let mut fields = ToolCallUpdateFields::new()
                 .status(outcome_status(metadata.outcome))
-                .kind(known.map(|known| known.kind))
-                .raw_output(output.and_then(|output| output.raw.clone()));
+                .kind(known.map(|known| known.kind));
 
             if let Some(detail) = metadata
                 .detail
@@ -323,12 +391,13 @@ pub(crate) fn project_tool_results(
                 }
             }
             let mut content = Vec::new();
-            if let Some(output) = output
-                && !output.text.is_empty()
-            {
-                content.push(ToolCallContent::from(ContentBlock::Text(TextContent::new(
-                    output.text.clone(),
-                ))));
+            if let Some(output) = output {
+                fields = fields.raw_output(output.raw);
+                if !output.text.is_empty() {
+                    content.push(ToolCallContent::from(ContentBlock::Text(TextContent::new(
+                        output.text,
+                    ))));
+                }
             }
             content.extend(file_change_content(metadata.file_changes(), workspace));
             if !content.is_empty() {
@@ -347,6 +416,19 @@ pub(crate) fn project_tool_results(
             )
         })
         .collect()
+}
+
+pub(crate) fn complete_tool_results(
+    message: &Message,
+    metadata: &[ToolResultMetadata],
+    workspace: &Path,
+    known_tools: &mut KnownTools,
+) -> Vec<AcpSessionUpdate> {
+    let updates = project_tool_results(message, metadata, workspace, known_tools);
+    for result in metadata {
+        known_tools.remove(&result.id);
+    }
+    updates
 }
 
 #[derive(Debug, Clone)]
@@ -616,7 +698,7 @@ struct ToolOutput {
     raw: Option<Value>,
 }
 
-fn tool_outputs(message: &Message) -> HashMap<String, ToolOutput> {
+fn tool_outputs(message: &Message) -> HashMap<String, &ToolResult> {
     let Message::User { content } = message else {
         return HashMap::new();
     };
@@ -626,38 +708,41 @@ fn tool_outputs(message: &Message) -> HashMap<String, ToolOutput> {
             let UserContent::ToolResult(result) = content else {
                 return None;
             };
-            Some((result.call.to_string(), tool_output(result)))
+            Some((result.call.to_string(), result))
         })
         .collect()
 }
 
 fn tool_output(result: &ToolResult) -> ToolOutput {
-    let mut text = Vec::new();
+    let mut text = String::new();
     let mut raw = Vec::new();
-    for content in &result.content {
+    for (index, content) in result.content.iter().enumerate() {
+        if index != 0 {
+            text.push('\n');
+        }
         match content {
             ToolResultContent::Text(value) => {
-                text.push(value.text.clone());
+                text.push_str(&value.text);
                 raw.push(Value::String(value.text.clone()));
             }
             ToolResultContent::Json { value } => {
-                text.push(
-                    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+                text.push_str(
+                    &serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
                 );
                 raw.push(value.clone());
             }
             ToolResultContent::Image(_) => {
-                text.push("[image tool output omitted]".to_string());
-                raw.push(Value::String("[image tool output omitted]".to_string()));
+                text.push_str("[image tool output omitted]");
+                raw.push(Value::String("[image tool output omitted]".into()));
             }
         }
     }
     ToolOutput {
-        text: text.join("\n"),
-        raw: match raw.as_slice() {
-            [] => None,
-            [value] => Some(value.clone()),
-            values => Some(Value::Array(values.to_vec())),
+        text,
+        raw: match raw.len() {
+            0 => None,
+            1 => raw.pop(),
+            _ => Some(Value::Array(raw)),
         },
     }
 }
@@ -728,11 +813,14 @@ fn operation_label(operation: FileChangeOperation) -> &'static str {
 }
 
 fn bounded(value: &str, max_chars: usize) -> String {
-    let mut bounded = value.chars().take(max_chars).collect::<String>();
-    if value.chars().count() > max_chars {
+    if let Some((end, _)) = value.char_indices().nth(max_chars) {
+        let mut bounded = String::with_capacity(end + '…'.len_utf8());
+        bounded.push_str(&value[..end]);
         bounded.push('…');
+        bounded
+    } else {
+        value.to_string()
     }
-    bounded
 }
 
 #[cfg(test)]

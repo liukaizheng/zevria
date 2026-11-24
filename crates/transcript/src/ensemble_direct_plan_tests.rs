@@ -263,13 +263,17 @@ fn direct_publication_requires_valid_seal_and_reports_in_order_once() {
                     8 => outcomes[0].status = AgentRunStatus::Abandoned,
                     9 => final_confirmation.accepted = false,
                     10 => {
-                        outcomes[0]
-                            .confirmation
-                            .as_mut()
-                            .unwrap()
-                            .snapshot
-                            .plan
-                            .markdown = Some("changed".into())
+                        let confirmed = outcomes[0].confirmation.as_mut().unwrap();
+                        let mut plan = confirmed.snapshot.plan.clone();
+                        plan.markdown = Some("changed".into());
+                        let mut revision = confirmed.snapshot.revision.clone();
+                        revision.digest =
+                            zevria_workflow::NativePlanCapture::content_digest(b"changed");
+                        // A valid snapshot of different bytes is not the snapshot
+                        // bound by this receipt or the root's prior publication.
+                        confirmed.snapshot = zevria_workflow::WorkerPlanData { revision, plan }
+                            .try_into()
+                            .unwrap();
                     }
                     _ => unreachable!(),
                 }

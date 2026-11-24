@@ -99,7 +99,6 @@ fn prompt_origins_are_decorative_and_body_is_verbatim() {
         (WorkerPromptKind::Initial, PromptOrigin::Initial),
         (WorkerPromptKind::UserFeedback, PromptOrigin::Feedback),
         (WorkerPromptKind::RecoveryContinuation, PromptOrigin::Retry),
-        (WorkerPromptKind::SemanticRecovery, PromptOrigin::Recovery),
     ]
     .into_iter()
     .enumerate()

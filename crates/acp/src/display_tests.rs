@@ -178,6 +178,63 @@ fn provisional_answers_emit_suffixes_then_authoritative_citation_segments() {
 }
 
 #[test]
+fn hosted_display_is_not_reissued_for_each_token_and_covers_the_replaced_segment() {
+    let turn = TurnId::new(1);
+    let mut streams = StreamSegments::default();
+    let mut attempt = attempt();
+    attempt
+        .presentation
+        .retain(|part| matches!(part.content, AssistantPresentationContent::Answer { .. }));
+    let mut text = String::from("Draft");
+    let now = tokio::time::Instant::now();
+    let publish = |streams: &mut StreamSegments, attempt: &mut ResponseAttempt, text: &str| {
+        attempt.presentation[0].content = AssistantPresentationContent::answer(text);
+        attempt.touch();
+        streams.display_snapshot_at(
+            turn,
+            AssistantStreamSnapshot {
+                message: None,
+                attempt: Some(attempt.clone()),
+            },
+            now,
+        )
+    };
+    let initial = publish(&mut streams, &mut attempt, &text);
+    let id = crate::tests::chunk_id(&initial[0]).to_string();
+    assert_eq!(display(initial).bindings.len(), 2);
+    for _ in 0..64 {
+        text.push_str("界");
+        let updates = publish(&mut streams, &mut attempt, &text);
+        assert!(
+            updates.is_empty(),
+            "the suffix waits for its matching display"
+        );
+    }
+    let deadline = streams.preview_deadline().unwrap();
+    let mut live = Vec::new();
+    streams.flush_preview(deadline, &mut live);
+    assert_eq!(crate::tests::chunk_text(&live[0]), "界".repeat(64));
+    assert_eq!(crate::tests::chunk_id(&live[0]), id);
+    assert_eq!(display(live).attempt, attempt);
+    assert!(streams.preview_deadline().is_none());
+
+    text.push('!');
+    assert!(publish(&mut streams, &mut attempt, &text).is_empty());
+    let corrected = publish(&mut streams, &mut attempt, "Corrected");
+    assert_eq!(
+        corrected.len(),
+        4,
+        "prior bytes and coverage, replacement bytes and coverage"
+    );
+    assert_eq!(crate::tests::chunk_text(&corrected[0]), "!");
+    assert_ne!(crate::tests::chunk_id(&corrected[2]), id);
+    let outgoing = display(vec![corrected[1].clone()]);
+    assert!(outgoing.bindings.iter().any(|binding| matches!(binding,
+        Binding::Text { message_id, end, .. } if message_id == &id && *end == text.len()
+    )));
+}
+
+#[test]
 fn repeated_attempt_revision_can_finish_an_ordinary_projection_and_its_binding() {
     let turn = TurnId::new(1);
     let mut attempt = attempt();
@@ -219,6 +276,86 @@ fn repeated_attempt_revision_can_finish_an_ordinary_projection_and_its_binding()
             )
             .is_empty()
     );
+}
+
+#[test]
+fn higher_revision_binds_a_caught_up_channel_and_reset_flushes_pending_coverage() {
+    use rig_core::message::Message;
+    let turn = TurnId::new(1);
+    let mut attempt = attempt();
+    attempt
+        .presentation
+        .retain(|part| matches!(part.content, AssistantPresentationContent::Answer { .. }));
+    attempt.presentation[0].content = AssistantPresentationContent::answer("**claim**");
+    let now = tokio::time::Instant::now();
+    let mut streams = StreamSegments::default();
+    let publish = |streams: &mut StreamSegments, attempt: &ResponseAttempt, raw| {
+        streams.display_snapshot_at(
+            turn,
+            AssistantStreamSnapshot {
+                message: Some(Message::assistant(raw)),
+                attempt: Some(attempt.clone()),
+            },
+            now,
+        )
+    };
+    assert_eq!(
+        display(publish(&mut streams, &attempt, "**claim"))
+            .bindings
+            .len(),
+        1
+    );
+    attempt.touch();
+    let caught_up = publish(&mut streams, &attempt, "**claim**");
+    let id = crate::tests::chunk_id(&caught_up[0]).to_string();
+    assert_eq!(display(caught_up).bindings.len(), 2);
+    let next = "**claim** and more";
+    attempt.presentation[0].content = AssistantPresentationContent::answer(next);
+    attempt.touch();
+    assert!(publish(&mut streams, &attempt, next).is_empty());
+    let outgoing = streams.reset();
+    assert_eq!(crate::tests::chunk_text(&outgoing[0]), " and more");
+    assert!(
+        display(outgoing)
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding,
+                Binding::Text { message_id, end, .. } if message_id == &id && *end == next.len()
+            ))
+    );
+}
+
+#[test]
+fn terminal_uses_the_completed_attempt_after_a_reset_and_a_late_failure() {
+    use rig_core::message::Message;
+    let turn = TurnId::new(1);
+    let mut winning = attempt();
+    winning.close(Outcome::Completed);
+    let mut streams = StreamSegments::default();
+    streams.display_snapshot(
+        turn,
+        AssistantStreamSnapshot {
+            message: None,
+            attempt: Some(winning.clone()),
+        },
+    );
+    streams.reset();
+    let mut failed = attempt();
+    failed.close(Outcome::Failed);
+    streams.display_snapshot(
+        turn,
+        AssistantStreamSnapshot {
+            message: None,
+            attempt: Some(failed),
+        },
+    );
+    let terminal =
+        streams.terminal_bound(turn, &Message::assistant("raw fallback"), Some(&winning.id));
+    assert_eq!(
+        crate::tests::chunk_text(&terminal[0]),
+        "answer [source](https://example.com)"
+    );
+    assert_eq!(display(terminal).attempt, winning);
 }
 
 #[test]

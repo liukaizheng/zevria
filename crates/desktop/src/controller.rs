@@ -60,8 +60,6 @@ pub struct SessionController {
     pub show_sessions: bool,
     /// Native capturing dialogs (for example replacement confirmation).
     pub capturing_dialog: bool,
-    /// Changes only with session data, never with the redraw clock.
-    pub projection_revision: u64,
     /// Display-only partials. Never sent to the host or persisted.
     pub unsaved_blocks: HashSet<(
         zevria_presentation::blocks::ProjectionEpoch,
@@ -118,7 +116,6 @@ impl SessionController {
             cancelling: false,
             show_sessions: false,
             capturing_dialog: false,
-            projection_revision: 0,
             unsaved_blocks: HashSet::new(),
             display_attempts: HashMap::new(),
             draft_generation: 0,
@@ -212,7 +209,6 @@ impl SessionController {
                         this.model = model;
                         this.unsaved_blocks.clear();
                         this.display_attempts.clear();
-                        this.projection_revision = this.projection_revision.wrapping_add(1);
                         if this.quit_requested
                             || this.pending.is_some()
                             || this.phase == Phase::Stopping
@@ -337,7 +333,6 @@ impl SessionController {
         if self.model.root.pending_prompt().is_some() {
             let reduction = self.model.disconnected();
             self.apply_reduction(reduction);
-            self.projection_revision = self.projection_revision.wrapping_add(1);
         }
         self.model.models.reset();
         self.model.root.session.finish_model_management();
@@ -393,12 +388,17 @@ impl SessionController {
         let mut receiver = running.take_event_receiver().expect("sole receiver");
         let mut exits = running.take_exit_receiver().expect("sole exit receiver");
         self.pump = Some(cx.spawn(async move |owner, cx| {
+            let mut ready = None;
             loop {
                 // Consume any ready acceptance before settling a disconnected runtime.
-                let next = tokio::select! {
-                    biased;
-                    update = receiver.recv() => update.ok_or_else(|| exits.try_recv().ok()),
-                    exit = exits.recv() => Err(exit),
+                let next = if let Some(update) = ready.take() {
+                    Ok(update)
+                } else {
+                    tokio::select! {
+                        biased;
+                        update = receiver.recv() => update.ok_or_else(|| exits.try_recv().ok()),
+                        exit = exits.recv() => Err(exit),
+                    }
                 };
                 let first = match next {
                     Ok(update) => update,
@@ -425,6 +425,7 @@ impl SessionController {
                         Err(_) => break,
                     }
                 }
+                let saturated = batch.len() == 64;
                 let keep_going = owner.update(cx, |this, cx| {
                     let mut fresh = None;
                     for update in batch {
@@ -469,17 +470,24 @@ impl SessionController {
                 if !matches!(keep_going, Ok(true)) {
                     break;
                 }
-                // Yield even when a producer continuously fills lifecycle traffic.
-                cx.background_executor()
-                    .timer(Duration::from_millis(1))
-                    .await;
+                if saturated {
+                    // Pace sustained lifecycle floods.
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
+                } else if let Ok(update) = receiver.try_recv() {
+                    // A watch stream can be continuously ready with only one
+                    // update per batch. Let GPUI paint and handle input before
+                    // synchronizing another frame, without delaying with a timer.
+                    ready = Some(update);
+                    tokio::task::yield_now().await;
+                }
             }
         }));
     }
     fn runtime_disconnected(&mut self, detail: String, cx: &mut Context<Self>) {
         let reduction = self.model.disconnected();
         self.apply_reduction(reduction);
-        self.projection_revision = self.projection_revision.wrapping_add(1);
         self.terminal_error = Some(detail);
         self.phase = Phase::Stopping;
         let weak = cx.weak_entity();
@@ -501,17 +509,7 @@ impl SessionController {
         if let SessionUpdate::Lifecycle(event) = &update {
             self.retain_unsaved_partial(event);
         }
-        let job_reply = matches!(
-            &update,
-            SessionUpdate::Lifecycle(zevria_session_api::SessionEvent::CommandControlResult { .. })
-        );
-        let history_len = self.model.root.conversation.history().len();
         let reduction = self.model.apply(update);
-        // Tail polling is independent of the transcript. Only reproject a job
-        // reply when it surfaced a new root notice.
-        if !job_reply || self.model.root.conversation.history().len() != history_len {
-            self.projection_revision = self.projection_revision.wrapping_add(1);
-        }
         self.flush_job_commands(cx);
         self.flush_mcp_commands(cx);
         self.ensure_tick(cx);
@@ -767,10 +765,16 @@ impl SessionController {
     /// An actual editor change, including undo to identical text, retires the
     /// old submitted draft's replacement token. Programmatic sync emits no edit.
     pub fn edit_draft(&mut self, text: String, cx: &mut Context<Self>) {
+        self.edit_composer_draft(text, cx);
+        cx.notify();
+    }
+
+    // The native editor already owns its redraw. Only an admitted continuation
+    // goes through `send`, which notifies session/transcript observers.
+    pub fn edit_composer_draft(&mut self, text: String, cx: &mut Context<Self>) {
         self.draft = text;
         self.draft_generation += 1;
         self.dispatch_job_continuation(cx);
-        cx.notify();
     }
     fn clock_required(&self) -> bool {
         self.model.root.is_busy()
@@ -811,22 +815,11 @@ impl SessionController {
         }));
     }
     pub fn send(&mut self, command: SessionCommand, cx: &mut Context<Self>) {
-        if !matches!(
-            &command,
-            SessionCommand::Control(ControlCommand::Command(_))
-                | SessionCommand::Turn(
-                    zevria_session_api::TurnCommand::Submit { .. }
-                        | zevria_session_api::TurnCommand::RevisePlanWithMessage { .. }
-                )
-        ) {
-            self.projection_revision = self.projection_revision.wrapping_add(1);
-        }
         if self
             .command
             .as_ref()
             .is_none_or(|sender| sender.send(command).is_err())
         {
-            self.projection_revision = self.projection_revision.wrapping_add(1);
             let reduction = self.model.disconnected();
             self.apply_reduction(reduction);
             self.terminal_error = Some("The session engine is no longer available.".into());
@@ -1013,7 +1006,6 @@ impl SessionController {
         };
         if let Some(notice) = notice {
             self.model.root.conversation.push_error(notice);
-            self.projection_revision = self.projection_revision.wrapping_add(1);
         }
         self.flush_job_commands(cx);
         cx.notify();

@@ -220,7 +220,14 @@ impl WorkerReviewJournal {
     /// Missing suffix evidence is committed by the root before interrupted work
     /// is settled, so proven dispatch cannot be mistaken for unsent feedback.
     pub fn reconcile(&self, root: &[WorkerReviewEvent]) -> Result<Vec<WorkerReviewEvent>, String> {
-        let root_abandonment = root.iter().find_map(|event| match event {
+        self.reconcile_events(root.iter())
+    }
+
+    pub fn reconcile_events<'a>(
+        &self,
+        root: impl Iterator<Item = &'a WorkerReviewEvent> + Clone,
+    ) -> Result<Vec<WorkerReviewEvent>, String> {
+        let root_abandonment = root.clone().find_map(|event| match event {
             WorkerReviewEvent::Abandoned { request_id } => Some(request_id),
             _ => None,
         });
@@ -238,7 +245,7 @@ impl WorkerReviewJournal {
             return Ok(Vec::new());
         }
         let accepted = root
-            .iter()
+            .clone()
             .filter_map(|event| match event {
                 WorkerReviewEvent::InputAccepted { input } => Some((input.generation, input)),
                 _ => None,
@@ -252,7 +259,6 @@ impl WorkerReviewJournal {
             }
         }
         let observed = root
-            .iter()
             .filter(|event| {
                 matches!(
                     event,

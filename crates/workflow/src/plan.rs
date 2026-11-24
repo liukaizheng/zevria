@@ -333,15 +333,17 @@ fn validate_title(title: &str) -> Result<(), PlanValidationError> {
 
 fn validate_nonempty_section(markdown: &str, heading: &str) -> Result<(), PlanValidationError> {
     let marker = format!("## {heading}");
-    let mut lines = markdown.lines();
-    let Some(_) = lines.find(|line| *line == marker) else {
+    let mut headings = draft::headings(markdown).into_iter();
+    let Some(section) = headings.find(|heading| heading.level == 2 && heading.line == marker)
+    else {
         return Err(PlanValidationError(format!(
             "markdown is missing the required `{marker}` section"
         )));
     };
-    let nonempty = lines
-        .take_while(|line| !line.starts_with("## "))
-        .any(|line| !line.trim().is_empty());
+    let end = headings
+        .find(|heading| heading.level <= 2)
+        .map_or(markdown.len(), |heading| heading.start);
+    let nonempty = !markdown[section.body..end].trim().is_empty();
     if !nonempty {
         return Err(PlanValidationError(format!(
             "the `{marker}` section must not be empty"

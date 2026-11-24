@@ -179,7 +179,16 @@ fn ensemble_abandoned_evidence_never_reenters_synthesis_or_recovery() {
     excluded.evidence.descriptor = excluded.descriptor.clone();
     excluded.evidence.report = "EXCLUDED_PROSE".into();
     excluded.evidence.failure = Some("EXCLUDED_PROVIDER_FAILURE".into());
-    excluded.retained.as_mut().unwrap().plan.markdown = Some("EXCLUDED_MARKDOWN".into());
+    let previous = excluded.retained.as_ref().unwrap();
+    let mut plan = previous.plan.clone();
+    plan.markdown = Some("EXCLUDED_MARKDOWN".into());
+    let mut revision = previous.revision.clone();
+    revision.digest = zevria_workflow::NativePlanCapture::content_digest(b"EXCLUDED_MARKDOWN");
+    excluded.retained = Some(
+        zevria_workflow::WorkerPlanData { revision, plan }
+            .try_into()
+            .unwrap(),
+    );
     let request_id = crate::QuestionRequestId::generate();
     let decision_id = crate::AgentUserDecisionId::from_question(&request_id, "excluded");
     excluded.evidence.decision_ids.push(decision_id.clone());

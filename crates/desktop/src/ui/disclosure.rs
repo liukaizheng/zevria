@@ -31,6 +31,10 @@ impl DisclosureState {
         );
     }
 
+    pub fn remove(&mut self, key: &str) {
+        self.overrides.remove(key);
+    }
+
     pub fn toggle(&mut self, key: String, currently_expanded: bool) {
         self.set(key, !currently_expanded);
     }

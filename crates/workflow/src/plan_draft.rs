@@ -186,16 +186,16 @@ pub fn submission_problems(markdown: &str, max_artifact_bytes: usize) -> Vec<Str
 }
 
 #[derive(Debug)]
-struct Heading<'a> {
-    line: &'a str,
-    level: usize,
-    start: usize,
-    body: usize,
+pub(super) struct Heading<'a> {
+    pub(super) line: &'a str,
+    pub(super) level: usize,
+    pub(super) start: usize,
+    pub(super) body: usize,
 }
 
 /// Scan ATX headings while ignoring backtick/tilde fenced code. Offsets retain
 /// the original UTF-8 bytes and line endings outside an edited section.
-fn headings(markdown: &str) -> Vec<Heading<'_>> {
+pub(super) fn headings(markdown: &str) -> Vec<Heading<'_>> {
     let mut result = Vec::new();
     let mut offset = 0;
     let mut fence = None::<(u8, usize)>;

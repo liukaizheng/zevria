@@ -1,62 +1,10 @@
 //! Renderer-free row invalidation. Tool completion revisions matter even when
 //! row count and text length do not change.
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    ops::Range,
-};
-use zevria_presentation::conversation::HistoryEntry;
+use std::ops::Range;
+use zevria_presentation::conversation::ConversationState;
 
-pub fn fingerprint(entry: &HistoryEntry) -> u64 {
-    let mut hash = DefaultHasher::new();
-    std::mem::discriminant(entry).hash(&mut hash);
-    match entry {
-        HistoryEntry::Conversation(entry) => {
-            entry.header.hash(&mut hash);
-            for block in &entry.blocks {
-                block.id.hash(&mut hash);
-                block.revision.hash(&mut hash);
-            }
-        }
-        HistoryEntry::PlanArtifact(a) => {
-            a.version.hash(&mut hash);
-            a.title.hash(&mut hash);
-            a.markdown.hash(&mut hash);
-        }
-        HistoryEntry::PlanHandoff(h, header) => {
-            h.artifact.version.hash(&mut hash);
-            h.artifact.title.hash(&mut hash);
-            h.artifact.markdown.hash(&mut hash);
-            header.hash(&mut hash);
-        }
-        HistoryEntry::JobNotice(notice, header) => {
-            notice.text().hash(&mut hash);
-            header.hash(&mut hash);
-        }
-        HistoryEntry::Ensemble(e) => {
-            e.header.hash(&mut hash);
-            e.run_id.hash(&mut hash);
-            std::mem::discriminant(&e.workflow).hash(&mut hash);
-            for block in e.prompt.blocks() {
-                std::mem::discriminant(block).hash(&mut hash);
-                match block {
-                    zevria_content::PromptBlock::Text(text) => text.hash(&mut hash),
-                    zevria_content::PromptBlock::Image(image) => {
-                        image.mime_type().hash(&mut hash);
-                        image.dimensions().hash(&mut hash);
-                    }
-                }
-            }
-            for worker in &e.workers {
-                worker.descriptor.id.hash(&mut hash);
-                std::mem::discriminant(&worker.status).hash(&mut hash);
-                worker.failure.hash(&mut hash);
-            }
-        }
-        HistoryEntry::Error(error) => error.hash(&mut hash),
-        HistoryEntry::CompactionDivider => {}
-    }
-    hash.finish()
+pub fn fingerprint(conversation: &ConversationState, index: usize) -> u64 {
+    conversation.entry_revision(index)
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum RowChange {
@@ -175,14 +123,11 @@ mod tests {
 
     #[test]
     fn structural_notices_and_versions_invalidate_without_debug_serialization() {
-        assert_ne!(
-            fingerprint(&HistoryEntry::Error("a".into())),
-            fingerprint(&HistoryEntry::Error("b".into()))
-        );
-        assert_ne!(
-            fingerprint(&HistoryEntry::CompactionDivider),
-            fingerprint(&HistoryEntry::Error(String::new()))
-        );
+        let mut conversation = ConversationState::default();
+        conversation.push_error("a".into());
+        let before = fingerprint(&conversation, 0);
+        conversation.commit_edit(0, true);
+        assert_ne!(before, fingerprint(&conversation, 0));
         let artifact = zevria_workflow::PlanArtifact {
             version: zevria_workflow::PlanVersion {
                 id: zevria_workflow::PlanId::new(),
@@ -192,9 +137,12 @@ mod tests {
             markdown: "large document".repeat(1000),
             source_turn_id: zevria_foundation::TurnId::new(1),
         };
-        let before = fingerprint(&HistoryEntry::PlanArtifact(artifact.clone()));
+        conversation.push_plan_artifact(artifact.clone());
+        let before = fingerprint(&conversation, 1);
         let mut next = artifact;
         next.version.revision += 1;
-        assert_ne!(before, fingerprint(&HistoryEntry::PlanArtifact(next)));
+        conversation.push_plan_artifact(next);
+        assert_ne!(before, fingerprint(&conversation, 2));
+        assert_eq!(before, fingerprint(&conversation, 1));
     }
 }

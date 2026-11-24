@@ -156,7 +156,6 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
             zevria_transcript::transcript::TranscriptItem::Message(Message::user("saved prompt")),
             zevria_transcript::transcript::TranscriptItem::provider_message(replay).unwrap(),
         ]);
-        c.projection_revision += 1;
         cx.notify();
     });
     cx.run_until_parked();

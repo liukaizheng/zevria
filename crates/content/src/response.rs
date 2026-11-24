@@ -7,7 +7,7 @@ use crate::citations::{
 use crate::readable::{readable_reasoning_value, sanitize_readable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 #[cfg(test)]
 #[path = "response_tests.rs"]
@@ -582,15 +582,83 @@ pub struct ResponseDisplay {
     pub attempt: ResponseAttempt,
     pub bindings: Vec<DisplayProjectionBinding>,
 }
+/// A borrowed source-address index shared by validation, projection, and replay.
+pub struct DisplayParts<'a>(
+    std::collections::HashMap<&'a AssistantSourceAddress, &'a AssistantPresentationContent>,
+);
+
+impl<'a> DisplayParts<'a> {
+    pub fn text(
+        &self,
+        kind: DisplayProjectionKind,
+        source: &AssistantSourceAddress,
+    ) -> Option<&'a str> {
+        match (self.0.get(source)?, kind) {
+            (AssistantPresentationContent::Answer { text, .. }, DisplayProjectionKind::Message)
+            | (AssistantPresentationContent::Reasoning { text }, DisplayProjectionKind::Thought) => {
+                Some(text)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn binding_text(&self, binding: &DisplayProjectionBinding) -> Option<String> {
+        let DisplayProjectionBinding::Text { kind, sources, .. } = binding else {
+            return None;
+        };
+        let mut text = String::new();
+        for (index, source) in sources.iter().enumerate() {
+            if index != 0 {
+                text.push('\n');
+            }
+            text.push_str(self.text(*kind, source)?);
+        }
+        Some(text)
+    }
+}
+
 impl ResponseDisplay {
+    pub fn parts(&self) -> DisplayParts<'_> {
+        DisplayParts(
+            self.attempt
+                .presentation
+                .iter()
+                .map(|part| (&part.source, &part.content))
+                .collect(),
+        )
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_and_parts().map(|_| ())
+    }
+
+    pub fn validate_and_parts(&self) -> anyhow::Result<DisplayParts<'_>> {
         anyhow::ensure!(
             self.version == RESPONSE_DISPLAY_VERSION,
             "unsupported response display version"
         );
         self.attempt.validate()?;
         anyhow::ensure!(self.bindings.len() <= 16384, "too many display bindings");
-        let mut ranges = BTreeMap::<(u8, &str), Vec<(usize, usize)>>::new();
+        let parts = self.parts();
+        let mut ranges =
+            std::collections::HashMap::<(DisplayProjectionKind, &str), Vec<(usize, usize)>>::new();
+        let native_tools: HashSet<_> = self
+            .attempt
+            .presentation
+            .iter()
+            .filter_map(|part| {
+                let AssistantPresentationContent::NativeTool { call_id } = &part.content else {
+                    return None;
+                };
+                Some((part.source.output_index, call_id.as_str()))
+            })
+            .collect();
+        let hosted_actions: std::collections::HashMap<_, _> = self
+            .attempt
+            .hosted_activity
+            .iter()
+            .map(|action| (action.output_index, action))
+            .collect();
         for binding in &self.bindings {
             match binding {
                 DisplayProjectionBinding::Text {
@@ -608,32 +676,25 @@ impl ResponseDisplay {
                             && *end <= 16 * 1024 * 1024,
                         "invalid projection range"
                     );
+                    let mut seen = HashSet::new();
+                    let mut length = sources.len() - 1;
+                    for source in sources {
+                        anyhow::ensure!(seen.insert(source), "duplicate projection source");
+                        let text = parts
+                            .text(*kind, source)
+                            .ok_or_else(|| anyhow::anyhow!("invalid projection sources"))?;
+                        length = length
+                            .checked_add(text.len())
+                            .ok_or_else(|| anyhow::anyhow!("projection range length overflow"))?;
+                    }
                     anyhow::ensure!(
-                        sources.iter().collect::<HashSet<_>>().len() == sources.len(),
-                        "duplicate projection source"
-                    );
-                    let expected = self
-                        .binding_text(binding)
-                        .ok_or_else(|| anyhow::anyhow!("invalid projection sources"))?;
-                    anyhow::ensure!(
-                        expected.len() == end - start,
+                        length == end - start,
                         "projection range does not match covered content"
                     );
-                    let prior = ranges
-                        .entry((
-                            if *kind == DisplayProjectionKind::Message {
-                                0
-                            } else {
-                                1
-                            },
-                            message_id,
-                        ))
-                        .or_default();
-                    anyhow::ensure!(
-                        !prior.iter().any(|(a, b)| *a < *end && *start < *b),
-                        "overlapping projection bindings"
-                    );
-                    prior.push((*start, *end));
+                    ranges
+                        .entry((*kind, message_id))
+                        .or_default()
+                        .push((*start, *end));
                 }
                 DisplayProjectionBinding::Tool {
                     tool_call_id,
@@ -642,48 +703,32 @@ impl ResponseDisplay {
                 } => {
                     validate_display_id(tool_call_id)?;
                     let valid = if *native {
-                        self.attempt.presentation.iter().any(|part| part.source.output_index == *output_index && matches!(&part.content, AssistantPresentationContent::NativeTool { call_id } if call_id == tool_call_id))
+                        native_tools.contains(&(*output_index, tool_call_id.as_str()))
                     } else {
-                        self.attempt.hosted_activity.iter().any(|action| {
-                            action.output_index == *output_index
-                                && action.client_id(&self.attempt.id) == *tool_call_id
+                        hosted_actions.get(output_index).is_some_and(|action| {
+                            action.client_id(&self.attempt.id) == *tool_call_id
                         })
                     };
                     anyhow::ensure!(valid, "invalid tool projection binding");
                 }
             }
         }
+        for ranges in ranges.values_mut() {
+            ranges.sort_unstable();
+            anyhow::ensure!(
+                ranges.windows(2).all(|pair| pair[0].1 <= pair[1].0),
+                "overlapping projection bindings"
+            );
+        }
         anyhow::ensure!(
             zevria_foundation::BoundedCountingWriter::json_fits(self, 16 * 1024 * 1024)?,
             "response display payload exceeds limit"
         );
-        Ok(())
+        Ok(parts)
     }
+
     pub fn binding_text(&self, binding: &DisplayProjectionBinding) -> Option<String> {
-        let DisplayProjectionBinding::Text { kind, sources, .. } = binding else {
-            return None;
-        };
-        sources
-            .iter()
-            .map(|source| {
-                self.attempt
-                    .presentation
-                    .iter()
-                    .find(|part| &part.source == source)
-                    .and_then(|part| match (&part.content, kind) {
-                        (
-                            AssistantPresentationContent::Answer { text, .. },
-                            DisplayProjectionKind::Message,
-                        )
-                        | (
-                            AssistantPresentationContent::Reasoning { text },
-                            DisplayProjectionKind::Thought,
-                        ) => Some(text.as_str()),
-                        _ => None,
-                    })
-            })
-            .collect::<Option<Vec<_>>>()
-            .map(|parts| parts.join("\n"))
+        self.parts().binding_text(binding)
     }
 }
 

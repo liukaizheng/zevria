@@ -141,7 +141,39 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                 }
                 live.handle_turn_terminal(turn_id, false, None)?;
                 live.handle_event(status(2, 1, quiet))?; // terminal cleanup
-                assert!(live.state.lock().unwrap().network_scope.is_none());
+                for message in [None, Some(Message::assistant("late watch value"))] {
+                    live.handle_update(SessionUpdate::Streams(
+                        zevria_session_api::SessionStreamBatch {
+                            root: Some(zevria_session_api::SessionStreamState {
+                                revision: 1,
+                                turn_id,
+                                message,
+                                attempt: None,
+                            }),
+                            ..Default::default()
+                        },
+                    ))?;
+                }
+                live.handle_event(SessionEvent::AssistantStreamUpdated {
+                    turn_id,
+                    snapshot: Message::assistant("late preview").into(),
+                })?;
+                live.handle_event(SessionEvent::Intermediate {
+                    turn_id,
+                    message: Message::assistant("late tool round"),
+                    attempt_id: None,
+                })?;
+                live.handle_event(SessionEvent::TurnCompleted {
+                    turn_id,
+                    message: Message::assistant("late completion"),
+                    attempt_id: None,
+                })?;
+                let state = live.state.lock().unwrap();
+                assert!(state.network_scope.is_none());
+                assert!(
+                    state.streams.is_empty(),
+                    "late previews must not recreate turn state"
+                );
             }
             server_received.await.unwrap();
             Ok(())

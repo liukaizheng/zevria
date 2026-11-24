@@ -101,7 +101,6 @@ pub struct BlockView {
     preview_task: Option<Task<()>>,
     attachments: Vec<PromptAttachment>,
     _text: Subscription,
-    _clock: Subscription,
     block_focus: FocusHandle,
     disclosure_focus: FocusHandle,
     action_focus: [FocusHandle; 4],
@@ -146,11 +145,6 @@ impl BlockView {
         let (text_source, plain) = Self::text_source(&row).unwrap_or_default();
         let text = cx.new(|cx| Self::parse_text(&text_source, plain, cx));
         let watch = Self::watch_text(&text, cx);
-        let clock = cx.observe(&controller, |this, _, cx| {
-            if this.row.phase == Phase::Live || matches!(&this.data.kind, BlockKind::Step(step) if step.status() == StatusIcon::Running) {
-                cx.notify();
-            }
-        });
         let mut this = Self {
             data: row.data.clone(),
             attachments: Self::attachments(&row.data),
@@ -167,7 +161,6 @@ impl BlockView {
             preview: None,
             preview_task: None,
             _text: watch,
-            _clock: clock,
             block_focus: cx.focus_handle(),
             disclosure_focus: cx.focus_handle(),
             action_focus: std::array::from_fn(|_| cx.focus_handle()),

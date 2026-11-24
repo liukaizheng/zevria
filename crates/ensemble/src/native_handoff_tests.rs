@@ -715,6 +715,78 @@ async fn native_write_display_diffs_do_not_override_whole_file_input() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn artifact_validation_checks_each_raw_spelling_of_the_same_path() {
+    use agent_client_protocol::schema::v1::ToolCallLocation;
+    let directory = tempfile::tempdir().unwrap();
+    let (_, plans, handoff) = claude_handoff_fixture(&directory);
+    let path = plans.join("plan.md");
+    std::fs::write(&path, "# Plan\n").unwrap();
+    let mut slash = path.as_os_str().to_owned();
+    slash.push("/");
+    let slash = PathBuf::from(slash);
+    assert_eq!(slash, path, "Path comparison normalizes the trailing slash");
+    let state = handoff.state.lock().unwrap();
+    assert_eq!(
+        state.artifact_mutation_target(None, &[ToolCallLocation::new(path.clone())], &[]).unwrap(),
+        Some(path.canonicalize().unwrap())
+    );
+    assert!(state.artifact_mutation_target(None, &[ToolCallLocation::new(path), ToolCallLocation::new(slash)], &[]).is_err());
+}
+
+#[tokio::test]
+async fn artifact_permission_without_allow_once_does_not_install_a_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, plans, handoff) = claude_handoff_fixture(&directory);
+    let attempt = handoff.start_attempt(CancellationToken::new());
+    handoff.inspect_update(&artifact_announcement("write", "Write")).unwrap();
+    let mut request = artifact_permission("write", "Write", &plans.join("plan.md"));
+    request.options.clear();
+    let (permission, ticket) = handoff.queue_permission(&request, attempt.id).await;
+    assert!(matches!(permission, ClaudeHandoffPermission::Invalid(error) if error.contains("allow_once")));
+    assert!(ticket.is_none());
+    let state = handoff.state.lock().unwrap();
+    assert!(state.permissions.is_empty());
+    assert!(state.unresolved_artifacts().is_empty());
+    assert!(state.abandoned_preparations().contains("abandoned preparation"));
+}
+
+#[test]
+fn exit_cannot_settle_while_an_artifact_ticket_is_validating() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, _, handoff) = claude_handoff_fixture(&directory);
+    let attempt = handoff.start_attempt(CancellationToken::new());
+    handoff.inspect_update(&artifact_announcement("write", "Write")).unwrap();
+    let source = native_exit(&handoff, "exit", serde_json::json!({"plan":"# Proposal"}));
+    // The callback has reserved FIFO order, but the blocking path check has
+    // not installed its target yet.
+    handoff.state.lock().unwrap().permissions.push_back(handoff::ClaudePlanPermissionKey {
+        sequence: 0,
+        attempt: attempt.id,
+        session_id: "session".into(),
+        tool_call_id: "write".into(),
+    });
+    assert_eq!(
+        handoff.unresolved_violation().as_deref(),
+        Some("Claude plan artifacts remain unresolved: Write \"write\": queued; validating target")
+    );
+    assert!(handoff.abandoned_preparations().is_none());
+    assert!(handoff.begin_settlement("exit", source).unwrap_err().contains("permission is queued"));
+}
+
+#[test]
+fn rejected_exit_does_not_leave_a_tool_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, _, handoff) = claude_handoff_fixture(&directory);
+    let update = acp_update(serde_json::json!({
+        "sessionUpdate":"tool_call", "toolCallId":"exit", "title":"Exit", "kind":"switch_mode", "status":"failed",
+        "_meta":{"claudeCode":{"toolName":"ExitPlanMode"}}
+    }));
+    assert!(handoff.inspect_update(&update).is_err());
+    assert!(!handoff.state.lock().unwrap().tools.contains_key("exit"));
+}
+
 #[test]
 fn native_write_authoritative_content_conflicts_fail_on_every_ingress() {
     for first in ["announcement", "update", "permission"] {

@@ -45,6 +45,19 @@ pub trait EnsembleLauncher: Send + Sync + 'static {
         anyhow::bail!("launcher does not support interactive Plan worker review")
     }
 
+    /// Start the same run after successful cross-log recovery. Implementations
+    /// may reuse that read-only preflight; writable reopening still validates
+    /// the file on the handle used for appending.
+    fn start_recovered_review(
+        &self,
+        request: EnsembleLaunchRequest,
+        states: Vec<WorkerReviewState>,
+        events: SessionEventSender,
+        turn: TurnContext,
+    ) -> anyhow::Result<EnsembleReviewExecution> {
+        self.start_review(request, states, events, turn)
+    }
+
     fn launch<'a>(
         &'a self,
         request: EnsembleLaunchRequest,

@@ -79,8 +79,11 @@ pub(crate) struct PlanDialogView<'a> {
 /// not need direct access to private substate fields.
 pub(crate) struct RenderParts<'a> {
     pub(crate) history: &'a [HistoryEntry],
+    pub(crate) conversation: &'a ConversationState,
+    pub(crate) stream_snapshot: Option<zevria_presentation::session::StreamSnapshotId>,
     pub(crate) pending_prompt: Option<&'a zevria_presentation::PromptPreview>,
     pub(crate) accepted_prompt_paint: Option<(usize, &'a zevria_presentation::PromptPaint)>,
+    #[cfg(test)]
     pub(crate) turn_starts: Vec<super::conversation::TurnStartTarget>,
     pub(crate) folds: &'a FoldState,
     pub(crate) selected: Option<ActiveSelection>,
@@ -107,7 +110,9 @@ pub(crate) struct RenderParts<'a> {
     pub(crate) queue: QueueView,
     pub(crate) network_status: Option<(String, bool)>,
     pub(crate) assistant_header: Option<crate::presentation::NativeHeader>,
+    #[cfg(test)]
     pub(crate) header_timings: HeaderTimings,
+    pub(crate) observed_at: Instant,
     pub(crate) pending_header: bool,
     pub(crate) status: StatusBarView,
     pub(crate) view: &'a mut ViewState,
@@ -131,10 +136,18 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn render_parts(&mut self) -> RenderParts<'_> {
-        let generated_controls =
-            crate::hints::hint_line(self.surface().context(), &self.hint_eligibility(), 100)
-                .to_string();
+        let surface = self.surface();
+        let eligibility = self.hint_eligibility();
+        self.render_parts_with_hints(surface, &eligibility)
+    }
+
+    pub(crate) fn render_parts_with_hints(
+        &mut self,
+        surface: Surface,
+        eligibility: &crate::hints::Eligibility,
+    ) -> RenderParts<'_> {
         let accent = self.status_accent();
         let work_pending = self.work_pending();
         let composer_locked = !self.can_edit_draft();
@@ -328,10 +341,12 @@ impl App {
             (ordinary_primary, StatusTone::Normal, None)
         };
         let controls = pane.title().map(|_| {
+            let generated_controls =
+                crate::hints::hint_line(surface.context(), eligibility, 100).to_string();
             if !pane.can_compose() {
                 format!("inspect only · {generated_controls}")
             } else {
-                generated_controls.clone()
+                generated_controls
             }
         });
         let compact_controls = controls.clone();
@@ -368,8 +383,11 @@ impl App {
         };
         RenderParts {
             history: conversation.history(),
+            conversation,
+            stream_snapshot: session.stream_snapshot(),
             pending_prompt: model.pending_prompt(),
             accepted_prompt_paint: model.accepted_prompt_paint(),
+            #[cfg(test)]
             turn_starts: conversation.turn_starts(diagnostics_visible),
             folds,
             selected,
@@ -396,7 +414,9 @@ impl App {
             queue,
             network_status: session.network_message(),
             assistant_header,
+            #[cfg(test)]
             header_timings: HeaderTimings::observe(conversation, session.observed_at()),
+            observed_at: session.observed_at(),
             pending_header,
             status,
             view,

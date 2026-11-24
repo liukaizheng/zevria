@@ -219,10 +219,7 @@ pub enum NativePlanSource {
 
 impl NativePlanCapture {
     pub fn content_digest(bytes: &[u8]) -> String {
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        sha256_hex(bytes)
     }
 
     pub fn validate(&self, plan: &AgentStructuredPlan) -> anyhow::Result<()> {
@@ -269,7 +266,6 @@ pub enum AgentRunRepair {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         option_id: Option<String>,
     },
-    MissingPlanProof,
     EarlyStop {
         stop_reason: String,
     },
@@ -441,9 +437,22 @@ impl AgentUnavailableDecision {
     }
 }
 
-fn stable_digest_id<'a>(prefix: &str, components: impl IntoIterator<Item = &'a str>) -> String {
-    use std::fmt::Write as _;
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hex = [0; 64];
+    write_lower_hex(&Sha256::digest(bytes), &mut hex);
+    String::from_utf8(hex.to_vec()).expect("hex is ASCII")
+}
 
+fn write_lower_hex(bytes: &[u8], out: &mut [u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    assert_eq!(bytes.len() * 2, out.len());
+    for (&byte, pair) in bytes.iter().zip(out.chunks_exact_mut(2)) {
+        pair[0] = HEX[(byte >> 4) as usize];
+        pair[1] = HEX[(byte & 15) as usize];
+    }
+}
+
+fn stable_digest_id<'a>(prefix: &str, components: impl IntoIterator<Item = &'a str>) -> String {
     let mut digest = Sha256::new();
     for component in components {
         digest.update(
@@ -457,9 +466,9 @@ fn stable_digest_id<'a>(prefix: &str, components: impl IntoIterator<Item = &'a s
     let mut id = String::with_capacity(prefix.len() + 1 + 32);
     id.push_str(prefix);
     id.push('_');
-    for byte in &digest[..16] {
-        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
-    }
+    let mut hex = [0; 32];
+    write_lower_hex(&digest[..16], &mut hex);
+    id.push_str(std::str::from_utf8(&hex).expect("hex is ASCII"));
     id
 }
 
@@ -704,10 +713,15 @@ impl AgentRunOutcome {
     }
 
     pub fn is_sanitized_abandonment(&self) -> bool {
-        self.report.is_empty()
+        self.status == AgentRunStatus::Abandoned
+            && !self.partial
+            && self.failure.as_deref() == Some(WORKER_ABANDONMENT_REASON)
+            && self.report.is_empty()
             && self.plan.is_none()
+            && self.confirmation.is_none()
             && self.user_decisions.is_empty()
-            && self.summary().is_sanitized_abandonment()
+            && self.decision_ids.is_empty()
+            && self.unavailable_decisions.is_empty()
     }
 
     pub fn has_plan_proof(&self) -> bool {
@@ -1354,21 +1368,21 @@ pub struct EnsembleRecovery {
 pub fn latest_ensemble_recovery<'a>(
     records: impl IntoIterator<Item = &'a EnsembleRecord>,
 ) -> Option<EnsembleRecovery> {
-    let mut starts: HashMap<EnsembleRunId, EnsembleStart> = HashMap::new();
-    let mut reports: HashMap<EnsembleRunId, (Message, Vec<AgentRunSummary>)> = HashMap::new();
+    let mut starts: HashMap<&EnsembleRunId, &EnsembleStart> = HashMap::new();
+    let mut reports: HashMap<&EnsembleRunId, (&Message, &Vec<AgentRunSummary>)> = HashMap::new();
     let mut order = Vec::new();
     for record in records {
         match record {
             EnsembleRecord::Started { start } => {
-                starts.insert(start.run_id.clone(), start.clone());
-                order.push(start.run_id.clone());
+                starts.insert(&start.run_id, start);
+                order.push(&start.run_id);
             }
             EnsembleRecord::ReportsReady {
                 run_id,
                 synthesis_input,
                 agents,
             } => {
-                reports.insert(run_id.clone(), (synthesis_input.clone(), agents.clone()));
+                reports.insert(run_id, (synthesis_input, agents));
             }
             EnsembleRecord::ReviewStarted { .. }
             | EnsembleRecord::WorkerReview { .. }
@@ -1383,9 +1397,11 @@ pub fn latest_ensemble_recovery<'a>(
         }
     }
     order.into_iter().rev().find_map(|run_id| {
-        starts.remove(&run_id).map(|start| EnsembleRecovery {
-            start,
-            reports_ready: reports.remove(&run_id),
+        starts.remove(run_id).map(|start| EnsembleRecovery {
+            start: start.clone(),
+            reports_ready: reports
+                .remove(run_id)
+                .map(|(message, agents)| (message.clone(), agents.clone())),
         })
     })
 }
@@ -1439,11 +1455,11 @@ pub fn build_synthesis_prompt(
     )
 }
 
-pub fn build_synthesis_prompt_with_feedback(
+pub fn build_synthesis_prompt_with_feedback<'a>(
     workflow: EnsembleWorkflow,
     original_request: &crate::UserPrompt,
     outcomes: &[AgentRunOutcome],
-    states: &[crate::WorkerReviewState],
+    states: impl IntoIterator<Item = &'a crate::WorkerReviewState>,
     max_bytes_per_agent: usize,
 ) -> anyhow::Result<Message> {
     original_request.validate()?;
@@ -1491,40 +1507,51 @@ pub fn validate_synthesis_image_budget(
     states: &[crate::WorkerReviewState],
     addition: Option<&crate::UserPrompt>,
 ) -> Result<(), crate::PromptError> {
-    potential_synthesis_images(original, states, addition).map(|_| ())
+    crate::UserPrompt::validate_images(synthesis_image_refs(original, states.iter(), addition))
 }
 
-pub fn potential_synthesis_images(
-    original: &crate::UserPrompt,
-    states: &[crate::WorkerReviewState],
-    addition: Option<&crate::UserPrompt>,
-) -> Result<crate::UserPrompt, crate::PromptError> {
-    let mut images = original
+fn synthesis_image_refs<'a>(
+    original: &'a crate::UserPrompt,
+    states: impl IntoIterator<Item = &'a crate::WorkerReviewState> + 'a,
+    addition: Option<&'a crate::UserPrompt>,
+) -> impl Iterator<Item = &'a crate::PromptImage> {
+    original
         .images()
-        .cloned()
-        .map(crate::PromptBlock::Image)
-        .collect::<Vec<_>>();
-    for state in states.iter().filter(|state| !state.abandoned) {
-        let pending_feedback = state
-            .active
-            .iter()
-            .chain(state.pending.iter())
-            .filter(|input| {
-                input.kind == crate::WorkerPromptKind::UserFeedback
-                    || (input.kind == crate::WorkerPromptKind::RecoveryContinuation
-                        && state.failed_image_input.as_ref().is_some_and(|failed| {
-                            failed.kind == crate::WorkerPromptKind::UserFeedback
-                                && failed.text == input.text
-                        }))
-            });
-        for input in state.incorporated_images.iter().chain(pending_feedback) {
-            images.extend(input.text.images().cloned().map(crate::PromptBlock::Image));
-        }
-    }
-    if let Some(addition) = addition {
-        images.extend(addition.images().cloned().map(crate::PromptBlock::Image));
-    }
-    crate::UserPrompt::new(images)
+        .chain(
+            states
+                .into_iter()
+                .filter(|state| !state.abandoned)
+                .flat_map(|state| {
+                    let pending_feedback =
+                        state.active.iter().chain(&state.pending).filter(|input| {
+                            input.kind == crate::WorkerPromptKind::UserFeedback
+                                || (input.kind == crate::WorkerPromptKind::RecoveryContinuation
+                                    && state.failed_image_input.as_ref().is_some_and(|failed| {
+                                        failed.kind == crate::WorkerPromptKind::UserFeedback
+                                            && failed.text == input.text
+                                    }))
+                        });
+                    state
+                        .incorporated_images
+                        .iter()
+                        .chain(pending_feedback)
+                        .flat_map(|input| input.text.images())
+                }),
+        )
+        .chain(addition.into_iter().flat_map(crate::UserPrompt::images))
+}
+
+pub fn potential_synthesis_images<'a>(
+    original: &'a crate::UserPrompt,
+    states: impl IntoIterator<Item = &'a crate::WorkerReviewState> + 'a,
+    addition: Option<&'a crate::UserPrompt>,
+) -> Result<crate::UserPrompt, crate::PromptError> {
+    crate::UserPrompt::new(
+        synthesis_image_refs(original, states, addition)
+            .cloned()
+            .map(crate::PromptBlock::Image)
+            .collect(),
+    )
 }
 
 /// Build the bounded text envelope. This helper never carries image bytes.
@@ -1668,10 +1695,76 @@ fn bounded_plan_synthesis_report(
     Ok(mandatory)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SynthesisReportRef<'a, P> {
+    agent: &'a str,
+    label: &'a str,
+    status: AgentRunStatus,
+    partial: bool,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    user_decisions: &'a [AgentUserDecisionBatch],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    decision_ids: &'a [AgentUserDecisionId],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    unavailable_user_decisions: &'a [AgentUnavailableDecision],
+    report: &'a str,
+    structured_plan: Option<P>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation: Option<&'a crate::WorkerConfirmationReceipt>,
+    failure: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    truncation_notes: &'a [&'a str],
+}
+
+fn review_report_ref<'a, P>(
+    outcome: &'a AgentRunOutcome,
+    decision_ids: &'a [AgentUserDecisionId],
+    report: &'a str,
+    structured_plan: Option<P>,
+    failure: Option<&'a str>,
+    notes: &'a [&'a str],
+) -> SynthesisReportRef<'a, P> {
+    SynthesisReportRef {
+        agent: &outcome.descriptor.agent,
+        label: &outcome.descriptor.label,
+        status: outcome.status,
+        partial: outcome.partial,
+        user_decisions: &outcome.user_decisions,
+        decision_ids,
+        unavailable_user_decisions: &outcome.unavailable_decisions,
+        report,
+        structured_plan,
+        confirmation: outcome
+            .confirmation
+            .as_ref()
+            .map(|confirmed| &confirmed.receipt),
+        failure,
+        truncation_notes: notes,
+    }
+}
+
 fn bounded_review_synthesis_report(
     outcome: &AgentRunOutcome,
     max_bytes: usize,
 ) -> anyhow::Result<SynthesisReport> {
+    let mut decision_ids = outcome.decision_ids.clone();
+    merge_decision_ids_from_batches(&mut decision_ids, &outcome.user_decisions);
+    let full = review_report_ref(
+        outcome,
+        &decision_ids,
+        &outcome.report,
+        outcome.plan.as_ref(),
+        outcome.failure.as_deref(),
+        &[],
+    );
+    if zevria_foundation::BoundedCountingWriter::json_fits(&full, max_bytes)? {
+        let mut owned = synthesis_report_base(outcome, decision_ids);
+        owned.report.clone_from(&outcome.report);
+        owned.structured_plan = outcome.plan.clone();
+        owned.failure.clone_from(&outcome.failure);
+        return Ok(owned);
+    }
     let plan_source = outcome
         .plan
         .as_ref()
@@ -1679,64 +1772,46 @@ fn bounded_review_synthesis_report(
         .transpose()
         .context("failed to serialize a worker's structured plan")?
         .unwrap_or_default();
-    let mut decision_ids = outcome.decision_ids.clone();
-    merge_decision_ids_from_batches(&mut decision_ids, &outcome.user_decisions);
-    let mut full = synthesis_report_base(outcome, decision_ids.clone());
-    full.report.clone_from(&outcome.report);
-    full.structured_plan = outcome.plan.clone();
-    full.failure.clone_from(&outcome.failure);
-    if zevria_foundation::BoundedCountingWriter::json_fits(&full, max_bytes)? {
-        return Ok(full);
-    }
-
     let lengths = [
         outcome.report.len(),
         plan_source.len(),
         outcome.failure.as_ref().map_or(0, String::len),
     ];
-    let candidate = |evidence_budget| {
-        let budgets = fair_byte_budgets(lengths, evidence_budget);
-        let mut report = synthesis_report_base(outcome, decision_ids.clone());
-        report.report = truncate_utf8_prefix(&outcome.report, budgets[0]);
-        report.structured_plan =
-            (budgets[1] > 0 && !plan_source.is_empty()).then(|| AgentStructuredPlan {
-                plan_id: None,
-                markdown: None,
-                entries: vec![AgentPlanEntry {
-                    content: truncate_utf8_prefix(&plan_source, budgets[1]),
-                    priority: "truncated".to_string(),
-                    status: "truncated".to_string(),
-                }],
-            });
-        report.failure = outcome
+    const NOTES: [&str; 1] = ["worker evidence truncated to fit max_synthesis_bytes_per_agent"];
+    #[derive(Serialize)]
+    struct TruncatedPlan<'a> {
+        entries: [TruncatedEntry<'a>; 1],
+    }
+    #[derive(Serialize)]
+    struct TruncatedEntry<'a> {
+        content: &'a str,
+        priority: &'static str,
+        status: &'static str,
+    }
+    let candidate = |budget| {
+        let budgets = fair_byte_budgets(lengths, budget);
+        let report = truncate_utf8_prefix(&outcome.report, budgets[0]);
+        let plan = (budgets[1] > 0 && !plan_source.is_empty()).then(|| TruncatedPlan {
+            entries: [TruncatedEntry {
+                content: truncate_utf8_prefix(&plan_source, budgets[1]),
+                priority: "truncated",
+                status: "truncated",
+            }],
+        });
+        let failure = outcome
             .failure
             .as_deref()
             .filter(|_| budgets[2] > 0)
             .map(|failure| truncate_utf8_prefix(failure, budgets[2]));
-        report.truncation_notes =
-            vec!["worker evidence truncated to fit max_synthesis_bytes_per_agent".to_string()];
-        report
+        review_report_ref(outcome, &decision_ids, report, plan, failure, &NOTES)
     };
-
-    let minimum = candidate(0);
-    let minimum_len = serialized_report_len(&minimum)?;
+    let minimum_len = serialized_report_len(&candidate(0))?;
     if minimum_len > max_bytes {
         anyhow::bail!(
             "max_synthesis_bytes_per_agent ({max_bytes}) is too small for the fixed metadata and exact user-decision payload of worker {:?} (minimum {minimum_len} serialized bytes); captured decisions are never truncated",
             outcome.descriptor.agent
         );
     }
-    bounded_evidence_candidate(lengths, max_bytes, candidate)
-}
-
-fn bounded_evidence_candidate<const N: usize>(
-    lengths: [usize; N],
-    max_bytes: usize,
-    candidate: impl Fn(usize) -> SynthesisReport,
-) -> anyhow::Result<SynthesisReport> {
-    // Every optional field is represented by a UTF-8 prefix and the marker is
-    // constant, so compact serialized size is monotonic in this shared raw
-    // evidence budget. Search using actual JSON bytes rather than a proxy.
     let mut low = 0;
     let mut high = lengths.into_iter().fold(0usize, usize::saturating_add);
     while low < high {
@@ -1748,13 +1823,103 @@ fn bounded_evidence_candidate<const N: usize>(
         }
     }
     let bounded = candidate(low);
+    let report = bounded.report.to_owned();
+    let failure = bounded.failure.map(str::to_owned);
+    let plan = bounded.structured_plan.map(|plan| AgentStructuredPlan {
+        plan_id: None,
+        markdown: None,
+        entries: plan
+            .entries
+            .into_iter()
+            .map(|entry| AgentPlanEntry {
+                content: entry.content.to_owned(),
+                priority: entry.priority.into(),
+                status: entry.status.into(),
+            })
+            .collect(),
+    });
+    let mut owned = synthesis_report_base(outcome, decision_ids);
+    owned.report = report;
+    owned.failure = failure;
+    owned.structured_plan = plan;
+    owned.truncation_notes = NOTES.into_iter().map(str::to_owned).collect();
     debug_assert!(zevria_foundation::BoundedCountingWriter::json_fits(
-        &bounded, max_bytes
+        &owned, max_bytes
     )?);
-    Ok(bounded)
+    Ok(owned)
 }
 
-fn serialized_report_len(report: &SynthesisReport) -> anyhow::Result<usize> {
+#[cfg(test)]
+mod synthesis_budget_tests {
+    use super::*;
+    use crate::{
+        WorkerConfirmationReceipt, WorkerControlId, WorkerControlTarget, WorkerPlanData,
+        WorkerPlanRevision,
+    };
+
+    #[test]
+    fn review_counts_confirmation_receipts_at_the_budget_boundary() {
+        let worker_id = AgentRunId::new();
+        let markdown = "# Confirmed".to_owned();
+        let revision = WorkerPlanRevision {
+            worker_id: worker_id.clone(),
+            generation: 1,
+            revision: 1,
+            digest: sha256_hex(markdown.as_bytes()),
+        };
+        let plan = AgentStructuredPlan {
+            plan_id: None,
+            markdown: Some(markdown),
+            entries: Vec::new(),
+        };
+        let receipt = WorkerConfirmationReceipt {
+            request_id: WorkerControlId::new(),
+            target: WorkerControlTarget {
+                turn_id: zevria_foundation::TurnId::new(1),
+                run_id: EnsembleRunId::new(),
+                worker_id: worker_id.clone(),
+            },
+            revision: revision.clone(),
+        };
+        let outcome = AgentRunOutcome {
+            descriptor: AgentRunDescriptor {
+                id: worker_id,
+                agent: "test".into(),
+                label: "Worker".into(),
+                safe_mode: "review".into(),
+            },
+            status: AgentRunStatus::Completed,
+            report: "evidence \"界\"\n".repeat(384),
+            plan: Some(plan.clone()),
+            confirmation: Some(Box::new(ConfirmedWorkerPlan {
+                snapshot: WorkerPlanData { revision, plan }.try_into().unwrap(),
+                receipt: receipt.clone(),
+                baseline: None,
+            })),
+            partial: false,
+            failure: None,
+            usage: None,
+            acp_session_id: None,
+            user_decisions: Vec::new(),
+            decision_ids: Vec::new(),
+            unavailable_decisions: Vec::new(),
+        };
+        let full = bounded_review_synthesis_report(&outcome, usize::MAX).unwrap();
+        let full_len = serialized_report_len(&full).unwrap();
+        let exact = bounded_review_synthesis_report(&outcome, full_len).unwrap();
+        assert_eq!(exact.report, outcome.report);
+        assert_eq!(exact.confirmation.as_ref(), Some(&receipt));
+
+        for limit in [full_len - 1, full_len / 2] {
+            let truncated = bounded_review_synthesis_report(&outcome, limit).unwrap();
+            assert!(serialized_report_len(&truncated).unwrap() <= limit);
+            assert!(!truncated.truncation_notes.is_empty());
+            assert_eq!(truncated.confirmation.as_ref(), Some(&receipt));
+        }
+    }
+}
+
+fn serialized_report_len(report: &impl Serialize) -> anyhow::Result<usize> {
     // Rejection diagnostics for required evidence report the exact byte count.
     let mut writer = zevria_foundation::BoundedCountingWriter::new(usize::MAX);
     serde_json::to_writer(&mut writer, report)
@@ -1793,12 +1958,12 @@ fn fair_byte_budgets<const N: usize>(lengths: [usize; N], total: usize) -> [usiz
     budgets
 }
 
-fn truncate_utf8_prefix(text: &str, max_bytes: usize) -> String {
+fn truncate_utf8_prefix(text: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes.min(text.len());
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    text[..end].to_string()
+    &text[..end]
 }
 
 /// Byte-bound a UTF-8 string without splitting a scalar value.

@@ -226,6 +226,11 @@ impl TimelineRow {
             fingerprint: 0,
         }
     }
+    pub fn needs_clock(&self) -> bool {
+        self.phase == Phase::Live
+            || matches!(&self.data.kind, BlockKind::Step(step) if step.status() == StatusIcon::Running)
+    }
+
     pub fn apply_disclosure(&mut self, disclosures: &DisclosureState) {
         self.expanded = if self.data.is_disclosure() {
             disclosures.is_expanded(&self.data.key, self.data.default_expanded())
@@ -235,6 +240,8 @@ impl TimelineRow {
         self.fingerprint = hash((
             &self.data.key,
             self.data.revision,
+            self.data.history_index,
+            self.data.source,
             self.turn_start,
             self.position,
             self.phase,
@@ -303,15 +310,28 @@ struct Entry {
     divider: bool,
 }
 
+#[derive(Clone, Copy)]
+struct Checkpoint {
+    history: usize,
+    row: usize,
+    revision: u64,
+    structure: u64,
+    call: Option<NativeHeader>,
+    busy: bool,
+    live_attempt: Option<NativeHeader>,
+}
+
 #[derive(Default)]
 pub struct Projector {
     entries: Vec<Entry>,
     restored: HashSet<PresentationBlockId>,
     live: Vec<Binding>,
     pending: Option<(u64, Arc<BlockData>)>,
+    checkpoint: Option<Checkpoint>,
 }
 
 pub struct Projection {
+    pub start_row: usize,
     pub rows: Vec<TimelineRow>,
     /// Unambiguous live-to-canonical renderer/disclosure identity transfers.
     pub transfers: Vec<(String, String)>,
@@ -326,6 +346,7 @@ impl Projector {
         unsaved: &HashSet<(ProjectionEpoch, PresentationBlockId)>,
         activity: Option<&str>,
         live_attempt: Option<NativeHeader>,
+        old_rows: &[TimelineRow],
     ) -> Projection {
         let streaming = match model.tail(Instant::now()) {
             ConversationTail::Streaming { message, .. } => {
@@ -333,19 +354,36 @@ impl Projector {
             }
             _ => None,
         };
-        self.project(
-            &model.conversation,
+        let conversation = &model.conversation;
+        let call = model.session.call_header();
+        let busy = model.session.has_turn_work();
+        let checkpoint = self.checkpoint.filter(|checkpoint| {
+            checkpoint.history < conversation.history().len()
+                && checkpoint.row < old_rows.len()
+                && checkpoint.structure == conversation.structure_revision()
+                && checkpoint.call == call
+                && checkpoint.busy == busy
+                && checkpoint.live_attempt == live_attempt
+                && conversation
+                    .changed_entries_since(checkpoint.revision)
+                    .all(|index| index > checkpoint.history)
+        });
+        self.project_from(
+            conversation,
             epoch,
-            model.session.call_header(),
-            model.session.has_turn_work(),
+            call,
+            busy,
             streaming.as_ref(),
             model.pending_prompt(),
             unsaved,
             activity,
             live_attempt,
+            checkpoint,
+            old_rows,
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn project(
         &mut self,
@@ -358,6 +396,36 @@ impl Projector {
         unsaved: &HashSet<(ProjectionEpoch, PresentationBlockId)>,
         activity: Option<&str>,
         live_attempt: Option<NativeHeader>,
+    ) -> Projection {
+        self.project_from(
+            conversation,
+            epoch,
+            call,
+            busy,
+            stream,
+            pending,
+            unsaved,
+            activity,
+            live_attempt,
+            None,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_from(
+        &mut self,
+        conversation: &ConversationState,
+        epoch: &str,
+        call: Option<NativeHeader>,
+        busy: bool,
+        stream: Option<&HistoryEntry>,
+        pending: Option<&PromptPreview>,
+        unsaved: &HashSet<(ProjectionEpoch, PresentationBlockId)>,
+        activity: Option<&str>,
+        live_attempt: Option<NativeHeader>,
+        checkpoint: Option<Checkpoint>,
+        old_rows: &[TimelineRow],
     ) -> Projection {
         let history = conversation.history();
         let previous_len = self.entries.len();
@@ -374,14 +442,17 @@ impl Projector {
         }
         self.entries.truncate(history.len());
         let mut timeline = Timeline::new(epoch);
+        let from = checkpoint.map_or(0, |checkpoint| checkpoint.history);
+        let start_row = checkpoint.map_or(0, |checkpoint| checkpoint.row);
+        let mut next_checkpoint = None;
         let mut next_live = Vec::new();
         let mut committed = Vec::new();
         let previous_call = self.live.first().map(|binding| binding.identity.header);
-        let live_entry = live_attempt.filter(|_| stream.is_none()).and_then(|header| {
-            history.iter().rposition(|entry| matches!(entry, HistoryEntry::Conversation(entry) if entry.header == Some(header)))
-        });
-        for (index, entry) in history.iter().enumerate() {
-            let stamp = rows::fingerprint(entry);
+        let live_entry = live_attempt
+            .filter(|_| stream.is_none())
+            .and_then(|header| conversation.represented_header_index(header));
+        for (index, entry) in history.iter().enumerate().skip(from) {
+            let stamp = rows::fingerprint(conversation, index);
             if self
                 .entries
                 .get(index)
@@ -395,6 +466,18 @@ impl Projector {
                 }
             }
             let entry = &self.entries[index];
+            if entry.starts_turn && !entry.fragments.is_empty() {
+                timeline.finish_turn();
+                next_checkpoint = Some(Checkpoint {
+                    history: index,
+                    row: start_row + timeline.rows.len(),
+                    revision: conversation.revision(),
+                    structure: conversation.structure_revision(),
+                    call,
+                    busy,
+                    live_attempt,
+                });
+            }
             let track_commit = previous_call == Some(entry.header)
                 && (entry.header.is_some() || index >= previous_len.saturating_sub(1));
             let working = busy
@@ -481,7 +564,10 @@ impl Projector {
                     .push(TimelineRow::new(Arc::new(data), Phase::Live));
             }
         }
-        let mut projection = timeline.finish();
+        self.checkpoint = next_checkpoint;
+        let previous = start_row.checked_sub(1).and_then(|i| old_rows.get(i));
+        let mut projection = timeline.finish(previous);
+        projection.start_row = start_row;
         // Only rekey disappearing rows. Segments are bound in order, so the
         // first unambiguous match owns the transfer for the entire thought group.
         let keys: HashSet<_> = projection
@@ -979,13 +1065,16 @@ impl<'a> Timeline<'a> {
         self.rows.append(&mut turn.rows);
     }
 
-    fn finish(mut self) -> Projection {
+    fn finish(mut self, previous_row: Option<&TimelineRow>) -> Projection {
         self.finish_turn();
         let last = self.rows.len().saturating_sub(1);
         for i in 0..self.rows.len() {
             let row = &self.rows[i];
             let step = |row: &TimelineRow| matches!(row.data.kind, BlockKind::Step(_));
-            let previous = i.checked_sub(1).and_then(|p| self.rows.get(p));
+            let previous = i
+                .checked_sub(1)
+                .and_then(|p| self.rows.get(p))
+                .or(previous_row);
             let position = step(row).then(|| {
                 match (
                     !row.turn_start && previous.is_some_and(step),
@@ -999,7 +1088,7 @@ impl<'a> Timeline<'a> {
                     (true, false) => StepPosition::Last,
                 }
             });
-            let gap = if i == 0 {
+            let gap = if previous.is_none() {
                 16
             } else if row.turn_start {
                 24
@@ -1016,6 +1105,7 @@ impl<'a> Timeline<'a> {
             row.last = i == last;
         }
         Projection {
+            start_row: 0,
             rows: self.rows,
             transfers: vec![],
             anchors: self.anchors,

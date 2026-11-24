@@ -13,7 +13,7 @@ use zevria_session_api::question_channels;
 use zevria_session_api::session_event_channel;
 use zevria_transcript::AgentRunTranscriptRecord;
 use zevria_transcript::load_agent_run;
-use zevria_workflow::AgentProtocolDirection;
+use zevria_workflow::{AgentProtocolDirection, validate_worker_synthesis_payload};
 
 use super::*;
 
@@ -408,11 +408,10 @@ async fn run_log_publishes_only_after_the_record_is_synced() {
         failure,
     );
     writer
+        .sender
         .send(RunLogWriteCommand::Record(Box::new(RunLogRecordCommand {
             record: diagnostic_record("durable diagnostic"),
-            publication: Some(AgentRunEvent::Stderr {
-                text: "durable diagnostic".to_string(),
-            }),
+            publish: true,
             force_sync: false,
             acknowledgement: None,
         })))
@@ -420,6 +419,7 @@ async fn run_log_publishes_only_after_the_record_is_synced() {
         .expect("writer accepts diagnostic");
     let (acknowledgement, barrier) = oneshot::channel();
     writer
+        .sender
         .send(RunLogWriteCommand::Barrier { acknowledgement })
         .await
         .expect("writer accepts barrier");
@@ -452,9 +452,10 @@ async fn run_log_batches_records_and_a_barrier_into_one_sync() {
     );
     for index in 0..16 {
         writer
+            .sender
             .try_send(RunLogWriteCommand::Record(Box::new(RunLogRecordCommand {
                 record: diagnostic_record(&format!("record {index}")),
-                publication: None,
+                publish: false,
                 force_sync: false,
                 acknowledgement: None,
             })))
@@ -462,6 +463,7 @@ async fn run_log_batches_records_and_a_barrier_into_one_sync() {
     }
     let (acknowledgement, barrier) = oneshot::channel();
     writer
+        .sender
         .try_send(RunLogWriteCommand::Barrier { acknowledgement })
         .expect("writer queue accepts barrier");
     barrier
@@ -486,11 +488,10 @@ async fn run_log_sync_failure_isolated_and_never_published() {
     );
     let (acknowledgement, result) = oneshot::channel();
     writer
+        .sender
         .send(RunLogWriteCommand::Record(Box::new(RunLogRecordCommand {
             record: diagnostic_record("not durable"),
-            publication: Some(AgentRunEvent::Stderr {
-                text: "not durable".to_string(),
-            }),
+            publish: true,
             force_sync: true,
             acknowledgement: Some(acknowledgement),
         })))
@@ -550,7 +551,8 @@ async fn accepted_decision_sync_failure_prevents_durable_publication() {
         path: PathBuf::from("unused-test-log"),
         writer,
         failure,
-        evidence: Arc::new(Mutex::new(WorkerEvidenceState::default())),
+        last_permission: Default::default(),
+        ignore_recovered_repair: Default::default(),
         review_publication: Arc::new(Mutex::new(None)),
         event_order: Arc::new(tokio::sync::Mutex::new(())),
     };
@@ -579,9 +581,10 @@ async fn blocking_run_log_sync_does_not_stall_the_async_runtime() {
     );
     let (acknowledgement, result) = oneshot::channel();
     writer
+        .sender
         .send(RunLogWriteCommand::Record(Box::new(RunLogRecordCommand {
             record: diagnostic_record("slow sync"),
-            publication: None,
+            publish: false,
             force_sync: true,
             acknowledgement: Some(acknowledgement),
         })))
@@ -1134,11 +1137,13 @@ fn claude_cancelled_terminal_and_abandoned_tickets_never_authorize_work() {
     invalid.tool_call.fields.locations = None;
     assert!(handoff.register_permission(&invalid, attempt.id).is_err());
     assert!(handoff.state.lock().unwrap().permissions.is_empty());
+    // Invalid permission requests must not turn a pathless preparation into
+    // an active unresolved target.
+    assert!(handoff.unresolved_violation().is_none());
     assert!(
         handoff
-            .unresolved_violation()
-            .unwrap()
-            .contains("no host permission observed")
+            .abandoned_preparations()
+            .is_some_and(|detail| detail.contains("abandoned preparation"))
     );
 }
 
@@ -1232,7 +1237,8 @@ async fn claude_permission_send_and_sync_failures_fence_admission_without_releas
             path: PathBuf::from("unused-test-log"),
             writer,
             failure,
-            evidence: Arc::new(Mutex::new(WorkerEvidenceState::default())),
+            last_permission: Default::default(),
+            ignore_recovered_repair: Default::default(),
             review_publication: Arc::new(Mutex::new(None)),
             event_order: Arc::new(tokio::sync::Mutex::new(())),
         };
@@ -3721,28 +3727,36 @@ fn only_nonempty_inline_markdown_survives_as_plan_completion_proof() {
         }
     }));
 
-    let mut state = WorkerEvidenceState::default();
+    let mut state = AgentRunProjection::default();
+    let has_proof = |state: &AgentRunProjection| {
+        state
+            .plan
+            .as_ref()
+            .is_some_and(AgentStructuredPlan::has_markdown_proof)
+    };
     for event in normalize_update(checklist) {
-        state.apply(&event);
+        state.apply(&AgentRunTranscriptRecord::Event { event });
     }
-    assert!(!state.has_plan_proof());
+    assert!(!has_proof(&state));
     for event in normalize_update(file) {
-        state.apply(&event);
+        state.apply(&AgentRunTranscriptRecord::Event { event });
     }
-    assert!(!state.has_plan_proof());
+    assert!(!has_proof(&state));
     for event in normalize_update(empty) {
-        state.apply(&event);
+        state.apply(&AgentRunTranscriptRecord::Event { event });
     }
-    assert!(!state.has_plan_proof());
-    state.apply(&AgentRunEvent::AgentMessage {
-        text: "ordinary final prose".to_string(),
-        message_id: Some("final".to_string()),
+    assert!(!has_proof(&state));
+    state.apply(&AgentRunTranscriptRecord::Event {
+        event: AgentRunEvent::AgentMessage {
+            text: "ordinary final prose".to_string(),
+            message_id: Some("final".to_string()),
+        },
     });
-    assert!(!state.has_plan_proof());
+    assert!(!has_proof(&state));
     for event in normalize_update(markdown) {
-        state.apply(&event);
+        state.apply(&AgentRunTranscriptRecord::Event { event });
     }
-    assert!(state.has_plan_proof());
+    assert!(has_proof(&state));
     assert_eq!(
         state
             .plan
@@ -3750,14 +3764,18 @@ fn only_nonempty_inline_markdown_survives_as_plan_completion_proof() {
             .and_then(|plan| plan.markdown.as_deref()),
         Some(exact)
     );
-    state.apply(&AgentRunEvent::PlanRemoved {
-        plan_id: "other".to_string(),
+    state.apply(&AgentRunTranscriptRecord::Event {
+        event: AgentRunEvent::PlanRemoved {
+            plan_id: "other".to_string(),
+        },
     });
-    assert!(state.has_plan_proof());
-    state.apply(&AgentRunEvent::PlanRemoved {
-        plan_id: "inline".to_string(),
+    assert!(has_proof(&state));
+    state.apply(&AgentRunTranscriptRecord::Event {
+        event: AgentRunEvent::PlanRemoved {
+            plan_id: "inline".to_string(),
+        },
     });
-    assert!(!state.has_plan_proof());
+    assert!(!has_proof(&state));
 }
 
 #[test]
@@ -7974,18 +7992,21 @@ for line in sys.stdin:
                 },
             })
             .expect_err("current writer refuses proof-only completion");
+        drop(writer);
         if repair_already_marked {
+            let mut writer = AgentRunTranscriptWriter::append_to(path.clone()).unwrap();
             writer
                 .append(&AgentRunTranscriptRecord::Event {
                     event: AgentRunEvent::Prompt {
                         text: semantic_repair_prompt(EnsembleWorkflow::Plan),
                         continuation: true,
-                        repair: Some(AgentRunRepair::MissingPlanProof),
+                        repair: Some(AgentRunRepair::EarlyStop {
+                            stop_reason: "max_tokens".into(),
+                        }),
                     },
                 })
                 .expect("durable repair boundary");
         }
-        drop(writer);
 
         let (events, _receiver) = session_event_channel(64);
         let original = std::fs::read(&path).unwrap();
@@ -8092,7 +8113,9 @@ async fn proof_only_history_and_historical_claude_markers_fail_closed_without_sp
                     event: AgentRunEvent::Prompt {
                         text: "already repaired".to_string(),
                         continuation: true,
-                        repair: Some(AgentRunRepair::MissingPlanProof),
+                        repair: Some(AgentRunRepair::EarlyStop {
+                            stop_reason: "max_tokens".into(),
+                        }),
                     },
                 })
                 .expect("repair marker");

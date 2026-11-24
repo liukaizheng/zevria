@@ -3,7 +3,6 @@
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{
     AgentRunDescriptor, AgentRunId, AgentRunOutcome, AgentRunStatus, AgentStructuredPlan,
@@ -50,25 +49,46 @@ pub struct WorkerPlanRevision {
     pub digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// An immutable, verified proposal. Cloning a receipt or view does not copy
+/// the Markdown, and eligibility checks never hash it again.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "WorkerPlanData")]
+pub struct WorkerPlanSnapshot(std::sync::Arc<WorkerPlanData>);
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkerPlanSnapshot {
+pub struct WorkerPlanData {
     pub revision: WorkerPlanRevision,
     pub plan: AgentStructuredPlan,
 }
-impl WorkerPlanSnapshot {
-    pub fn validate(&self) -> bool {
-        self.plan.markdown.as_ref().is_some_and(|markdown| {
-            !markdown.trim().is_empty() && self.revision.digest == markdown_digest(markdown)
-        }) && self.revision.generation > 0
-            && self.revision.revision > 0
+
+impl std::ops::Deref for WorkerPlanSnapshot {
+    type Target = WorkerPlanData;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
-fn markdown_digest(markdown: &str) -> String {
-    Sha256::digest(markdown.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+
+impl Serialize for WorkerPlanSnapshot {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+impl TryFrom<WorkerPlanData> for WorkerPlanSnapshot {
+    type Error = &'static str;
+    fn try_from(data: WorkerPlanData) -> Result<Self, Self::Error> {
+        if data.revision.generation == 0
+            || data.revision.revision == 0
+            || !data.plan.markdown.as_deref().is_some_and(|markdown| {
+                !markdown.trim().is_empty()
+                    && data.revision.digest == crate::ensemble::sha256_hex(markdown.as_bytes())
+            })
+        {
+            return Err("invalid worker plan snapshot identity or Markdown digest");
+        }
+        Ok(Self(std::sync::Arc::new(data)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,7 +102,6 @@ impl WorkerConfirmationReceipt {
     pub fn validates_snapshot(&self, snapshot: &WorkerPlanSnapshot, worker: &AgentRunId) -> bool {
         self.request_id.validate()
             && !self.target.run_id.as_str().trim().is_empty()
-            && snapshot.validate()
             && &snapshot.revision.worker_id == worker
             && &self.target.worker_id == worker
             && self.revision == snapshot.revision
@@ -113,7 +132,6 @@ pub enum WorkerPromptKind {
     Initial,
     UserFeedback,
     RecoveryContinuation,
-    SemanticRecovery,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -389,7 +407,6 @@ impl WorkerReviewState {
                 && !self.retained_removed
                 && self.synthesis_error.is_none()
                 && snapshot.revision.generation >= self.publication_floor
-                && snapshot.validate()
         })
     }
     pub fn status(&self) -> AgentRunStatus {
@@ -643,15 +660,16 @@ impl WorkerReviewState {
                     .as_ref()
                     .filter(|text| !text.trim().is_empty())
                 {
-                    self.candidate = Some(WorkerPlanSnapshot {
-                        revision: WorkerPlanRevision {
-                            worker_id: self.descriptor.id.clone(),
-                            generation: *generation,
-                            revision: self.next_revision,
-                            digest: markdown_digest(markdown),
-                        },
-                        plan: plan.clone(),
-                    });
+                    self.candidate =
+                        Some(WorkerPlanSnapshot(std::sync::Arc::new(WorkerPlanData {
+                            revision: WorkerPlanRevision {
+                                worker_id: self.descriptor.id.clone(),
+                                generation: *generation,
+                                revision: self.next_revision,
+                                digest: crate::ensemble::sha256_hex(markdown.as_bytes()),
+                            },
+                            plan: plan.clone(),
+                        })));
                     self.next_revision += 1;
                 }
             }
@@ -680,20 +698,32 @@ impl WorkerReviewState {
                 connected,
                 evidence,
             } => {
-                let mut retained = self.evidence.clone();
+                let mut user_decisions = std::mem::take(&mut self.evidence.user_decisions);
+                let mut decision_ids = std::mem::take(&mut self.evidence.decision_ids);
+                let mut unavailable_decisions =
+                    std::mem::take(&mut self.evidence.unavailable_decisions);
                 crate::ensemble::merge_decision_evidence(
-                    &mut retained.user_decisions,
-                    &mut retained.decision_ids,
-                    &mut retained.unavailable_decisions,
+                    &mut user_decisions,
+                    &mut decision_ids,
+                    &mut unavailable_decisions,
                     &evidence.user_decisions,
                     &evidence.decision_ids,
                     &evidence.unavailable_decisions,
                 );
-                self.evidence = *evidence.clone();
-                self.evidence.user_decisions = retained.user_decisions;
-                self.evidence.decision_ids = retained.decision_ids;
-                self.evidence.unavailable_decisions = retained.unavailable_decisions;
-                self.evidence.confirmation = None;
+                self.evidence = AgentRunOutcome {
+                    descriptor: evidence.descriptor.clone(),
+                    status: evidence.status,
+                    report: evidence.report.clone(),
+                    plan: evidence.plan.clone(),
+                    confirmation: None,
+                    partial: evidence.partial,
+                    failure: evidence.failure.clone(),
+                    usage: evidence.usage.clone(),
+                    acp_session_id: evidence.acp_session_id.clone(),
+                    user_decisions,
+                    decision_ids,
+                    unavailable_decisions,
+                };
                 self.connected = *connected;
                 if !connected {
                     self.image_capability = None;
@@ -823,23 +853,77 @@ pub fn apply_worker_review_event(
     worker_id: &AgentRunId,
     event: &WorkerReviewEvent,
 ) -> Result<Vec<AgentRunId>, String> {
-    let mut proposed = states.to_vec();
-    let target = proposed
-        .iter_mut()
-        .find(|state| &state.descriptor.id == worker_id)
-        .ok_or("foreign worker review transition")?;
-    target.apply(event)?;
-    let mut affected = vec![worker_id.clone()];
-    if let WorkerReviewEvent::BaselineMarked { receipt } = event {
-        for state in &mut proposed {
-            if &state.descriptor.id != worker_id && state.baseline.is_some() {
-                state.apply(&WorkerReviewEvent::BaselineCleared {
-                    request_id: receipt.request_id.clone(),
-                })?;
-                affected.push(state.descriptor.id.clone());
-            }
+    let changes = validate_worker_review_event(states, worker_id, event)?;
+    let mut affected = Vec::with_capacity(changes.displaced.len() + 1);
+    affected.push(worker_id.clone());
+    states[changes.target].apply_validated_transition(event);
+    if let Some(clear) = changes.clear {
+        for index in changes.displaced {
+            let state = &mut states[index];
+            state.apply_validated_transition(&clear);
+            affected.push(state.descriptor.id.clone());
         }
     }
-    states.clone_from_slice(&proposed);
     Ok(affected)
+}
+
+pub struct WorkerReviewChanges {
+    pub target: usize,
+    pub displaced: Vec<usize>,
+    pub clear: Option<WorkerReviewEvent>,
+}
+
+pub fn validate_worker_review_event(
+    states: &[WorkerReviewState],
+    worker_id: &AgentRunId,
+    event: &WorkerReviewEvent,
+) -> Result<WorkerReviewChanges, String> {
+    let target = states
+        .iter()
+        .position(|state| &state.descriptor.id == worker_id)
+        .ok_or("foreign worker review transition")?;
+    states[target].validate_transition(event)?;
+    let mut displaced = Vec::new();
+    let clear = if let WorkerReviewEvent::BaselineMarked { receipt } = event {
+        let clear = WorkerReviewEvent::BaselineCleared {
+            request_id: receipt.request_id.clone(),
+        };
+        for (index, state) in states
+            .iter()
+            .enumerate()
+            .filter(|(index, state)| *index != target && state.baseline.is_some())
+        {
+            state.validate_transition(&clear)?;
+            displaced.push(index);
+        }
+        Some(clear)
+    } else {
+        None
+    };
+    Ok(WorkerReviewChanges {
+        target,
+        displaced,
+        clear,
+    })
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_verify_exact_bytes_at_the_wire_boundary() {
+        let markdown = "# Exact plan\n";
+        let mut wire = serde_json::json!({
+            "revision": {
+                "worker_id": "worker", "generation": 1, "revision": 1,
+                "digest": crate::ensemble::sha256_hex(markdown.as_bytes())
+            },
+            "plan": { "markdown": markdown, "entries": [] }
+        });
+        let snapshot: WorkerPlanSnapshot = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(snapshot).unwrap(), wire);
+        wire["plan"]["markdown"] = "# Exact plan".into();
+        assert!(serde_json::from_value::<WorkerPlanSnapshot>(wire).is_err());
+    }
 }

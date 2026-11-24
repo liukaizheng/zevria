@@ -174,22 +174,22 @@ impl<P: ModelProvider> SessionEngine<P> {
     /// Check the future image-bearing root request without committing a seal or
     /// consuming worker confirmation. Incomplete workers contribute only known
     /// proof; confirmation repeats this check with the complete evidence set.
-    pub(in crate::session) async fn preflight_potential_synthesis(
+    pub(in crate::session) async fn preflight_potential_synthesis<'a>(
         &mut self,
-        start: &EnsembleStart,
-        states: &[WorkerReviewState],
+        start: &'a EnsembleStart,
+        states: impl Iterator<Item = &'a WorkerReviewState> + Clone + 'a,
         max_bytes_per_agent: usize,
         turn: &TurnContext,
     ) -> anyhow::Result<()> {
-        let images =
-            zevria_workflow::ensemble::potential_synthesis_images(&start.prompt, states, None)?;
+        let images = zevria_workflow::ensemble::potential_synthesis_images(
+            &start.prompt,
+            states.clone(),
+            None,
+        )?;
         if !images.has_images() {
             return Ok(());
         }
-        let outcomes = states
-            .iter()
-            .map(WorkerReviewState::outcome)
-            .collect::<Vec<_>>();
+        let outcomes = states.map(WorkerReviewState::outcome).collect::<Vec<_>>();
         let known = outcomes
             .iter()
             .filter(|outcome| {
@@ -632,7 +632,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             start.workflow,
             &start.prompt,
             &outcomes,
-            reviews.get(&start.run_id).map_or(&[], Vec::as_slice),
+            reviews.get(&start.run_id).map_or(&[][..], Vec::as_slice),
             launcher.max_synthesis_bytes_per_agent(),
         )?;
         if start.publishes_confirmed_worker_plan()

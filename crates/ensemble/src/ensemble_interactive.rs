@@ -3,16 +3,38 @@
 use super::*;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub(super) struct PendingInteraction(Arc<AtomicU64>);
+#[derive(Default)]
+pub(super) struct InteractionCounter {
+    active: AtomicU64,
+    drained: tokio::sync::Notify,
+}
+
+impl InteractionCounter {
+    async fn wait_drained(&self) {
+        loop {
+            // `notify_waiters` covers futures created before the notification,
+            // even if they have not been polled yet.
+            let drained = self.drained.notified();
+            if self.active.load(AtomicOrdering::Acquire) == 0 {
+                return;
+            }
+            drained.await;
+        }
+    }
+}
+
+pub(super) struct PendingInteraction(Arc<InteractionCounter>);
 impl PendingInteraction {
-    pub(super) fn new(count: Arc<AtomicU64>) -> Self {
-        count.fetch_add(1, AtomicOrdering::AcqRel);
+    pub(super) fn new(count: Arc<InteractionCounter>) -> Self {
+        count.active.fetch_add(1, AtomicOrdering::AcqRel);
         Self(count)
     }
 }
 impl Drop for PendingInteraction {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, AtomicOrdering::AcqRel);
+        if self.0.active.fetch_sub(1, AtomicOrdering::AcqRel) == 1 {
+            self.0.drained.notify_waiters();
+        }
     }
 }
 
@@ -304,11 +326,6 @@ impl InteractiveConnection {
         connected: bool,
     ) -> Result<(), AcpError> {
         log.barrier().await.map_err(acp_error)?;
-        let path = log.path().to_path_buf();
-        let projection = tokio::task::spawn_blocking(move || load_agent_run_projection(&path))
-            .await
-            .map_err(acp_error)?
-            .map_err(acp_error)?;
         let input = self.current.lock().expect("worker input poisoned").take();
         self.release();
         if let Some(input) = input {
@@ -333,20 +350,12 @@ impl InteractiveConnection {
                 .await
                 .map_err(acp_error)?;
             }
-            let evidence = AgentRunOutcome {
-                descriptor: self.descriptor.clone(),
-                status: AgentRunStatus::AwaitingFeedback,
-                report: projection.report,
-                plan: projection.plan,
-                confirmation: None,
-                partial: false,
-                failure: failure.clone(),
-                usage: projection.usage,
-                acp_session_id: projection.acp_session_id,
-                user_decisions: projection.user_decisions,
-                decision_ids: projection.decision_ids,
-                unavailable_decisions: projection.unavailable_decisions,
-            };
+            let evidence = log.outcome_evidence(
+                self.descriptor.clone(),
+                AgentRunStatus::AwaitingFeedback,
+                false,
+                failure.clone(),
+            );
             let event = WorkerReviewEvent::Settled {
                 generation: input.generation,
                 failure,
@@ -379,7 +388,7 @@ impl InteractiveConnection {
         lifetime: &tokio_util::sync::CancellationToken,
         handoff: Option<&ClaudePlanHandoff>,
         cancel_grace: Duration,
-        interactions: &AtomicU64,
+        interactions: &InteractionCounter,
         progress: &WorkerAttemptProgress,
         violation: &Mutex<Option<String>>,
         images_supported: bool,
@@ -437,10 +446,7 @@ impl InteractiveConnection {
                     handoff.begin_generation_at(input.generation)?;
                 }
                 // Recovery within an interaction never grants a new budget.
-                log.evidence
-                    .lock()
-                    .expect("worker evidence poisoned")
-                    .repair = None;
+                log.forget_repair();
             }
             progress
                 .prompt_dispatched
@@ -508,14 +514,9 @@ impl InteractiveConnection {
             }
             // ACP end_turn can race a provider's outstanding elicitation or
             // permission callback. Do not advertise quiescence until it closes.
-            let drain = async {
-                while interactions.load(AtomicOrdering::Acquire) != 0 {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            };
             tokio::select! {
                 () = cancellation.cancelled() => return Ok(WorkerEnd::LocalCancelled),
-                result = tokio::time::timeout(cancel_grace, drain) => {
+                result = tokio::time::timeout(cancel_grace, interactions.wait_drained()) => {
                     if result.is_err() {
                         return Err(acp_error("permission handlers did not settle; close the connection before another prompt"));
                     }
@@ -554,6 +555,7 @@ impl EnsembleSupervisor {
         states: Vec<WorkerReviewState>,
         events: SessionEventSender,
         turn: TurnContext,
+        preflight: bool,
     ) -> anyhow::Result<EnsembleReviewExecution> {
         anyhow::ensure!(
             request.start.workflow == EnsembleWorkflow::Plan,
@@ -567,7 +569,9 @@ impl EnsembleSupervisor {
                     .all(|(state, descriptor)| &state.descriptor == descriptor),
             "review state must match every selected worker in descriptor order"
         );
-        preflight_existing_logs(&self.agent_runs_root, &request.start)?;
+        if preflight {
+            preflight_existing_logs(&self.agent_runs_root, &request.start)?;
+        }
         let cancellation = turn.cancellation().child_token();
         let permits = Arc::new(Semaphore::new(self.config.max_concurrent_agents));
         let (updates, receiver) = mpsc::channel(WORKER_CONTROL_CAPACITY);
@@ -750,7 +754,7 @@ impl EnsembleSupervisor {
                     interactive.release();
                     if turn.is_cancelled() {
                         let context = interactive.transient.lock().expect("transient recovery poisoned").failure_context(&agent.login_hint).into_iter().collect::<Vec<_>>();
-                        self.finish_worker_with_context(&log, EnsembleWorkflow::Plan, descriptor.clone(), AgentRunStatus::Cancelled, true,
+                        self.finish_worker_with_context(&log, descriptor.clone(), AgentRunStatus::Cancelled, true,
                             Some("ensemble turn cancelled by the user".into()), &context).await;
                     }
                     return Ok(());
@@ -762,7 +766,6 @@ impl EnsembleSupervisor {
                     }
                     Some(WorkerActorCommand::CancelPrompt { generation }) => { interactive.cancel_input(generation, &attempt_cancel.lock().expect("worker cancellation poisoned")); }
                     Some(WorkerActorCommand::Mirror(event)) => { log.emit(AgentRunEvent::Review { event: Box::new(event) }).await?; }
-                    Some(WorkerActorCommand::Retry) => {}
                     Some(WorkerActorCommand::Abandon { outcome, request_id }) => {
                         commands.close();
                         drop(queue_tx);
@@ -844,156 +847,161 @@ impl EnsembleSupervisor {
         };
         let mut first = true;
         let diagnostics = RawDiagnosticSink::spawn(log);
-        let mut recovery_context = None;
-        loop {
-            let cancellation = root.child_token();
-            *cancel_slot.lock().expect("worker cancellation poisoned") = cancellation.clone();
-            let attempt = interactive.attempt.fetch_add(1, AtomicOrdering::AcqRel) + 1;
-            let continuing = interactive
-                .current
-                .lock()
-                .expect("worker input poisoned")
-                .clone();
-            if let Some(input) = continuing {
-                let event = WorkerReviewEvent::Recovering {
-                    generation: input.generation,
-                    attempt,
-                };
-                log.emit(AgentRunEvent::Review {
-                    event: Box::new(event),
-                })
-                .await?;
-            } else {
-                recovery_context = None;
-                let queued = if first {
-                    interactive.queue.lock().await.try_recv().ok()
-                } else {
-                    None
-                };
-                if let Some(input) = queued {
-                    interactive
-                        .dispatch(input, log)
-                        .await
-                        .map_err(anyhow::Error::msg)?;
-                } else if !first || session_id.is_none() {
-                    let Some(input) = interactive.next(root).await else {
-                        return Ok(());
-                    };
-                    interactive
-                        .dispatch(input, log)
-                        .await
-                        .map_err(anyhow::Error::msg)?;
-                }
-            }
-            first = false;
-            if interactive.input_cancelled() {
-                interactive
-                    .settle(
-                        log,
-                        Some("worker input cancelled before startup or dispatch".into()),
-                        false,
-                    )
-                    .await
-                    .map_err(anyhow::Error::msg)?;
-                continue;
-            }
-            if let Err(error) = interactive.acquire(&cancellation).await {
-                interactive
-                    .settle(log, Some(error.to_string()), false)
-                    .await
-                    .map_err(anyhow::Error::msg)?;
-                continue;
-            }
-            let result = self
-                .run_worker_attempt(WorkerAttemptContext {
-                    agent_config: agent,
-                    descriptor: &interactive.descriptor,
-                    workflow: EnsembleWorkflow::Plan,
-                    base_prompt: &zevria_content::UserPrompt::default(),
-                    mode: session_id
-                        .clone()
-                        .map_or(WorkerAttemptMode::Fresh, |session_id| {
-                            WorkerAttemptMode::DurableRecovery {
-                                session_id: Some(session_id),
-                                repair: None,
-                            }
-                        }),
-                    log,
-                    cancellation: &cancellation,
-                    plan_handoff: handoff.as_ref(),
-                    transient_recovery: &interactive.transient,
-                    turn,
-                    diagnostics: diagnostics.sender(),
-                    interactive: Some(interactive.clone()),
-                })
-                .await;
-            interactive.release();
-            diagnostics.barrier().await;
-            log.barrier().await?;
-            if let Some(id) = &result.durable_session_id {
-                session_id = Some(id.clone());
-            }
-            if root.is_cancelled() {
-                return Ok(());
-            }
-            if !cancellation.is_cancelled()
-                && !interactive.input_cancelled()
-                && interactive
+        let result = async {
+            let mut recovery_context = None;
+            loop {
+                let cancellation = root.child_token();
+                *cancel_slot.lock().expect("worker cancellation poisoned") = cancellation.clone();
+                let attempt = interactive.attempt.fetch_add(1, AtomicOrdering::AcqRel) + 1;
+                let continuing = interactive
                     .current
                     .lock()
                     .expect("worker input poisoned")
-                    .is_some()
-                && interactive.relaunches.load(AtomicOrdering::Acquire)
-                    < MAX_LIVE_PROCESS_RECOVERY_ATTEMPTS as u64
-                && let Some(error) = result.recoverable_process_error()
-            {
-                let number = interactive.relaunches.fetch_add(1, AtomicOrdering::AcqRel) + 1;
-                recovery_context = Some(format!(
-                    "automatic process recovery attempt {number} of {MAX_LIVE_PROCESS_RECOVERY_ATTEMPTS} followed an unexpected process termination: {}",
-                    concise_process_failure(error)
-                ));
-                log.emit(AgentRunEvent::Status {
-                    status: AgentRunStatus::Resuming,
-                    detail: recovery_context.clone(),
-                })
-                .await?;
-                interactive.continuing.store(true, AtomicOrdering::Release);
-                continue;
-            }
-            let mut failure = result
-                .violation
-                .unwrap_or_else(|| match result.connection_result {
-                    Some(Err(error)) => error_with_login_hint(&error, &agent.login_hint),
-                    Some(Ok(end)) => format!("{end:?}"),
-                    None => "worker attempt cancelled".into(),
-                });
-            for context in [
-                handoff
-                    .as_ref()
-                    .and_then(ClaudePlanHandoff::unresolved_violation),
-                interactive
-                    .transient
-                    .lock()
-                    .expect("transient recovery poisoned")
-                    .failure_context(&agent.login_hint),
-                recovery_context.take(),
-                handoff
-                    .as_ref()
-                    .and_then(ClaudePlanHandoff::abandoned_preparations),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if !failure.contains(&context) {
-                    failure.push_str("; ");
-                    failure.push_str(&context);
+                    .clone();
+                if let Some(input) = continuing {
+                    let event = WorkerReviewEvent::Recovering {
+                        generation: input.generation,
+                        attempt,
+                    };
+                    log.emit(AgentRunEvent::Review {
+                        event: Box::new(event),
+                    })
+                    .await?;
+                } else {
+                    recovery_context = None;
+                    let queued = if first {
+                        interactive.queue.lock().await.try_recv().ok()
+                    } else {
+                        None
+                    };
+                    if let Some(input) = queued {
+                        interactive
+                            .dispatch(input, log)
+                            .await
+                            .map_err(anyhow::Error::msg)?;
+                    } else if !first || session_id.is_none() {
+                        let Some(input) = interactive.next(root).await else {
+                            return Ok(());
+                        };
+                        interactive
+                            .dispatch(input, log)
+                            .await
+                            .map_err(anyhow::Error::msg)?;
+                    }
                 }
+                first = false;
+                if interactive.input_cancelled() {
+                    interactive
+                        .settle(
+                            log,
+                            Some("worker input cancelled before startup or dispatch".into()),
+                            false,
+                        )
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                    continue;
+                }
+                if let Err(error) = interactive.acquire(&cancellation).await {
+                    interactive
+                        .settle(log, Some(error.to_string()), false)
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                    continue;
+                }
+                let result = self
+                    .run_worker_attempt(WorkerAttemptContext {
+                        agent_config: agent,
+                        descriptor: &interactive.descriptor,
+                        workflow: EnsembleWorkflow::Plan,
+                        base_prompt: &zevria_content::UserPrompt::default(),
+                        mode: session_id
+                            .clone()
+                            .map_or(WorkerAttemptMode::Fresh, |session_id| {
+                                WorkerAttemptMode::DurableRecovery {
+                                    session_id: Some(session_id),
+                                    repair: None,
+                                }
+                            }),
+                        log,
+                        cancellation: &cancellation,
+                        plan_handoff: handoff.as_ref(),
+                        transient_recovery: &interactive.transient,
+                        turn,
+                        diagnostics: diagnostics.sender(),
+                        interactive: Some(interactive.clone()),
+                    })
+                    .await;
+                interactive.release();
+                diagnostics.barrier().await;
+                log.barrier().await?;
+                if let Some(id) = &result.durable_session_id {
+                    session_id = Some(id.clone());
+                }
+                if root.is_cancelled() {
+                    return Ok(());
+                }
+                if !cancellation.is_cancelled()
+                    && !interactive.input_cancelled()
+                    && interactive
+                        .current
+                        .lock()
+                        .expect("worker input poisoned")
+                        .is_some()
+                    && interactive.relaunches.load(AtomicOrdering::Acquire)
+                        < MAX_LIVE_PROCESS_RECOVERY_ATTEMPTS as u64
+                    && let Some(error) = result.recoverable_process_error()
+                {
+                    let number = interactive.relaunches.fetch_add(1, AtomicOrdering::AcqRel) + 1;
+                    recovery_context = Some(format!(
+                        "automatic process recovery attempt {number} of {MAX_LIVE_PROCESS_RECOVERY_ATTEMPTS} followed an unexpected process termination: {}",
+                        concise_process_failure(error)
+                    ));
+                    log.emit(AgentRunEvent::Status {
+                        status: AgentRunStatus::Resuming,
+                        detail: recovery_context.clone(),
+                    })
+                    .await?;
+                    interactive.continuing.store(true, AtomicOrdering::Release);
+                    continue;
+                }
+                let mut failure = result
+                    .violation
+                    .unwrap_or_else(|| match result.connection_result {
+                        Some(Err(error)) => error_with_login_hint(&error, &agent.login_hint),
+                        Some(Ok(end)) => format!("{end:?}"),
+                        None => "worker attempt cancelled".into(),
+                    });
+                for context in [
+                    handoff
+                        .as_ref()
+                        .and_then(ClaudePlanHandoff::unresolved_violation),
+                    interactive
+                        .transient
+                        .lock()
+                        .expect("transient recovery poisoned")
+                        .failure_context(&agent.login_hint),
+                    recovery_context.take(),
+                    handoff
+                        .as_ref()
+                        .and_then(ClaudePlanHandoff::abandoned_preparations),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !failure.contains(&context) {
+                        failure.push_str("; ");
+                        failure.push_str(&context);
+                    }
+                }
+                interactive
+                    .settle(log, Some(failure), false)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
             }
-            interactive
-                .settle(log, Some(failure), false)
-                .await
-                .map_err(anyhow::Error::msg)?;
         }
+        .await;
+        diagnostics.finish().await;
+        result
     }
 }
 

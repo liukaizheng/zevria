@@ -841,11 +841,25 @@ pub(crate) fn fold_body_rows(
     if !mode.is_folded() {
         return;
     }
+    let full = wrapped_height(&lines[content_start..], wrap_width);
+    fold_body_rows_measured(lines, content_start, wrap_width, card, blocks, header, full);
+}
+
+/// Fold a body whose layout has already been measured. The caller only needs
+/// to supply its first logical line when the body spans more than one row.
+pub(crate) fn fold_body_rows_measured(
+    lines: &mut Vec<Line<'static>>,
+    content_start: usize,
+    wrap_width: u16,
+    card: Option<(u16, u16)>,
+    blocks: Option<usize>,
+    header: Option<&FoldHeader>,
+    full: usize,
+) {
     if wrap_width == 0 {
         lines.truncate(content_start);
         return;
     }
-    let full = wrapped_height(&lines[content_start..], wrap_width);
     if full <= 1 {
         return;
     }

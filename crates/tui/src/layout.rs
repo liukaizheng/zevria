@@ -24,9 +24,10 @@ use crate::app::{
 };
 use crate::chrome::style_selected_line;
 use crate::layout::prepare::{
-    ConversationBlockContext, FoldHeader, card_inset, fold_body_rows, render_compaction_divider,
-    render_conversation_block, render_ensemble, render_error, render_job_notice,
-    render_plan_artifact, render_plan_handoff, span_summary_line, wrapped_height,
+    ConversationBlockContext, FoldHeader, card_inset, fold_body_rows_measured,
+    render_compaction_divider, render_conversation_block, render_ensemble, render_error,
+    render_job_notice, render_plan_artifact, render_plan_handoff, span_summary_line,
+    wrapped_height,
 };
 use crate::presentation::{
     ConversationEntry, NativeHeader, PresentationBlock, PresentationBlockId, PresentationBlockKind,
@@ -89,6 +90,7 @@ struct PresentationBlockLayout {
     body_line_start: usize,
     fold_header: Option<FoldHeader>,
     height: usize,
+    prefix_height: usize,
     rows: RowRange,
     decoration: RowRange,
     role: Option<PresentationRole>,
@@ -126,6 +128,7 @@ impl PresentationBlockLayout {
             body_line_start: rows.content_line_start,
             fold_header: rows.fold_header,
             height,
+            prefix_height: 0,
             rows: rows.body,
             decoration: rows.decoration,
             role: block.role,
@@ -174,6 +177,9 @@ pub(crate) struct DecorationRows {
 #[derive(Default)]
 pub(crate) struct EntryLayout {
     width: u16,
+    revision: Option<u64>,
+    prefix_height: usize,
+    ends_with_reasoning: bool,
     pub(crate) span: Option<SpanRole>,
     /// Summary-only fingerprint; covered entries retain their real layouts.
     span_summary: Option<SpanSummary>,
@@ -185,7 +191,8 @@ pub(crate) struct EntryLayout {
     conversation_blocks: Option<Vec<PresentationBlockLayout>>,
     item_folds: Vec<FoldMode>,
     message_folded: FoldMode,
-    /// The entry's rendered lines. Selection geometry is cached separately.
+    /// Standalone lines for summaries and non-conversation entries. Unfolded
+    /// conversation lines live only in their block layout.
     pub(crate) lines: Vec<Line<'static>>,
     /// Wrapped height of `lines` at `width`. The inter-entry gap row that
     /// follows every entry in the pane is not included.
@@ -199,15 +206,52 @@ pub(crate) struct EntryLayout {
 }
 
 impl EntryLayout {
+    pub(crate) fn offset(&self) -> usize {
+        self.prefix_height
+    }
+
     /// Painting, total height, and hit testing share the same trailing gap.
     pub(crate) fn extent(&self) -> usize {
         self.height.saturating_add(usize::from(self.height > 0))
+    }
+
+    pub(crate) fn append_visible_lines(
+        &self,
+        offset: usize,
+        window: RowRange,
+        start: &mut Option<usize>,
+        lines: &mut Vec<Line<'static>>,
+    ) {
+        if let Some(blocks) = &self.conversation_blocks
+            && !self.message_folded.is_folded()
+        {
+            let local_start = window.start().saturating_sub(offset);
+            let first = blocks.partition_point(|block| {
+                block.prefix_height.saturating_add(block.height) <= local_start
+            });
+            for block in &blocks[first..] {
+                let base = offset.saturating_add(block.prefix_height);
+                if base >= window.end() {
+                    break;
+                }
+                if block.height != 0 {
+                    start.get_or_insert(base);
+                    lines.extend(block.lines.iter().cloned());
+                }
+            }
+        } else if self.height > 0
+            && RowRange::from_start_len(offset, self.height).intersects(window)
+        {
+            start.get_or_insert(offset);
+            lines.extend(self.lines.iter().cloned());
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn matches(
         &self,
         entry: &HistoryEntry,
+        revision: Option<u64>,
         entry_selection: EntrySelection,
         width: u16,
         diagnostics_visible: bool,
@@ -234,13 +278,14 @@ impl EntryLayout {
                     entry_folds,
                     timings,
                 ),
-                // These entries are immutable once committed.
+                // These entries are immutable until tail replacement.
                 HistoryEntry::PlanArtifact(_)
                 | HistoryEntry::PlanHandoff(..)
                 | HistoryEntry::JobNotice(..)
                 | HistoryEntry::CompactionDivider
                 | HistoryEntry::Error(_) => {
                     self.conversation_blocks.is_none()
+                        && (revision.is_none() || self.revision == revision)
                         && self
                             .item_folds
                             .iter()
@@ -248,8 +293,16 @@ impl EntryLayout {
                             .eq((0..entry.selectable_upper_bound())
                                 .map(|index| entry_folds.item_mode(index)))
                 }
-                // Compact worker rows mutate outside the presentation model.
-                HistoryEntry::Ensemble(_) => false,
+                HistoryEntry::Ensemble(_) => {
+                    revision.is_some()
+                        && self.revision == revision
+                        && self
+                            .item_folds
+                            .iter()
+                            .copied()
+                            .eq((0..entry.selectable_upper_bound())
+                                .map(|index| entry_folds.item_mode(index)))
+                }
             }
     }
 
@@ -259,6 +312,7 @@ impl EntryLayout {
     fn ensure_current(
         slot: &mut Option<Self>,
         entry: &HistoryEntry,
+        revision: Option<u64>,
         entry_selection: EntrySelection,
         width: u16,
         diagnostics_visible: bool,
@@ -270,6 +324,7 @@ impl EntryLayout {
         if slot.as_ref().is_some_and(|cached| {
             cached.matches(
                 entry,
+                revision,
                 entry_selection,
                 width,
                 diagnostics_visible,
@@ -285,7 +340,7 @@ impl EntryLayout {
             .as_mut()
             .and_then(|cached| cached.conversation_blocks.take())
             .unwrap_or_default();
-        let (built, rebuilt_blocks) = Self::build(
+        let (mut built, rebuilt_blocks) = Self::build(
             entry,
             entry_selection,
             width,
@@ -296,6 +351,7 @@ impl EntryLayout {
             entry_folds,
             timings,
         );
+        built.revision = revision;
         *slot = Some(built);
         Some(rebuilt_blocks)
     }
@@ -388,7 +444,6 @@ impl EntryLayout {
                     entry_selection,
                     diagnostics_visible,
                     reusable_blocks,
-                    &mut lines,
                     previous_reasoning,
                     appearance,
                     entry_folds,
@@ -399,9 +454,24 @@ impl EntryLayout {
                     && let Some(first) = blocks.first()
                 {
                     let prefix_len = first.body_line_start;
+                    lines.extend(first.lines[..prefix_len].iter().cloned());
+                    let prefix_rows = wrapped_height(&lines, width);
+                    let full_rows = blocks.last().map_or(0, |last| {
+                        last.prefix_height
+                            .saturating_add(last.height)
+                            .saturating_sub(prefix_rows)
+                    });
+                    let body = first.lines[prefix_len..]
+                        .iter()
+                        .chain(blocks[1..].iter().flat_map(|block| block.lines.iter()));
+                    if full_rows > 1 {
+                        lines.extend(body.take(1).cloned());
+                    } else if width > 0 {
+                        lines.extend(body.cloned());
+                    }
                     let card = appearance == TranscriptAppearance::Acp
                         && first.fingerprint.prompt_group.is_some();
-                    fold_body_rows(
+                    fold_body_rows_measured(
                         &mut lines,
                         prefix_len,
                         width,
@@ -412,10 +482,10 @@ impl EntryLayout {
                         } else {
                             None
                         },
-                        message_folded,
+                        full_rows,
                     );
                     let rows = RowRange::from_start_len(
-                        wrapped_height(&lines[..prefix_len], width),
+                        prefix_rows,
                         wrapped_height(&lines[prefix_len..], width),
                     );
                     if entry_selection != EntrySelection::None {
@@ -525,8 +595,25 @@ impl EntryLayout {
                 (vec![(0, rows)], None)
             }
         };
-        let height = wrapped_height(&lines, width);
-        let mut offset = 0;
+        // Geometry tests inspect every logical line. The real cache and the
+        // viewport painter keep unfolded content exclusively in block layouts.
+        #[cfg(test)]
+        if let Some(blocks) = &conversation_blocks
+            && !message_folded.is_folded()
+        {
+            lines.extend(blocks.iter().flat_map(|block| block.lines.iter().cloned()));
+        }
+        let height = conversation_blocks
+            .as_ref()
+            .filter(|_| !message_folded.is_folded())
+            .map_or_else(
+                || wrapped_height(&lines, width),
+                |blocks| {
+                    blocks
+                        .last()
+                        .map_or(0, |last| last.prefix_height.saturating_add(last.height))
+                },
+            );
         let decorations = conversation_blocks
             .as_ref()
             .map_or_else(Vec::new, |blocks| {
@@ -546,12 +633,11 @@ impl EntryLayout {
                     .iter()
                     .map(|block| {
                         let decoration = DecorationRows {
-                            rows: block.decoration.shifted(offset),
+                            rows: block.decoration.shifted(block.prefix_height),
                             role: block.role,
                             card: appearance == TranscriptAppearance::Acp
                                 && block.fingerprint.prompt_group.is_some(),
                         };
-                        offset += block.height;
                         decoration
                     })
                     .collect()
@@ -569,6 +655,9 @@ impl EntryLayout {
         (
             Self {
                 width,
+                revision: None,
+                prefix_height: 0,
+                ends_with_reasoning: false,
                 span: None,
                 span_summary: None,
                 absorbing_span: entry_folds.absorbing_span().map(|(start, _)| start),
@@ -707,7 +796,6 @@ fn build_conversation_blocks(
     entry_selection: EntrySelection,
     diagnostics_visible: bool,
     reusable_blocks: Vec<PresentationBlockLayout>,
-    lines: &mut Vec<Line<'static>>,
     previous_reasoning: bool,
     appearance: TranscriptAppearance,
     entry_folds: EntryFolds<'_>,
@@ -757,18 +845,27 @@ fn build_conversation_blocks(
                 items.push((index, rows));
             }
         }
+        layout.prefix_height = prefix_height;
         prefix_height = prefix_height.saturating_add(layout.height);
-        lines.extend(layout.lines.iter().cloned());
         blocks.push(layout);
     }
     (blocks, items, rebuilt)
 }
 
 /// Cached rendering of the in-flight message or render-only pending header.
-struct StreamingLayout {
-    width: u16,
+#[derive(PartialEq, Eq)]
+struct StreamingKey {
+    snapshot: Option<zevria_presentation::session::StreamSnapshotId>,
     header: Option<NativeHeader>,
     elapsed_seconds: Option<u64>,
+    width: u16,
+    folded: bool,
+    has_body: bool,
+    previous_reasoning: bool,
+}
+
+struct StreamingLayout {
+    key: StreamingKey,
     blocks: Vec<PresentationBlockLayout>,
     lines: Vec<Line<'static>>,
     height: usize,
@@ -781,10 +878,30 @@ struct PendingPromptLayout {
     height: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LayoutContext {
+    epoch: zevria_presentation::blocks::ProjectionEpoch,
+    folds: u64,
+    structure: u64,
+    timings: u64,
+    width: u16,
+    diagnostics_visible: bool,
+    selected: Option<ActiveSelection>,
+    appearance: TranscriptAppearance,
+}
+
 /// Per-frame validated cache of the conversation pane's wrapped lines.
 #[derive(Default)]
 pub(crate) struct ConversationCache {
     entries: Vec<EntryLayout>,
+    layout_key: Option<(LayoutContext, u64)>,
+    geometry_revision: u64,
+    timing_key: Option<(
+        zevria_presentation::blocks::ProjectionEpoch,
+        u64,
+        Vec<(NativeHeader, u64)>,
+    )>,
+    timing_revision: u64,
     /// Real layouts under summaries/placeholders, including the representative.
     covered: HashMap<usize, EntryLayout>,
     streaming: Option<StreamingLayout>,
@@ -839,20 +956,54 @@ impl ConversationCache {
     }
 
     /// Install decoration state before refreshing committed and streaming layouts.
+    #[cfg(test)]
     pub(crate) fn set_header_timings(&mut self, timings: HeaderTimings) {
         self.header_timings = timings;
+        self.timing_key = None;
+        self.timing_revision += 1;
+    }
+
+    pub(crate) fn observe_header_timings(
+        &mut self,
+        conversation: &zevria_presentation::conversation::ConversationState,
+        now: std::time::Instant,
+    ) {
+        let epoch = conversation.epoch();
+        let revision = conversation.header_timing_revision();
+        if self
+            .timing_key
+            .as_ref()
+            .is_some_and(|(old_epoch, old_revision, running)| {
+                *old_epoch == epoch
+                    && *old_revision == revision
+                    && conversation
+                        .running_header_seconds(now)
+                        .eq(running.iter().copied())
+            })
+        {
+            return;
+        }
+        self.timing_key = Some((
+            epoch,
+            revision,
+            conversation.running_header_seconds(now).collect(),
+        ));
+        self.header_timings = HeaderTimings::observe(conversation, now);
+        self.timing_revision += 1;
     }
 
     /// Drop cached committed entries at and after a semantic replacement
     /// boundary. Reducers call this immediately rather than storing a hidden
     /// one-frame invalidation marker on `App`.
     pub(crate) fn invalidate_from(&mut self, index: usize) {
+        self.layout_key = None;
         self.entries.truncate(index);
         self.covered.retain(|&history, _| history < index);
     }
 
     /// Bring the per-entry cache in line with `history`, re-rendering only
     /// entries whose width, selection, or tool-call state changed.
+    #[cfg(test)]
     pub(crate) fn refresh(
         &mut self,
         history: &[HistoryEntry],
@@ -861,10 +1012,63 @@ impl ConversationCache {
         diagnostics_visible: bool,
         folds: &FoldState,
     ) {
+        self.refresh_with_revisions(history, None, selected, width, diagnostics_visible, folds);
+    }
+
+    pub(crate) fn refresh_with_revisions(
+        &mut self,
+        history: &[HistoryEntry],
+        conversation: Option<&zevria_presentation::conversation::ConversationState>,
+        selected: Option<ActiveSelection>,
+        width: u16,
+        diagnostics_visible: bool,
+        folds: &FoldState,
+    ) {
+        let key = conversation.map(|conversation| {
+            (
+                LayoutContext {
+                    epoch: conversation.epoch(),
+                    folds: folds.revision(),
+                    structure: conversation.structure_revision(),
+                    timings: self.timing_revision,
+                    width,
+                    diagnostics_visible,
+                    selected,
+                    appearance: self.appearance,
+                },
+                conversation.revision(),
+            )
+        });
+        if key.is_some() && self.layout_key == key {
+            return;
+        }
+        if let (Some((old, _)), Some((new, _))) = (self.layout_key, key)
+            && old.epoch != new.epoch
+        {
+            self.entries.clear();
+            self.covered.clear();
+            self.streaming = None;
+        }
+        let mut from = 0;
+        if let Some(conversation) = conversation
+            && !folds.has_spans()
+            && let Some((old_context, old_revision)) = self.layout_key
+            && key.is_some_and(|(context, _)| context == old_context)
+        {
+            from = conversation
+                .changed_entries_since(old_revision)
+                .min()
+                .unwrap_or(history.len())
+                .min(self.entries.len());
+        }
+        self.layout_key = key;
+        self.geometry_revision += 1;
         self.entries.truncate(history.len());
         self.covered.retain(|&index, _| index < history.len());
-        let mut previous_reasoning = false;
-        for (index, entry) in history.iter().enumerate() {
+        let mut previous_reasoning = from
+            .checked_sub(1)
+            .is_some_and(|i| self.entries[i].ends_with_reasoning);
+        for (index, entry) in history.iter().enumerate().skip(from) {
             let entry_folds = folds.entry(index);
             let role = entry_folds.span();
             let entry_selection = selected
@@ -888,6 +1092,7 @@ impl ConversationCache {
             let rebuilt = EntryLayout::ensure_current(
                 &mut real,
                 entry,
+                conversation.map(|conversation| conversation.entry_revision(index)),
                 entry_selection,
                 width,
                 diagnostics_visible,
@@ -919,7 +1124,7 @@ impl ConversationCache {
             } else {
                 false
             };
-            let layout = if let Some(role) = role {
+            let mut layout = if let Some(role) = role {
                 self.covered.insert(index, real);
                 rendered
                     .filter(|cached| cached.span == Some(role) && cached.width == width)
@@ -927,36 +1132,48 @@ impl ConversationCache {
             } else {
                 real
             };
+            layout.ends_with_reasoning = previous_reasoning;
             match self.entries.get_mut(index) {
                 Some(slot) => *slot = layout,
                 None => self.entries.push(layout),
             }
         }
-        for (start, layout) in self.entries.iter_mut().enumerate() {
-            let Some(SpanRole::Summary { end }) = layout.span else {
-                continue;
-            };
-            let selected = selected
-                .is_some_and(|active| (start..=end).contains(&active.selection.history_index));
-            let rebuilt = layout.refresh_summary(
-                folds.span_summary(history, start, diagnostics_visible),
-                selected,
-            );
-            #[cfg(not(test))]
-            let _ = rebuilt;
-            #[cfg(test)]
-            if rebuilt {
-                self.rebuilds += 1;
+        if folds.has_spans() {
+            for (start, layout) in self.entries.iter_mut().enumerate() {
+                let Some(SpanRole::Summary { end }) = layout.span else {
+                    continue;
+                };
+                let selected = selected
+                    .is_some_and(|active| (start..=end).contains(&active.selection.history_index));
+                let rebuilt = layout.refresh_summary(
+                    folds.span_summary(history, start, diagnostics_visible),
+                    selected,
+                );
+                #[cfg(not(test))]
+                let _ = rebuilt;
+                #[cfg(test)]
+                if rebuilt {
+                    self.rebuilds += 1;
+                }
+                // Content indices can change even when the summary fingerprint
+                // does not (for example, diagnostics replacing another block).
+                layout.items.clear();
+                layout.items.extend(
+                    self.covered[&start]
+                        .items
+                        .iter()
+                        .map(|&(index, _)| (index, RowRange::new(0, 1))),
+                );
             }
-            // Content indices can change even when the summary fingerprint
-            // does not (for example, diagnostics replacing another block).
-            layout.items.clear();
-            layout.items.extend(
-                self.covered[&start]
-                    .items
-                    .iter()
-                    .map(|&(index, _)| (index, RowRange::new(0, 1))),
-            );
+        }
+        let mut offset = from.checked_sub(1).map_or(0, |i| {
+            self.entries[i]
+                .prefix_height
+                .saturating_add(self.entries[i].extent())
+        });
+        for entry in &mut self.entries[from..] {
+            entry.prefix_height = offset;
+            offset = offset.saturating_add(entry.extent());
         }
         self.tail_reasoning = previous_reasoning;
     }
@@ -967,21 +1184,14 @@ impl ConversationCache {
         &self,
         targets: &[TurnStartTarget],
     ) -> Vec<(TurnStartTarget, usize)> {
-        let mut offset = 0usize;
-        let offsets = self
-            .entries
-            .iter()
-            .map(|entry| {
-                let start = offset;
-                offset = offset.saturating_add(entry.extent());
-                start
-            })
-            .collect::<Vec<_>>();
         let mut positions = targets
             .iter()
             .filter_map(|&target| {
                 let (history, within) = self.turn_start_location(target)?;
-                Some((target, offsets[history].saturating_add(within)))
+                Some((
+                    target,
+                    self.entries[history].prefix_height.saturating_add(within),
+                ))
             })
             .collect::<Vec<_>>();
         positions.dedup_by_key(|(_, row)| *row);
@@ -990,10 +1200,7 @@ impl ConversationCache {
 
     pub(crate) fn turn_start_row(&self, target: TurnStartTarget) -> Option<usize> {
         let (history, within) = self.turn_start_location(target)?;
-        let offset = self.entries[..history]
-            .iter()
-            .map(EntryLayout::extent)
-            .sum::<usize>();
+        let offset = self.entries[history].prefix_height;
         Some(offset.saturating_add(within))
     }
 
@@ -1040,8 +1247,9 @@ impl ConversationCache {
         &self,
         top: usize,
     ) -> Option<(usize, PresentationBlockId, usize)> {
-        let mut offset = 0usize;
-        for (history, entry) in self.entries.iter().enumerate() {
+        let history = self.entry_at_row(top);
+        if let Some(entry) = self.entries.get(history) {
+            let offset = entry.prefix_height;
             if matches!(entry.span, Some(SpanRole::Summary { .. })) && top == offset {
                 return self
                     .covered
@@ -1073,7 +1281,6 @@ impl ConversationCache {
                     }
                 }
             }
-            offset = offset.saturating_add(entry.extent());
         }
         None
     }
@@ -1131,6 +1338,21 @@ impl ConversationCache {
         None
     }
 
+    pub(crate) fn geometry_revision(&self) -> u64 {
+        self.geometry_revision
+    }
+
+    pub(crate) fn entry_at_row(&self, row: usize) -> usize {
+        self.entries
+            .partition_point(|entry| entry.prefix_height.saturating_add(entry.extent()) <= row)
+    }
+
+    pub(crate) fn total_height(&self) -> usize {
+        self.entries.last().map_or(0, |entry| {
+            entry.prefix_height.saturating_add(entry.extent())
+        })
+    }
+
     pub(crate) fn entries(&self) -> &[EntryLayout] {
         &self.entries
     }
@@ -1175,6 +1397,7 @@ impl ConversationCache {
 
     /// Cache streamed content, or only its native header before readable content
     /// arrives. The caller omits the header when committed content already owns it.
+    #[cfg(test)]
     pub(crate) fn refresh_streaming(
         &mut self,
         streaming: Option<&Message>,
@@ -1182,7 +1405,35 @@ impl ConversationCache {
         width: u16,
         entry_folds: EntryFolds<'_>,
     ) {
+        self.refresh_streaming_at(streaming, None, header, width, entry_folds);
+    }
+
+    pub(crate) fn refresh_streaming_at(
+        &mut self,
+        streaming: Option<&Message>,
+        snapshot: Option<zevria_presentation::session::StreamSnapshotId>,
+        header: Option<NativeHeader>,
+        width: u16,
+        entry_folds: EntryFolds<'_>,
+    ) {
         let elapsed_seconds = header_elapsed_seconds(header, &self.header_timings);
+        let key = StreamingKey {
+            snapshot,
+            header,
+            elapsed_seconds,
+            width,
+            folded: entry_folds.stream_is_folded(),
+            has_body: streaming.is_some(),
+            previous_reasoning: self.tail_reasoning,
+        };
+        if (streaming.is_none() || snapshot.is_some())
+            && self
+                .streaming
+                .as_ref()
+                .is_some_and(|cached| cached.key == key)
+        {
+            return;
+        }
         let entry = streaming.and_then(|message| {
             HistoryEntry::from_message(message.clone(), ToolCallStatus::Finished)
         });
@@ -1191,20 +1442,10 @@ impl ConversationCache {
                 self.streaming = None;
                 return;
             };
-            if self.streaming.as_ref().is_some_and(|cached| {
-                cached.width == width
-                    && cached.header == Some(header)
-                    && cached.blocks.is_empty()
-                    && cached.elapsed_seconds == elapsed_seconds
-            }) {
-                return;
-            }
             let lines = vec![prepare::native_assistant_header(header, elapsed_seconds)];
             let height = wrapped_height(&lines, width);
             self.streaming = Some(StreamingLayout {
-                width,
-                header: Some(header),
-                elapsed_seconds,
+                key,
                 blocks: Vec::new(),
                 lines,
                 height,
@@ -1216,16 +1457,17 @@ impl ConversationCache {
             block.revision = streaming_block_revision(block);
         }
 
-        let cached = self.streaming.take().filter(|cached| cached.width == width);
+        let cached = self
+            .streaming
+            .take()
+            .filter(|cached| cached.key.width == width);
         let reusable = cached.map_or_else(Vec::new, |cached| cached.blocks);
-        let mut lines = Vec::new();
         let (blocks, _, rebuilt) = build_conversation_blocks(
             &entry,
             width,
             EntrySelection::None,
             false,
             reusable,
-            &mut lines,
             self.tail_reasoning,
             TranscriptAppearance::Native,
             entry_folds,
@@ -1237,11 +1479,15 @@ impl ConversationCache {
         }
         #[cfg(not(test))]
         let _ = rebuilt;
-        let height = wrapped_height(&lines, width);
+        let height = blocks
+            .last()
+            .map_or(0, |last| last.prefix_height.saturating_add(last.height));
+        let lines = blocks
+            .iter()
+            .flat_map(|block| block.lines.iter().cloned())
+            .collect();
         self.streaming = Some(StreamingLayout {
-            width,
-            header,
-            elapsed_seconds,
+            key,
             blocks,
             lines,
             height,
@@ -1336,12 +1582,23 @@ mod tests {
         use std::time::{Duration, Instant};
 
         fn assert_geometry(actual: &EntryLayout, expected: &EntryLayout) {
-            assert_eq!(actual.lines, expected.lines);
+            let lines = |entry: &EntryLayout| {
+                let mut lines = Vec::new();
+                entry.append_visible_lines(
+                    0,
+                    RowRange::from_start_len(0, entry.height),
+                    &mut None,
+                    &mut lines,
+                );
+                lines
+            };
+            let rendered = lines(actual);
+            assert_eq!(rendered, lines(expected));
             assert_eq!(actual.height, expected.height);
             assert_eq!(actual.items, expected.items);
             assert_eq!(actual.selection, expected.selection);
             assert_eq!(actual.extent(), expected.extent());
-            assert_eq!(actual.height, wrapped_height(&actual.lines, actual.width));
+            assert_eq!(actual.height, wrapped_height(&rendered, actual.width));
             let decorations = |entry: &EntryLayout| {
                 entry
                     .decorations
@@ -1851,6 +2108,22 @@ mod tests {
     }
 
     #[test]
+    fn clearing_an_unkeyed_stream_discards_body_with_same_header() {
+        let mut cache = ConversationCache::default();
+        let header = Some(NativeHeader::Assistant {
+            turn: zevria_presentation::blocks::DisplayTurn(1),
+            call: 1,
+        });
+        let message = Message::assistant("body\n".repeat(12));
+        cache.refresh_streaming(Some(&message), header, 24, EntryFolds::none());
+        assert!(cache.streaming().unwrap().1 > 1);
+        cache.refresh_streaming(None, header, 24, EntryFolds::none());
+        assert!(cache.streaming.as_ref().unwrap().blocks.is_empty());
+        cache.refresh_streaming(None, None, 24, EntryFolds::none());
+        assert!(cache.streaming().is_none());
+    }
+
+    #[test]
     fn semantic_anchors_exclude_gaps_and_uncommitted_rows() {
         let mut cache = ConversationCache::default();
         assert_eq!(cache.semantic_anchor(0), None);
@@ -2004,6 +2277,7 @@ mod tests {
             &FoldState::default(),
         );
         cache.entries[0].height = usize::MAX - 2;
+        cache.entries[1].prefix_height = cache.entries[0].extent();
         let first_id = cache.entries[1].conversation_blocks.as_ref().unwrap()[0]
             .fingerprint
             .id;

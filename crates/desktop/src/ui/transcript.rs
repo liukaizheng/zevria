@@ -37,7 +37,12 @@ struct PaneView {
     projector: Projector,
     blocks: HashMap<String, RetainedBlock>,
     disclosures: DisclosureState,
-    revision: u64,
+    conversation_revision: u64,
+    structure_revision: u64,
+    stream_snapshot: Option<zevria_presentation::session::StreamSnapshotId>,
+    live_attempt: Option<NativeHeader>,
+    live_rows: HashSet<String>,
+    activity: Option<String>,
     busy: bool,
     call: Option<NativeHeader>,
     pending: Option<u64>,
@@ -53,7 +58,12 @@ impl PaneView {
             projector: Projector::default(),
             blocks: HashMap::new(),
             disclosures: DisclosureState::default(),
-            revision: u64::MAX,
+            conversation_revision: u64::MAX,
+            structure_revision: u64::MAX,
+            stream_snapshot: None,
+            live_attempt: None,
+            live_rows: HashSet::new(),
+            activity: None,
             busy: false,
             call: None,
             pending: None,
@@ -132,7 +142,6 @@ impl TranscriptView {
             let previous = std::mem::replace(&mut self.pane, next);
             self.parked.insert(self.selected.clone(), previous);
             self.selected = selected;
-            self.pane.revision = u64::MAX;
             self.pane.scroller.update(cx, |list, cx| list.remeasure(cx));
         }
         let controller = self.controller.read(cx);
@@ -141,20 +150,39 @@ impl TranscriptView {
                 .is_none_or(|id| controller.model.children.iter().any(|c| &c.id == id))
         });
         let model = controller.model.visible();
-        let revision = controller.projection_revision;
+        let revision = model.conversation.revision();
+        let structure = model.conversation.structure_revision();
+        let snapshot = model.session.stream_snapshot();
+        let live_attempt = controller.live_attempt_header(model);
         let busy = model.session.has_turn_work();
         let call = model.session.call_header();
         let pending = model.pending_prompt().map(|p| p.id());
         let cancelling = controller.cancelling;
         let replaced = Some(epoch) != self.pane.epoch;
+        let activity = busy.then(|| {
+            let label = super::status::working_activity(model, cancelling);
+            // Reconnecting tips read the clock during paint; their row identity
+            // and layout only change when entering or leaving reconnect state.
+            if label.starts_with("Reconnecting") {
+                "Reconnecting".into()
+            } else {
+                label
+            }
+        });
         if !replaced
-            && self.pane.revision == revision
+            && !pane_changed
+            && self.pane.conversation_revision == revision
+            && self.pane.structure_revision == structure
+            && self.pane.stream_snapshot == snapshot
+            && self.pane.live_attempt == live_attempt
+            && self.pane.activity == activity
             && self.pane.busy == busy
             && self.pane.call == call
             && self.pane.pending == pending
             && self.pane.cancelling == cancelling
         {
-            return; // Draft edits and the status clock do not rebuild the timeline.
+            self.notify_live_rows(cx);
+            return;
         }
         if replaced {
             self.pane.epoch = Some(epoch);
@@ -162,14 +190,16 @@ impl TranscriptView {
             self.pane.disclosures = DisclosureState::default();
             self.pane.blocks.clear();
         }
-        let activity = busy.then(|| super::status::working_activity(model, cancelling));
         let mut projection = self.pane.projector.project_timeline(
             model,
             &format!("{epoch:?}"),
             &controller.unsaved_blocks,
             activity.as_deref(),
-            controller.live_attempt_header(model),
+            live_attempt,
+            &self.pane.rows,
         );
+        let start = projection.start_row;
+        let old_suffix = &self.pane.rows[start..];
         let valid: HashSet<_> = projection
             .rows
             .iter()
@@ -177,19 +207,14 @@ impl TranscriptView {
             .collect();
         let mut aliases = HashMap::new();
         if !replaced {
-            let old_keys: HashSet<_> = self
-                .pane
-                .rows
-                .iter()
-                .map(|row| row.data.key.as_str())
-                .collect();
+            let old_keys: HashSet<_> = old_suffix.iter().map(|row| row.data.key.as_str()).collect();
             aliases.extend(
                 projection
                     .transfers
                     .into_iter()
                     .filter(|(_, new)| !old_keys.contains(new.as_str())),
             );
-            for old in &self.pane.rows {
+            for old in old_suffix {
                 if let Some(anchor) = old.data.source {
                     let resolved = model.conversation.resolved_identity(anchor);
                     if let Some(new) = projection.anchors.get(&resolved) {
@@ -208,26 +233,33 @@ impl TranscriptView {
         for (old, new) in &aliases {
             self.rekey(old, new, window, cx);
         }
-        self.pane
-            .blocks
-            .retain(|key, _| valid.contains(key.as_str()));
-        self.pane.disclosures.retain_keys(&valid);
-        for row in &mut projection.rows {
-            row.apply_disclosure(&self.pane.disclosures);
+        let old = self.pane.rows.split_off(start);
+        for row in &old {
+            self.pane.indices.remove(&row.data.key);
+            self.pane.live_rows.remove(&row.data.key);
+            if !valid.contains(row.data.key.as_str()) {
+                self.pane.blocks.remove(&row.data.key);
+                self.pane.disclosures.remove(&row.data.key);
+            }
         }
-        let old = std::mem::replace(&mut self.pane.rows, projection.rows);
-        self.pane.indices = self
-            .pane
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(i, row)| (row.data.key.clone(), i))
-            .collect();
-        self.pane.revision = revision;
+        for (i, row) in projection.rows.iter_mut().enumerate() {
+            row.apply_disclosure(&self.pane.disclosures);
+            if row.needs_clock() {
+                self.pane.live_rows.insert(row.data.key.clone());
+            }
+            self.pane.indices.insert(row.data.key.clone(), start + i);
+        }
+        self.pane.rows.append(&mut projection.rows);
+        self.pane.conversation_revision = revision;
+        self.pane.structure_revision = structure;
+        self.pane.stream_snapshot = snapshot;
+        self.pane.live_attempt = live_attempt;
+        self.pane.activity = activity;
         self.pane.busy = busy;
         self.pane.call = call;
         self.pane.pending = pending;
         self.pane.cancelling = cancelling;
+        let mut sync = Vec::new();
         if replaced {
             self.pane
                 .scroller
@@ -249,9 +281,7 @@ impl TranscriptView {
                     (key.as_str(), row.fingerprint)
                 })
                 .collect::<Vec<_>>();
-            let after = self
-                .pane
-                .rows
+            let after = self.pane.rows[start..]
                 .iter()
                 .map(|row| (row.data.key.as_str(), row.fingerprint))
                 .collect::<Vec<_>>();
@@ -260,15 +290,18 @@ impl TranscriptView {
                     RowChange::None => {}
                     RowChange::Remeasure(indices) => {
                         self.pane.scroller.update(cx, |list, cx| {
-                            for i in indices {
+                            for &i in &indices {
+                                let i = start + i;
                                 list.remeasure_items(i..i + 1, cx);
                             }
                         });
+                        sync.extend(indices.into_iter().map(|i| start + i));
                     }
                     RowChange::Splice { old, count } => {
-                        self.pane
-                            .scroller
-                            .update(cx, |list, cx| list.splice(old, count, cx));
+                        sync.extend(start + old.start..start + old.start + count);
+                        self.pane.scroller.update(cx, |list, cx| {
+                            list.splice(start + old.start..start + old.end, count, cx)
+                        });
                     }
                 }
             }
@@ -276,14 +309,31 @@ impl TranscriptView {
         if reset_focus {
             window.focus(&self.window_focus, cx);
         }
-        for row in &self.pane.rows {
+        for (_, key) in aliases {
+            if let Some(&index) = self.pane.indices.get(&key) {
+                sync.push(index);
+            }
+        }
+        sync.sort_unstable();
+        sync.dedup();
+        for index in sync {
+            let row = &self.pane.rows[index];
             if let Some(block) = self.pane.blocks.get(&row.data.key) {
                 block
                     .view
                     .update(cx, |view, cx| view.sync(row.clone(), window, cx));
             }
         }
+        self.notify_live_rows(cx);
         cx.notify();
+    }
+
+    fn notify_live_rows(&self, cx: &mut Context<Self>) {
+        for key in &self.pane.live_rows {
+            if let Some(block) = self.pane.blocks.get(key) {
+                block.view.update(cx, |_, cx| cx.notify());
+            }
+        }
     }
 
     pub fn jump_to_latest(&mut self, cx: &mut Context<Self>) {

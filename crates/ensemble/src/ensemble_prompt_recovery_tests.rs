@@ -13,7 +13,8 @@ async fn transient_continuation_sync_failure_prevents_dispatch_and_retains_origi
         path: PathBuf::from("unused-transient-log"),
         writer,
         failure,
-        evidence: Arc::new(Mutex::new(WorkerEvidenceState::default())),
+        last_permission: Default::default(),
+        ignore_recovered_repair: Default::default(),
         review_publication: Arc::new(Mutex::new(None)),
         event_order: Arc::new(tokio::sync::Mutex::new(())),
     };
@@ -590,10 +591,9 @@ async fn transient_cancellation_during_backoff_or_continuation_never_retries_aga
         );
         let cancel = async {
             loop {
-                if let zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::AgentRunUpdated {
-                    event,
-                    ..
-                }) = receiver
+                if let zevria_session_api::SessionUpdate::Lifecycle(
+                    SessionEvent::AgentRunUpdated { event, .. },
+                ) = receiver
                     .recv()
                     .await
                     .expect("worker event channel closed before cancellation")

@@ -1404,8 +1404,8 @@ fn plan_artifact_handoff_error_and_ensemble_items_fold_and_unfold() {
     rendered_text(&mut app, 120, 30);
     assert_eq!(
         app.view_cache().rebuilds,
-        rebuilt + 1,
-        "only ensemble always rebuilds"
+        rebuilt,
+        "unchanged ensemble and immutable rows are cached"
     );
     chord(&mut app, 'R');
     rendered_text(&mut app, 120, 30);

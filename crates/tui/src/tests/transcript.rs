@@ -6749,7 +6749,9 @@ fn acp_markdown_plan_replaces_representations_across_repair_and_matching_removal
         AgentRunEvent::Prompt {
             text: "repair now".to_string(),
             continuation: true,
-            repair: Some(AgentRunRepair::MissingPlanProof),
+            repair: Some(AgentRunRepair::EarlyStop {
+                stop_reason: "max_tokens".into(),
+            }),
         },
     );
     apply_agent_event(
@@ -6837,7 +6839,9 @@ fn acp_transient_continuation_retains_one_byte_exact_native_plan_block() {
         AgentRunEvent::Prompt {
             text: "repair now".into(),
             continuation: true,
-            repair: Some(AgentRunRepair::MissingPlanProof),
+            repair: Some(AgentRunRepair::EarlyStop {
+                stop_reason: "max_tokens".into(),
+            }),
         },
         AgentRunEvent::Status {
             status: AgentRunStatus::Resuming,

@@ -1,7 +1,10 @@
 //! Materialize the append-only ACP event journal into semantic TUI blocks.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
+use zevria_content::response::{
+    DisplayProjectionBinding as Binding, DisplayProjectionKind as DisplayKind,
+};
 use zevria_workflow::AgentProtocolDirection;
 use zevria_workflow::AgentRunEvent;
 use zevria_workflow::AgentRunLocation;
@@ -279,13 +282,18 @@ pub struct AgentTranscriptReducer {
     // Latest coverage per emitted segment/range, not a history of token
     // snapshots. A corrected segment may arrive before its predecessor's
     // coalesced preview; keep enough evidence to cover that predecessor later.
-    display_text_coverage: HashMap<(SegmentKind, String, usize), DisplayTextCoverage>,
+    display_text_coverage:
+        HashMap<String, HashMap<(SegmentKind, String, usize), DisplayTextCoverage>>,
+    display_segments: HashMap<(SegmentKind, String), HashSet<String>>,
+    display_tools: HashMap<String, HashSet<String>>,
+    displays_dirty: BTreeSet<String>,
+    hosted_actions_dirty: BTreeSet<usize>,
     fallback_groups: HashMap<String, PresentationBlockId>,
+    fallback_group_ids: HashSet<PresentationBlockId>,
     applied_answers: HashMap<String, usize>,
 }
 
 struct DisplayTextCoverage {
-    attempt_id: String,
     end: usize,
     text: String,
 }
@@ -393,45 +401,7 @@ impl AgentTranscriptReducer {
             self.review_session_established();
         }
         match event {
-            AgentRunEvent::ResponseDisplay { display } => {
-                if display.validate().is_ok()
-                    && !self.displays.get(&display.attempt.id).is_some_and(|old| {
-                        old.attempt.revision > display.attempt.revision
-                            || (old.attempt.revision == display.attempt.revision
-                                && old.attempt != display.attempt)
-                    })
-                {
-                    for binding in &display.bindings {
-                        if let zevria_content::response::DisplayProjectionBinding::Text {
-                            kind,
-                            message_id,
-                            start,
-                            end,
-                            ..
-                        } = binding
-                            && let Some(text) = display.binding_text(binding)
-                        {
-                            let kind = match kind {
-                                zevria_content::response::DisplayProjectionKind::Message => {
-                                    SegmentKind::Agent
-                                }
-                                zevria_content::response::DisplayProjectionKind::Thought => {
-                                    SegmentKind::Thought
-                                }
-                            };
-                            self.display_text_coverage.insert(
-                                (kind, message_id.clone(), *start),
-                                DisplayTextCoverage {
-                                    attempt_id: display.attempt.id.clone(),
-                                    end: *end,
-                                    text,
-                                },
-                            );
-                        }
-                    }
-                    self.displays.insert(display.attempt.id.clone(), *display);
-                }
-            }
+            AgentRunEvent::ResponseDisplay { display } => self.install_display(*display),
             AgentRunEvent::ReplayBoundary => unreachable!("replay boundary handled above"),
             AgentRunEvent::Review { event } => self.apply_review_event(conversation, *event),
             AgentRunEvent::Prompt { mut text, .. } if !self.review_inputs.is_empty() => {
@@ -547,12 +517,17 @@ impl AgentTranscriptReducer {
             ),
             AgentRunEvent::ToolResultMetadata { metadata } => {
                 if let Some(location) = self.tools.get(&metadata.id).copied()
-                    && let Some(block) = block_mut(conversation, location)
+                    && let Some(block) =
+                        conversation.hinted_block_mut(location.history_index, location.block_id)
                     && let PresentationBlockKind::Tool(PresentedTool::Acp(tool)) = &mut block.kind
                     && tool.metadata.as_ref() != Some(metadata.as_ref())
                 {
+                    let id = metadata.id.clone();
                     tool.metadata = Some(*metadata);
+                    let hosted = tool.is_hosted_search();
                     block.touch();
+                    conversation.touch_entry(location.history_index);
+                    self.tool_changed(&id, location, hosted);
                 }
             }
             AgentRunEvent::Plan { plan } | AgentRunEvent::NativePlanCaptured { plan, .. } => {
@@ -620,8 +595,7 @@ impl AgentTranscriptReducer {
             }
             event => self.append_diagnostic(conversation, diagnostic_for_event(&event)),
         }
-        self.refresh_displays(conversation);
-        self.regroup_hosted_actions(conversation);
+        self.flush_projection_changes(conversation);
         change
     }
 
@@ -637,9 +611,10 @@ impl AgentTranscriptReducer {
             return ConversationChange::default();
         }
         if let Some(replay) = &mut self.replay {
-            return replay
+            replay
                 .reducer
                 .apply_preview(&mut replay.conversation, event);
+            return ConversationChange::default();
         }
         match event {
             AgentRunEvent::AgentMessage { text, message_id } => self.apply_segment(
@@ -658,6 +633,7 @@ impl AgentTranscriptReducer {
             ),
             event => return self.apply_event(conversation, event),
         }
+        self.flush_projection_changes(conversation);
         ConversationChange::default()
     }
 
@@ -777,6 +753,7 @@ impl AgentTranscriptReducer {
         } else if let Some(block) = replacement {
             entry.blocks.push(block);
         }
+        conversation.change_structure();
         self.rebuild_locations(conversation);
         self.fence();
         self.user_group = None;
@@ -866,6 +843,7 @@ impl AgentTranscriptReducer {
                 if group == block.id {
                     block.prompt = Some(annotation.clone());
                 }
+                conversation.touch_entry(location.history_index);
             }
         }
         // Accepted review content is complete. Unmatched provider user chunks
@@ -895,6 +873,7 @@ impl AgentTranscriptReducer {
             if group == block.id {
                 block.prompt = Some(PromptAnnotation::default());
             }
+            conversation.touch_entry(location.history_index);
         }
     }
 
@@ -947,7 +926,42 @@ impl AgentTranscriptReducer {
         text: String,
         update: SegmentUpdate,
     ) {
-        self.apply_segment_raw(conversation, kind, message_id.clone(), text.clone(), update);
+        if message_id.is_none() {
+            self.apply_segment_raw(conversation, kind, None, text, update);
+            if kind == SegmentKind::Agent
+                && matches!(update, SegmentUpdate::Replace)
+                && let Some(target) = &self.segment
+            {
+                conversation
+                    .mark_agent_preview(target.location.history_index, target.location.block_id);
+            }
+            return;
+        }
+        let replacing_projection = if kind != SegmentKind::User
+            && matches!(update, SegmentUpdate::Replace)
+            && let Some(id) = &message_id
+            && let Some(target) = &self.segment
+            && target.kind == kind
+            && target.message_id.as_ref() == Some(id)
+            && let Some((buffer, pieces)) = self.projections.get(&(kind, id.clone()))
+            && let Some(piece) = pieces
+                .last()
+                .filter(|piece| piece.location == target.location)
+        {
+            // Coverage may have left only a suffix in the ordinary block.
+            // The complete source slice is authoritative for Replace.
+            if buffer[piece.start..piece.end] == text {
+                self.prompt_echo = None;
+                self.user_group = None;
+                return;
+            }
+            true
+        } else {
+            false
+        };
+        let changed =
+            self.apply_segment_raw(conversation, kind, message_id.clone(), text.clone(), update)
+                || replacing_projection;
         if kind == SegmentKind::Agent
             && matches!(update, SegmentUpdate::Replace)
             && let Some(target) = &self.segment
@@ -955,11 +969,24 @@ impl AgentTranscriptReducer {
             conversation
                 .mark_agent_preview(target.location.history_index, target.location.block_id);
         }
-        if kind != SegmentKind::User
+        if changed
+            && kind != SegmentKind::User
             && let Some(message_id) = message_id
             && let Some(target) = &self.segment
         {
-            let (buffer, pieces) = self.projections.entry((kind, message_id)).or_default();
+            let key = (kind, message_id);
+            if replacing_projection
+                && let Some(block) = block_mut(conversation, target.location)
+                && block.visibility == BlockVisibility::Covered
+            {
+                block.visibility = BlockVisibility::Always;
+                block.touch();
+                conversation.touch_entry(target.location.history_index);
+            }
+            if let Some(ids) = self.display_segments.get(&key) {
+                self.displays_dirty.extend(ids.iter().cloned());
+            }
+            let (buffer, pieces) = self.projections.entry(key).or_default();
             if let Some(piece) = pieces
                 .last_mut()
                 .filter(|piece| piece.location == target.location)
@@ -979,85 +1006,171 @@ impl AgentTranscriptReducer {
                 });
             }
         }
-        self.refresh_displays(conversation);
-        self.regroup_hosted_actions(conversation);
     }
 
-    fn regroup_hosted_actions(&mut self, conversation: &mut ConversationState) {
-        for history_index in 0..conversation.history().len() {
-            let Some(HistoryEntry::Conversation(entry)) = conversation.entry_mut(history_index)
-            else {
-                continue;
-            };
-            let original = std::mem::take(&mut entry.blocks);
-            let mut blocks = Vec::new();
-            let mut old_groups = HashMap::new();
-            let mut ordinary = Vec::new();
-            for block in original {
-                if self.fallback_groups.values().any(|id| *id == block.id) {
-                    old_groups.insert(block.id, block);
-                } else {
-                    ordinary.push(block);
+    fn install_display(&mut self, display: zevria_content::response::ResponseDisplay) {
+        let id = &display.attempt.id;
+        if self.displays.get(id).is_some_and(|old| {
+            old.attempt.revision > display.attempt.revision
+                || (old.attempt.revision == display.attempt.revision
+                    && (old.attempt != display.attempt || old.bindings == display.bindings))
+        }) {
+            return;
+        }
+        let Ok(parts) = display.validate_and_parts() else {
+            return;
+        };
+        let coverage = self.display_text_coverage.entry(id.clone()).or_default();
+        for binding in &display.bindings {
+            match binding {
+                Binding::Text {
+                    kind,
+                    message_id,
+                    start,
+                    end,
+                    ..
+                } => {
+                    let kind = segment_kind(*kind);
+                    self.display_segments
+                        .entry((kind, message_id.clone()))
+                        .or_default()
+                        .insert(id.clone());
+                    let evidence = coverage.entry((kind, message_id.clone(), *start));
+                    if let Some(text) = parts.binding_text(binding) {
+                        evidence
+                            .and_modify(|prior| {
+                                prior.end = *end;
+                                prior.text.clone_from(&text);
+                            })
+                            .or_insert(DisplayTextCoverage { end: *end, text });
+                    }
+                }
+                Binding::Tool { tool_call_id, .. } => {
+                    self.display_tools
+                        .entry(tool_call_id.clone())
+                        .or_default()
+                        .insert(id.clone());
                 }
             }
-            let mut pending = Vec::new();
-            let mut pending_attempt = None;
-            for block in ordinary {
-                let candidate = if block.visibility != BlockVisibility::Covered {
-                    if let PresentationBlockKind::Tool(PresentedTool::Acp(tool)) = &block.kind {
-                        tool.hosted_activity().map(|activity| {
-                            (
-                                tool.id
-                                    .rsplit_once(':')
-                                    .map(|(prefix, _)| prefix.to_string())
-                                    .unwrap_or_else(|| tool.id.clone()),
-                                activity.detail.is_none(),
-                            )
-                        })
-                    } else {
-                        None
-                    }
+        }
+        self.displays_dirty.insert(id.clone());
+        self.displays.insert(id.clone(), display);
+    }
+
+    fn tool_changed(&mut self, id: &str, location: BlockLocation, hosted: bool) {
+        if let Some(attempts) = self.display_tools.get(id) {
+            self.displays_dirty.extend(attempts.iter().cloned());
+        }
+        if hosted {
+            self.hosted_actions_dirty.insert(location.history_index);
+        }
+    }
+
+    fn flush_projection_changes(&mut self, conversation: &mut ConversationState) {
+        if !self.displays_dirty.is_empty() {
+            self.refresh_displays(conversation);
+        }
+        for index in std::mem::take(&mut self.hosted_actions_dirty) {
+            self.regroup_hosted_actions(conversation, index);
+        }
+    }
+
+    fn regroup_hosted_actions(
+        &mut self,
+        conversation: &mut ConversationState,
+        history_index: usize,
+    ) {
+        let Some(HistoryEntry::Conversation(entry)) =
+            conversation.entry_mut_untracked(history_index)
+        else {
+            return;
+        };
+        let original = std::mem::take(&mut entry.blocks);
+        let old: Vec<_> = original
+            .iter()
+            .map(|block| (block.id, block.revision, block.visibility))
+            .collect();
+        let mut blocks = Vec::with_capacity(original.len());
+        let mut old_groups = HashMap::new();
+        let mut ordinary = Vec::new();
+        for block in original {
+            if self.fallback_group_ids.contains(&block.id) {
+                old_groups.insert(block.id, block);
+            } else {
+                ordinary.push(block);
+            }
+        }
+        let mut pending = Vec::new();
+        let mut pending_attempt = None;
+        for block in ordinary {
+            let candidate = if block.visibility != BlockVisibility::Covered {
+                if let PresentationBlockKind::Tool(PresentedTool::Acp(tool)) = &block.kind {
+                    tool.hosted_activity().map(|activity| {
+                        (
+                            tool.id
+                                .rsplit_once(':')
+                                .map(|(prefix, _)| prefix.to_string())
+                                .unwrap_or_else(|| tool.id.clone()),
+                            activity.detail.is_none(),
+                        )
+                    })
                 } else {
                     None
-                };
-                if let Some((attempt, unknown)) = candidate {
-                    if pending_attempt
-                        .as_ref()
-                        .is_some_and(|prior| prior != &attempt)
-                        || !unknown
-                    {
-                        self.flush_hosted_group(
-                            conversation,
-                            &mut pending,
-                            &mut blocks,
-                            &mut old_groups,
-                        );
-                    }
-                    pending_attempt = Some(attempt);
-                    pending.push(block);
-                    if !unknown {
-                        self.flush_hosted_group(
-                            conversation,
-                            &mut pending,
-                            &mut blocks,
-                            &mut old_groups,
-                        );
-                    }
-                } else {
+                }
+            } else {
+                None
+            };
+            if let Some((attempt, unknown)) = candidate {
+                if pending_attempt
+                    .as_ref()
+                    .is_some_and(|prior| prior != &attempt)
+                    || !unknown
+                {
                     self.flush_hosted_group(
                         conversation,
                         &mut pending,
                         &mut blocks,
                         &mut old_groups,
                     );
-                    pending_attempt = None;
-                    blocks.push(block);
                 }
+                pending_attempt = Some(attempt);
+                pending.push(block);
+                if !unknown {
+                    self.flush_hosted_group(
+                        conversation,
+                        &mut pending,
+                        &mut blocks,
+                        &mut old_groups,
+                    );
+                }
+            } else {
+                let mut block = block;
+                if block.visibility == BlockVisibility::Grouped {
+                    block.visibility = BlockVisibility::Always;
+                }
+                self.flush_hosted_group(conversation, &mut pending, &mut blocks, &mut old_groups);
+                pending_attempt = None;
+                blocks.push(block);
             }
-            self.flush_hosted_group(conversation, &mut pending, &mut blocks, &mut old_groups);
-            if let Some(HistoryEntry::Conversation(entry)) = conversation.entry_mut(history_index) {
-                entry.blocks = blocks;
-            }
+        }
+        self.flush_hosted_group(conversation, &mut pending, &mut blocks, &mut old_groups);
+        let changed = !blocks
+            .iter()
+            .map(|block| (block.id, block.revision, block.visibility))
+            .eq(old);
+        let removed = !old_groups.is_empty();
+        let Some(HistoryEntry::Conversation(entry)) =
+            conversation.entry_mut_untracked(history_index)
+        else {
+            unreachable!()
+        };
+        entry.blocks = blocks;
+        if changed {
+            conversation.invalidate_block_indices(history_index);
+            conversation.touch_entry(history_index);
+        }
+        if removed {
+            conversation.change_structure();
         }
     }
 
@@ -1099,6 +1212,7 @@ impl AgentTranscriptReducer {
             .fallback_groups
             .entry(key)
             .or_insert_with(|| conversation.allocate_block_id());
+        self.fallback_group_ids.insert(id);
         let kind = PresentationBlockKind::WebActivity(activity);
         let mut block = PresentationBlock {
             id,
@@ -1123,11 +1237,23 @@ impl AgentTranscriptReducer {
     }
 
     fn refresh_displays(&mut self, conversation: &mut ConversationState) {
-        use zevria_content::response::DisplayProjectionBinding as Binding;
-        use zevria_content::response::DisplayProjectionKind as Kind;
-        let mut displays = self.displays.values().cloned().collect::<Vec<_>>();
-        displays.sort_by(|a, b| a.attempt.id.cmp(&b.attempt.id));
-        for display in displays {
+        for id in std::mem::take(&mut self.displays_dirty) {
+            let Some(display) = self.displays.get(&id) else {
+                continue;
+            };
+            let parts = display.parts();
+            let tool_sources: HashMap<_, _> = display
+                .attempt
+                .presentation
+                .iter()
+                .filter_map(|part| {
+                    matches!(
+                        part.content,
+                        zevria_content::AssistantPresentationContent::NativeTool { .. }
+                    )
+                    .then_some((part.source.output_index, &part.source))
+                })
+                .collect();
             let mut covered = Vec::new();
             let mut text_coverage: HashMap<BlockLocation, (String, Vec<(usize, usize)>)> =
                 HashMap::new();
@@ -1143,23 +1269,25 @@ impl AgentTranscriptReducer {
                         end,
                         sources: addresses,
                     } => {
-                        let kind = if *kind == Kind::Message {
-                            SegmentKind::Agent
-                        } else {
-                            SegmentKind::Thought
-                        };
+                        let kind = segment_kind(*kind);
                         let Some((buffer, pieces)) =
                             self.projections.get(&(kind, message_id.clone()))
                         else {
                             valid = false;
                             break;
                         };
-                        if buffer.get(*start..*end) != display.binding_text(binding).as_deref() {
+                        let expected = self
+                            .display_text_coverage
+                            .get(&id)
+                            .and_then(|coverage| coverage.get(&(kind, message_id.clone(), *start)));
+                        if buffer.get(*start..*end).is_none_or(|actual| {
+                            expected.is_none_or(|evidence| actual != evidence.text)
+                        }) {
                             valid = false;
                             break;
                         }
                         sources.extend(addresses.iter().cloned());
-                        for piece in pieces {
+                        for piece in intersecting_pieces(pieces, *start, *end) {
                             let a = piece.start.max(*start);
                             let b = piece.end.min(*end);
                             if a < b {
@@ -1177,8 +1305,12 @@ impl AgentTranscriptReducer {
                         ..
                     } => {
                         if let Some(location) = self.tools.get(tool_call_id).copied()
-                            && let Some(block) = block_mut(conversation, location)
+                            && let Some(index) =
+                                conversation.block_index(location.history_index, location.block_id)
+                            && let Some(HistoryEntry::Conversation(entry)) =
+                                conversation.entry(location.history_index)
                         {
+                            let block = &entry.blocks[index];
                             if !*native
                                 && !matches!(&block.kind, PresentationBlockKind::Tool(PresentedTool::Acp(tool)) if zevria_content::response::is_hosted_search_input(&tool.id, tool.raw_input.as_ref()))
                             {
@@ -1199,10 +1331,9 @@ impl AgentTranscriptReducer {
             // Only exact, previously advertised coverage can retire an older
             // append-only segment. Never blanket-hide a message ID or guess a
             // binding by proximity, and preserve any unrelated suffix.
-            for ((kind, message_id, start), evidence) in &self.display_text_coverage {
-                if evidence.attempt_id != display.attempt.id {
-                    continue;
-                }
+            for ((kind, message_id, start), evidence) in
+                self.display_text_coverage.get(&id).into_iter().flatten()
+            {
                 let Some((buffer, pieces)) = self.projections.get(&(*kind, message_id.clone()))
                 else {
                     continue;
@@ -1210,7 +1341,7 @@ impl AgentTranscriptReducer {
                 if buffer.get(*start..evidence.end) != Some(evidence.text.as_str()) {
                     continue;
                 }
-                for piece in pieces {
+                for piece in intersecting_pieces(pieces, *start, evidence.end) {
                     let a = piece.start.max(*start);
                     let b = piece.end.min(evidence.end);
                     if a < b {
@@ -1238,30 +1369,40 @@ impl AgentTranscriptReducer {
             let first = covered
                 .iter()
                 .filter_map(|(location, _)| {
-                    let HistoryEntry::Conversation(entry) =
-                        conversation.entry(location.history_index)?
-                    else {
-                        return None;
-                    };
-                    let index = entry
-                        .blocks
-                        .iter()
-                        .position(|block| block.id == location.block_id)?;
+                    let index =
+                        conversation.block_index(location.history_index, location.block_id)?;
                     Some((location.history_index, index, location.block_id))
                 })
                 .min_by_key(|(history, index, _)| (*history, *index));
             for (location, remaining) in covered {
-                if let Some(block) = block_mut(conversation, location) {
+                if let Some(block) =
+                    conversation.hinted_block_mut(location.history_index, location.block_id)
+                {
+                    let mut changed = false;
                     if let Some(remaining) = remaining.filter(|text| !text.is_empty()) {
+                        changed = block.visibility != BlockVisibility::Always;
                         block.visibility = BlockVisibility::Always;
                         match &mut block.kind {
-                            PresentationBlockKind::Text { text, .. } => *text = remaining,
-                            PresentationBlockKind::Reasoning { parts } => *parts = vec![remaining],
+                            PresentationBlockKind::Text { text, .. } => {
+                                changed |= *text != remaining;
+                                *text = remaining;
+                            }
+                            PresentationBlockKind::Reasoning { parts } => {
+                                changed |= parts.len() != 1 || parts[0] != remaining;
+                                *parts = vec![remaining];
+                            }
                             _ => {}
                         }
-                        block.touch();
-                    } else {
+                    } else if block.visibility != BlockVisibility::Covered {
+                        changed = true;
                         block.visibility = BlockVisibility::Covered;
+                        if matches!(block.kind, PresentationBlockKind::Tool(_)) {
+                            self.hosted_actions_dirty.insert(location.history_index);
+                        }
+                    }
+                    if changed {
+                        block.touch();
+                        conversation.touch_entry(location.history_index);
                     }
                 }
             }
@@ -1314,16 +1455,12 @@ impl AgentTranscriptReducer {
                         native: true,
                     } => {
                         if let Some(location) = self.tools.get(tool_call_id)
-                            && let Some(part) = display.attempt.presentation.iter().find(|part| {
-                                part.source.output_index == *output_index
-                                    && part.source.part
-                                        == zevria_content::AssistantPartIdentity::Tool
-                            })
+                            && let Some(source) = tool_sources.get(output_index)
                         {
                             conversation.alias_attempt_part(
                                 (location.history_index, location.block_id),
                                 &display.attempt.id,
-                                &part.source,
+                                source,
                             );
                         }
                     }
@@ -1334,20 +1471,17 @@ impl AgentTranscriptReducer {
                         start,
                         end,
                     } => {
-                        let kind = if *kind == Kind::Message {
-                            SegmentKind::Agent
-                        } else {
-                            SegmentKind::Thought
-                        };
-                        if let Some((_, pieces)) = self.projections.get(&(kind, message_id.clone()))
+                        if let Some((_, pieces)) = self
+                            .projections
+                            .get(&(segment_kind(*kind), message_id.clone()))
                         {
-                            for piece in pieces
-                                .iter()
+                            let mut offset = *start;
+                            let mut sources = sources.iter().peekable();
+                            for piece in intersecting_pieces(pieces, *start, *end)
                                 .filter(|piece| piece.start >= *start && piece.end <= *end)
                             {
-                                let mut offset = *start;
-                                for source in sources {
-                                    let length = display.attempt.presentation.iter().find(|part| &part.source == source).map_or(0, |part| match &part.content { zevria_content::AssistantPresentationContent::Reasoning { text } | zevria_content::AssistantPresentationContent::Answer { text, .. } => text.len(), _ => 0 });
+                                while let Some(source) = sources.peek() {
+                                    let length = parts.text(*kind, source).map_or(0, str::len);
                                     if piece.start < offset + length {
                                         conversation.alias_attempt_part(
                                             (piece.location.history_index, piece.location.block_id),
@@ -1357,6 +1491,7 @@ impl AgentTranscriptReducer {
                                         break;
                                     }
                                     offset += length + 1;
+                                    sources.next();
                                 }
                             }
                         }
@@ -1373,7 +1508,7 @@ impl AgentTranscriptReducer {
         message_id: Option<String>,
         text: String,
         update: SegmentUpdate,
-    ) {
+    ) -> bool {
         if kind != SegmentKind::User {
             self.prompt_echo = None;
             self.user_group = None;
@@ -1381,36 +1516,28 @@ impl AgentTranscriptReducer {
         if let Some(target) = &self.segment
             && target.kind == kind
             && target.message_id == message_id
-            && let Some(block) = block_mut(conversation, target.location)
+            && let Some(block) = conversation
+                .hinted_block_mut(target.location.history_index, target.location.block_id)
         {
-            match (&mut block.kind, update) {
-                (PresentationBlockKind::Text { text: existing, .. }, SegmentUpdate::Append) => {
-                    existing.push_str(&text);
-                    block.touch();
-                    return;
+            let changed = match (&mut block.kind, update) {
+                (PresentationBlockKind::Text { text: existing, .. }, update) => {
+                    Some(update_text(existing, text.as_str(), update))
                 }
-                (PresentationBlockKind::Text { text: existing, .. }, SegmentUpdate::Replace) => {
-                    existing.clone_from(&text);
+                (PresentationBlockKind::Reasoning { parts }, update) => Some(update_text(
+                    parts
+                        .last_mut()
+                        .unwrap_or_else(|| unreachable!("reasoning starts with a part")),
+                    text.as_str(),
+                    update,
+                )),
+                _ => None,
+            };
+            if let Some(changed) = changed {
+                if changed {
                     block.touch();
-                    return;
+                    conversation.touch_entry(target.location.history_index);
                 }
-                (PresentationBlockKind::Reasoning { parts }, SegmentUpdate::Append) => {
-                    match parts.last_mut() {
-                        Some(existing) => existing.push_str(&text),
-                        None => parts.push(text),
-                    }
-                    block.touch();
-                    return;
-                }
-                (PresentationBlockKind::Reasoning { parts }, SegmentUpdate::Replace) => {
-                    match parts.last_mut() {
-                        Some(existing) => existing.clone_from(&text),
-                        None => parts.push(text),
-                    }
-                    block.touch();
-                    return;
-                }
-                _ => {}
+                return changed;
             }
         }
 
@@ -1452,6 +1579,7 @@ impl AgentTranscriptReducer {
             message_id,
             location,
         });
+        true
     }
 
     fn apply_tool_call(
@@ -1464,20 +1592,29 @@ impl AgentTranscriptReducer {
             self.fence();
         }
         if let Some(location) = self.tools.get(&incoming.id).copied()
-            && let Some(block) = block_mut(conversation, location)
+            && let Some(block) =
+                conversation.hinted_block_mut(location.history_index, location.block_id)
             && let PresentationBlockKind::Tool(PresentedTool::Acp(existing)) = &mut block.kind
         {
-            **existing = incoming;
-            block.touch();
+            if **existing != incoming {
+                let hosted = existing.is_hosted_search() || incoming.is_hosted_search();
+                let id = incoming.id.clone();
+                **existing = incoming;
+                block.touch();
+                conversation.touch_entry(location.history_index);
+                self.tool_changed(&id, location, hosted);
+            }
             return;
         }
         let id = incoming.id.clone();
+        let hosted = incoming.is_hosted_search();
         let location = self.append_block(
             conversation,
             Some(PresentationRole::Assistant),
             BlockVisibility::Always,
             PresentationBlockKind::Tool(PresentedTool::Acp(Box::new(incoming))),
         );
+        self.tool_changed(&id, location, hosted);
         self.tools.insert(id, location);
     }
 
@@ -1498,56 +1635,43 @@ impl AgentTranscriptReducer {
         if !self.tools.contains_key(&id) {
             self.fence();
         }
-        let location = self.tools.get(&id).copied().unwrap_or_else(|| {
-            let location = self.append_block(
+        let Some(location) = self.tools.get(&id).copied() else {
+            self.apply_tool_call(
                 conversation,
-                Some(PresentationRole::Assistant),
-                BlockVisibility::Always,
-                PresentationBlockKind::Tool(PresentedTool::Acp(Box::new(AcpToolPresentation {
+                AcpToolPresentation {
                     metadata: None,
-                    id: id.clone(),
-                    title: title.clone().unwrap_or_else(|| id.clone()),
-                    kind: kind.clone().unwrap_or_else(|| "tool".to_string()),
-                    status: status.clone().unwrap_or_else(|| "updated".to_string()),
-                    content: Vec::new(),
-                    locations: Vec::new(),
-                    raw_input: None,
-                    raw_output: None,
-                }))),
+                    title: title.unwrap_or_else(|| id.clone()),
+                    id,
+                    kind: kind.unwrap_or_else(|| "tool".into()),
+                    status: status.unwrap_or_else(|| "updated".into()),
+                    content: content.unwrap_or_default(),
+                    locations: locations.unwrap_or_default(),
+                    raw_input,
+                    raw_output,
+                },
             );
-            self.tools.insert(id.clone(), location);
-            location
-        });
-        let Some(block) = block_mut(conversation, location) else {
+            return;
+        };
+        let Some(block) = conversation.hinted_block_mut(location.history_index, location.block_id)
+        else {
             return;
         };
         let PresentationBlockKind::Tool(PresentedTool::Acp(tool)) = &mut block.kind else {
             return;
         };
-        let previous = tool.clone();
-        if let Some(title) = title {
-            tool.title = title;
-        }
-        if let Some(kind) = kind {
-            tool.kind = kind;
-        }
-        if let Some(status) = status {
-            tool.status = status;
-        }
-        if let Some(content) = content {
-            tool.content = content;
-        }
-        if let Some(locations) = locations {
-            tool.locations = locations;
-        }
-        if let Some(raw_input) = raw_input {
-            tool.raw_input = Some(raw_input);
-        }
-        if let Some(raw_output) = raw_output {
-            tool.raw_output = Some(raw_output);
-        }
-        if *tool != previous {
+        let hosted_before = tool.is_hosted_search();
+        let changed = update_field(&mut tool.title, title)
+            | update_field(&mut tool.kind, kind)
+            | update_field(&mut tool.status, status)
+            | update_field(&mut tool.content, content)
+            | update_field(&mut tool.locations, locations)
+            | update_field(&mut tool.raw_input, raw_input.map(Some))
+            | update_field(&mut tool.raw_output, raw_output.map(Some));
+        if changed {
+            let hosted = hosted_before || tool.is_hosted_search();
             block.touch();
+            conversation.touch_entry(location.history_index);
+            self.tool_changed(&id, location, hosted);
         }
     }
 
@@ -1573,8 +1697,11 @@ impl AgentTranscriptReducer {
             && let Some(block) = block_mut(conversation, location)
             && let PresentationBlockKind::Plan(existing) = &mut block.kind
         {
-            *existing = plan;
-            block.touch();
+            if *existing != plan {
+                *existing = plan;
+                block.touch();
+                conversation.touch_entry(location.history_index);
+            }
             return;
         }
         let location = self.append_block(
@@ -1592,25 +1719,15 @@ impl AgentTranscriptReducer {
         let Some(location) = self.current_plan else {
             return;
         };
-        let matches = block_mut(conversation, location).is_some_and(|block| {
-            matches!(
-                &block.kind,
-                PresentationBlockKind::Plan(plan)
-                    if plan.plan_id.as_deref() == Some(plan_id)
-            )
-        });
-        if !matches {
-            return;
+        if block_mut(conversation, location).is_some_and(|block| {
+            matches!(&block.kind, PresentationBlockKind::Plan(plan) if plan.plan_id.as_deref() == Some(plan_id))
+        }) && conversation.remove_block(location.history_index, location.block_id)
+        {
+            self.current_plan = None;
+            self.current_plan_markdown = None;
+            self.hosted_actions_dirty.insert(location.history_index);
+            self.rebuild_locations(conversation);
         }
-        let Some(HistoryEntry::Conversation(entry)) =
-            conversation.entry_mut(location.history_index)
-        else {
-            return;
-        };
-        entry.blocks.retain(|block| block.id != location.block_id);
-        self.current_plan = None;
-        self.current_plan_markdown = None;
-        self.rebuild_locations(conversation);
     }
 
     fn append_diagnostic(
@@ -1658,22 +1775,7 @@ impl AgentTranscriptReducer {
 
     fn reset_for_replay(&mut self, conversation: &mut ConversationState) {
         let _ = conversation.clear_projection();
-        self.current_entry = None;
-        self.segment = None;
-        self.tools.clear();
-        self.current_plan = None;
-        self.current_plan_markdown = None;
-        self.plan_scope_start = 0;
-        self.prompt_echo = None;
-        self.image_echoes.clear();
-        self.user_group = None;
-        self.review = ReviewProjection::default();
-        self.review_prompts.clear();
-        self.review_inputs.clear();
-        self.review_markers.clear();
-        self.replaying_review = false;
-        self.review_sealed = false;
-        self.latest_usage = None;
+        *self = Self::default();
         self.append_diagnostic(
             conversation,
             PresentedDiagnostic {
@@ -1714,11 +1816,8 @@ impl AgentTranscriptReducer {
         }
         let history_index = self.ensure_entry(conversation);
         let block = Self::new_block(conversation, role, visibility, kind);
-        let Some(HistoryEntry::Conversation(entry)) = conversation.entry_mut(history_index) else {
-            unreachable!("ensure_entry creates a conversation entry")
-        };
         let block_id = block.id;
-        entry.blocks.push(block);
+        conversation.append_entry_block(history_index, block);
         BlockLocation {
             history_index,
             block_id,
@@ -1789,13 +1888,47 @@ fn block_mut(
     conversation: &mut ConversationState,
     location: BlockLocation,
 ) -> Option<&mut PresentationBlock> {
-    let HistoryEntry::Conversation(entry) = conversation.entry_mut(location.history_index)? else {
-        return None;
-    };
-    entry
-        .blocks
-        .iter_mut()
-        .find(|block| block.id == location.block_id)
+    conversation.hinted_block_mut(location.history_index, location.block_id)
+}
+
+fn segment_kind(kind: DisplayKind) -> SegmentKind {
+    match kind {
+        DisplayKind::Message => SegmentKind::Agent,
+        DisplayKind::Thought => SegmentKind::Thought,
+    }
+}
+
+fn intersecting_pieces(
+    pieces: &[ProjectionPiece],
+    start: usize,
+    end: usize,
+) -> impl Iterator<Item = &ProjectionPiece> {
+    pieces[pieces.partition_point(|piece| piece.end <= start)..]
+        .iter()
+        .take_while(move |piece| piece.start < end)
+}
+
+fn update_field<T: PartialEq>(target: &mut T, value: Option<T>) -> bool {
+    if let Some(value) = value
+        && *target != value
+    {
+        *target = value;
+        true
+    } else {
+        false
+    }
+}
+
+fn update_text(target: &mut String, text: &str, update: SegmentUpdate) -> bool {
+    match update {
+        SegmentUpdate::Append if !text.is_empty() => target.push_str(text),
+        SegmentUpdate::Replace if target != text => {
+            target.clear();
+            target.push_str(text);
+        }
+        _ => return false,
+    }
+    true
 }
 
 fn presented_plan(plan: AgentStructuredPlan) -> PresentedPlan {
@@ -1988,5 +2121,72 @@ fn diagnostic_for_event(event: &AgentRunEvent) -> PresentedDiagnostic {
         label: label.to_string(),
         text,
         tone,
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use zevria_content::response::{RESPONSE_DISPLAY_VERSION, ResponseDisplay};
+    use zevria_content::{
+        AssistantPartIdentity, AssistantPresentationContent, AssistantPresentationPart,
+        AssistantSourceAddress, ResponseAttempt,
+    };
+
+    #[test]
+    fn replacing_a_partially_covered_preview_compares_the_full_projection() {
+        let mut reducer = AgentTranscriptReducer::default();
+        let mut conversation = ConversationState::default();
+        let key = (SegmentKind::Agent, "msg".to_owned());
+        let replace = |reducer: &mut AgentTranscriptReducer,
+                       conversation: &mut ConversationState,
+                       text: &str| {
+            reducer.apply_segment(
+                conversation,
+                key.0,
+                Some(key.1.clone()),
+                text.into(),
+                SegmentUpdate::Replace,
+            );
+            reducer.flush_projection_changes(conversation);
+        };
+        replace(&mut reducer, &mut conversation, "lead tail");
+        let location = reducer.segment.as_ref().unwrap().location;
+        let source = AssistantSourceAddress {
+            output_index: 0,
+            part: AssistantPartIdentity::Content(0),
+            item_id: None,
+        };
+        let mut attempt = ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("p", "m"));
+        attempt.presentation.push(AssistantPresentationPart {
+            source: source.clone(),
+            content: AssistantPresentationContent::answer("lead"),
+        });
+        reducer.install_display(ResponseDisplay {
+            version: RESPONSE_DISPLAY_VERSION,
+            attempt,
+            bindings: vec![Binding::Text {
+                kind: DisplayKind::Message,
+                message_id: key.1.clone(),
+                start: 0,
+                end: 4,
+                sources: vec![source],
+            }],
+        });
+        reducer.flush_projection_changes(&mut conversation);
+        let block = block_mut(&mut conversation, location).unwrap();
+        assert!(matches!(&block.kind, PresentationBlockKind::Text { text, .. } if text == " tail"));
+
+        let revision = conversation.entry_revision(location.history_index);
+        replace(&mut reducer, &mut conversation, "lead tail");
+        assert_eq!(
+            conversation.entry_revision(location.history_index),
+            revision
+        );
+
+        replace(&mut reducer, &mut conversation, " tail");
+        let (buffer, pieces) = reducer.projections.get(&key).unwrap();
+        assert_eq!(buffer, " tail");
+        assert_eq!(pieces[0].end, buffer.len());
     }
 }

@@ -22,15 +22,9 @@ pub(super) struct ClaudePlanHandoffState {
     pub(super) artifact_directory: PathBuf,
     pub(super) workspace_artifact_directory: PathBuf,
     pub(super) workspace: PathBuf,
-    pub(super) tools: HashMap<String, ClaudePlanTool>,
-    pub(super) retired_tools: HashSet<String>,
-    // Tool evidence survives proposal boundaries; only current-generation exits
-    // participate in proposal eligibility. Retired identities are tombstones.
+    pub(super) tools: HashMap<String, ToolLedgerEntry>,
     pub(super) generation: u64,
-    pub(super) tool_generations: HashMap<String, u64>,
-    pub(super) artifact_evidence: HashMap<String, ArtifactEvidence>,
-    pub(super) exit_hints: HashMap<String, PathBuf>,
-    pub(super) exit_terminals: HashMap<String, ToolCallStatus>,
+    observation_revision: u64,
     pub(super) next_announcement: u64,
     pub(super) next_attempt: u64,
     pub(super) current_attempt: Option<u64>,
@@ -41,6 +35,16 @@ pub(super) struct ClaudePlanHandoffState {
     // Do not admit another request until that sync has also succeeded.
     pub(super) delivering_permission: Option<ClaudePlanPermissionKey>,
     pub(super) phase: ClaudePlanHandoffPhase,
+}
+
+#[derive(Default)]
+pub(super) struct ToolLedgerEntry {
+    tool: Option<ClaudePlanTool>,
+    generation: u64,
+    retired: bool,
+    artifact: ArtifactEvidence,
+    exit_hint: Option<PathBuf>,
+    exit_terminal: Option<ToolCallStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,11 +149,15 @@ impl Drop for ClaudePlanAttempt {
             .state
             .lock()
             .expect("Claude plan handoff lock poisoned");
+        let old_len = state.permissions.len();
         state.permissions.retain(|ticket| ticket.attempt != self.id);
-        if state.current_attempt == Some(self.id) {
+        let current = state.current_attempt == Some(self.id);
+        if current {
             state.current_attempt = None;
         }
-        self.handoff.changed.send_replace(());
+        if current || state.permissions.len() != old_len {
+            self.handoff.changed.send_replace(());
+        }
     }
 }
 
@@ -165,13 +173,18 @@ impl Drop for ClaudePlanPermissionTicket {
             .state
             .lock()
             .expect("Claude plan handoff lock poisoned");
+        let old_len = state.permissions.len();
         state.permissions.retain(|ticket| ticket != &self.key);
-        if state.delivering_permission.as_ref() == Some(&self.key) {
+        let current = state.current_attempt.is_some()
+            && state.delivering_permission.as_ref() == Some(&self.key);
+        if current {
             // Abandoned/send-failed/sync-failed delivery is ambiguous. Even if a
             // terminal raced with it, no waiter in this attempt may approve work.
             state.current_attempt = None;
         }
-        self.handoff.changed.send_replace(());
+        if current || state.permissions.len() != old_len {
+            self.handoff.changed.send_replace(());
+        }
     }
 }
 
@@ -225,7 +238,9 @@ impl ArtifactEvidence {
             {
                 return Err("Claude Write changed its complete-content evidence".into());
             }
-            self.whole_file_content = Some(content.to_string());
+            if self.whole_file_content.is_none() {
+                self.whole_file_content = Some(content.to_string());
+            }
         }
         Ok(())
     }
@@ -266,8 +281,14 @@ impl ClaudePlanHandoff {
         ) {
             return Err(acp_error("the previous native proposal has not settled"));
         }
-        let retired = state.tools.keys().cloned().collect::<Vec<_>>();
-        state.retired_tools.extend(retired);
+        for entry in state.tools.values_mut().filter(|entry| !entry.retired) {
+            entry.retired = true;
+            entry.artifact.whole_file_content = None;
+            entry.exit_hint = None;
+            if let Some(ClaudePlanTool::ExitPlanMode { plan }) = &mut entry.tool {
+                *plan = String::new();
+            }
+        }
         state.generation = generation;
         state.phase = ClaudePlanHandoffPhase::Active;
         *self.completion.lock().expect("handoff signal poisoned") =
@@ -287,12 +308,8 @@ impl ClaudePlanHandoff {
                 workspace_artifact_directory: workspace_claude_plan_artifact_directory(workspace),
                 workspace: workspace.to_path_buf(),
                 tools: HashMap::new(),
-                retired_tools: HashSet::new(),
                 generation: 1,
-                tool_generations: HashMap::new(),
-                artifact_evidence: HashMap::new(),
-                exit_hints: HashMap::new(),
-                exit_terminals: HashMap::new(),
+                observation_revision: 0,
                 next_announcement: 0,
                 next_attempt: 0,
                 current_attempt: None,
@@ -328,104 +345,237 @@ impl ClaudePlanHandoff {
         }
     }
 
-    // Called in the receive callback, before spawning any waiter: FIFO means
-    // valid request receive order, not announcement order or task poll order.
+    // Reserve a FIFO position in the receive callback. Filesystem checks run
+    // without the state lock, then the ticket and lifecycle are checked again.
+    fn classify_and_register(
+        &self,
+        request: &RequestPermissionRequest,
+        attempt: u64,
+    ) -> (ClaudeHandoffPermission, Option<ClaudePlanPermissionTicket>) {
+        let mut state = self.state.lock().expect("handoff poisoned");
+        let permission = state.permission(request);
+        if !matches!(permission, ClaudeHandoffPermission::ArtifactMutation) {
+            return (permission, None);
+        }
+        let result = (|| {
+            if state.current_attempt != Some(attempt) {
+                return Err(
+                    "Claude plan permission belongs to an inactive connection attempt".into(),
+                );
+            }
+            require_one_shot_option(request)?;
+            let id = request.tool_call.tool_call_id.0.as_ref();
+            if state.granted_tool.as_deref() == Some(id)
+                || state
+                    .permissions
+                    .iter()
+                    .any(|ticket| ticket.tool_call_id == id)
+                || state
+                    .delivering_permission
+                    .as_ref()
+                    .is_some_and(|ticket| ticket.tool_call_id == id)
+            {
+                return Err(format!(
+                    "Claude plan artifact {id:?} requested duplicate permission or already has an unresolved grant"
+                ));
+            }
+            let key = ClaudePlanPermissionKey {
+                sequence: state.next_ticket,
+                attempt,
+                session_id: request.session_id.to_string(),
+                tool_call_id: id.to_owned(),
+            };
+            state.next_ticket += 1;
+            state.permissions.push_back(key.clone());
+            self.changed.send_replace(());
+            Ok(ClaudePlanPermissionTicket {
+                handoff: self.clone(),
+                key,
+            })
+        })();
+        match result {
+            Ok(ticket) => (permission, Some(ticket)),
+            Err(error) => (ClaudeHandoffPermission::Invalid(error), None),
+        }
+    }
+
+    pub(super) async fn queue_permission(
+        &self,
+        request: &RequestPermissionRequest,
+        attempt: u64,
+    ) -> (ClaudeHandoffPermission, Option<ClaudePlanPermissionTicket>) {
+        let (permission, ticket) = self.classify_and_register(request, attempt);
+        let Some(ticket) = ticket else {
+            if matches!(permission, ClaudeHandoffPermission::Invalid(_)) {
+                self.fence_attempt(attempt);
+            }
+            return (permission, None);
+        };
+        let result = async {
+            let paths = artifact_request_paths(request)?;
+            let scope = self
+                .state
+                .lock()
+                .expect("handoff poisoned")
+                .artifact_scope();
+            let prepared = tokio::task::spawn_blocking(move || scope.prepare_target(paths))
+                .await
+                .map_err(|error| {
+                    format!("artifact permission validation task failed: {error}")
+                })??;
+            self.install_permission_target(request, Some(&ticket.key), prepared)
+        }
+        .await;
+        match result {
+            Ok(()) => (permission, Some(ticket)),
+            Err(error) => {
+                self.fence_attempt(attempt);
+                (ClaudeHandoffPermission::Invalid(error), None)
+            }
+        }
+    }
+
+    fn fence_attempt(&self, attempt: u64) {
+        let mut state = self.state.lock().expect("handoff poisoned");
+        if state.current_attempt == Some(attempt) {
+            state.current_attempt = None;
+            self.changed.send_replace(());
+        }
+    }
+
+    fn install_permission_target(
+        &self,
+        request: &RequestPermissionRequest,
+        ticket: Option<&ClaudePlanPermissionKey>,
+        prepared: PreparedTarget,
+    ) -> Result<(), String> {
+        let id = request.tool_call.tool_call_id.0.as_ref();
+        let mut state = self.state.lock().expect("handoff poisoned");
+        if ticket.is_some_and(|ticket| {
+            state.current_attempt != Some(ticket.attempt) || !state.permissions.contains(ticket)
+        }) {
+            return Err(
+                "Claude artifact permission was retired while validating its target".into(),
+            );
+        }
+        if !matches!(state.phase, ClaudePlanHandoffPhase::Active) || state.is_retired(id) {
+            return Err(
+                "Claude attempted another plan artifact mutation after handoff began".into(),
+            );
+        }
+        let entry = state
+            .tools
+            .get_mut(id)
+            .ok_or("Claude plan artifact permission lost its announcement")?;
+        let Some(ClaudePlanTool::ArtifactMutation {
+            operation,
+            path,
+            lifecycle: ClaudePlanArtifactLifecycle::Active,
+            ..
+        }) = &mut entry.tool
+        else {
+            return Err(
+                "Claude plan artifact permission no longer identifies an active artifact".into(),
+            );
+        };
+        if let Some(path) = path.as_ref()
+            && path != &prepared.path
+        {
+            return Err(format!(
+                "Claude plan artifact permission changed target from {} to {}",
+                path.display(),
+                prepared.path.display()
+            ));
+        }
+        let changed = path.as_ref() != Some(&prepared.path)
+            || (entry.artifact.directory_identity.is_none()
+                && prepared.directory_identity.is_some());
+        if entry.artifact.directory_identity.is_some()
+            && entry.artifact.directory_identity != prepared.directory_identity
+        {
+            return Err("Claude artifact directory was replaced during mutation".into());
+        }
+        entry
+            .artifact
+            .observe_write_content(*operation, request.tool_call.fields.raw_input.as_ref())?;
+        if entry.artifact.directory_identity.is_none() {
+            entry.artifact.directory_identity = prepared.directory_identity;
+        }
+        *path = Some(prepared.path);
+        if changed {
+            self.changed.send_replace(());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(super) fn register_permission(
         &self,
         request: &RequestPermissionRequest,
         attempt: u64,
     ) -> Result<ClaudePlanPermissionTicket, String> {
-        let mut state = self
+        let (permission, ticket) = self.classify_and_register(request, attempt);
+        let ticket = ticket.ok_or_else(|| match permission {
+            ClaudeHandoffPermission::Invalid(error) => error,
+            _ => "Claude artifact queue received a non-artifact permission".into(),
+        })?;
+        let scope = self
             .state
             .lock()
-            .expect("Claude plan handoff lock poisoned");
-        if state
-            .retired_tools
-            .contains(&request.tool_call.tool_call_id.to_string())
-        {
-            return Err(
-                "stale artifact permission belongs to an earlier proposal generation".into(),
-            );
-        }
-        if state.current_attempt != Some(attempt) {
-            return Err(
-                "Claude plan permission belongs to an inactive connection attempt".to_string(),
-            );
-        }
-        if !matches!(state.phase, ClaudePlanHandoffPhase::Active) {
-            return Err(
-                "Claude attempted another plan artifact mutation after handoff began".to_string(),
-            );
-        }
-        match state.permission(request) {
-            ClaudeHandoffPermission::ArtifactMutation => {}
-            ClaudeHandoffPermission::Invalid(error) => return Err(error),
-            _ => return Err("Claude artifact queue received a non-artifact permission".to_string()),
-        }
-        if artifact_mutation_permission_option(&request.options).is_none() {
-            return Err(
-                "Claude plan artifact mutation offered no allow_once permission option".to_string(),
-            );
-        }
-        let tool_call_id = request.tool_call.tool_call_id.to_string();
-        if state.granted_tool.as_ref() == Some(&tool_call_id)
-            || state
-                .permissions
-                .iter()
-                .any(|ticket| ticket.tool_call_id == tool_call_id)
-            || state
-                .delivering_permission
-                .as_ref()
-                .is_some_and(|ticket| ticket.tool_call_id == tool_call_id)
-        {
-            return Err(format!(
-                "Claude plan artifact {tool_call_id:?} requested duplicate permission or already has an unresolved grant"
-            ));
-        }
-        let key = ClaudePlanPermissionKey {
-            sequence: state.next_ticket,
-            attempt,
-            session_id: request.session_id.to_string(),
-            tool_call_id,
-        };
-        state.next_ticket += 1;
-        state.permissions.push_back(key.clone());
-        self.changed.send_replace(());
-        Ok(ClaudePlanPermissionTicket {
-            handoff: self.clone(),
-            key,
-        })
+            .expect("handoff poisoned")
+            .artifact_scope();
+        self.install_permission_target(
+            request,
+            Some(&ticket.key),
+            scope.prepare_target(artifact_request_paths(request)?)?,
+        )?;
+        Ok(ticket)
     }
 
     pub(super) fn inspect_update(&self, update: &AcpSessionUpdate) -> Result<(), String> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("Claude plan handoff lock poisoned");
+        if !matches!(
+            update,
+            AcpSessionUpdate::ToolCall(_) | AcpSessionUpdate::ToolCallUpdate(_)
+        ) {
+            return Ok(());
+        }
+        let mut state = self.state.lock().expect("handoff poisoned");
+        let revision = state.observation_revision;
         let result = match update {
             AcpSessionUpdate::ToolCall(call) => state.inspect_tool_call(call),
             AcpSessionUpdate::ToolCallUpdate(update) => state.inspect_tool_update(update),
-            _ => Ok(()),
+            _ => unreachable!(),
         };
-        if result.is_err() {
-            // Fence admission under the same lock before waking tasks. The
-            // notification handler will record the violation and cancel the
-            // worker, but a waiter must not race ahead of that handler.
-            state.current_attempt = None;
+        // Fence admission before notifying; reporting the violation awaits IO.
+        let fenced = result.is_err() && state.current_attempt.take().is_some();
+        if fenced || revision != state.observation_revision {
+            self.changed.send_replace(());
         }
-        self.changed.send_replace(());
         result
     }
 
+    #[cfg(test)]
     pub(super) fn permission(&self, request: &RequestPermissionRequest) -> ClaudeHandoffPermission {
-        let mut state = self
-            .state
-            .lock()
-            .expect("Claude plan handoff lock poisoned");
-        let permission = state.permission(request);
-        if matches!(permission, ClaudeHandoffPermission::Invalid(_)) {
-            state.current_attempt = None;
-            self.changed.send_replace(());
+        let (permission, scope) = {
+            let mut state = self.state.lock().expect("handoff poisoned");
+            let permission = state.permission(request);
+            if matches!(permission, ClaudeHandoffPermission::Invalid(_))
+                && state.current_attempt.take().is_some()
+            {
+                self.changed.send_replace(());
+            }
+            (permission, state.artifact_scope())
+        };
+        if matches!(permission, ClaudeHandoffPermission::ArtifactMutation)
+            && let Err(error) = artifact_request_paths(request)
+                .and_then(|paths| scope.prepare_target(paths))
+                .and_then(|prepared| self.install_permission_target(request, None, prepared))
+        {
+            let mut state = self.state.lock().expect("handoff poisoned");
+            if state.current_attempt.take().is_some() {
+                self.changed.send_replace(());
+            }
+            return ClaudeHandoffPermission::Invalid(error);
         }
         permission
     }
@@ -445,13 +595,20 @@ impl ClaudePlanHandoff {
         source: ClaudePlanCandidate,
     ) -> Result<(), String> {
         let mut state = self.state.lock().expect("handoff poisoned");
-        if state.retired_tools.contains(tool_call_id) {
+        if state.is_retired(tool_call_id) {
             return Err("stale Claude handoff belongs to an earlier proposal generation".into());
         }
         if !matches!(state.phase, ClaudePlanHandoffPhase::Active) {
             return Err("Claude attempted more than one ExitPlanMode handoff".into());
         }
-        match (&source, state.tools.get(tool_call_id)) {
+        // Tickets reserve their place before filesystem validation starts.
+        // Never enter Settling while an earlier grant still needs admission.
+        if state.has_queued_permissions() {
+            return Err(
+                "Claude ExitPlanMode cannot settle while artifact permission is queued".into(),
+            );
+        }
+        match (&source, state.tool(tool_call_id)) {
             (
                 ClaudePlanCandidate::Explicit(plan),
                 Some(ClaudePlanTool::ExitPlanMode { plan: expected }),
@@ -525,7 +682,7 @@ impl ClaudePlanHandoff {
                     return Err("native handoff is no longer settling".into());
                 };
                 if *rejection_delivered
-                    && state.unresolved_artifacts().is_empty()
+                    && !state.has_unresolved_artifacts()
                     && state.delivering_permission.is_none()
                     && state.granted_tool.is_none()
                 {
@@ -553,7 +710,7 @@ impl ClaudePlanHandoff {
         let mut state = self.state.lock().expect("handoff poisoned");
         if state.generation != generation
             || !matches!(&state.phase, ClaudePlanHandoffPhase::Settling { tool_call_id: current, .. } if current == &tool_call_id)
-            || !state.unresolved_artifacts().is_empty()
+            || state.has_unresolved_artifacts()
             || state.current_attempt.is_none()
         {
             return Err(
@@ -561,7 +718,7 @@ impl ClaudePlanHandoff {
             );
         }
         // Raw plan data that arrived while the file read was in flight must agree.
-        if let Some(ClaudePlanTool::ExitPlanMode { plan }) = state.tools.get(&tool_call_id)
+        if let Some(ClaudePlanTool::ExitPlanMode { plan }) = state.tool(&tool_call_id)
             && normalize_handoff_plan(&markdown)? != *plan
         {
             return Err(
@@ -572,9 +729,9 @@ impl ClaudePlanHandoff {
             artifact_tool_id, ..
         } = &provenance
             && state
-                .artifact_evidence
+                .tools
                 .get(artifact_tool_id)
-                .and_then(|evidence| evidence.whole_file_content.as_ref())
+                .and_then(|entry| entry.artifact.whole_file_content.as_ref())
                 .is_some_and(|expected| expected != &markdown)
         {
             return Err(
@@ -583,7 +740,7 @@ impl ClaudePlanHandoff {
         }
         // Remember the resolved identity separately from provider terminal status.
         // Late repeated rawInput.plan must agree even for a file-backed capture.
-        state.tools.insert(
+        state.set_tool(
             tool_call_id.clone(),
             ClaudePlanTool::ExitPlanMode {
                 plan: normalize_handoff_plan(&markdown)?,
@@ -657,8 +814,8 @@ impl ClaudePlanHandoff {
         if let ClaudePlanHandoffPhase::Aborted { error } = &state.phase {
             return Some(error.clone());
         }
-        let unresolved = state.unresolved_artifacts();
-        if !unresolved.is_empty() {
+        if state.has_unresolved_artifacts() {
+            let unresolved = state.unresolved_artifacts();
             let abandoned = state.abandoned_preparations();
             let diagnostic = if abandoned.is_empty() {
                 String::new()
@@ -672,10 +829,10 @@ impl ClaudePlanHandoff {
         if matches!(state.phase, ClaudePlanHandoffPhase::Completed) {
             return None;
         }
-        if let Some((tool_call_id, _)) = state.tools.iter().find(|(id, tool)| {
-            state.tool_generations.get(*id) == Some(&state.generation)
-                && !state.retired_tools.contains(*id)
-                && matches!(tool, ClaudePlanTool::PendingExitPlanMode)
+        if let Some((tool_call_id, _)) = state.tools.iter().find(|(_, entry)| {
+            entry.generation == state.generation
+                && !entry.retired
+                && matches!(entry.tool, Some(ClaudePlanTool::PendingExitPlanMode))
         }) {
             return Some(format!(
                 "Claude ExitPlanMode handoff {tool_call_id:?} never resolved to a nonempty plan"
@@ -754,54 +911,120 @@ impl NativeCaptureGuard {
 }
 
 impl ClaudePlanPermissionTicket {
-    pub(super) fn try_admit(
+    fn admission_check(
         &self,
         request: &RequestPermissionRequest,
-        cancelled: impl Fn() -> bool,
-    ) -> Result<ClaudePlanAdmission, String> {
-        let mut state = self
-            .handoff
-            .state
-            .lock()
-            .expect("Claude plan handoff lock poisoned");
-        if cancelled()
+        cancelled: bool,
+    ) -> Result<Result<GrantCheck, ClaudePlanAdmission>, String> {
+        let state = self.handoff.state.lock().expect("handoff poisoned");
+        if cancelled
             || state.current_attempt != Some(self.key.attempt)
             || !state.permissions.contains(&self.key)
         {
-            return Ok(ClaudePlanAdmission::Cancelled);
+            return Ok(Err(ClaudePlanAdmission::Cancelled));
         }
-        if self.key.session_id != request.session_id.to_string()
-            || self.key.tool_call_id != request.tool_call.tool_call_id.to_string()
+        if self.key.session_id != request.session_id.0.as_ref()
+            || self.key.tool_call_id != request.tool_call.tool_call_id.0.as_ref()
         {
-            return Err(
-                "Claude plan permission ticket changed session or tool identity".to_string(),
-            );
+            return Err("Claude plan permission ticket changed session or tool identity".into());
         }
         if state.permissions.front() != Some(&self.key)
             || state.granted_tool.is_some()
             || state.delivering_permission.is_some()
         {
-            return Ok(ClaudePlanAdmission::Waiting);
+            return Ok(Err(ClaudePlanAdmission::Waiting));
         }
-        // Recheck all request evidence and the filesystem after time in queue.
-        match state.permission(request) {
-            ClaudeHandoffPermission::ArtifactMutation => {}
-            ClaudeHandoffPermission::Invalid(error) => return Err(error),
-            _ => return Err("Claude plan permission no longer identifies an artifact".to_string()),
-        }
-        if !matches!(state.phase, ClaudePlanHandoffPhase::Active) {
+        if !matches!(state.phase, ClaudePlanHandoffPhase::Active)
+            || state.is_retired(&self.key.tool_call_id)
+        {
             return Err(
-                "Claude attempted another plan artifact mutation after handoff began".to_string(),
+                "Claude attempted another plan artifact mutation after handoff began".into(),
             );
         }
-        state.prepare_artifact_mutation(request)?;
-        if cancelled() {
+        let entry = state
+            .tools
+            .get(&self.key.tool_call_id)
+            .ok_or("artifact permission no longer identifies an announced tool")?;
+        let Some(ClaudePlanTool::ArtifactMutation {
+            path: Some(path),
+            lifecycle: ClaudePlanArtifactLifecycle::Active,
+            ..
+        }) = &entry.tool
+        else {
+            return Err(
+                "artifact permission no longer identifies a validated active target".into(),
+            );
+        };
+        Ok(Ok(GrantCheck {
+            scope: state.artifact_scope(),
+            path: path.clone(),
+            directory_identity: entry.artifact.directory_identity.clone(),
+        }))
+    }
+
+    fn commit_admission(
+        &self,
+        checked: PreparedTarget,
+        cancelled: bool,
+    ) -> Result<ClaudePlanAdmission, String> {
+        let mut state = self.handoff.state.lock().expect("handoff poisoned");
+        if cancelled
+            || state.current_attempt != Some(self.key.attempt)
+            || state.permissions.front() != Some(&self.key)
+        {
             return Ok(ClaudePlanAdmission::Cancelled);
         }
+        if state.granted_tool.is_some()
+            || state.delivering_permission.is_some()
+            || !matches!(state.phase, ClaudePlanHandoffPhase::Active)
+            || state.is_retired(&self.key.tool_call_id)
+        {
+            return Err("Claude artifact permission changed while preparing its target".into());
+        }
+        let entry = state
+            .tools
+            .get_mut(&self.key.tool_call_id)
+            .ok_or("artifact permission no longer identifies an announced tool")?;
+        if !matches!(&entry.tool, Some(ClaudePlanTool::ArtifactMutation { path: Some(path), lifecycle: ClaudePlanArtifactLifecycle::Active, .. }) if *path == checked.path)
+            || (entry.artifact.directory_identity.is_some()
+                && entry.artifact.directory_identity != checked.directory_identity)
+        {
+            return Err("Claude plan artifact target changed while preparing its directory".into());
+        }
+        entry.artifact.directory_identity = checked.directory_identity;
         state.permissions.pop_front();
         state.granted_tool = Some(self.key.tool_call_id.clone());
         state.delivering_permission = Some(self.key.clone());
+        self.handoff.changed.send_replace(());
         Ok(ClaudePlanAdmission::Granted)
+    }
+
+    pub(super) async fn try_admit_async(
+        &self,
+        request: &RequestPermissionRequest,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<ClaudePlanAdmission, String> {
+        let check = match self.admission_check(request, cancelled())? {
+            Ok(check) => check,
+            Err(admission) => return Ok(admission),
+        };
+        let checked = tokio::task::spawn_blocking(move || check.prepare())
+            .await
+            .map_err(|error| format!("artifact admission task failed: {error}"))??;
+        self.commit_admission(checked, cancelled())
+    }
+
+    #[cfg(test)]
+    pub(super) fn try_admit(
+        &self,
+        request: &RequestPermissionRequest,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<ClaudePlanAdmission, String> {
+        let check = match self.admission_check(request, cancelled())? {
+            Ok(check) => check,
+            Err(admission) => return Ok(admission),
+        };
+        self.commit_admission(check.prepare()?, cancelled())
     }
 
     pub(super) fn delivered(&self) {
@@ -812,12 +1035,51 @@ impl ClaudePlanPermissionTicket {
             .expect("Claude plan handoff lock poisoned");
         if state.delivering_permission.as_ref() == Some(&self.key) {
             state.delivering_permission = None;
+            self.handoff.changed.send_replace(());
         }
-        self.handoff.changed.send_replace(());
     }
 }
 
 impl ClaudePlanHandoffState {
+    fn tool(&self, id: &str) -> Option<&ClaudePlanTool> {
+        self.tools.get(id)?.tool.as_ref()
+    }
+
+    fn set_tool(&mut self, id: String, tool: ClaudePlanTool) {
+        let entry = self.tools.entry(id).or_insert_with(|| ToolLedgerEntry {
+            generation: self.generation,
+            ..Default::default()
+        });
+        if entry.tool.as_ref() != Some(&tool) {
+            entry.tool = Some(tool);
+            self.observation_revision += 1;
+        }
+    }
+
+    fn is_retired(&self, id: &str) -> bool {
+        self.tools.get(id).is_some_and(|entry| entry.retired)
+    }
+
+    fn has_queued_permissions(&self) -> bool {
+        // All tickets belong to the current attempt; a new attempt clears the
+        // queue before accepting requests.
+        self.current_attempt.is_some() && !self.permissions.is_empty()
+    }
+
+    fn has_unresolved_artifacts(&self) -> bool {
+        self.has_queued_permissions()
+            || self.tools.values().any(|entry| {
+                matches!(
+                    entry.tool,
+                    Some(ClaudePlanTool::ArtifactMutation {
+                        path: Some(_),
+                        lifecycle: ClaudePlanArtifactLifecycle::Active,
+                        ..
+                    })
+                )
+            })
+    }
+
     fn artifact_snapshot(&self, path_hint: Option<&Path>) -> Result<ArtifactSnapshot, String> {
         let hint = path_hint
             .map(|path| {
@@ -832,18 +1094,16 @@ impl ClaudePlanHandoffState {
         // Select the latest observed mutation on each target, not the newest file
         // or newest successful write. A later failed mutation invalidates fallback.
         let mut latest = HashMap::new();
-        for (id, tool) in &self.tools {
-            if self.tool_generations.get(id) != Some(&self.generation)
-                || self.retired_tools.contains(id)
-            {
+        for (id, entry) in &self.tools {
+            if entry.generation != self.generation || entry.retired {
                 continue;
             }
-            if let ClaudePlanTool::ArtifactMutation {
+            if let Some(ClaudePlanTool::ArtifactMutation {
                 path: Some(path),
                 lifecycle,
                 announcement,
                 ..
-            } = tool
+            }) = &entry.tool
             {
                 let entry = latest.entry(path).or_insert((id, lifecycle, announcement));
                 if announcement > entry.2 {
@@ -868,7 +1128,11 @@ impl ClaudePlanHandoffState {
         Ok(ArtifactSnapshot {
             path: (*path).clone(),
             artifact_tool_id: (*id).clone(),
-            evidence: self.artifact_evidence.get(*id).cloned().unwrap_or_default(),
+            evidence: self
+                .tools
+                .get(*id)
+                .map(|entry| entry.artifact.clone())
+                .unwrap_or_default(),
             artifact_directory: self.artifact_directory.clone(),
             workspace_artifact_directory: self.workspace_artifact_directory.clone(),
             workspace: self.workspace.clone(),
@@ -881,13 +1145,13 @@ impl ClaudePlanHandoffState {
         let mut tools = self
             .tools
             .iter()
-            .filter_map(|(id, tool)| match tool {
-                ClaudePlanTool::ArtifactMutation {
+            .filter_map(|(id, entry)| match &entry.tool {
+                Some(ClaudePlanTool::ArtifactMutation {
                     operation,
                     path,
                     lifecycle: ClaudePlanArtifactLifecycle::Active,
                     announcement,
-                } => Some((*announcement, id.as_str(), *operation, path.as_deref())),
+                }) => Some((*announcement, id.as_str(), *operation, path.as_deref())),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -895,18 +1159,30 @@ impl ClaudePlanHandoffState {
         tools
     }
 
+    fn permission_is_queued(&self, id: &str) -> bool {
+        self.has_queued_permissions()
+            && self
+                .permissions
+                .iter()
+                .any(|ticket| ticket.tool_call_id == id)
+    }
+
     pub(super) fn unresolved_artifacts(&self) -> String {
         self.nonterminal_artifacts()
-            .iter()
+            .into_iter()
             .filter_map(|(_, id, operation, path)| {
-                let path = (*path)?;
-                let admission = if self.granted_tool.as_deref() == Some(*id) {
+                let queued = self.permission_is_queued(id);
+                let Some(path) = path else {
+                    return queued.then(|| {
+                        format!(
+                            "{} {id:?}: queued; validating target",
+                            operation.tool_name()
+                        )
+                    });
+                };
+                let admission = if self.granted_tool.as_deref() == Some(id) {
                     "granted; terminal result unknown"
-                } else if self
-                    .permissions
-                    .iter()
-                    .any(|ticket| ticket.tool_call_id == *id)
-                {
+                } else if queued {
                     "queued; not granted"
                 } else {
                     "no host permission observed; native execution may still be active"
@@ -923,8 +1199,8 @@ impl ClaudePlanHandoffState {
 
     pub(super) fn abandoned_preparations(&self) -> String {
         self.nonterminal_artifacts()
-            .iter()
-            .filter(|(_, _, _, path)| path.is_none())
+            .into_iter()
+            .filter(|(_, id, _, path)| path.is_none() && !self.permission_is_queued(id))
             .map(|(_, id, operation, _)| {
                 format!(
                     "{} {id:?}: tool input never completed; abandoned preparation",
@@ -937,7 +1213,7 @@ impl ClaudePlanHandoffState {
 
     pub(super) fn inspect_tool_call(&mut self, call: &ToolCall) -> Result<(), String> {
         let tool_call_id = call.tool_call_id.to_string();
-        if self.retired_tools.contains(&tool_call_id)
+        if self.is_retired(&tool_call_id)
             && !matches!(
                 call.status,
                 ToolCallStatus::Completed | ToolCallStatus::Failed
@@ -969,7 +1245,7 @@ impl ClaudePlanHandoffState {
                 &call.content,
                 true,
             ),
-            _ if self.tools.contains_key(&tool_call_id) => Err(format!(
+            _ if self.tool(&tool_call_id).is_some() => Err(format!(
                 "Claude plan handoff tool call {tool_call_id:?} changed or omitted its metadata identity"
             )),
             _ if mutating_tool_report(Some(call.kind), &call.content) => Err(
@@ -982,18 +1258,21 @@ impl ClaudePlanHandoffState {
 
     pub(super) fn inspect_tool_update(&mut self, update: &ToolCallUpdate) -> Result<(), String> {
         let tool_call_id = update.tool_call_id.to_string();
-        if self.retired_tools.contains(&tool_call_id)
+        if self.is_retired(&tool_call_id)
             && !(matches!(
                 update.fields.status,
                 Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
             ) || (update.fields.status.is_none()
-                && self.exit_terminals.contains_key(&tool_call_id)))
+                && self
+                    .tools
+                    .get(&tool_call_id)
+                    .is_some_and(|entry| entry.exit_terminal.is_some())))
         {
             return Err(
                 "stale Claude tool refinement belongs to an earlier proposal generation".into(),
             );
         }
-        let known = self.tools.get(&tool_call_id).cloned();
+        let known = self.tool(&tool_call_id).is_some();
         let tool_name = claude_tool_name(update.meta.as_ref());
         if let Some(operation) = tool_name.and_then(ClaudePlanArtifactOperation::from_tool_name) {
             return self.inspect_artifact_mutation(
@@ -1016,7 +1295,7 @@ impl ClaudePlanHandoffState {
                 update.fields.content.as_deref().unwrap_or_default(),
                 false,
             ),
-            _ if known.is_some()
+            _ if known
                 || mutating_tool_report(
                     update.fields.kind,
                     update.fields.content.as_deref().unwrap_or_default(),
@@ -1043,11 +1322,8 @@ impl ClaudePlanHandoffState {
         content: &[ToolCallContent],
         initial: bool,
     ) -> Result<(), String> {
-        let existing = self.tools.get(tool_call_id).cloned();
+        let existing = self.tool(tool_call_id).cloned();
         let previously_terminal = matches!(&existing, Some(ClaudePlanTool::ArtifactMutation { lifecycle, .. }) if lifecycle.is_terminal());
-        self.tool_generations
-            .entry(tool_call_id.to_string())
-            .or_insert(self.generation);
         match &existing {
             Some(ClaudePlanTool::ArtifactMutation {
                 operation: previous,
@@ -1168,11 +1444,22 @@ impl ClaudePlanHandoffState {
             ));
         }
 
-        let evidence = self
-            .artifact_evidence
+        let generation = self.generation;
+        let entry = self
+            .tools
             .entry(tool_call_id.to_string())
-            .or_default();
-        evidence.observe_write_content(operation, raw_input)?;
+            .or_insert_with(|| ToolLedgerEntry {
+                generation,
+                ..Default::default()
+            });
+        let evidence = &mut entry.artifact;
+        let had_content = evidence.whole_file_content.is_some();
+        if !entry.retired {
+            evidence.observe_write_content(operation, raw_input)?;
+        }
+        if had_content != evidence.whole_file_content.is_some() {
+            self.observation_revision += 1;
+        }
         if let Some(parent) = path.as_ref().and_then(|path| path.parent()) {
             let identity = zevria_foundation::contained_read::OpenedRoot::open_absolute(parent)
                 .ok()
@@ -1180,7 +1467,10 @@ impl ClaudePlanHandoffState {
             if evidence.directory_identity.is_some() && identity != evidence.directory_identity {
                 return Err("Claude artifact directory was replaced during mutation".into());
             }
-            evidence.directory_identity = identity;
+            if evidence.directory_identity != identity {
+                evidence.directory_identity = identity;
+                self.observation_revision += 1;
+            }
         }
         if lifecycle.is_terminal() {
             validate_claude_plan_artifact_path(
@@ -1201,7 +1491,7 @@ impl ClaudePlanHandoffState {
             self.permissions
                 .retain(|ticket| ticket.tool_call_id != tool_call_id);
         }
-        self.tools.insert(
+        self.set_tool(
             tool_call_id.to_string(),
             ClaudePlanTool::ArtifactMutation {
                 operation,
@@ -1225,94 +1515,89 @@ impl ClaudePlanHandoffState {
         if kind.is_some_and(|kind| kind != ToolKind::SwitchMode) {
             return Err("Claude ExitPlanMode reported an unexpected ACP tool kind".to_string());
         }
-        let existing = self.tools.get(tool_call_id).cloned();
-        self.tool_generations
-            .entry(tool_call_id.to_string())
-            .or_insert(self.generation);
-        if let Some(hint) = extract_handoff_path_hint(raw_input)? {
-            if self
-                .exit_hints
-                .get(tool_call_id)
-                .is_some_and(|previous| previous != &hint)
-            {
-                return Err("Claude ExitPlanMode changed its planFilePath".into());
-            }
-            self.exit_hints.insert(tool_call_id.to_string(), hint);
-        }
-        if let Some(ClaudePlanTool::ArtifactMutation { operation, .. }) = &existing {
+        let entry = self.tools.get(tool_call_id);
+        let existing = entry.and_then(|entry| entry.tool.as_ref());
+        if let Some(ClaudePlanTool::ArtifactMutation { operation, .. }) = existing {
             return Err(format!(
                 "ACP tool call {tool_call_id:?} changed from {} to ExitPlanMode",
                 operation.tool_name()
             ));
         }
-        let terminal = self.exit_terminals.contains_key(tool_call_id)
-            || matches!(
-                status,
-                Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
-            );
         if existing.is_none() && !matches!(self.phase, ClaudePlanHandoffPhase::Active) {
             return Err("Claude attempted more than one ExitPlanMode handoff".into());
         }
-        if let Some(previous) = self.exit_terminals.get(tool_call_id) {
-            if status.is_some_and(|status| status != *previous) {
-                return Err("Claude ExitPlanMode changed its provider terminal status".into());
-            }
-        } else if terminal {
-            self.exit_terminals
-                .insert(tool_call_id.to_string(), status.expect("terminal status"));
+        let hint = extract_handoff_path_hint(raw_input)?;
+        if let (Some(hint), Some(previous)) =
+            (&hint, entry.and_then(|entry| entry.exit_hint.as_ref()))
+            && hint != previous
+        {
+            return Err("Claude ExitPlanMode changed its planFilePath".into());
         }
-        let plan = if terminal {
-            // Zevria deliberately rejects ExitPlanMode after capturing its plan so
-            // Claude stays in planning mode. The provider tool may therefore finish
-            // as failed even though the native handoff completed successfully. ACP
-            // terminal content is tool output; only a repeated rawInput.plan can
-            // assert (and potentially violate) payload identity at this point.
-            extract_handoff_raw_plan(raw_input)?
+        let previous_terminal = entry.and_then(|entry| entry.exit_terminal);
+        if let (Some(previous), Some(status)) = (previous_terminal, status)
+            && status != previous
+        {
+            return Err("Claude ExitPlanMode changed its provider terminal status".into());
+        }
+        let new_terminal = status
+            .filter(|status| matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed));
+        let terminal = previous_terminal.or(new_terminal);
+        let retired = entry.is_some_and(|entry| entry.retired);
+        let next_tool = if retired {
+            None
         } else {
-            extract_handoff_plan(raw_input, content)?
-        };
-        let Some(plan) = plan else {
-            return match existing {
-                Some(ClaudePlanTool::ExitPlanMode { .. }) => Ok(()),
-                // A rejected exit may fail before a file-backed capture settles.
-                // Terminal output is not proposal data.
-                Some(ClaudePlanTool::PendingExitPlanMode) => Ok(()),
-                Some(ClaudePlanTool::ArtifactMutation { operation, .. }) => Err(format!(
-                    "ACP tool call {tool_call_id:?} changed from {} to ExitPlanMode",
-                    operation.tool_name()
-                )),
-                None if initial && !terminal => {
-                    self.tools.insert(
-                        tool_call_id.to_string(),
-                        ClaudePlanTool::PendingExitPlanMode,
-                    );
-                    Ok(())
-                }
-                None if initial => {
-                    Err("Claude ExitPlanMode handoff contained no nonempty plan".to_string())
-                }
-                None => Err(format!(
-                    "unknown ExitPlanMode update for ACP tool call {tool_call_id:?}"
-                )),
+            let plan = if terminal.is_some() {
+                // Terminal content is tool output: Zevria rejects the mode
+                // switch even when capture succeeds. Only rawInput.plan can
+                // (re)assert proposal identity after that point.
+                extract_handoff_raw_plan(raw_input)?
+            } else {
+                extract_handoff_plan(raw_input, content)?
             };
+            match (existing, plan) {
+                (Some(ClaudePlanTool::ExitPlanMode { plan: previous }), Some(plan))
+                    if *previous != plan =>
+                {
+                    return Err(
+                        "Claude ExitPlanMode changed its plan payload during handoff".into(),
+                    );
+                }
+                (_, Some(plan)) => Some(ClaudePlanTool::ExitPlanMode { plan }),
+                (Some(_), None) => None,
+                (None, None) if initial && terminal.is_none() => {
+                    Some(ClaudePlanTool::PendingExitPlanMode)
+                }
+                (None, None) if initial => {
+                    return Err("Claude ExitPlanMode handoff contained no nonempty plan".into());
+                }
+                (None, None) => {
+                    return Err(format!(
+                        "unknown ExitPlanMode update for ACP tool call {tool_call_id:?}"
+                    ));
+                }
+            }
         };
-        match existing {
-            Some(ClaudePlanTool::ExitPlanMode { plan: previous }) if previous != plan => {
-                Err("Claude ExitPlanMode changed its plan payload during handoff".to_string())
-            }
-            Some(ClaudePlanTool::ArtifactMutation { operation, .. }) => Err(format!(
-                "ACP tool call {tool_call_id:?} changed from {} to ExitPlanMode",
-                operation.tool_name()
-            )),
-            Some(ClaudePlanTool::PendingExitPlanMode | ClaudePlanTool::ExitPlanMode { .. })
-            | None => {
-                self.tools.insert(
-                    tool_call_id.to_string(),
-                    ClaudePlanTool::ExitPlanMode { plan },
-                );
-                Ok(())
-            }
+        // Install only a fully validated update, so a rejected report cannot
+        // leave a phantom identity or alter terminal evidence.
+        if let Some(tool) = next_tool {
+            self.set_tool(tool_call_id.to_string(), tool);
         }
+        let entry = self
+            .tools
+            .get_mut(tool_call_id)
+            .expect("validated ExitPlanMode tool");
+        if !retired
+            && let Some(hint) = hint
+            && entry.exit_hint.as_ref() != Some(&hint)
+        {
+            entry.exit_hint = Some(hint);
+            self.observation_revision += 1;
+        }
+        if entry.exit_terminal != terminal {
+            entry.exit_terminal = terminal;
+            self.observation_revision += 1;
+        }
+        Ok(())
     }
 
     pub(super) fn permission(
@@ -1320,16 +1605,15 @@ impl ClaudePlanHandoffState {
         request: &RequestPermissionRequest,
     ) -> ClaudeHandoffPermission {
         let tool_call_id = request.tool_call.tool_call_id.to_string();
-        if self.retired_tools.contains(&tool_call_id) {
+        if self.is_retired(&tool_call_id) {
             return ClaudeHandoffPermission::Invalid(
                 "stale Claude permission belongs to an earlier proposal generation".into(),
             );
         }
         let request_tool_name = claude_tool_name(request.tool_call.meta.as_ref());
-        match self.tools.get(&tool_call_id).cloned() {
+        match self.tool(&tool_call_id).cloned() {
             Some(ClaudePlanTool::ArtifactMutation {
                 operation,
-                path,
                 lifecycle,
                 ..
             }) => {
@@ -1356,64 +1640,7 @@ impl ClaudePlanHandoffState {
                         "Claude plan artifact permission reported a non-edit tool kind".to_string(),
                     );
                 }
-                match self.artifact_mutation_target(
-                    request.tool_call.fields.raw_input.as_ref(),
-                    request
-                        .tool_call
-                        .fields
-                        .locations
-                        .as_deref()
-                        .unwrap_or_default(),
-                    request
-                        .tool_call
-                        .fields
-                        .content
-                        .as_deref()
-                        .unwrap_or_default(),
-                ) {
-                    Ok(Some(request_path)) => {
-                        if let Some(path) = path
-                            && request_path != path
-                        {
-                            return ClaudeHandoffPermission::Invalid(format!(
-                                "Claude plan artifact permission changed target from {} to {}",
-                                path.display(),
-                                request_path.display()
-                            ));
-                        }
-                        let evidence = self
-                            .artifact_evidence
-                            .entry(tool_call_id.clone())
-                            .or_default();
-                        if let Err(error) = evidence.observe_write_content(
-                            operation,
-                            request.tool_call.fields.raw_input.as_ref(),
-                        ) {
-                            return ClaudeHandoffPermission::Invalid(error);
-                        }
-                        if evidence.directory_identity.is_none() {
-                            evidence.directory_identity = request_path
-                                .parent()
-                                .and_then(|parent| {
-                                    zevria_foundation::contained_read::OpenedRoot::open_absolute(
-                                        parent,
-                                    )
-                                    .ok()
-                                })
-                                .and_then(|root| root.identity().ok());
-                        }
-                        if let Some(ClaudePlanTool::ArtifactMutation { path, .. }) =
-                            self.tools.get_mut(&tool_call_id)
-                        {
-                            *path = Some(request_path);
-                        }
-                        ClaudeHandoffPermission::ArtifactMutation
-                    }
-                    Ok(None) => ClaudeHandoffPermission::Invalid(
-                        "Claude plan artifact permission omitted the validated target".to_string(),
-                    ),
-                    Err(error) => ClaudeHandoffPermission::Invalid(error),
-                }
+                ClaudeHandoffPermission::ArtifactMutation
             }
             Some(ClaudePlanTool::PendingExitPlanMode | ClaudePlanTool::ExitPlanMode { .. }) => {
                 if request_tool_name.is_some_and(|name| name != "ExitPlanMode") {
@@ -1445,18 +1672,19 @@ impl ClaudePlanHandoffState {
                         Err(error) => return ClaudeHandoffPermission::Invalid(error),
                     };
                 if let Some(hint) = hint {
-                    if self
-                        .exit_hints
-                        .get(&tool_call_id)
+                    let entry = self.tools.get_mut(&tool_call_id).expect("known tool");
+                    if entry
+                        .exit_hint
+                        .as_ref()
                         .is_some_and(|previous| previous != &hint)
                     {
                         return ClaudeHandoffPermission::Invalid(
                             "Claude ExitPlanMode permission changed planFilePath".into(),
                         );
                     }
-                    self.exit_hints.insert(tool_call_id.clone(), hint);
+                    entry.exit_hint = Some(hint);
                 }
-                let previous = match self.tools.get(&tool_call_id) {
+                let previous = match self.tool(&tool_call_id) {
                     Some(ClaudePlanTool::ExitPlanMode { plan }) => Some(plan.clone()),
                     _ => None,
                 };
@@ -1469,14 +1697,17 @@ impl ClaudePlanHandoffState {
                 }
                 let source = match request_plan.or(previous) {
                     Some(plan) => {
-                        self.tools.insert(
+                        self.set_tool(
                             tool_call_id.clone(),
                             ClaudePlanTool::ExitPlanMode { plan: plan.clone() },
                         );
                         ClaudePlanCandidate::Explicit(plan)
                     }
                     None => ClaudePlanCandidate::Artifact {
-                        path_hint: self.exit_hints.get(&tool_call_id).cloned(),
+                        path_hint: self
+                            .tools
+                            .get(&tool_call_id)
+                            .and_then(|entry| entry.exit_hint.clone()),
                     },
                 };
                 ClaudeHandoffPermission::ExitPlanMode { source }
@@ -1504,97 +1735,31 @@ impl ClaudePlanHandoffState {
         }
     }
 
-    pub(super) fn prepare_artifact_mutation(
-        &self,
-        request: &RequestPermissionRequest,
-    ) -> Result<(), String> {
-        let tool_call_id = request.tool_call.tool_call_id.to_string();
-        let expected_path = match self.tools.get(&tool_call_id) {
-            Some(ClaudePlanTool::ArtifactMutation {
-                path: Some(path),
-                lifecycle: ClaudePlanArtifactLifecycle::Active,
-                ..
-            }) => path.clone(),
-            _ => {
-                return Err(format!(
-                    "Claude plan artifact mutation {tool_call_id:?} is no longer active and validated"
-                ));
-            }
-        };
-        let request_path = self
-            .artifact_mutation_target(
-                request.tool_call.fields.raw_input.as_ref(),
-                request
-                    .tool_call
-                    .fields
-                    .locations
-                    .as_deref()
-                    .unwrap_or_default(),
-                request
-                    .tool_call
-                    .fields
-                    .content
-                    .as_deref()
-                    .unwrap_or_default(),
-            )?
-            .ok_or_else(|| {
-                "Claude plan artifact permission omitted the validated target".to_string()
-            })?;
-        if request_path != expected_path {
-            return Err(format!(
-                "Claude plan artifact permission changed target from {} to {}",
-                expected_path.display(),
-                request_path.display()
-            ));
-        }
-        if request_path.parent() != Some(self.workspace_artifact_directory.as_path()) {
-            return Ok(());
-        }
-
-        prepare_workspace_claude_plan_artifact_directory(
-            &self.workspace_artifact_directory,
-            &self.workspace,
-        )?;
-        let prepared_path = validate_claude_plan_artifact_path(
-            &request_path,
-            &self.artifact_directory,
-            &self.workspace_artifact_directory,
-            &self.workspace,
-        )?;
-        if prepared_path != expected_path {
-            return Err(format!(
-                "Claude plan artifact target changed while preparing its workspace directory from {} to {}",
-                expected_path.display(),
-                prepared_path.display()
-            ));
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(super) fn begin_capture(&mut self, tool_call_id: &str, plan: &str) -> Result<(), String> {
-        if self.retired_tools.contains(tool_call_id) {
+        if self.is_retired(tool_call_id) {
             return Err("stale Claude handoff belongs to an earlier proposal generation".into());
         }
         if !matches!(self.phase, ClaudePlanHandoffPhase::Active) {
             return Err("Claude attempted more than one ExitPlanMode handoff".to_string());
         }
-        let unresolved = self.unresolved_artifacts();
-        if !unresolved.is_empty() {
+        if self.has_unresolved_artifacts() {
+            let unresolved = self.unresolved_artifacts();
             return Err(format!(
                 "Claude ExitPlanMode cannot capture while plan artifacts remain unresolved: {unresolved}"
             ));
         }
-        if self.tools.iter().any(|(id, tool)| {
-            self.tool_generations.get(id) == Some(&self.generation)
-                && matches!(tool, ClaudePlanTool::PendingExitPlanMode)
+        if self.tools.values().any(|entry| {
+            entry.generation == self.generation
+                && !entry.retired
+                && matches!(entry.tool, Some(ClaudePlanTool::PendingExitPlanMode))
         }) {
             return Err(
                 "Claude ExitPlanMode cannot capture while a handoff payload remains unresolved"
                     .to_string(),
             );
         }
-        match self.tools.get(tool_call_id) {
+        match self.tool(tool_call_id) {
             Some(ClaudePlanTool::ExitPlanMode { plan: expected }) if expected == plan => {
                 self.phase = ClaudePlanHandoffPhase::Capturing {
                     tool_call_id: tool_call_id.to_string(),
@@ -1605,48 +1770,157 @@ impl ClaudePlanHandoffState {
         }
     }
 
+    fn artifact_scope(&self) -> ArtifactPathScope {
+        ArtifactPathScope {
+            artifact_directory: self.artifact_directory.clone(),
+            workspace_artifact_directory: self.workspace_artifact_directory.clone(),
+            workspace: self.workspace.clone(),
+        }
+    }
+
     pub(super) fn artifact_mutation_target(
         &self,
         raw_input: Option<&serde_json::Value>,
         locations: &[agent_client_protocol::schema::v1::ToolCallLocation],
         content: &[ToolCallContent],
     ) -> Result<Option<PathBuf>, String> {
-        let mut paths = Vec::new();
-        if let Some(raw_input) = raw_input {
-            let object = raw_input.as_object().ok_or_else(|| {
-                "Claude plan artifact mutation raw input must be an object when present".to_string()
-            })?;
-            if let Some(file_path) = object.get("file_path") {
-                let file_path = file_path.as_str().ok_or_else(|| {
-                    "Claude plan artifact mutation raw input file_path must be a string".to_string()
-                })?;
-                paths.push(PathBuf::from(file_path));
-            }
-        }
-        paths.extend(locations.iter().map(|location| location.path.clone()));
-        for content in content {
-            if let ToolCallContent::Diff(diff) = content {
-                paths.push(diff.path.clone());
-            }
-        }
-        if paths.is_empty() {
-            return Ok(None);
-        }
-        let mut resolved = None;
-        for path in paths {
-            let path = validate_claude_plan_artifact_path(
-                &path,
-                &self.artifact_directory,
-                &self.workspace_artifact_directory,
-                &self.workspace,
-            )?;
-            if resolved.as_ref().is_some_and(|resolved| resolved != &path) {
-                return Err("Claude plan artifact mutation reported conflicting paths".to_string());
-            }
-            resolved = Some(path);
-        }
-        Ok(resolved)
+        resolve_artifact_paths(
+            artifact_target_paths(raw_input, locations, content)?,
+            &self.artifact_directory,
+            &self.workspace_artifact_directory,
+            &self.workspace,
+        )
     }
+}
+
+struct ArtifactPathScope {
+    artifact_directory: PathBuf,
+    workspace_artifact_directory: PathBuf,
+    workspace: PathBuf,
+}
+struct PreparedTarget {
+    path: PathBuf,
+    directory_identity: Option<String>,
+}
+struct GrantCheck {
+    scope: ArtifactPathScope,
+    path: PathBuf,
+    directory_identity: Option<String>,
+}
+
+impl ArtifactPathScope {
+    fn prepare_target(&self, paths: Vec<PathBuf>) -> Result<PreparedTarget, String> {
+        let path = resolve_artifact_paths(
+            paths,
+            &self.artifact_directory,
+            &self.workspace_artifact_directory,
+            &self.workspace,
+        )?
+        .ok_or("Claude plan artifact permission omitted the validated target")?;
+        let directory_identity = artifact_parent_identity(&path);
+        Ok(PreparedTarget {
+            path,
+            directory_identity,
+        })
+    }
+}
+
+impl GrantCheck {
+    fn prepare(self) -> Result<PreparedTarget, String> {
+        let scope = self.scope;
+        if self.path.parent() == Some(scope.workspace_artifact_directory.as_path()) {
+            prepare_workspace_claude_plan_artifact_directory(
+                &scope.workspace_artifact_directory,
+                &scope.workspace,
+            )?;
+        }
+        // Do not reparse the permission payload. The pinned target still needs
+        // a containment and identity check after waiting in the FIFO.
+        let checked = scope.prepare_target(vec![self.path.clone()])?;
+        if checked.path != self.path
+            || (self.directory_identity.is_some()
+                && checked.directory_identity != self.directory_identity)
+        {
+            return Err("Claude plan artifact target changed while preparing its directory".into());
+        }
+        Ok(checked)
+    }
+}
+
+fn artifact_parent_identity(path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    zevria_foundation::contained_read::OpenedRoot::open_absolute(parent)
+        .ok()?
+        .identity()
+        .ok()
+}
+
+fn require_one_shot_option(request: &RequestPermissionRequest) -> Result<(), String> {
+    if artifact_mutation_permission_option(&request.options).is_none() {
+        return Err("Claude plan artifact mutation offered no allow_once permission option".into());
+    }
+    Ok(())
+}
+
+fn artifact_request_paths(request: &RequestPermissionRequest) -> Result<Vec<PathBuf>, String> {
+    let fields = &request.tool_call.fields;
+    artifact_target_paths(
+        fields.raw_input.as_ref(),
+        fields.locations.as_deref().unwrap_or_default(),
+        fields.content.as_deref().unwrap_or_default(),
+    )
+}
+
+fn artifact_target_paths(
+    raw_input: Option<&serde_json::Value>,
+    locations: &[agent_client_protocol::schema::v1::ToolCallLocation],
+    content: &[ToolCallContent],
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    if let Some(raw_input) = raw_input {
+        let object = raw_input.as_object().ok_or_else(|| {
+            "Claude plan artifact mutation raw input must be an object when present".to_string()
+        })?;
+        if let Some(file_path) = object.get("file_path") {
+            let file_path = file_path.as_str().ok_or_else(|| {
+                "Claude plan artifact mutation raw input file_path must be a string".to_string()
+            })?;
+            paths.push(PathBuf::from(file_path));
+        }
+    }
+    paths.extend(locations.iter().map(|location| location.path.clone()));
+    for content in content {
+        if let ToolCallContent::Diff(diff) = content {
+            paths.push(diff.path.clone());
+        }
+    }
+    Ok(paths)
+}
+
+fn resolve_artifact_paths(
+    mut paths: Vec<PathBuf>,
+    artifact_directory: &Path,
+    workspace_artifact_directory: &Path,
+    workspace: &Path,
+) -> Result<Option<PathBuf>, String> {
+    // Path equality normalizes some spellings; validate every distinct raw
+    // spelling before comparing the validated targets.
+    paths.sort_unstable_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+    paths.dedup_by(|a, b| a.as_os_str() == b.as_os_str());
+    let mut resolved = None;
+    for path in paths {
+        let path = validate_claude_plan_artifact_path(
+            &path,
+            artifact_directory,
+            workspace_artifact_directory,
+            workspace,
+        )?;
+        if resolved.as_ref().is_some_and(|resolved| resolved != &path) {
+            return Err("Claude plan artifact mutation reported conflicting paths".into());
+        }
+        resolved = Some(path);
+    }
+    Ok(resolved)
 }
 
 pub(super) fn claude_plan_artifact_directory(

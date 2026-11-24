@@ -183,6 +183,7 @@ use zevria_presentation::{PaneScope, Reduction, SessionModel};
 pub struct App {
     model: SessionModel,
     folds: FoldState,
+    fold_structure: Option<(zevria_presentation::blocks::ProjectionEpoch, u64)>,
     composer: ComposerState,
     interaction: InteractionState,
     edit: EditState,
@@ -341,7 +342,7 @@ impl App {
                     .as_ref()?
                     .1
                     .confirmed_plan()
-                    .map(|plan| plan.snapshot.revision);
+                    .map(|plan| plan.snapshot.revision.clone());
                 let Some(expected_revision) = revision else {
                     self.push_error("This worker has no confirmed baseline proposal.".into());
                     return None;
@@ -1092,7 +1093,7 @@ impl App {
         self.restore_presentation_selection(anchor);
         self.view
             .reconcile_anchor_identity(&self.model.conversation);
-        self.folds.reconcile(&self.model.conversation);
+        self.reconcile_fold_structure();
         self.leave_insert_if_composer_locked();
         effects
     }
@@ -1177,6 +1178,15 @@ impl App {
         }
     }
 
+    pub(crate) fn reconcile_fold_structure(&mut self) {
+        let conversation = &self.model.conversation;
+        let stamp = (conversation.epoch(), conversation.structure_revision());
+        if self.fold_structure != Some(stamp) {
+            self.folds.reconcile(conversation);
+            self.fold_structure = Some(stamp);
+        }
+    }
+
     pub(crate) fn apply_conversation_change(
         &mut self,
         mut change: ConversationChange,
@@ -1184,7 +1194,7 @@ impl App {
         self.view.capture_conversation_anchor();
         self.view
             .reconcile_anchor_identity(&self.model.conversation);
-        self.folds.reconcile(&self.model.conversation);
+        self.reconcile_fold_structure();
         self.view.invalidate_rendered_geometry();
         if let Some(index) = change.invalidate_from() {
             self.view.invalidate_from(index);

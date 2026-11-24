@@ -48,7 +48,7 @@ impl App {
     ) -> FrameLayout {
         let surface = self.surface();
         let eligibility = self.hint_eligibility();
-        let mut parts = self.render_parts();
+        let mut parts = self.render_parts_with_hints(surface, &eligibility);
         let frame_area = frame.area();
         paint_surface(
             frame.buffer_mut(),
@@ -103,9 +103,10 @@ impl App {
         {
             let cache = parts.view.conversation_cache_mut();
             cache.set_appearance(parts.appearance);
-            cache.set_header_timings(std::mem::take(&mut parts.header_timings));
-            cache.refresh(
+            cache.observe_header_timings(parts.conversation, parts.observed_at);
+            cache.refresh_with_revisions(
                 parts.history,
+                Some(parts.conversation),
                 parts.selected,
                 wrap_width,
                 parts.diagnostics_visible,
@@ -119,8 +120,9 @@ impl App {
                 | ConversationTail::Waiting { .. }
                 | ConversationTail::Retrying { .. } => None,
             };
-            cache.refresh_streaming(
+            cache.refresh_streaming_at(
                 streaming,
+                parts.stream_snapshot,
                 parts
                     .assistant_header
                     .filter(|_| streaming.is_some() || parts.pending_header),
@@ -163,34 +165,20 @@ impl App {
         let tail_is_chat = chat_height > 0;
         let viewport_height = usize::from(layout.conversation_content.height);
 
-        let separator_after = {
-            let entries = parts.view.conversation_cache().entries();
-            let mut separators = vec![false; entries.len()];
-            let mut next_visible_is_chat = (tail_height > 0).then_some(tail_is_chat);
-            for (index, entry) in entries.iter().enumerate().rev() {
-                if entry.height == 0 {
-                    continue;
+        let cache = parts.view.conversation_cache();
+        let selection_range = parts.selected.and_then(|active| {
+            let entry = cache.entries().get(active.selection.history_index)?;
+            let representative = match entry.span {
+                Some(zevria_presentation::fold::SpanRole::Hidden { start }) => {
+                    &cache.entries()[start]
                 }
-                let current_is_chat = parts.history.get(index).is_some_and(|history| {
-                    history_has_visible_chat_group(history, parts.diagnostics_visible)
-                });
-                separators[index] = current_is_chat && next_visible_is_chat == Some(true);
-                next_visible_is_chat = Some(current_is_chat);
-            }
-            separators
-        };
-
-        let (selection_range, entries_total) = {
-            let mut selection_range = None;
-            let mut entries_total = 0_usize;
-            for entry in parts.view.conversation_cache().entries() {
-                if let Some(range) = entry.selection {
-                    selection_range = Some(range.shifted(entries_total));
-                }
-                entries_total = entries_total.saturating_add(entry.extent());
-            }
-            (selection_range, entries_total)
-        };
+                _ => entry,
+            };
+            representative
+                .selection
+                .map(|range| range.shifted(representative.offset()))
+        });
+        let entries_total = cache.total_height();
         let preview_range = RowRange::from_start_len(entries_total, preview_height);
         let streaming_range = RowRange::from_start_len(preview_range.end(), streaming_height);
         let status_range = RowRange::from_start_len(
@@ -198,9 +186,11 @@ impl App {
             status_height,
         );
         let total = status_range.end();
-        parts
-            .view
-            .refresh_turn_positions(&parts.turn_starts, layout.conversation_content);
+        parts.view.refresh_current_turn_positions(
+            parts.conversation,
+            parts.diagnostics_visible,
+            layout.conversation_content,
+        );
         parts.view.reconcile_conversation_viewport(
             total,
             viewport_height,
@@ -219,8 +209,14 @@ impl App {
         let mut surface_ranges = Vec::new();
         let mut window_start = None;
         let mut painted_commit = None;
-        let mut offset = 0_usize;
-        for (index, entry) in parts.view.conversation_cache().entries().iter().enumerate() {
+        let cache = parts.view.conversation_cache();
+        for (index, entry) in cache
+            .entries()
+            .iter()
+            .enumerate()
+            .skip(cache.entry_at_row(window.start()))
+        {
+            let offset = entry.offset();
             if offset >= window.end() {
                 break;
             }
@@ -228,18 +224,30 @@ impl App {
             let separator = usize::from(entry.height > 0);
             let end = offset.saturating_add(entry.extent());
             if RowRange::new(offset, end).intersects(window) {
-                window_start.get_or_insert(offset);
-                visible.extend(entry.lines.iter().cloned());
+                entry.append_visible_lines(offset, window, &mut window_start, &mut visible);
                 if let Some((prompt_index, probe)) = parts.accepted_prompt_paint
                     && prompt_index == index
                     && entry_range.intersects(window)
                 {
                     painted_commit = Some(probe);
                 }
-                if separator > 0 {
+                if separator > 0 && (window.start()..window.end()).contains(&entry_range.end()) {
+                    window_start.get_or_insert(entry_range.end());
                     visible.push(
-                        if separator_after[index]
-                            && parts.appearance == TranscriptAppearance::Native
+                        if parts.appearance == TranscriptAppearance::Native
+                            && history_has_visible_chat_group(
+                                &parts.history[index],
+                                parts.diagnostics_visible,
+                            )
+                            && cache.entries()[index + 1..]
+                                .iter()
+                                .position(|entry| entry.height > 0)
+                                .map_or(tail_height > 0 && tail_is_chat, |next| {
+                                    history_has_visible_chat_group(
+                                        &parts.history[index + 1 + next],
+                                        parts.diagnostics_visible,
+                                    )
+                                })
                         {
                             message_separator_line(wrap_width)
                         } else {
@@ -269,7 +277,6 @@ impl App {
                     accent_ranges.push((entry_range, color));
                 }
             }
-            offset = end;
         }
         if RowRange::from_start_len(entries_total, tail_height).intersects(window) {
             window_start.get_or_insert(entries_total);

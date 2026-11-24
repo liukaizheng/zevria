@@ -206,15 +206,14 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
         }),
         _ => None,
     };
-    let header = model.session.call_header();
+    let indices = model.session.call_header().map_or(&[][..], |header| {
+        model.conversation.represented_header_indices(header)
+    });
     let mut newest_web = true;
-    for entry in model.conversation.history().iter().rev() {
-        let HistoryEntry::Conversation(entry) = entry else {
+    for &index in indices.iter().rev() {
+        let Some(HistoryEntry::Conversation(entry)) = model.conversation.entry(index) else {
             continue;
         };
-        if header.is_none() || entry.header != header {
-            continue;
-        }
         for block in entry.blocks.iter().rev().filter(|b| b.visible(false)) {
             match &block.kind {
                 PresentationBlockKind::WebActivity(activity) if newest_web => {

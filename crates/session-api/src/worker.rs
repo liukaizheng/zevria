@@ -63,7 +63,6 @@ impl Drop for WorkerControlRegistration {
 /// dispatch accepted input or freeze an outcome. All IO runs outside its reducer.
 pub enum WorkerActorCommand {
     Prompt(WorkerInput),
-    Retry,
     CancelPrompt {
         generation: u64,
     },
