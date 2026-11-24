@@ -44,13 +44,30 @@ fn sse_fixture_accumulates_all_block_types_and_semantic_progress() {
             complete_tool |= text.contains("pwd");
         }
     }
-    let finished = accumulator.finish().unwrap();
+    let finished = accumulator
+        .finish(
+            zevria_foundation::ModelProfileRef::new("test", "test"),
+            None,
+        )
+        .unwrap();
     assert!(readable_reasoning && complete_tool);
-    assert_eq!(finished.blocks[0]["signature"], "  exact signature\n");
-    assert_eq!(finished.blocks[1]["data"], "opaque-redacted");
-    assert_eq!(finished.blocks[2]["citations"].as_array().unwrap().len(), 1);
-    assert_eq!(finished.blocks[3]["input"], json!({"command":"pwd"}));
-    assert_eq!(finished.blocks[4]["opaque"]["value"], true);
+    assert_eq!(
+        finished.replay.replay().items[0]["signature"],
+        "  exact signature\n"
+    );
+    assert_eq!(finished.replay.replay().items[1]["data"], "opaque-redacted");
+    assert_eq!(
+        finished.replay.replay().items[2]["citations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        finished.replay.replay().items[3]["input"],
+        json!({"command":"pwd"})
+    );
+    assert_eq!(finished.replay.replay().items[4]["opaque"]["value"], true);
     assert_eq!(finished.usage.canonical().total_tokens, 64);
 }
 
@@ -105,6 +122,65 @@ fn management_preflight_accepts_idle_history_and_empty_assistants_do_not_strand_
     let mut retry = json!({"system":[], "messages":[{"role":"user","content":[{"type":"text","text":"first"}]},{"role":"system","content":[{"type":"text","text":"directive"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"opaque"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]});
     project::strip_thinking(&mut retry);
     project::validate_messages(retry["messages"].as_array().unwrap()).unwrap();
+}
+
+#[test]
+fn rolled_back_system_directive_does_not_change_the_next_thinking_binding() {
+    let target = target();
+    let system = json!([{"type":"text", "text":"system prompt"}]);
+    let tools = Value::Null;
+    let first = Message::user("first");
+    let second = Message::user("second");
+    let directive = DirectiveContent::new(zevria_instructions::DirectivePayload::SkillRevocation {
+        name: zevria_instructions::SkillName::parse("example").unwrap(),
+        reason: "changed".into(),
+    })
+    .unwrap();
+    let stripped = ReplayMessage::new(ProviderReplay::anthropic_messages(
+        target.clone(),
+        vec![json!({"type":"thinking", "thinking":"", "signature":"stale"})],
+        Some("0".repeat(64)),
+    ))
+    .unwrap();
+    let mut input = vec![
+        ModelRequestItem::message(&first),
+        ModelRequestItem::DeveloperInstruction(&directive),
+        ModelRequestItem::replay_backed(&stripped),
+        ModelRequestItem::message(&second),
+    ];
+    let prefix = project::project(&input, &target, true, &system, &tools, false).unwrap();
+    assert_eq!(
+        prefix.messages,
+        [
+            json!({"role":"user", "content":[{"type":"text", "text":"first"}, {"type":"text", "text":"second"}]}),
+            json!({"role":"system", "content":[{"type":"text", "text":directive.text}]}),
+        ]
+    );
+    let wire_binding = binding::request_binding(&system, &tools, &prefix.messages);
+    assert_eq!(
+        prefix.prefix_binding, wire_binding,
+        "hash the merged user turn only once"
+    );
+
+    let thinking = json!({"type":"thinking", "thinking":"", "signature":"  exact\n"});
+    let following = ReplayMessage::new(ProviderReplay::anthropic_messages(
+        target.clone(),
+        vec![thinking.clone(), json!({"type":"text", "text":"answer"})],
+        Some(wire_binding),
+    ))
+    .unwrap();
+    let next = Message::user("continue");
+    input.extend([
+        ModelRequestItem::replay_backed(&following),
+        ModelRequestItem::message(&next),
+    ]);
+    let projected = project::project(&input, &target, true, &system, &tools, false).unwrap();
+    assert_eq!(projected.stripped_thinking_turns, 1);
+    assert_eq!(projected.messages[2]["content"][0], thinking);
+    assert_eq!(
+        projected.prefix_binding,
+        binding::request_binding(&system, &tools, &projected.messages)
+    );
 }
 
 fn target() -> ModelProfileRef {
@@ -432,7 +508,10 @@ fn stream_stop_matrix_unknown_redacted_eager_json_and_errors() {
         ] {
             acc.push(&event.to_string()).unwrap();
         }
-        let result = acc.finish();
+        let result = acc.finish(
+            zevria_foundation::ModelProfileRef::new("test", "test"),
+            None,
+        );
         assert_eq!(
             result.is_ok(),
             matches!(stop, "end_turn" | "stop_sequence" | "tool_use")
@@ -467,14 +546,29 @@ fn stream_stop_matrix_unknown_redacted_eager_json_and_errors() {
     acc.push(r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#)
         .unwrap();
     acc.push(r#"{"type":"message_stop"}"#).unwrap();
-    let finished = acc.finish().unwrap();
-    assert_eq!(finished.blocks[0]["data"], " exact ");
-    assert_eq!(finished.blocks[1]["unknown"], json!([1, 2]));
-    assert_eq!(finished.blocks[2]["input"], json!({"command":"pwd"}));
+    let finished = acc
+        .finish(
+            zevria_foundation::ModelProfileRef::new("test", "test"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(finished.replay.replay().items[0]["data"], " exact ");
+    assert_eq!(finished.replay.replay().items[1]["unknown"], json!([1, 2]));
+    assert_eq!(
+        finished.replay.replay().items[2]["input"],
+        json!({"command":"pwd"})
+    );
     let mut acc = stream::MessageAccumulator::default();
     let error = acc
         .push(r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#)
         .unwrap_err();
     assert_eq!(error.kind, error::ErrorKind::Retryable("overloaded"));
-    assert!(stream::MessageAccumulator::default().finish().is_err());
+    assert!(
+        stream::MessageAccumulator::default()
+            .finish(
+                zevria_foundation::ModelProfileRef::new("test", "test"),
+                None
+            )
+            .is_err()
+    );
 }

@@ -14,6 +14,7 @@ impl Drop for AttemptStream {
         // Cancellation drops the provider future before its ordinary terminal
         // flush. Retain the latest ingested evidence without cloning on every
         // stream delta or publishing an out-of-cadence frontend snapshot.
+        self.state.materialize();
         self.collector.collect(self.state.attempt().clone());
     }
 }
@@ -54,7 +55,11 @@ impl AttemptStream {
         }
         Ok(())
     }
-    pub(crate) fn publish(&self, progress: &ProgressReporter) {
+    pub(crate) fn materialize(&mut self) {
+        self.state.materialize();
+    }
+    pub(crate) fn publish(&mut self, progress: &ProgressReporter) {
+        self.materialize();
         // Always collect, even when there is not yet anything readable to show.
         progress.collect_attempt(self.attempt().clone());
         if self.attempt().has_display() {
@@ -63,12 +68,6 @@ impl AttemptStream {
                 attempt: Some(self.attempt().clone()),
             });
         }
-    }
-    #[cfg(test)]
-    pub(crate) fn completed_text(
-        &self,
-    ) -> &std::collections::BTreeMap<(u64, u64), rig_core::message::Text> {
-        self.state.completed_text()
     }
     #[cfg(test)]
     pub(crate) async fn observe(&mut self, event: &Value, progress: &ProgressReporter) {

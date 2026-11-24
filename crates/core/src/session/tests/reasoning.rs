@@ -61,7 +61,7 @@ impl ModelProvider for Provider {
             "effort management must not inspect/count/convert history"
         );
         Ok(zevria_model::models::ReplayPreflight::Compatible(
-            zevria_model::estimates::estimate_model_input_for_profile(input.to_vec(), target)?,
+            zevria_model::estimates::estimate_model_input_for_profile(input, target)?,
         ))
     }
     fn install_model_update(&mut self, role: ModelRole, target: &ModelSelection) {

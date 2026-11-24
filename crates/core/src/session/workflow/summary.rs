@@ -72,25 +72,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             .collect::<Vec<_>>();
         let safe = replay_safe_prefixes(&history)?;
         let prompt = summary_request_message(self.compaction.summary_prompt());
-        let catalog_backed = self
-            .provider
-            .model_catalog()
-            .iter()
-            .any(|entry| entry.context.profile == context.profile);
-        let mut last_size_error = None;
-        for k in (1..=history.len()).rev() {
-            anyhow::ensure!(!turn.is_cancelled(), "turn cancelled");
-            if !safe[k] {
-                tracing::debug!(
-                    source_items = history.len(),
-                    prefix_items = k,
-                    "skipping dependency-crossing summary boundary"
-                );
-                continue;
-            }
+        let safe_k = (1..=history.len()).filter(|&k| safe[k]).collect::<Vec<_>>();
+        let make_request = |k| {
             let mut input = full[..source.cut(k)].to_vec();
             input.push(ModelRequestItem::message(&prompt));
-            let request = ModelRequest {
+            ModelRequest {
                 input_identity: None,
                 instructions: &source.request.instructions,
                 tools: &source.request.tools,
@@ -98,19 +84,32 @@ impl<P: ModelProvider> SessionEngine<P> {
                 input,
                 model_role: policy.model_role,
                 allowed_tool_names: policy.allowed_tool_names.as_deref(),
-            };
-            if catalog_backed {
-                let reasoning = self
-                    .provider
-                    .model_selection(policy.model_role)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "catalog-backed provider requires an explicit role selection"
-                        )
-                    })?
-                    .reasoning_level;
+            }
+        };
+        let catalog_backed = self
+            .provider
+            .model_catalog()
+            .iter()
+            .any(|entry| entry.context.profile == context.profile);
+        let mut fit_count = safe_k.len();
+        if catalog_backed && !safe_k.is_empty() {
+            let reasoning = self
+                .provider
+                .model_selection(policy.model_role)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("catalog-backed provider requires an explicit role selection")
+                })?
+                .reasoning_level;
+            // Try the full safe prefix first. Only an oversized history needs
+            // the logarithmic search over smaller replay-safe boundaries.
+            let mut lo = 0;
+            let mut hi = safe_k.len();
+            let mut probe = hi - 1;
+            loop {
+                anyhow::ensure!(!turn.is_cancelled(), "turn cancelled");
+                let k = safe_k[probe];
                 let fits = self
-                    .request_fits_view(context, reasoning, request.clone(), turn.cancellation())
+                    .request_fits_view(context, reasoning, make_request(k), turn.cancellation())
                     .await?;
                 if self.context.count_failures.contains(&context.profile) {
                     self.context.input_count =
@@ -118,16 +117,31 @@ impl<P: ModelProvider> SessionEngine<P> {
                             turn_id: turn.id,
                         };
                 }
-                if !fits {
+                if fits {
+                    lo = probe + 1;
+                } else {
+                    hi = probe;
                     tracing::debug!(
                         source_items = history.len(),
                         prefix_items = k,
                         rejection = "local",
                         "summary prefix exceeds input capacity"
                     );
-                    continue;
                 }
-            } else {
+                if lo == hi {
+                    break;
+                }
+                probe = lo + (hi - lo) / 2;
+            }
+            fit_count = lo;
+        }
+        let mut last_size_error = None;
+        // Do not re-count on a pre-execution rejection. Only replay-safe,
+        // strictly smaller prefixes can be tried after that rejection.
+        for &k in safe_k[..fit_count].iter().rev() {
+            anyhow::ensure!(!turn.is_cancelled(), "turn cancelled");
+            let request = make_request(k);
+            if !catalog_backed {
                 self.preflight_summary_input(context, &request.input)?;
             }
             // A full-history attempt may continue the normal WebSocket chain.

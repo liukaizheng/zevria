@@ -31,9 +31,7 @@ use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::question::QuestionResponder;
 use zevria_session_api::turn::TurnContext;
 use zevria_transcript::transcript::{Conversation, TranscriptItem, TranscriptWriter};
-use zevria_transcript::{
-    SessionReplayError, ToolDeclarationPlacement, ToolDeclarationRecord, tool_window,
-};
+use zevria_transcript::{SessionReplayError, ToolDeclarationPlacement, ToolDeclarationRecord};
 use zevria_workflow::plan::{PlanId, PlanWorkflowState};
 
 /// Owns one resumable conversation and drives provider/tool iterations.
@@ -308,13 +306,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         .expect("registered tools have unique names and object schemas")
     }
 
-    fn uncached_tool_declaration_update(
+    fn tool_declaration_update_from(
         &self,
-        items: &[TranscriptItem],
-        policy: &TurnPolicy,
+        desired: &ToolDeclarations,
+        window: &zevria_transcript::ToolWindow<'_>,
     ) -> Option<TranscriptItem> {
-        let desired = self.desired_tool_declarations(policy);
-        let window = tool_window(items);
         let (placement, tools) = if window.initial.is_some() {
             let additions = desired
                 .iter()
@@ -334,7 +330,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 ToolDeclarations::new(additions).expect("filtered declarations"),
             )
         } else if self.incremental_tools {
-            (ToolDeclarationPlacement::Initial, desired)
+            (ToolDeclarationPlacement::Initial, desired.clone())
         } else {
             return None;
         };

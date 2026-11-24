@@ -113,7 +113,8 @@ fn request_body_and_counting_cache_breakpoints() {
         )
     );
     assert!(
-        body::count_tokens_body(&built.body)
+        serde_json::to_value(body::count_tokens_body(&built.body))
+            .unwrap()
             .get("max_tokens")
             .is_none()
     );
@@ -135,9 +136,14 @@ fn stream_preserves_signature_and_rejects_invalid_json_and_unknown_deltas() {
     ] {
         stream.push(&event.to_string()).unwrap();
     }
-    let finished = stream.finish().unwrap();
+    let finished = stream
+        .finish(
+            zevria_foundation::ModelProfileRef::new("test", "test"),
+            None,
+        )
+        .unwrap();
     assert_eq!(
-        finished.blocks[0],
+        finished.replay.replay().items[0],
         json!({"type":"thinking","thinking":"","signature":"  opaque\n"})
     );
     assert_eq!(finished.usage.canonical().input_tokens, 60);

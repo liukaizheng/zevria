@@ -54,7 +54,6 @@ impl DoneEvent {
 pub struct CompletionResponse {
     pub id: String,
     pub status: ResponseStatus,
-    pub output: Vec<Output>,
     pub usage: Option<ResponsesUsage>,
     pub error: Option<ResponseError>,
     pub incomplete_details: Option<IncompleteDetails>,
@@ -86,13 +85,12 @@ pub struct InputTokensDetails {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResponseChunk {
-    #[serde(flatten)]
+    #[serde(rename = "type")]
     pub kind: ResponseChunkKind,
     pub response: CompletionResponse,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
 pub enum ResponseChunkKind {
     #[serde(rename = "response.created")]
     ResponseCreated,
@@ -106,48 +104,99 @@ pub enum ResponseChunkKind {
     ResponseIncomplete,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ItemChunk {
     pub item_id: Option<String>,
     pub output_index: u64,
-    #[serde(flatten)]
     pub data: ItemChunkKind,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
+impl ItemChunk {
+    pub(crate) fn decode(mut value: Value) -> serde_json::Result<Self> {
+        // Move the routing header out, then decode just the matching body.
+        // An internally tagged/flattened DTO would buffer the whole frame.
+        let item_id = serde_json::from_value(value["item_id"].take())?;
+        let output_index = serde_json::from_value(value["output_index"].take())?;
+        let data = match value["type"].as_str() {
+            Some("response.output_item.added") => {
+                ItemChunkKind::OutputItemAdded(serde_json::from_value(value)?)
+            }
+            Some("response.output_item.done") => {
+                ItemChunkKind::OutputItemDone(serde_json::from_value(value)?)
+            }
+            Some("response.content_part.added") => {
+                ItemChunkKind::ContentPartAdded(serde_json::from_value(value)?)
+            }
+            Some("response.content_part.done") => {
+                ItemChunkKind::ContentPartDone(serde_json::from_value(value)?)
+            }
+            Some("response.output_text.delta") => {
+                ItemChunkKind::OutputTextDelta(serde_json::from_value(value)?)
+            }
+            Some("response.output_text.done") => {
+                ItemChunkKind::OutputTextDone(serde_json::from_value(value)?)
+            }
+            Some("response.refusal.delta") => {
+                ItemChunkKind::RefusalDelta(serde_json::from_value(value)?)
+            }
+            Some("response.refusal.done") => {
+                ItemChunkKind::RefusalDone(serde_json::from_value(value)?)
+            }
+            Some("response.function_call_arguments.delta") => {
+                ItemChunkKind::FunctionCallArgsDelta(serde_json::from_value(value)?)
+            }
+            Some("response.function_call_arguments.done") => {
+                ItemChunkKind::FunctionCallArgsDone(serde_json::from_value(value)?)
+            }
+            Some("response.reasoning_summary_part.added") => {
+                ItemChunkKind::ReasoningSummaryPartAdded(serde_json::from_value(value)?)
+            }
+            Some("response.reasoning_summary_part.done") => {
+                ItemChunkKind::ReasoningSummaryPartDone(serde_json::from_value(value)?)
+            }
+            Some("response.reasoning_summary_text.delta") => {
+                ItemChunkKind::ReasoningSummaryTextDelta(serde_json::from_value(value)?)
+            }
+            Some("response.reasoning_summary_text.done") => {
+                ItemChunkKind::ReasoningSummaryTextDone(serde_json::from_value(value)?)
+            }
+            Some("response.reasoning_text.delta") => {
+                ItemChunkKind::ReasoningTextDelta(serde_json::from_value(value)?)
+            }
+            Some("response.reasoning_text.done") => {
+                ItemChunkKind::ReasoningTextDone(serde_json::from_value(value)?)
+            }
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "unknown Responses item event type",
+                ));
+            }
+        };
+        Ok(Self {
+            item_id,
+            output_index,
+            data,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum ItemChunkKind {
-    #[serde(rename = "response.output_item.added")]
     OutputItemAdded(ItemOutput),
-    #[serde(rename = "response.output_item.done")]
     OutputItemDone(ItemOutput),
-    #[serde(rename = "response.content_part.added")]
     ContentPartAdded(ContentPartChunk),
-    #[serde(rename = "response.content_part.done")]
     ContentPartDone(ContentPartChunk),
-    #[serde(rename = "response.output_text.delta")]
     OutputTextDelta(DeltaTextChunk),
-    #[serde(rename = "response.output_text.done")]
     OutputTextDone(OutputTextChunk),
-    #[serde(rename = "response.refusal.delta")]
     RefusalDelta(DeltaTextChunk),
-    #[serde(rename = "response.refusal.done")]
     RefusalDone(RefusalTextChunk),
-    #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgsDelta(DeltaTextChunk),
-    #[serde(rename = "response.function_call_arguments.done")]
     FunctionCallArgsDone(ArgsTextChunk),
-    #[serde(rename = "response.reasoning_summary_part.added")]
     ReasoningSummaryPartAdded(SummaryPartChunk),
-    #[serde(rename = "response.reasoning_summary_part.done")]
     ReasoningSummaryPartDone(SummaryPartChunk),
-    #[serde(rename = "response.reasoning_summary_text.delta")]
     ReasoningSummaryTextDelta(SummaryTextChunk),
-    #[serde(rename = "response.reasoning_summary_text.done")]
     ReasoningSummaryTextDone(SummaryTextDone),
-    #[serde(rename = "response.reasoning_text.delta")]
     ReasoningTextDelta(ReasoningTextDelta),
-    #[serde(rename = "response.reasoning_text.done")]
     ReasoningTextDone(OutputTextChunk),
 }
 

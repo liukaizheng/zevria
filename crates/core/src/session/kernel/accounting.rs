@@ -314,7 +314,7 @@ impl ContextAccounting {
                 continue;
             }
             let estimate = zevria_model::estimates::estimate_model_input_with_policy(
-                conversation.model_input(),
+                &conversation.model_input(),
                 &profile,
                 &context.image_accounting,
             );

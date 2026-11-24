@@ -26,29 +26,28 @@ fn streaming_message(
 
 fn publish_snapshot(
     result: &AssistantMessageAccumulator,
-    attempt: Option<&crate::attempt::AttemptStream>,
+    mut attempt: Option<&mut crate::attempt::AttemptStream>,
     progress: &zevria_session_api::ProgressReporter,
 ) {
-    let snapshot = zevria_content::AssistantStreamSnapshot {
-        message: streaming_message(result, attempt).ok(),
-        attempt: attempt.map(|attempt| attempt.attempt().clone()),
-    };
-    if snapshot
-        .attempt
-        .as_ref()
-        .is_some_and(|attempt| !attempt.has_display())
-    {
-        if let Some(attempt) = snapshot.attempt {
-            progress.collect_attempt(attempt);
+    if let Some(attempt) = &mut attempt {
+        attempt.materialize();
+        if !attempt.attempt().has_display() {
+            progress.collect_attempt(attempt.attempt().clone());
+            return;
         }
-    } else {
-        progress.stream_snapshot(snapshot);
     }
+    progress.stream_snapshot(zevria_content::AssistantStreamSnapshot {
+        message: streaming_message(result, attempt.as_deref()).ok(),
+        attempt: attempt.map(|attempt| attempt.attempt().clone()),
+    });
 }
 
 impl AttemptState {
     #[cfg(test)]
-    pub(crate) fn streaming_message(&self) -> anyhow::Result<Message> {
+    pub(crate) fn streaming_message(&mut self) -> anyhow::Result<Message> {
+        if let Some(attempt) = &mut self.attempt {
+            attempt.materialize();
+        }
         streaming_message(&self.result, self.attempt.as_ref())
     }
 
@@ -73,13 +72,13 @@ impl AttemptState {
 
     pub(crate) fn publish_stream(&mut self, progress: &zevria_session_api::ProgressReporter) {
         if self.cadence.take_due(false) {
-            publish_snapshot(&self.result, self.attempt.as_ref(), progress);
+            publish_snapshot(&self.result, self.attempt.as_mut(), progress);
         }
     }
 
     pub(crate) fn flush_stream(&mut self, progress: &zevria_session_api::ProgressReporter) {
         if self.cadence.take_due(true) {
-            publish_snapshot(&self.result, self.attempt.as_ref(), progress);
+            publish_snapshot(&self.result, self.attempt.as_mut(), progress);
         }
     }
 
@@ -89,10 +88,10 @@ impl AttemptState {
         progress: &zevria_session_api::ProgressReporter,
     ) -> F::Output {
         let result = &self.result;
-        let attempt = &self.attempt;
+        let attempt = &mut self.attempt;
         self.cadence
             .next(next, || {
-                publish_snapshot(result, attempt.as_ref(), progress)
+                publish_snapshot(result, attempt.as_mut(), progress)
             })
             .await
     }

@@ -434,12 +434,11 @@ async fn skill_catalog_prospective_capacity_uses_identical_full_instruction_stat
     let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new());
     let gate = PlanSubmissionGate::inert(None);
     let scope = ToolExecutionScope::new(&engine, SessionMode::Build, &policy, &turn, &gate);
+    scope.instructions.validate().unwrap();
     assert_eq!(
         scope
             .instructions
-            .as_ref()
-            .unwrap()
-            .prepare_updates(scope.instruction_state.as_ref().unwrap(), &prospective)
+            .prepare_updates(scope.instruction_state.unwrap(), &prospective)
             .unwrap()
             .instruction_tokens
             + scope.fixed_tokens,

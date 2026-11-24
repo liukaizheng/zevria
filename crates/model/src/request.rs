@@ -381,12 +381,33 @@ impl ModelInputIdentity {
         item: ModelRequestItem<'_>,
     ) -> anyhow::Result<[u8; 32]> {
         use sha2::{Digest as _, Sha256};
-        let bytes = serde_json::to_vec(&item)?;
-        let mut hash = Sha256::new();
-        hash.update(prefix);
-        hash.update((bytes.len() as u64).to_be_bytes());
-        hash.update(bytes);
-        Ok(hash.finalize().into())
+        struct DigestWriter {
+            hash: Sha256,
+            len: u64,
+        }
+
+        impl std::io::Write for DigestWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.hash.update(bytes);
+                self.len += bytes.len() as u64;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = DigestWriter {
+            hash: Sha256::new(),
+            len: 0,
+        };
+        writer.hash.update(prefix);
+        serde_json::to_writer(&mut writer, &item)?;
+        // Frame the JSON with a fixed-size trailer so it can be hashed in one
+        // pass. This identity is in-memory only, not part of the wire prefix.
+        writer.hash.update(writer.len.to_be_bytes());
+        Ok(writer.hash.finalize().into())
     }
 
     pub fn len(&self) -> usize {

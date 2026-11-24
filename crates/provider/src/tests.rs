@@ -630,7 +630,9 @@ fn test_session_with_pump(
     let endpoints = OpenAiResponseEndpoints::parse(url).expect("test endpoint");
     OpenAiProvider {
         cache_diagnostics: Default::default(),
-        input_projection: None,
+        responses_cache: Default::default(),
+        request_properties_cache: None,
+        image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
         profile: zevria_foundation::ModelProfileRef::new("test-provider", "gpt-test"),
         context_window_tokens: 272_000,
         preamble: "Test instructions".to_string(),
@@ -4594,7 +4596,9 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         .http;
     let openai = OpenAiProvider {
         cache_diagnostics: Default::default(),
-        input_projection: None,
+        responses_cache: Default::default(),
+        request_properties_cache: None,
+        image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
         profile: test_profile_ref(),
         context_window_tokens: 272_000,
         preamble: "Test instructions".to_string(),

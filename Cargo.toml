@@ -31,6 +31,7 @@ zevria-tui = { path = "crates/tui" }
 
 anyhow = "1.0.103"
 base64 = "=0.22.1"
+bytes = "1.12.0"
 # MIT OR Apache-2.0; only the input raster codecs are enabled here.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # MIT OR Apache-2.0; native bitmap reads, X11 and optional Wayland data-control.

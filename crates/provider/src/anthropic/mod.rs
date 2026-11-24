@@ -13,6 +13,7 @@ use crate::{
         failure_class,
     },
 };
+use bytes::Bytes;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -29,7 +30,7 @@ use zevria_anthropic::{
 };
 use zevria_foundation::{ModelProfileRef, ReasoningLevel};
 use zevria_model::{
-    CompactResult, InputTokenCount, ModelInputTooLarge, ModelRequest, ModelResponse, ProviderReplay,
+    CompactResult, InputTokenCount, MessageRecord, ModelInputTooLarge, ModelRequest, ModelResponse,
 };
 use zevria_session_api::{
     CompactFuture, InputTokenCountFuture, ModelProvider, ProgressReporter, ProviderFuture,
@@ -165,6 +166,7 @@ impl AnthropicProvider {
     async fn attempt(
         &self,
         prepared: &PreparedRequest,
+        encoded_body: &Bytes,
         progress: AttemptProgress<'_>,
         request_start_deadline: Duration,
     ) -> Result<(FinishedMessage, Option<String>), (ApiError, Option<String>)> {
@@ -179,7 +181,8 @@ impl AnthropicProvider {
                         &self.recovery,
                         request_start_deadline,
                         self.authenticated_request(self.url.clone(), &lease)
-                            .json(&prepared.body)
+                            .header("content-type", "application/json")
+                            .body(encoded_body.clone())
                             .send(),
                     )
                     .await
@@ -255,12 +258,12 @@ impl AnthropicProvider {
         progress.status(NetworkStatus::AwaitingResponse).await;
         let mut events = response.bytes_stream().eventsource();
         let mut accumulator = MessageAccumulator::default();
-        let mut clock = ProgressClock::new(&self.recovery);
+        let mut clock = ProgressClock::new(&self.recovery, progress);
         let mut cadence = crate::streaming::StreamCadence::default();
         let stream_result = async {
             loop {
                 let event = cadence
-                    .next(clock.next(events.next(), progress), || {
+                    .next(clock.next(events.next()), || {
                         if let Some(message) = accumulator.preview() {
                             progress.reporter.stream_updated(message);
                         }
@@ -305,7 +308,7 @@ impl AnthropicProvider {
                     .push(&event.data)
                     .map_err(|e| (e, request_id.clone()))?;
                 if advanced {
-                    clock.advanced(progress).await;
+                    clock.advanced(tokio::time::Instant::now()).await;
                     cadence.mark_dirty();
                     if cadence.take_due(accumulator.is_stopped())
                         && let Some(message) = accumulator.preview()
@@ -344,7 +347,7 @@ impl AnthropicProvider {
                 replay_source=prepared.replay_source, "Anthropic terminal response");
         }
         accumulator
-            .finish()
+            .finish(self.profile.clone(), Some(prepared.prefix_binding.clone()))
             .map(|finished| (finished, request_id.clone()))
             .map_err(|e| (e, request_id))
     }
@@ -357,6 +360,7 @@ impl AnthropicProvider {
     ) -> anyhow::Result<ModelResponse> {
         let mut prepared = self.prepare(&request, history.as_deref())?;
         drop(history);
+        let mut encoded_body = Bytes::from(serde_json::to_vec(&prepared.body)?);
         let recovery = Recovery::new(&self.recovery);
         let mut stripped_retry = false;
         while let Some(plan) = recovery.start_attempt() {
@@ -368,16 +372,19 @@ impl AnthropicProvider {
             };
             attempt_progress.status(NetworkStatus::AttemptStarted).await;
             match self
-                .attempt(&prepared, attempt_progress, plan.request_start_deadline)
+                .attempt(
+                    &prepared,
+                    &encoded_body,
+                    attempt_progress,
+                    plan.request_start_deadline,
+                )
                 .await
             {
                 Ok((finished, _request_id)) => {
                     let usage = finished.usage.canonical();
-                    let response = ModelResponse::from_replay(ProviderReplay::anthropic_messages(
-                        self.profile.clone(),
-                        finished.blocks,
-                        Some(prepared.prefix_binding),
-                    ))?
+                    let response = ModelResponse::from_record(MessageRecord::from_trusted_replay(
+                        finished.replay,
+                    ))
                     .with_usage(Some(usage));
                     return Ok(response);
                 }
@@ -458,6 +465,7 @@ impl AnthropicProvider {
                                 .as_array()
                                 .expect("prepared messages"),
                         )?;
+                        encoded_body = Bytes::from(serde_json::to_vec(&prepared.body)?);
                     }
                     progress
                         .retrying(
@@ -482,7 +490,10 @@ impl AnthropicProvider {
             let Some(url) = self.count_url.clone().filter(|_| !self.count_unsupported) else {
                 return Ok(InputTokenCount::Unsupported);
             };
-            let body = body::count_tokens_body(&self.prepare(&request, history.as_deref())?.body);
+            let prepared = self.prepare(&request, history.as_deref())?;
+            let body = Bytes::from(serde_json::to_vec(&body::count_tokens_body(
+                &prepared.body,
+            ))?);
             let timeout =
                 Duration::from_secs(self.endpoint.input_token_count.request_timeout_seconds);
             let (response, deadline) = authenticated(
@@ -492,7 +503,8 @@ impl AnthropicProvider {
                     let request = self
                         .authenticated_request(url.clone(), &lease)
                         .header("accept", "application/json")
-                        .json(&body)
+                        .header("content-type", "application/json")
+                        .body(body.clone())
                         .send();
                     async move {
                         let deadline = tokio::time::Instant::now() + timeout;

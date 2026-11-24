@@ -408,8 +408,8 @@ pub(in crate::session) struct ToolExecutionScope<'a> {
     pub(in crate::session) policy: &'a TurnPolicy,
     pub(in crate::session) catalog: &'a Arc<zevria_instructions::skill::SkillCatalog>,
     pub(in crate::session) fixed_tokens: u64,
-    pub(in crate::session) instruction_state: Option<zevria_instructions::DirectiveState>,
-    pub(in crate::session) instructions: anyhow::Result<Arc<RequestPlan>>,
+    pub(in crate::session) instruction_state: Option<&'a zevria_instructions::DirectiveState>,
+    pub(in crate::session) instructions: Arc<RequestPlan>,
     pub(in crate::session) skill_activation_available: bool,
     pub(in crate::session) input_token_limit: u64,
     pub(in crate::session) turn: &'a TurnContext,
@@ -465,16 +465,15 @@ pub(in crate::session) async fn execute_ordinary_tool_call(
         Ok(request) => request,
         Err(error) => return skill_lifecycle_error_slot(call, error),
     };
-    let Some(state) = &scope.instruction_state else {
+    let Some(state) = scope.instruction_state else {
         return skill_lifecycle_error_slot(call, "instruction state is unavailable");
     };
-    let instructions = match &scope.instructions {
-        Ok(instructions) => instructions,
-        Err(error) => return skill_lifecycle_error_slot(call, error),
-    };
+    if let Err(error) = scope.instructions.validate() {
+        return skill_lifecycle_error_slot(call, error);
+    }
     let preparation = crate::session::manage::skills::SkillApplicationPreparation {
         context: skill_context.as_ref().expect("skill context"),
-        instructions,
+        instructions: &scope.instructions,
         state,
         fixed_tokens: scope.fixed_tokens,
         input_token_limit: scope.input_token_limit,
@@ -932,16 +931,17 @@ impl<'a> ToolExecutionScope<'a> {
         turn: &'a TurnContext,
         gate: &'a PlanSubmissionGate,
     ) -> Self {
+        let plan = engine.request_plan(policy);
         Self {
             tools: &engine.tools,
             mcp: engine.capabilities.mcp.as_deref(),
             mode,
             policy,
             catalog: &engine.skills.catalog,
-            fixed_tokens: engine.request_plan(policy).irreducible_tokens,
-            instruction_state: engine.directive_state().ok().cloned(),
-            instructions: engine.instruction_preparation(policy),
-            skill_activation_available: engine.skill_activation_available(policy),
+            fixed_tokens: plan.irreducible_tokens,
+            instruction_state: engine.directive_state().ok(),
+            skill_activation_available: plan.catalog_available,
+            instructions: plan,
             input_token_limit: engine.context_policy(policy.model_role).input_token_limit,
             turn,
             reconciliation_catalog: gate.reconciliation_catalog(),

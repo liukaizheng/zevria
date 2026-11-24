@@ -266,15 +266,23 @@ async fn pump_socket(
     terminal: watch::Sender<Option<OpenAiWebSocketTerminalCategory>>,
 ) {
     let mut last_frame = tokio::time::Instant::now();
+    let keepalive_sleep = tokio::time::sleep_until(last_frame + keepalive);
+    tokio::pin!(keepalive_sleep);
     let category = loop {
         tokio::select! {
-            _ = tokio::time::sleep_until(last_frame + keepalive), if !keepalive.is_zero() => {
+            _ = &mut keepalive_sleep, if !keepalive.is_zero() => {
+                let deadline = last_frame + keepalive;
+                if tokio::time::Instant::now() < deadline {
+                    keepalive_sleep.as_mut().reset(deadline);
+                    continue;
+                }
                 if let Err(error) = socket.send(WebSocketMessage::Ping(Default::default())).await {
                     cache_diagnostics.error(OpenAiWebSocketTerminalCategory::SendError, &error);
                     let _ = forward_event(&events, OpenAiWebSocketInbound::Error(error));
                     break OpenAiWebSocketTerminalCategory::SendError;
                 }
                 last_frame = tokio::time::Instant::now();
+                keepalive_sleep.as_mut().reset(last_frame + keepalive);
             }
             command = commands.recv() => {
                 let Some(command) = command else {

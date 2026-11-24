@@ -589,8 +589,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         if decision == PlanDecision::ImplementCurrent {
             let policy = self.policies.policy(SessionMode::Build);
             records.extend(self.standard_request_boundary(policy));
-            records.extend(self.instruction_updates(
-                self.conversation.items(),
+            records.extend(self.instruction_updates_from_state(
+                self.directive_state()?,
                 policy,
                 self.active_skills()?,
             )?);
@@ -681,8 +681,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         })];
         let policy = self.policies.policy(SessionMode::Build);
         records.extend(self.standard_request_boundary(policy));
-        records.extend(self.instruction_updates(
-            self.conversation.items(),
+        records.extend(self.instruction_updates_from_state(
+            self.directive_state()?,
             policy,
             self.active_skills()?,
         )?);

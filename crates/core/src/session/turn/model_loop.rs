@@ -464,15 +464,14 @@ impl<P: ModelProvider> SessionEngine<P> {
         // seeded from transcript pins; accepted applications are embedded in
         // their correlated results only after shared engine admission.
         timings.advance(crate::session::kernel::timing::RoundPhase::Tools);
-        let scope = ToolExecutionScope::new(self, mode, policy, turn, submission_gate);
         let plan = BatchPlan::new(calls, submission_gate);
-        let mut batch = execute_planned_tool_calls(
-            &scope,
-            &plan,
-            self.active_skills()?.clone(),
-            submission_gate,
-        )
-        .await;
+        let active = if plan.calls.iter().any(|call| call.tool.is_skill()) {
+            self.active_skills()?.clone()
+        } else {
+            Default::default()
+        };
+        let scope = ToolExecutionScope::new(self, mode, policy, turn, submission_gate);
+        let mut batch = execute_planned_tool_calls(&scope, &plan, active, submission_gate).await;
         timings.advance(crate::session::kernel::timing::RoundPhase::CommitResults);
         let previous_plan = self.plan_state()?.clone();
         if let Some(first) = batch.drafts.first() {
@@ -500,12 +499,14 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .cloned()
                 .map(|draft| TranscriptItem::Plan(PlanRecord::DraftSaved { draft })),
         );
-        let staged = self.instruction_replay()?.clone().apply_suffix(&records)?;
-        records.extend(self.instruction_updates_from_state(
-            staged.directives(),
-            policy,
-            staged.skills(),
-        )?);
+        if !batch.skill_applications.is_empty() {
+            let staged = self.instruction_replay()?.clone().apply_suffix(&records)?;
+            records.extend(self.instruction_updates_from_state(
+                staged.directives(),
+                policy,
+                staged.skills(),
+            )?);
+        }
         self.record_completed(records)?;
         gate.observe(&plan.calls, &batch);
         let force_exact_recheck = !batch.skill_applications.is_empty();

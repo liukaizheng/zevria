@@ -2,11 +2,13 @@
 
 use crate::session::SessionEngine;
 use crate::session::kernel::accounting::CapacityCandidates;
-use crate::session::kernel::request_plan::HistoryView;
+use crate::session::kernel::request_plan::RequestPlan;
 use crate::session::kernel::state::{RequestShapeFingerprint, request_shape_fingerprint};
 use sha2::{Digest as _, Sha256};
 use zevria_foundation::config::ModelContextPolicy;
 use zevria_foundation::policy::{ModelRole, TurnPolicy};
+use zevria_instructions::DirectiveContent;
+use zevria_model::ContextTokenEstimate;
 use zevria_model::estimates::estimate_model_request_item;
 use zevria_model::request::{InputTokenCount, ModelInputIdentity, ModelRequest, ModelRequestItem};
 use zevria_model::telemetry::{ContextTokenSnapshot, ContextTokenSource};
@@ -14,6 +16,18 @@ use zevria_session_api::event::{ProgressReporter, SessionEvent};
 use zevria_session_api::provider::ModelProvider;
 use zevria_transcript::SessionReplayError;
 use zevria_transcript::transcript::TranscriptItem;
+
+type LocalContextCandidates = (ContextTokenEstimate, Option<ContextTokenEstimate>);
+
+fn fixed_input_tokens_for(plan: &RequestPlan) -> u64 {
+    plan.fixed_tokens.saturating_add(
+        plan.tool_update
+            .as_ref()
+            .and_then(TranscriptItem::model_request_item)
+            .map(estimate_model_request_item)
+            .map_or(0, |estimate| estimate.estimated_tokens),
+    )
+}
 
 pub(in crate::session) enum CapacityCompactionState {
     Completed,
@@ -113,14 +127,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     /// Recorded additions are input; only a not-yet-recorded addition is fixed
     /// overhead. An Initial is already represented by request_tools.
     pub(in crate::session) fn fixed_input_tokens(&self, policy: &TurnPolicy) -> u64 {
-        let plan = self.request_plan(policy);
-        plan.fixed_tokens.saturating_add(
-            plan.tool_update
-                .as_ref()
-                .and_then(TranscriptItem::model_request_item)
-                .map(estimate_model_request_item)
-                .map_or(0, |estimate| estimate.estimated_tokens),
-        )
+        fixed_input_tokens_for(&self.request_plan(policy))
     }
 
     /// A checkpoint can discard the old declaration window. Only a freshly
@@ -151,7 +158,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         {
             Some(estimate) => estimate,
             None => zevria_model::estimates::estimate_model_input_with_policy(
-                self.conversation.model_input(),
+                &self.conversation.model_input(),
                 &context.profile,
                 &context.image_accounting,
             )?,
@@ -252,27 +259,39 @@ impl<P: ModelProvider> SessionEngine<P> {
     pub(in crate::session) fn local_context_candidates(
         &self,
         policy: &TurnPolicy,
-    ) -> anyhow::Result<(
-        zevria_model::ContextTokenEstimate,
-        Option<zevria_model::ContextTokenEstimate>,
-    )> {
-        let context = self.context_policy(policy.model_role);
-        let updates = self.reconcile_instruction_state(
-            self.directive_state()?,
-            policy,
-            self.active_skills()?,
-        )?;
-        let plan = self.request_plan(policy);
-        let mut input = self.conversation.model_input();
+    ) -> anyhow::Result<LocalContextCandidates> {
+        let plan = self.instruction_preparation(policy)?;
+        let updates = plan.updates(self.directive_state()?, self.active_skills()?)?;
+        self.local_context_candidates_for(
+            &plan,
+            &updates,
+            self.conversation.model_input(),
+            self.conversation.input_identity(),
+        )
+        .map(|(candidates, _)| candidates)
+    }
+
+    fn local_context_candidates_for<'a>(
+        &self,
+        plan: &'a RequestPlan,
+        updates: &'a [DirectiveContent],
+        mut input: Vec<ModelRequestItem<'a>>,
+        committed_identity: Option<&'a ModelInputIdentity>,
+    ) -> anyhow::Result<(LocalContextCandidates, Vec<ModelRequestItem<'a>>)> {
+        let context = &plan.context;
+        let policy = &plan.policy;
+        let committed_len = input.len();
         input.extend(updates.iter().map(ModelRequestItem::DeveloperInstruction));
         input.extend(
             plan.tool_update
                 .as_ref()
                 .and_then(TranscriptItem::model_request_item),
         );
-        let identity = (updates.is_empty() && plan.tool_update.is_none())
-            .then(|| self.conversation.input_identity())
-            .flatten();
+        let identity = if updates.is_empty() && plan.tool_update.is_none() {
+            committed_identity
+        } else {
+            None
+        };
         let request = ModelRequest {
             instructions: &plan.instructions,
             tools: &plan.tools,
@@ -295,10 +314,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             ),
         };
         let update_estimate = zevria_model::estimates::estimate_model_input_with_policy(
-            updates
-                .iter()
-                .map(ModelRequestItem::DeveloperInstruction)
-                .collect(),
+            &request.input[committed_len..committed_len + updates.len()],
             &context.profile,
             &context.image_accounting,
         )?;
@@ -308,14 +324,12 @@ impl<P: ModelProvider> SessionEngine<P> {
             None
         } else {
             self.context
-                .projected_estimate(
-                    &context.profile,
-                    plan.shape,
-                    self.fixed_input_tokens(policy),
-                )
+                .projected_estimate(&context.profile, plan.shape, fixed_input_tokens_for(plan))
                 .map(|estimate| estimate.saturating_add(update_estimate))
         };
-        Ok((estimate, usage))
+        let mut input = request.input;
+        input.truncate(committed_len);
+        Ok(((estimate, usage), input))
     }
 
     pub(in crate::session) async fn assess_current_request(
@@ -325,9 +339,21 @@ impl<P: ModelProvider> SessionEngine<P> {
         allow_exact_count: bool,
         force_exact_count: bool,
     ) -> anyhow::Result<ContextTokenSnapshot> {
-        let context = self.context_policy(policy.model_role).clone();
-        let (local, usage) = self.local_context_candidates(policy)?;
-        let identity = self.logical_request_identity(policy)?;
+        let plan = self.instruction_preparation(policy)?;
+        let context = &plan.context;
+        let updates = plan.updates(self.directive_state()?, self.active_skills()?)?;
+        let ((local, usage), input) = self.local_context_candidates_for(
+            &plan,
+            &updates,
+            self.conversation.model_input(),
+            self.conversation.input_identity(),
+        )?;
+        self.ensure_replay_valid()?;
+        let identity = if let Some(identity) = self.conversation.input_identity() {
+            prepared_identity_from_digest(plan.shape, &plan.instructions, identity.digest())
+        } else {
+            prepared_request_identity(plan.shape, &plan.instructions, &input)?
+        };
         let pending_exact =
             self.context
                 .input_count
@@ -356,13 +382,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             && (unmeasured_images || force_exact_count || assessment.needs_exact())
             && pending_exact.is_none()
         {
-            let input = self.conversation.model_input();
-            let instructions = self.rendered_instructions(policy);
-            let tools = self.request_tools(HistoryView::Committed, policy);
             let request = ModelRequest {
                 input_identity: self.conversation.input_identity(),
-                instructions: &instructions,
-                tools: &tools,
+                instructions: &plan.instructions,
+                tools: &plan.tools,
                 forbid_tool_calls: false,
                 input,
                 model_role: policy.model_role,
@@ -405,7 +428,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
 
         let snapshot = ContextTokenSnapshot {
-            profile: context.profile,
+            profile: context.profile.clone(),
             model_role: policy.model_role,
             projected_input_tokens,
             known_input_tokens,

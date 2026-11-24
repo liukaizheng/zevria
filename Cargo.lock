@@ -11469,6 +11469,7 @@ name = "zevria-provider"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "eventsource-stream",
  "futures-util",
  "libc",

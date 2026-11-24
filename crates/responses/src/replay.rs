@@ -3,13 +3,21 @@
 //! not a cumulative last-writer-wins map of provider handles.
 
 use crate::protocol::message_to_openai_input;
-use rig_core::message::{AssistantContent, CallId, Message, Text, UserContent};
-use std::collections::{BTreeSet, HashSet};
+use rig_core::message::{
+    AssistantContent, CallId, Message, Text, ToolCall, ToolFunction, UserContent,
+};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 use zevria_foundation::ModelProfileRef;
 use zevria_model::ModelRequestItem;
 use zevria_model::compaction::replay::ToolCorrelations;
 use zevria_model::models::ReplayPreflight;
-use zevria_model::{ProviderReplay, ReplayProtocol};
+use zevria_model::provider_replay::{
+    decode_responses_item, normalize_tool_arguments, responses_tool_handles,
+};
+use zevria_model::{ProviderReplay, ReplayProtocol, openai::Output};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ReplaySource {
@@ -50,7 +58,7 @@ pub struct InputProjection {
 impl InputProjection {
     fn call(
         &mut self,
-        handles: BTreeSet<String>,
+        handles: &[Option<&str>],
         native_id: Option<String>,
         omitted: bool,
     ) -> anyhow::Result<Option<String>> {
@@ -88,24 +96,22 @@ impl InputProjection {
         Ok(output)
     }
 
-    fn result(&mut self, handles: &BTreeSet<String>) -> anyhow::Result<&Call> {
+    fn result(&mut self, handles: &[Option<&str>]) -> anyhow::Result<&Call> {
         self.calls.result(handles)
     }
 
     fn replay(&mut self, replay: &ProviderReplay, target: &ModelProfileRef) -> anyhow::Result<()> {
-        // Decode known shapes even for native replay; equality is not permission
-        // to transmit malformed known records. Unknown fields remain raw.
-        let portable = replay.portable_projection()?;
         if replay.protocol() != Some(ReplayProtocol::Responses) {
+            let portable = replay.portable_projection()?;
             self.used_portable = true;
-            let mut handles = replay.tool_call_handles().into_iter();
+            let mut handles = replay.tool_call_handles();
             if let Some(mut message) = portable.message {
                 if let Message::Assistant(assistant) = &mut message {
                     for block in &mut assistant.content {
                         if let AssistantContent::ToolCall(call) = block {
                             let (aliases, _) = handles.next().expect("decoded native call");
                             call.id = CallId::from_wire(
-                                self.call(aliases, None, false)?.expect("portable call"),
+                                self.call(&aliases, None, false)?.expect("portable call"),
                             );
                             call.native = None;
                         }
@@ -115,24 +121,31 @@ impl InputProjection {
             }
             return Ok(());
         }
-        let native = replay
-            .native_items_for(target, ReplayProtocol::Responses)?
-            .is_some();
+        let native = replay.source_profile == *target;
+        if native {
+            // Native replay must still reject malformed known records.
+            replay.validate_known_items()?;
+        } else {
+            replay
+                .validate()
+                .map_err(|reason| anyhow::anyhow!("invalid provider replay envelope: {reason}"))?;
+        }
         self.used_native |= native;
         self.used_portable |= !native;
-        for item in &replay.items {
+        for (index, item) in replay.items.iter().enumerate() {
+            let decoded = if native {
+                None
+            } else {
+                decode_responses_item(item, index)?
+            };
             let kind = item
                 .get("type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            let handles = ["id", "call_id"]
-                .into_iter()
-                .filter_map(|key| item.get(key)?.as_str())
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned)
-                .collect::<BTreeSet<_>>();
+            let handles = responses_tool_handles(item);
+            let has_handle = handles.iter().any(Option::is_some);
             anyhow::ensure!(
-                !matches!(kind, "function_call" | "custom_tool_call") || !handles.is_empty(),
+                !matches!(kind, "function_call" | "custom_tool_call") || has_handle,
                 "historical tool call has no correlation handle"
             );
             if kind == "function_call" {
@@ -141,25 +154,14 @@ impl InputProjection {
                     .filter(|id| !id.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("function call has no call_id"))?;
                 let output = self
-                    .call(handles, native.then(|| id.to_string()), false)?
+                    .call(&handles, native.then(|| id.to_string()), false)?
                     .expect("supported call");
-                if !native {
-                    let single = ProviderReplay::openai_responses(
-                        replay.source_profile.clone(),
-                        vec![item.clone()],
-                    );
-                    let mut message = single
-                        .portable_projection()?
-                        .message
-                        .expect("function projection");
-                    if let Message::Assistant(assistant) = &mut message {
-                        for block in &mut assistant.content {
-                            if let AssistantContent::ToolCall(call) = block {
-                                call.id = CallId::from_wire(output.clone());
-                                call.native = None;
-                            }
-                        }
-                    }
+                if let Some(Output::FunctionCall(function)) = decoded {
+                    let arguments = normalize_tool_arguments(function.arguments.as_str());
+                    let message = Message::from(vec![AssistantContent::ToolCall(ToolCall::new(
+                        CallId::from_wire(output),
+                        ToolFunction::new(function.name, arguments),
+                    ))]);
                     self.input.extend(message_to_openai_input(message)?);
                 }
             } else if matches!(kind, "function_call_output" | "custom_tool_call_output") {
@@ -172,9 +174,9 @@ impl InputProjection {
                 if !native && let Some(id) = call.output.clone() {
                     self.input.push(serde_json::json!({"type":"function_call_output", "call_id":id, "output":item["output"]}));
                 }
-            } else if kind.ends_with("_call") && !handles.is_empty() {
+            } else if kind.ends_with("_call") && has_handle {
                 self.call(
-                    handles,
+                    &handles,
                     native.then(|| {
                         item["call_id"]
                             .as_str()
@@ -184,13 +186,11 @@ impl InputProjection {
                     }),
                     !native,
                 )?;
-            } else if !native {
-                let single = ProviderReplay::openai_responses(
-                    replay.source_profile.clone(),
-                    vec![item.clone()],
-                );
-                if let Some(message) = single.portable_projection()?.message {
-                    self.input.extend(message_to_openai_input(message)?);
+            } else if let Some(Output::Message(message)) = decoded {
+                let content = message.into_portable_content().collect::<Vec<_>>();
+                if !content.is_empty() {
+                    self.input
+                        .extend(message_to_openai_input(Message::from(content))?);
                 }
             }
             if native {
@@ -212,16 +212,15 @@ impl InputProjection {
                             Text::new(zevria_content::citations::render_text(text)),
                         )),
                         AssistantContent::ToolCall(call) => {
-                            let mut handles = BTreeSet::from([call.id.to_string()]);
-                            if let Some(item) = call.native.as_ref().map(|native| &native.item) {
-                                handles.extend(
-                                    item.get("id")
-                                        .and_then(serde_json::Value::as_str)
-                                        .filter(|id| !id.is_empty())
-                                        .map(str::to_owned),
-                                );
-                            }
-                            let id = self.call(handles, None, false)?.expect("supported call");
+                            let handle = call.id.wire();
+                            let alias = call
+                                .native
+                                .as_ref()
+                                .and_then(|native| native.item["id"].as_str())
+                                .filter(|id| !id.is_empty());
+                            let id = self
+                                .call(&[Some(&handle), alias], None, false)?
+                                .expect("supported call");
                             let mut call = call.clone();
                             call.id = CallId::from_wire(id);
                             call.native = None;
@@ -245,8 +244,7 @@ impl InputProjection {
                         portable.push(block.clone());
                         continue;
                     };
-                    let handles = BTreeSet::from([result.call.to_string()]);
-                    let call = self.result(&handles)?;
+                    let call = self.result(&[Some(&result.call.wire())])?;
                     if let Some(output) = &call.output {
                         let mut result = result.clone();
                         result.call = CallId::from_wire(output.clone());
@@ -315,25 +313,11 @@ pub fn preflight_with_policy(
     policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
 ) -> anyhow::Result<ReplayPreflight> {
     policy.validate(false)?;
-    let sources = input
-        .iter()
-        .filter_map(|item| match item {
-            ModelRequestItem::ReplayOnly(replay)
-                if &replay.source_profile != target
-                    || replay.protocol() != Some(ReplayProtocol::Responses) =>
-            {
-                Some(replay.source_profile.clone())
-            }
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    // Validate every known record before reporting recoverable incompatibility.
-    for item in input {
-        if let Some(replay) = item.replay_ref() {
-            replay.portable_projection()?;
-        }
-    }
+    let sources = foreign_replay_only_sources(input, target);
     if !sources.is_empty() {
+        for replay in input.iter().filter_map(|item| item.replay_ref()) {
+            replay.validate_known_items()?;
+        }
         return Ok(ReplayPreflight::ConversionRequired {
             sources: sources.into_iter().collect(),
         });
@@ -363,6 +347,24 @@ pub fn preflight_with_policy(
     Ok(ReplayPreflight::Compatible(estimate))
 }
 
+fn foreign_replay_only_sources(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+) -> BTreeSet<ModelProfileRef> {
+    input
+        .iter()
+        .filter_map(|item| match item {
+            ModelRequestItem::ReplayOnly(replay)
+                if &replay.source_profile != target
+                    || replay.protocol() != Some(ReplayProtocol::Responses) =>
+            {
+                Some(replay.source_profile.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Prepared-request settings shared by one cached capacity assessment.
 #[derive(Debug, Clone, Copy)]
 pub struct PreflightOptions<'a> {
@@ -373,13 +375,16 @@ pub struct PreflightOptions<'a> {
     pub policy: &'a zevria_foundation::image_accounting::ImageAccountingPolicy,
 }
 
-/// Capacity validation retains correlation context, not old projected payloads.
+/// One destination projection, shared by local admission and wire dispatch.
 #[derive(Default)]
-pub struct PreflightCache {
-    prefix: Option<PreflightPrefix>,
+pub struct ResponsesSlotCache {
+    prefix: Option<ProjectionPrefix>,
+    generation: u64,
 }
 
-struct PreflightPrefix {
+pub type PreflightCache = ResponsesSlotCache;
+
+struct ProjectionPrefix {
     target: ModelProfileRef,
     compatibility: [bool; 3],
     policy: zevria_foundation::image_accounting::ImageAccountingPolicy,
@@ -387,11 +392,35 @@ struct PreflightPrefix {
     count: usize,
     digest: [u8; 32],
     projection: InputProjection,
+    input: Arc<Vec<serde_json::Value>>,
     estimate: zevria_model::compaction::ResponsesInputEstimate,
     folded_tools: u64,
 }
 
-impl PreflightCache {
+pub struct ProjectedInput {
+    pub input: Arc<Vec<serde_json::Value>>,
+    pub source: ReplaySource,
+    /// Changes on rebuild, including admission-side rebuilds that may have
+    /// renamed portable IDs in a previously transmitted prefix.
+    pub generation: u64,
+}
+
+impl ResponsesSlotCache {
+    pub fn projected_input(&self) -> Option<ProjectedInput> {
+        self.prefix.as_ref().map(|prefix| ProjectedInput {
+            input: prefix.input.clone(),
+            source: prefix.projection.source(),
+            generation: self.generation,
+        })
+    }
+
+    pub fn folded_tool_tokens(&self, identity: &zevria_model::ModelInputIdentity) -> Option<u64> {
+        self.prefix
+            .as_ref()
+            .filter(|prefix| prefix.count == identity.len() && prefix.digest == identity.digest())
+            .map(|prefix| prefix.folded_tools)
+    }
+
     pub fn assess(
         &mut self,
         input: &[ModelRequestItem<'_>],
@@ -451,32 +480,31 @@ impl PreflightCache {
             {
                 prefix
             }
-            _ => PreflightPrefix {
-                target: target.clone(),
-                policy: policy.clone(),
-                policy_version: policy.version(),
-                compatibility,
-                count: 0,
-                digest: [0; 32],
-                projection: InputProjection::default(),
-                estimate: Default::default(),
-                folded_tools: 0,
-            },
+            _ => {
+                self.generation = self
+                    .generation
+                    .checked_add(1)
+                    .expect("projection generations exhausted");
+                ProjectionPrefix {
+                    target: target.clone(),
+                    policy: policy.clone(),
+                    policy_version: policy.version(),
+                    compatibility,
+                    count: 0,
+                    digest: [0; 32],
+                    projection: InputProjection::default(),
+                    input: Arc::default(),
+                    estimate: Default::default(),
+                    folded_tools: 0,
+                }
+            }
         };
         let suffix = &input[prefix.count..];
-        let mut sources = BTreeSet::new();
-        for item in suffix {
-            if let Some(replay) = item.replay_ref() {
-                replay.portable_projection()?;
-            }
-            if let ModelRequestItem::ReplayOnly(replay) = item
-                && (&replay.source_profile != target
-                    || replay.protocol() != Some(ReplayProtocol::Responses))
-            {
-                sources.insert(replay.source_profile.clone());
-            }
-        }
+        let sources = foreign_replay_only_sources(suffix, target);
         if !sources.is_empty() {
+            for replay in suffix.iter().filter_map(|item| item.replay_ref()) {
+                replay.validate_known_items()?;
+            }
             return Ok(ReplayPreflight::ConversionRequired {
                 sources: sources.into_iter().collect(),
             });
@@ -488,9 +516,11 @@ impl PreflightCache {
             tool_options,
             additional_tools,
         )?;
-        prefix
-            .estimate
-            .append_with_policy(&prefix.projection.take_input(), policy);
+        let mut projected = prefix.projection.take_input();
+        if !projected.is_empty() {
+            prefix.estimate.append_with_policy(&projected, policy);
+            Arc::make_mut(&mut prefix.input).append(&mut projected);
+        }
         if !additional_tools {
             for item in suffix {
                 if let ModelRequestItem::AdditionalTools(tools) = item {
@@ -557,9 +587,6 @@ impl InputProjection {
 
     pub fn take_input(&mut self) -> Vec<serde_json::Value> {
         std::mem::take(&mut self.input)
-    }
-    pub fn restore_input(&mut self, input: Vec<serde_json::Value>) {
-        self.input = input;
     }
     pub fn source(&self) -> ReplaySource {
         if self.used_portable {

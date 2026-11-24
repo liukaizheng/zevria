@@ -206,9 +206,9 @@ impl<'a> Recovery<'a> {
         })
     }
 
-    pub(crate) fn mark_progress(&self) {
+    fn mark_progress(&self, now: Instant) {
         let mut state = self.state.lock().expect("recovery state");
-        state.last_progress = Some(Instant::now());
+        state.last_progress = Some(now);
         state.made_progress = true;
         state.consecutive_failures = 0;
     }
@@ -438,33 +438,60 @@ impl std::fmt::Display for ResponseIdleTimeout {
 }
 impl std::error::Error for ResponseIdleTimeout {}
 
-pub(crate) struct ProgressClock {
+pub(crate) struct ProgressClock<'a> {
+    progress: AttemptProgress<'a>,
     last_progress: Instant,
+    synced: Option<Instant>,
     warning: Duration,
     idle: Duration,
     warned: bool,
     observed: bool,
+    sleep: std::pin::Pin<Box<tokio::time::Sleep>>,
 }
 
-impl ProgressClock {
-    pub(crate) fn new(policy: &RecoveryPolicy) -> Self {
+impl<'a> ProgressClock<'a> {
+    pub(crate) fn new(policy: &RecoveryPolicy, progress: AttemptProgress<'a>) -> Self {
+        let now = Instant::now();
+        let warning = policy.stall_warning;
+        let idle = policy.response_idle_timeout;
         Self {
-            last_progress: Instant::now(),
-            warning: policy.stall_warning,
-            idle: policy.response_idle_timeout,
+            progress,
+            last_progress: now,
+            synced: None,
+            warning,
+            idle,
             warned: false,
             observed: false,
+            sleep: Box::pin(tokio::time::sleep_until(now + warning.min(idle))),
         }
     }
 
-    pub(crate) async fn advanced(&mut self, progress: AttemptProgress<'_>) {
-        self.last_progress = Instant::now();
-        progress.recovery.mark_progress();
-        if self.warned || !self.observed {
-            progress.status(NetworkStatus::ProgressResumed).await;
+    fn sync_progress(&mut self) {
+        if self.observed && self.synced != Some(self.last_progress) {
+            self.progress.recovery.mark_progress(self.last_progress);
+            self.synced = Some(self.last_progress);
         }
-        self.warned = false;
+    }
+
+    pub(crate) async fn advanced(&mut self, now: Instant) {
+        self.last_progress = now;
+        let first = !self.observed;
         self.observed = true;
+        if first {
+            self.sync_progress();
+        }
+        let resumed = std::mem::take(&mut self.warned);
+        if resumed {
+            // We were watching only the idle timeout. The next warning can
+            // now be due sooner than that already-armed timer.
+            let deadline = now + self.warning.min(self.idle);
+            if deadline < self.sleep.deadline() {
+                self.sleep.as_mut().reset(deadline);
+            }
+        }
+        if resumed || first {
+            self.progress.status(NetworkStatus::ProgressResumed).await;
+        }
     }
 
     /// Pin parser/read futures across warnings: recreating them can discard
@@ -472,25 +499,38 @@ impl ProgressClock {
     pub(crate) async fn next<F: Future>(
         &mut self,
         next: F,
-        progress: AttemptProgress<'_>,
     ) -> Result<F::Output, ResponseIdleTimeout> {
         tokio::pin!(next);
+        let progress = self.progress;
         loop {
             tokio::select! {
                 biased;
-                () = tokio::time::sleep_until(self.last_progress + self.idle) => {
-                    tracing::warn!(attempt = progress.attempt, transport = ?progress.transport, phase = "response", timeout_category = "response_idle_timeout", idle_ms = ms(self.last_progress.elapsed()), "response progress deadline expired");
-                    return Err(ResponseIdleTimeout);
-                },
-                () = tokio::time::sleep_until(self.last_progress + self.warning), if !self.warned => {
-                    self.warned = true;
+                () = &mut self.sleep => {
                     let idle_for = self.last_progress.elapsed();
-                    tracing::info!(attempt = progress.attempt, transport = ?progress.transport, phase = "response", idle_ms = ms(idle_for), "response progress is quiet");
-                    progress.status(NetworkStatus::Quiet { idle_for, retry_in: self.idle.saturating_sub(idle_for), will_retry: progress.recovery.will_retry_at(self.last_progress + self.idle, self.observed) }).await;
-                }
+                    let idle_deadline = self.last_progress + self.idle;
+                    if idle_for >= self.idle {
+                        tracing::warn!(attempt = progress.attempt, transport = ?progress.transport, phase = "response", timeout_category = "response_idle_timeout", idle_ms = ms(idle_for), "response progress deadline expired");
+                        return Err(ResponseIdleTimeout);
+                    }
+                    if !self.warned && idle_for >= self.warning {
+                        self.warned = true;
+                        self.sync_progress();
+                        tracing::info!(attempt = progress.attempt, transport = ?progress.transport, phase = "response", idle_ms = ms(idle_for), "response progress is quiet");
+                        progress.status(NetworkStatus::Quiet { idle_for, retry_in: self.idle.saturating_sub(idle_for), will_retry: progress.recovery.will_retry_at(idle_deadline, self.observed) }).await;
+                    }
+                    let interval = if self.warned { self.idle } else { self.warning.min(self.idle) };
+                    self.sleep.as_mut().reset(self.last_progress + interval);
+                },
                 value = &mut next => return Ok(value),
             }
         }
+    }
+}
+
+impl Drop for ProgressClock<'_> {
+    fn drop(&mut self) {
+        // Run before the retry decision, including on early transport errors.
+        self.sync_progress();
     }
 }
 
@@ -521,7 +561,7 @@ mod tests {
             recovery.decide(&failure("request_error")),
             Decision::Exhausted(ExhaustedReason::Window)
         );
-        recovery.mark_progress();
+        recovery.mark_progress(Instant::now());
         let Decision::Retry {
             delay,
             retrying_for,
@@ -575,7 +615,7 @@ mod tests {
         recovery.state.lock().unwrap().jitter_sample = u32::MAX;
         tokio::time::advance(Duration::from_secs(600)).await;
         // The window never interrupts a running, useful attempt.
-        recovery.mark_progress();
+        recovery.mark_progress(Instant::now());
         assert!(
             matches!(recovery.decide(&failure("premature_eof")), Decision::Retry { delay, retrying_for, .. } if delay == Duration::from_millis(500) && retrying_for == Duration::from_millis(299_500))
         );
@@ -594,7 +634,7 @@ mod tests {
             assert_eq!(recovery.start_attempt().unwrap().attempt, attempt);
             assert_eq!(recovery.will_retry_at(Instant::now(), true), attempt < 4);
             assert!(recovery.will_retry_at(Instant::now(), false));
-            recovery.mark_progress();
+            recovery.mark_progress(Instant::now());
             let decision = recovery.decide(&failure("premature_eof"));
             if attempt == 4 {
                 assert_eq!(decision, Decision::Exhausted(ExhaustedReason::Interrupted));
@@ -692,6 +732,38 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn progress_clock_defers_subsequent_progress_until_drop() {
+        let policy = RecoveryPolicy::default();
+        let recovery = Recovery::new(&policy);
+        let attempt = recovery.start_attempt().unwrap().attempt;
+        let (reporter, _updates) = reporter();
+        let mut clock = ProgressClock::new(
+            &policy,
+            AttemptProgress {
+                reporter: &reporter,
+                recovery: &recovery,
+                attempt,
+                transport: NetworkTransport::Http,
+            },
+        );
+        let first = Instant::now();
+        clock.advanced(first).await;
+        assert_eq!(recovery.state.lock().unwrap().last_progress, Some(first));
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            clock.advanced(Instant::now()).await;
+        }
+        let latest = Instant::now();
+        assert_eq!(recovery.state.lock().unwrap().last_progress, Some(first));
+
+        // Dropping the clock before the recovery decision must use the time
+        // of the last frame, not the (possibly later) end of the attempt.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        drop(clock);
+        assert_eq!(recovery.state.lock().unwrap().last_progress, Some(latest));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn warning_preserves_pending_read_and_progress_rearms_watchdog() {
         use zevria_session_api::{SessionEvent, SessionUpdate};
         let (reporter, mut events) = reporter();
@@ -700,27 +772,24 @@ mod tests {
             let policy = RecoveryPolicy::default();
             let recovery = Recovery::new(&policy);
             recovery.start_attempt().unwrap();
-            let mut clock = ProgressClock::new(&policy);
             let progress = AttemptProgress {
                 reporter: &reporter,
                 recovery: &recovery,
                 attempt: 1,
                 transport: NetworkTransport::WebSocket,
             };
+            let mut clock = ProgressClock::new(&policy, progress);
             assert_eq!(
-                clock
-                    .next(async { recv.await.unwrap() }, progress)
-                    .await
-                    .unwrap(),
+                clock.next(async { recv.await.unwrap() }).await.unwrap(),
                 "partial frame completed"
             );
-            clock.advanced(progress).await;
+            clock.advanced(Instant::now()).await;
             for _ in 0..8 {
                 tokio::time::sleep(Duration::from_secs(25)).await;
-                clock.next(std::future::ready(()), progress).await.unwrap();
-                clock.advanced(progress).await;
+                clock.next(std::future::ready(())).await.unwrap();
+                clock.advanced(Instant::now()).await;
             }
-            clock.next(std::future::pending::<()>(), progress).await
+            clock.next(std::future::pending::<()>()).await
         });
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(30)).await;
@@ -773,8 +842,8 @@ mod tests {
                 attempt: 1,
                 transport: NetworkTransport::Http,
             };
-            ProgressClock::new(&policy)
-                .next(std::future::pending::<()>(), progress)
+            ProgressClock::new(&policy, progress)
+                .next(std::future::pending::<()>())
                 .await
         });
         tokio::task::yield_now().await;

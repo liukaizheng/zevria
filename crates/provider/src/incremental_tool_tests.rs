@@ -78,9 +78,9 @@ async fn additions_share_strict_renderer_fold_in_place_and_keep_tools_when_forbi
         .await
         .unwrap();
         assert_eq!(fallback.full_input, normal.full_input);
-        let mut expected = normal.request_properties.clone();
+        let mut expected = normal.request_properties.as_ref().clone();
         expected["tool_choice"] = "none".into();
-        assert_eq!(fallback.request_properties, expected);
+        assert_eq!(*fallback.request_properties, expected);
         provider.compatibility.additional_tools = false;
         let folded = crate::turn::prepare_turn_request(&request, &mut provider)
             .await

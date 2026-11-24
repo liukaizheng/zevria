@@ -274,8 +274,8 @@ impl<P: ModelProvider> SessionEngine<P> {
             _ => None,
         });
         records.extend(boundary);
-        records.extend(self.instruction_updates(
-            self.conversation.items(),
+        records.extend(self.instruction_updates_from_state(
+            self.directive_state()?,
             policy,
             self.active_skills()?,
         )?);

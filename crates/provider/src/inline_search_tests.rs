@@ -128,7 +128,6 @@ async fn answers_stream_before_final_annotations_and_only_display_copies_are_san
         panic!("answer")
     };
     assert_eq!(display, "Claim [Source](https://example.org/)");
-    assert_eq!(search.completed_text()[&(0, 0)].text, text);
     let before = search.attempt().clone();
     search.observe(&json!({"type":"response.output_text.annotation.added","output_index":0,"content_index":0,"annotation_index":0,"annotation":{"type":"url_citation","start_index":0,"end_index":5,"title":"stale","url":"https://stale.example.org"}}), &progress).await;
     assert_eq!(

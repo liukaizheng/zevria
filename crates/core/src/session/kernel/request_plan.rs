@@ -43,6 +43,15 @@ pub(in crate::session) struct RequestPlan {
     validation: Option<String>,
 }
 
+impl RequestPlan {
+    pub(in crate::session) fn validate(&self) -> anyhow::Result<()> {
+        if let Some(error) = &self.validation {
+            anyhow::bail!("{error}");
+        }
+        Ok(())
+    }
+}
+
 impl<P: ModelProvider> SessionEngine<P> {
     pub(in crate::session) fn request_plan(&self, policy: &TurnPolicy) -> Arc<RequestPlan> {
         let mut cache = self
@@ -86,12 +95,8 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> Arc<RequestPlan> {
         let items = history.items(&self.conversation);
         let desired = self.desired_tool_declarations(policy);
-        let tools = Arc::new(
-            tool_window(items)
-                .initial
-                .cloned()
-                .unwrap_or_else(|| desired.clone()),
-        );
+        let window = tool_window(items);
+        let tools = Arc::new(window.initial.cloned().unwrap_or_else(|| desired.clone()));
         let tool_bytes: Arc<[u8]> = serde_json::to_vec(tools.as_ref())
             .expect("tools serialize")
             .into();
@@ -111,7 +116,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             instructions,
             tools,
             tool_bytes,
-            tool_update: self.uncached_tool_declaration_update(items, policy),
+            tool_update: self.tool_declaration_update_from(&desired, &window),
             catalog: self.skills.catalog.clone(),
             catalog_available: available,
             bodies_enabled: available,
@@ -169,9 +174,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         #[cfg(feature = "test-support")]
         crate::session::pipeline_probe::record(|counts| counts.instruction_snapshots += 1);
         let plan = self.request_plan(policy);
-        if let Some(error) = &plan.validation {
-            anyhow::bail!("{error}");
-        }
+        plan.validate()?;
         Ok(plan)
     }
 

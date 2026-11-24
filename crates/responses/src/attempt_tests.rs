@@ -5,7 +5,8 @@ use zevria_content::{AssistantPartIdentity as Part, AssistantPresentationContent
 fn state() -> AttemptReducer {
     AttemptReducer::new(zevria_foundation::ModelProfileRef::new("test", "test"))
 }
-fn answer(state: &AttemptReducer) -> String {
+fn answer(state: &mut AttemptReducer) -> String {
+    state.materialize();
     let message = crate::accumulator::AssistantMessageAccumulator::default()
         .streaming_message_with_attempt(state)
         .unwrap();
@@ -136,20 +137,23 @@ fn growing_parts_reconcile_annotations_from_original_unicode_offsets() {
     state.ingest(&early);
     state.ingest(&json!({"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}));
     state.ingest(&delta("🦀é", 4));
-    assert_eq!(answer(&state), "🦀é", "future range is not a fallback link");
-    assert!(state.completed_text().is_empty());
+    assert_eq!(
+        answer(&mut state),
+        "🦀é",
+        "future range is not a fallback link"
+    );
     let revision = state.attempt().revision;
     state.ingest(&delta("🦀é", 4));
     state.ingest(&delta("stale", 2));
     assert_eq!(state.attempt().revision, revision);
     state.ingest(&delta("你好", 5));
-    assert_eq!(answer(&state), "🦀é你好 [Source](https://example.org/)");
+    assert_eq!(answer(&mut state), "🦀é你好 [Source](https://example.org/)");
     assert!(state.attempt().revision > revision);
     state.ingest(&json!({"type":"response.output_text.done","output_index":0,"content_index":0,"text":"🦀é你好"}));
     state.ingest(&annotation(1, 6, 4, "javascript:alert(1)"));
     state.ingest(&annotation(2, 7, 999, "https://fallback.example.org"));
     assert_eq!(
-        answer(&state),
+        answer(&mut state),
         "🦀é你好 [Source](https://example.org/)\n\n[Source](https://fallback.example.org/)"
     );
     // Correct an annotation index, then reject its older duplicate without
@@ -157,16 +161,16 @@ fn growing_parts_reconcile_annotations_from_original_unicode_offsets() {
     state.ingest(&annotation(0, 10, 4, "https://correct.example.org"));
     state.ingest(&annotation(0, 8, 4, "https://stale.example.org"));
     state.ingest(&annotation(3, 9, 2, "https://other.example.org"));
-    assert!(!answer(&state).contains("stale.example"));
-    assert!(answer(&state).contains("other.example"));
+    assert!(!answer(&mut state).contains("stale.example"));
+    assert!(answer(&mut state).contains("other.example"));
     state.ingest(&json!({"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"output_text","text":"final","annotations":[early["annotation"]]}}));
-    assert_eq!(answer(&state), "fina [Source](https://example.org/)l");
+    assert_eq!(answer(&mut state), "fina [Source](https://example.org/)l");
     let completed = state.attempt().clone();
     state.ingest(&delta("stale suffix", 11));
     state.ingest(&annotation(0, 12, 4, "https://late.example.org"));
     state.ingest(&json!({"type":"response.output_text.done","output_index":0,"content_index":0,"text":"stale done"}));
     assert_eq!(state.attempt(), &completed);
-    assert_eq!(state.completed_text()[&(0, 0)].text, "final");
+    assert_eq!(state.live_text[&(0, 0)].raw, "final");
 }
 
 #[test]
@@ -174,10 +178,10 @@ fn authoritative_items_remove_provisional_parts() {
     let mut state = state();
     state.ingest(&delta("provisional", 1));
     state.ingest(&json!({"type":"response.output_text.delta","output_index":0,"content_index":1,"delta":"trailing draft"}));
-    assert_eq!(answer(&state), "provisional\ntrailing draft");
+    assert_eq!(answer(&mut state), "provisional\ntrailing draft");
     let item = json!({"type":"message","id":"native","content":[{"type":"output_text","text":"authoritative","annotations":[]}]});
     state.ingest(&json!({"type":"response.output_item.done","output_index":0,"item":item}));
-    assert_eq!(answer(&state), "authoritative");
+    assert_eq!(answer(&mut state), "authoritative");
     let completed = state.attempt().clone();
     for event in [
         json!({"type":"response.content_part.done","output_index":0,"content_index":1,"part":{"type":"output_text","text":"late trailing","annotations":[]}}),
@@ -196,23 +200,23 @@ fn opaque_markers_stay_hidden_until_annotations_arrive_even_after_text_done() {
     let token = "\u{e200}cite\u{e202}turn0search0\u{e201}";
     let raw = format!("Claim {token} more prose.");
     state.ingest(&delta(&raw, 1));
-    assert_eq!(answer(&state), "Claim  more prose.");
+    assert_eq!(answer(&mut state), "Claim  more prose.");
     state.ingest(
         &json!({"type":"response.output_text.done","output_index":0,"content_index":0,"text":raw}),
     );
-    assert_eq!(answer(&state), "Claim  more prose.");
+    assert_eq!(answer(&mut state), "Claim  more prose.");
     let citation = json!({"type":"url_citation","start_index":6,"end_index":6+token.chars().count(),"title":"Source","url":"https://example.org"});
     state.ingest(&json!({"type":"response.output_text.annotation.added","output_index":0,"content_index":0,"annotation_index":0,"annotation":citation}));
     assert_eq!(
-        answer(&state),
+        answer(&mut state),
         "Claim [Source](https://example.org/) more prose."
     );
     state.ingest(&json!({"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"output_text","text":raw,"annotations":[citation]}}));
     assert_eq!(
-        answer(&state),
+        answer(&mut state),
         "Claim [Source](https://example.org/) more prose."
     );
-    assert_eq!(state.completed_text()[&(0, 0)].text, raw);
+    assert_eq!(state.live_text[&(0, 0)].raw, raw);
 }
 
 #[test]
@@ -221,9 +225,9 @@ fn later_output_text_does_not_wait_for_an_earlier_messages_item_done() {
     state.ingest(&delta("early answer", 1));
     state.ingest(&json!({"type":"response.reasoning_summary_text.delta","output_index":1,"summary_index":0,"delta":"interleaved reasoning"}));
     state.ingest(&json!({"type":"response.output_text.delta","output_index":2,"content_index":0,"delta":"later answer"}));
-    assert_eq!(answer(&state), "early answer\nlater answer");
+    assert_eq!(answer(&mut state), "early answer\nlater answer");
     state.ingest(&delta(" grows", 2));
-    assert_eq!(answer(&state), "early answer grows\nlater answer");
+    assert_eq!(answer(&mut state), "early answer grows\nlater answer");
     assert_eq!(
         state
             .attempt()
@@ -233,7 +237,6 @@ fn later_output_text_does_not_wait_for_an_earlier_messages_item_done() {
             .collect::<Vec<_>>(),
         [0, 1, 2]
     );
-    assert!(state.completed_text().is_empty());
 }
 
 #[test]
@@ -255,9 +258,9 @@ fn multiple_parts_and_mixed_activity_keep_source_order_as_the_current_part_grows
             .any(|part| matches!(part.content, Content::Answer { .. }))
     );
     state.ingest(&json!({"type":"response.content_part.added","output_index":3,"content_index":0,"part":{"type":"output_text","text":"first","annotations":[]}}));
-    assert_eq!(answer(&state), "first\nsecond");
+    assert_eq!(answer(&mut state), "first\nsecond");
     state.ingest(&json!({"type":"response.output_text.delta","output_index":3,"content_index":1,"delta":" grows"}));
-    assert_eq!(answer(&state), "first\nsecond grows");
+    assert_eq!(answer(&mut state), "first\nsecond grows");
     assert_eq!(
         state
             .attempt()
@@ -279,12 +282,13 @@ fn future_annotations_update_sources_before_text_and_final_items_replace_them() 
     let mut state = state();
     let annotation = |url: &str| json!({"type":"url_citation", "url":url, "title":"Source", "start_index":100,"end_index":200});
     state.ingest(&delta("Claim.", 1));
+    state.materialize();
     let revision = state.attempt().revision;
     state.ingest(
         &json!({"type":"response.output_text.annotation.added","output_index":0,
         "content_index":0,"annotation_index":0,"annotation":annotation("https://draft.test/")}),
     );
-    assert_eq!(answer(&state), "Claim.");
+    assert_eq!(answer(&mut state), "Claim.");
     assert_eq!(state.attempt().revision, revision + 1);
     let sources =
         |state: &AttemptReducer, index: usize| match &state.attempt().presentation[index].content {
@@ -301,6 +305,7 @@ fn future_annotations_update_sources_before_text_and_final_items_replace_them() 
         {"type":"output_text","text":"Claim.","annotations":[annotation("https://final.test/")]},
         {"type":"refusal","refusal":"No.","annotations":[annotation("https://ignored.test/")]}
     ]}}));
+    state.materialize();
     assert_eq!(state.attempt().presentation.len(), 2);
     assert_eq!(sources(&state, 0), ["https://final.test/"]);
     assert!(sources(&state, 1).is_empty());
@@ -317,18 +322,18 @@ fn refusals_and_split_controls_stream_without_mutating_raw_completed_parts() {
     ] {
         state.ingest(&event);
     }
-    assert_eq!(answer(&state), "Cannot help.");
+    assert_eq!(answer(&mut state), "Cannot help.");
     state.ingest(&json!({"type":"response.refusal.done","output_index":0,"content_index":0,"refusal":"Cannot comply."}));
     state.ingest(&json!({"type":"response.refusal.delta","output_index":0,"content_index":0,"delta":"stale"}));
-    assert_eq!(answer(&state), "Cannot comply.");
+    assert_eq!(answer(&mut state), "Cannot comply.");
     let mut state = super::tests::state();
     state.ingest(&delta("Before \u{1b}[", 1));
     state.ingest(&delta("31mred\u{1b}[0m\u{202e}", 2));
-    assert_eq!(answer(&state), "Before red");
+    assert_eq!(answer(&mut state), "Before red");
     let raw = "Before \u{1b}[31mred\u{1b}[0m\u{202e}";
     state.ingest(&json!({"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"output_text","text":raw,"annotations":[]}}));
-    assert_eq!(answer(&state), "Before red");
-    assert_eq!(state.completed_text()[&(0, 0)].text, raw);
+    assert_eq!(answer(&mut state), "Before red");
+    assert_eq!(state.live_text[&(0, 0)].raw, raw);
 }
 
 #[test]
@@ -338,11 +343,20 @@ fn large_single_part_keeps_latest_text_not_a_delta_history() {
     for sequence in 0..1024 {
         state.ingest(&delta(chunk, sequence));
     }
-    assert_eq!(answer(&state), chunk.repeat(1024));
+    assert!(
+        state.attempt().presentation.is_empty(),
+        "initial rendering is lazy"
+    );
+    assert_eq!(answer(&mut state), chunk.repeat(1024));
+    state.ingest(&delta(chunk, 1024));
+    assert!(
+        !state.answers_dirty,
+        "plain deltas append to a materialized answer"
+    );
+    assert_eq!(answer(&mut state), chunk.repeat(1025));
     assert_eq!(state.live_text.len(), 1);
     assert_eq!(state.display_text.len(), 1);
     assert_eq!(state.attempt().presentation.len(), 1);
-    assert!(state.completed_text().is_empty());
     assert!(state.dirty_text.is_empty());
 }
 

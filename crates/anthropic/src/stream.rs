@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use zevria_foundation::ModelProfileRef;
-use zevria_model::ProviderReplay;
+use zevria_model::{ProviderReplay, ReplayMessage, anthropic::ContentBlock};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -65,7 +65,7 @@ pub struct MessageAccumulator {
     input_transformations: Value,
 }
 pub struct FinishedMessage {
-    pub blocks: Vec<Value>,
+    pub replay: ReplayMessage,
     pub stop_reason: String,
     pub stop_details: Value,
     pub usage: Usage,
@@ -179,10 +179,9 @@ impl MessageAccumulator {
                     let input: serde_json::Map<String, Value> = serde_json::from_str(&block.partial_json).map_err(|error| ApiError::new(ErrorKind::Retryable("invalid_tool_json"), format!("invalid tool JSON at content_block_stop: {error}; try compatibility.eager_tool_input_streaming: false if this persists")))?;
                     block.raw["input"] = Value::Object(input);
                 }
-                serde_json::from_value::<zevria_model::anthropic::ContentBlock>(block.raw.clone())
-                    .map_err(|error| {
-                        protocol(format!("invalid completed Anthropic block: {error}"))
-                    })?;
+                ContentBlock::validate_known(&block.raw).map_err(|error| {
+                    protocol(format!("invalid completed Anthropic block: {error}"))
+                })?;
                 block.stopped = true;
             }
             Event::MessageDelta { delta, usage } => {
@@ -229,23 +228,34 @@ impl MessageAccumulator {
         &self.input_transformations
     }
     pub fn preview(&self) -> Option<Message> {
-        let blocks = self
+        let visible = |block: &&Block| {
+            block.stopped || matches!(block.raw["type"].as_str(), Some("text" | "thinking"))
+        };
+        let boundary = self
             .blocks
-            .values()
-            .filter(|block| {
-                block.stopped || matches!(block.raw["type"].as_str(), Some("text" | "thinking"))
-            })
-            .map(|block| block.raw.clone())
-            .collect::<Vec<_>>();
-        let blocks = echo_blocks(blocks);
-        if blocks.is_empty() {
-            return None;
+            .iter()
+            .rev()
+            .find(|(_, block)| visible(block) && block.raw["type"] == "fallback")
+            .map(|(&index, _)| index);
+        let mut content = Vec::new();
+        for (&index, block) in &self.blocks {
+            if !visible(&block)
+                || block.raw["type"] == "fallback"
+                || boundary.is_some_and(|boundary| index < boundary && block.raw["type"] != "text")
+            {
+                continue;
+            }
+            if let Some(decoded) = ContentBlock::decode_known(&block.raw).ok()? {
+                content.extend(decoded.canonical(&block.raw));
+            }
         }
-        ProviderReplay::anthropic_messages(ModelProfileRef::new("preview", "preview"), blocks, None)
-            .to_message()
-            .ok()
+        (!content.is_empty()).then(|| Message::from(content))
     }
-    pub fn finish(self) -> Result<FinishedMessage, ApiError> {
+    pub fn finish(
+        self,
+        profile: ModelProfileRef,
+        prefix_binding: Option<String>,
+    ) -> Result<FinishedMessage, ApiError> {
         if !self.stopped {
             return Err(protocol("Anthropic stream ended before message_stop"));
         }
@@ -282,15 +292,14 @@ impl MessageAccumulator {
                 "Anthropic response contained no assistant content",
             ));
         }
-        ProviderReplay::anthropic_messages(
-            ModelProfileRef::new("validation", "validation"),
-            blocks.clone(),
-            None,
-        )
-        .to_message()
+        let replay = ReplayMessage::new(ProviderReplay::anthropic_messages(
+            profile,
+            blocks,
+            prefix_binding,
+        ))
         .map_err(|e| terminal(e.to_string()))?;
         Ok(FinishedMessage {
-            blocks,
+            replay,
             stop_reason,
             stop_details: self.stop_details,
             usage: self.usage,

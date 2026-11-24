@@ -21,8 +21,8 @@ pub fn estimate_model_request_item(item: ModelRequestItem<'_>) -> ContextTokenEs
     }
 }
 
-pub fn estimate_model_input(input: Vec<ModelRequestItem<'_>>) -> ContextTokenEstimate {
-    input.into_iter().map(estimate_model_request_item).fold(
+pub fn estimate_model_input(input: &[ModelRequestItem<'_>]) -> ContextTokenEstimate {
+    input.iter().copied().map(estimate_model_request_item).fold(
         ContextTokenEstimate::default(),
         ContextTokenEstimate::saturating_add,
     )
@@ -120,11 +120,12 @@ pub fn estimate_model_request_item_with_policy(
 }
 
 pub fn estimate_model_input_for_profile(
-    input: Vec<ModelRequestItem<'_>>,
+    input: &[ModelRequestItem<'_>],
     target_profile: &ModelProfileRef,
 ) -> anyhow::Result<ContextTokenEstimate> {
     input
-        .into_iter()
+        .iter()
+        .copied()
         .try_fold(ContextTokenEstimate::default(), |total, item| {
             estimate_model_request_item_for_profile(item, target_profile)
                 .map(|estimate| total.saturating_add(estimate))
@@ -132,12 +133,13 @@ pub fn estimate_model_input_for_profile(
 }
 
 pub fn estimate_model_input_with_policy(
-    input: Vec<ModelRequestItem<'_>>,
+    input: &[ModelRequestItem<'_>],
     target_profile: &ModelProfileRef,
     policy: &ImageAccountingPolicy,
 ) -> anyhow::Result<ContextTokenEstimate> {
     input
-        .into_iter()
+        .iter()
+        .copied()
         .try_fold(ContextTokenEstimate::default(), |total, item| {
             estimate_model_request_item_with_policy(item, target_profile, policy)
                 .map(|estimate| total.saturating_add(estimate))

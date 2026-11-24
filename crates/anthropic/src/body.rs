@@ -93,7 +93,7 @@ pub fn build_with_history(
             )?,
             "prepared Anthropic history does not match this request"
         );
-        history.completion(&system, &tools, false)?
+        history.completion(&system, &tools, false, &request.input)?
     } else {
         project::project_with_compatibility(
             &request.input,
@@ -171,21 +171,31 @@ pub fn place_cache_breakpoints(body: &mut Value, enabled: bool) {
     }
 }
 
-pub fn count_tokens_body(body: &Value) -> Value {
-    let mut count = serde_json::Map::new();
-    for key in [
-        "model",
-        "system",
-        "tools",
-        "tool_choice",
-        "messages",
-        "thinking",
-    ] {
-        if let Some(value) = body.get(key) {
-            count.insert(key.into(), value.clone());
+pub struct CountTokensBody<'a>(&'a Value);
+
+impl serde::Serialize for CountTokensBody<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let fields = [
+            "model",
+            "system",
+            "tools",
+            "tool_choice",
+            "messages",
+            "thinking",
+        ]
+        .into_iter()
+        .filter_map(|key| self.0.get(key).map(|value| (key, value)));
+        let mut map = serializer.serialize_map(Some(fields.clone().count()))?;
+        for (key, value) in fields {
+            map.serialize_entry(key, value)?;
         }
+        map.end()
     }
-    Value::Object(count)
+}
+
+pub fn count_tokens_body(body: &Value) -> CountTokensBody<'_> {
+    CountTokensBody(body)
 }
 
 pub fn beta_headers(

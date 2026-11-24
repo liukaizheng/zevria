@@ -210,12 +210,12 @@ fn turn() -> TurnContext {
 }
 
 #[tokio::test]
-async fn descending_admission_exact_fallback_and_full_success() {
-    for (counting, expected_k) in [
-        (Counting::Exact(4), 4),
-        (Counting::Exact(2), 2),
-        (Counting::Unsupported, 1),
-        (Counting::Failed, 1),
+async fn binary_admission_exact_fallback_and_full_success() {
+    for (counting, expected_k, evaluated) in [
+        (Counting::Exact(4), 4, &[4][..]),
+        (Counting::Exact(2), 2, &[4, 2, 3][..]),
+        (Counting::Unsupported, 1, &[4, 2, 1][..]),
+        (Counting::Failed, 1, &[4, 2, 1][..]),
     ] {
         let (_directory, mut engine) = engine(PrefixProvider::new(
             counting,
@@ -236,10 +236,7 @@ async fn descending_admission_exact_fallback_and_full_success() {
             .await
             .unwrap();
         assert_eq!(result, ("summary".into(), expected_k));
-        assert_eq!(
-            *engine.provider.evaluated.lock().unwrap(),
-            (expected_k..=4).rev().collect::<Vec<_>>()
-        );
+        assert_eq!(*engine.provider.evaluated.lock().unwrap(), evaluated);
         assert_eq!(engine.provider.requests.len(), 1);
         assert_eq!(
             &engine.provider.requests[0][..expected_k],
@@ -264,6 +261,47 @@ async fn descending_admission_exact_fallback_and_full_success() {
             assert_eq!(engine.provider.counts, [4]);
         }
     }
+}
+
+#[tokio::test]
+async fn summary_counts_logarithmically_and_does_not_recount_after_safe_rejection() {
+    let (_directory, mut engine) = engine(PrefixProvider::new(
+        Counting::Exact(42),
+        [size_error(), Ok(Message::assistant("summary"))],
+    ));
+    let context = engine.provider.context.clone();
+    let (events, _receiver) = session_event_channel(32);
+    let result = engine
+        .summarize_prefix(
+            &captured_source(&source(127)),
+            &context,
+            test_policies().policy(SessionMode::Build),
+            &events,
+            &turn(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, ("summary".into(), 41));
+    assert_eq!(engine.provider.counts.first(), Some(&127));
+    assert!(
+        engine.provider.counts.len() <= 8,
+        "{:?}",
+        engine.provider.counts
+    );
+    assert_eq!(
+        engine.provider.counts,
+        *engine.provider.evaluated.lock().unwrap()
+    );
+    assert_eq!(
+        engine
+            .provider
+            .requests
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        [43, 42],
+        "only the upper bound and its next smaller prefix reach completion",
+    );
 }
 
 #[tokio::test]
@@ -638,7 +676,12 @@ async fn mid_turn_partial_checkpoint_preserves_a_complete_batch_even_if_dispatch
     let (source, _) = snapshot_conversation_input(&full);
     assert_eq!(&checkpoint.replacement_history[1..], &source[3..]);
     assert_eq!(checkpoint.replacement_history.len(), 3);
-    assert_eq!(engine.provider.counts, [5, 3]);
+    assert_eq!(engine.provider.counts.first(), Some(&5));
+    assert!(engine.provider.counts.contains(&3));
+    assert!(
+        !engine.provider.counts.contains(&4),
+        "do not probe a split tool batch"
+    );
     assert_eq!(
         engine.provider.requests.len(),
         2,

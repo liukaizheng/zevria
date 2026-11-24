@@ -138,6 +138,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         Ok(self.conversation.replay()?.instructions.directives())
     }
 
+    #[cfg(test)]
     pub(in crate::session) fn instruction_updates(
         &self,
         source: &[TranscriptItem],

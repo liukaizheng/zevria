@@ -74,24 +74,27 @@ impl NativeOutputLedger {
     }
 
     pub fn record_terminal_output(&mut self, payload: &str) {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(payload) else {
+        let Ok(mut event) = serde_json::from_str::<serde_json::Value>(payload) else {
             self.malformed = true;
             return;
         };
-        self.record_terminal_output_value(&event);
+        self.take_terminal_output(&mut event);
     }
 
-    pub fn record_terminal_output_value(&mut self, event: &serde_json::Value) {
-        let output = event
-            .get("response")
-            .and_then(|response| response.get("output"))
-            .and_then(serde_json::Value::as_array);
-        if let Some(output) = output {
-            if output.iter().all(serde_json::Value::is_object) {
-                self.terminal = Some(output.clone());
-            } else {
-                self.malformed = true;
+    /// Move terminal output into the authoritative ledger after borrowed
+    /// observers have read the complete event.
+    pub fn take_terminal_output(&mut self, event: &mut serde_json::Value) {
+        let Some(output) = event
+            .get_mut("response")
+            .and_then(|response| response.get_mut("output"))
+        else {
+            return;
+        };
+        match output.take() {
+            serde_json::Value::Array(output) if output.iter().all(serde_json::Value::is_object) => {
+                self.terminal = Some(output);
             }
+            _ => self.malformed = true,
         }
     }
 
@@ -180,6 +183,14 @@ impl AssistantMessageAccumulator {
     }
 
     pub fn record_item(&mut self, chunk: ItemChunk) -> anyhow::Result<()> {
+        self.record_item_with_attempt(chunk, false)
+    }
+
+    pub fn record_item_with_attempt(
+        &mut self,
+        chunk: ItemChunk,
+        has_attempt: bool,
+    ) -> anyhow::Result<()> {
         let ItemChunk {
             item_id,
             output_index,
@@ -235,7 +246,9 @@ impl AssistantMessageAccumulator {
                 let Some(message) = self.message_mut(output_index, item_id.as_deref())? else {
                     return Ok(());
                 };
-                message.append_text(delta.content_index, &delta.delta)?;
+                if !has_attempt {
+                    message.append_text(delta.content_index, &delta.delta)?;
+                }
             }
             ItemChunkKind::OutputTextDone(done) => {
                 let Some(message) = self.message_mut(output_index, item_id.as_deref())? else {
@@ -250,7 +263,9 @@ impl AssistantMessageAccumulator {
                 let Some(message) = self.message_mut(output_index, item_id.as_deref())? else {
                     return Ok(());
                 };
-                message.append_refusal(delta.content_index, &delta.delta)?;
+                if !has_attempt {
+                    message.append_refusal(delta.content_index, &delta.delta)?;
+                }
             }
             ItemChunkKind::RefusalDone(done) => {
                 let Some(message) = self.message_mut(output_index, item_id.as_deref())? else {

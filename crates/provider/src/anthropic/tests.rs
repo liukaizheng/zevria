@@ -176,7 +176,7 @@ async fn headers_streaming_usage_counting_and_local_compaction() {
     assert!(requests[1].headers.contains("inline-tools-2026-09-15"));
     assert_eq!(
         requests[1].body,
-        zevria_anthropic::body::count_tokens_body(&requests[0].body)
+        serde_json::to_value(zevria_anthropic::body::count_tokens_body(&requests[0].body)).unwrap()
     );
 }
 

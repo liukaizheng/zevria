@@ -75,7 +75,10 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
     let activated = prepare_turn_request(&build_request, &mut provider)
         .await
         .unwrap();
-    assert_eq!(first.request_properties, activated.request_properties);
+    assert!(std::sync::Arc::ptr_eq(
+        &first.request_properties,
+        &activated.request_properties
+    ));
     let transmission = select_transmission(&activated, &mut provider);
     assert!(matches!(transmission.mode, RequestMode::Incremental));
     assert_eq!(
@@ -108,10 +111,10 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
     .await
     .unwrap();
     assert_eq!(activated.full_input, switched.full_input);
-    let mut properties = activated.request_properties.clone();
+    let mut properties = activated.request_properties.as_ref().clone();
     properties["instructions"] = plan.into();
     assert_eq!(
-        properties, switched.request_properties,
+        properties, *switched.request_properties,
         "instructions are the only request-property difference"
     );
     let transmission = select_transmission(&switched, &mut provider);

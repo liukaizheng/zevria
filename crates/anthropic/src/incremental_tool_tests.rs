@@ -143,7 +143,7 @@ fn inline_additions_merge_with_directives_in_order_and_fold_only_when_ineffectiv
             assert_eq!(body["tools"][0]["description"], "replacement");
             assert!(!body["messages"].to_string().contains("tool_addition"));
         }
-        let count = body::count_tokens_body(body);
+        let count = serde_json::to_value(body::count_tokens_body(body)).unwrap();
         for key in ["system", "tools", "messages", "thinking"] {
             assert_eq!(
                 serde_json::to_string(&count[key]).unwrap(),

@@ -8,7 +8,7 @@ use crate::{
 
 use crate::accumulator::AttemptState;
 use crate::http::{HttpAttemptError, diagnostic_detail};
-use crate::recovery::{AttemptProgress, ProgressClock};
+use crate::recovery::ProgressClock;
 use crate::telemetry::RequestTelemetry;
 use crate::websocket_session::OpenAiWebSocketTerminalCategory;
 use rig_core::error::ProviderError as CompletionError;
@@ -152,14 +152,13 @@ impl DriverFailure {
     }
 }
 
-pub(super) struct DriverContext<'a> {
+pub(super) struct DriverContext<'a, 'clock> {
     pub(super) openai: &'a mut OpenAiProvider,
     pub(super) state: &'a mut AttemptState,
     pub(super) prepared: &'a PreparedRequest,
     pub(super) progress: &'a ProgressReporter,
     pub(super) telemetry: &'a mut RequestTelemetry,
-    pub(super) clock: &'a mut ProgressClock,
-    pub(super) attempt_progress: AttemptProgress<'a>,
+    pub(super) clock: &'a mut ProgressClock<'clock>,
 }
 
 pub(super) struct ResponseDriver<'a> {
@@ -182,7 +181,7 @@ impl<'a> ResponseDriver<'a> {
 
     fn terminal(
         &self,
-        ctx: &mut DriverContext<'_>,
+        ctx: &mut DriverContext<'_, '_>,
         status: &str,
         id: Option<&str>,
         usage: Option<TokenUsage>,
@@ -230,7 +229,11 @@ impl<'a> ResponseDriver<'a> {
         );
     }
 
-    fn terminal_error(&self, ctx: &mut DriverContext<'_>, error: anyhow::Error) -> DriverFailure {
+    fn terminal_error(
+        &self,
+        ctx: &mut DriverContext<'_, '_>,
+        error: anyhow::Error,
+    ) -> DriverFailure {
         match self.transport {
             DriverTransport::WebSocket { .. } => {
                 abandon_attempt(ctx.openai, ctx.state);
@@ -248,7 +251,7 @@ impl<'a> ResponseDriver<'a> {
 
     fn success(
         &self,
-        ctx: &mut DriverContext<'_>,
+        ctx: &mut DriverContext<'_, '_>,
         response_id: String,
         usage: Option<TokenUsage>,
         done: bool,
@@ -279,7 +282,7 @@ impl<'a> ResponseDriver<'a> {
 
     fn failed_terminal(
         &self,
-        ctx: &mut DriverContext<'_>,
+        ctx: &mut DriverContext<'_, '_>,
         id: Option<String>,
         done: bool,
         error: anyhow::Error,
@@ -308,7 +311,7 @@ impl<'a> ResponseDriver<'a> {
         }
     }
 
-    fn server_error(&self, ctx: &mut DriverContext<'_>, error: ErrorEvent) -> DriverFailure {
+    fn server_error(&self, ctx: &mut DriverContext<'_, '_>, error: ErrorEvent) -> DriverFailure {
         if let DriverTransport::Http {
             upstream_request_id,
             ..
@@ -417,8 +420,8 @@ impl<'a> ResponseDriver<'a> {
     /// HTTP status/auth recovery, socket fencing setup and attempt lifetime.
     pub(super) async fn process(
         &mut self,
-        mut ctx: DriverContext<'_>,
-        raw: serde_json::Value,
+        mut ctx: DriverContext<'_, '_>,
+        mut raw: serde_json::Value,
         _payload_len: usize,
     ) -> Result<Option<ModelResponse>, DriverFailure> {
         Diagnostics::observe_value(
@@ -446,21 +449,21 @@ impl<'a> ResponseDriver<'a> {
                 {
                     ctx.state.response_ids.insert(id.to_owned());
                 }
-                ctx.clock.advanced(ctx.attempt_progress).await;
+                ctx.clock.advanced(tokio::time::Instant::now()).await;
             }
             ProgressObservation::Unchanged => {}
         }
         ctx.telemetry.observe_openai(&raw);
+        ctx.state.observe_attempt_value(&raw);
         match raw["type"].as_str() {
             Some("response.output_item.done") => {
                 ctx.state.native_output.record_output_item_done_value(&raw)
             }
             Some("response.completed" | "response.done") => {
-                ctx.state.native_output.record_terminal_output_value(&raw)
+                ctx.state.native_output.take_terminal_output(&mut raw)
             }
             _ => {}
         }
-        ctx.state.observe_attempt_value(&raw);
         let event = parse_server_event_value(raw)
             .map_err(|error| self.terminal_error(&mut ctx, CompletionError::from(error).into()))?;
         let Some(event) = event else {
@@ -471,7 +474,7 @@ impl<'a> ResponseDriver<'a> {
             ResponsesWebSocketEvent::Item(item) => {
                 ctx.state
                     .result
-                    .record_item(item)
+                    .record_item_with_attempt(item, ctx.state.attempt.is_some())
                     .map_err(|error| self.terminal_error(&mut ctx, error))?;
                 ctx.state.publish_stream(ctx.progress);
             }
@@ -511,13 +514,13 @@ impl<'a> ResponseDriver<'a> {
             ResponsesWebSocketEvent::Error(error) => return Err(self.server_error(&mut ctx, error)),
             ResponsesWebSocketEvent::Done(done) => {
                 let response_id = done.response_id().map(ToOwned::to_owned);
-                let value = done.response.get("status").cloned().ok_or_else(|| {
+                let value = done.response.get("status").ok_or_else(|| {
                     self.terminal_error(
                         &mut ctx,
                         anyhow::anyhow!("OpenAI response.done did not include a response status"),
                     )
                 })?;
-                let status = serde_json::from_value::<ResponseStatus>(value)
+                let status = <ResponseStatus as serde::Deserialize>::deserialize(value)
                     .map_err(|error| self.terminal_error(&mut ctx, error.into()))?;
                 match status {
                     ResponseStatus::Completed => {
@@ -556,10 +559,11 @@ impl<'a> ResponseDriver<'a> {
                             ResponseStatus::Incomplete => "incomplete",
                             _ => "cancelled",
                         };
-                        let response = serde_json::from_value::<OpenAiCompletionResponse>(
-                            done.response.clone(),
-                        )
-                        .ok();
+                        let response =
+                            <OpenAiCompletionResponse as serde::Deserialize>::deserialize(
+                                &done.response,
+                            )
+                            .ok();
                         self.terminal(
                             &mut ctx,
                             status_name,

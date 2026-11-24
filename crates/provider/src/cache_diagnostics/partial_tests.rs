@@ -157,7 +157,7 @@ async fn comparison_only_wire_mutation_is_still_a_wire_mismatch() {
         .await
         .unwrap();
         let prepared = dispatch(prepared, &mut provider);
-        let mut body = prepared.request_properties.clone();
+        let mut body = prepared.request_properties.as_ref().clone();
         body["stream"] = json!(true);
         body["input"] = json!(prepared.full_input);
         body["prompt_cache_options"]["comparison_response_id"] = json!("resp_wire_mutation");

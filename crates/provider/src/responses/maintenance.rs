@@ -10,10 +10,15 @@ use crate::{
     credential::{authenticated, http_unauthorized, rejected_after_refresh},
 };
 
-use super::prepare::prepare_turn_request;
+use super::{
+    prepare::{ResponsesCountProbe, prepare_count_request, prepare_turn_request},
+    serialize::RequestBody,
+};
+use bytes::Bytes;
 pub(super) async fn count_full_input_tokens(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
+    probe: Option<ResponsesCountProbe>,
 ) -> anyhow::Result<InputTokenCount> {
     if openai.input_token_count_unsupported {
         return Ok(InputTokenCount::Unsupported);
@@ -22,29 +27,8 @@ pub(super) async fn count_full_input_tokens(
         return Ok(InputTokenCount::Unsupported);
     };
 
-    let prepared = prepare_turn_request(model_request, openai).await?;
-    let mut body = prepared.request_properties;
-    crate::prompt_cache::remove_comparison(&mut body);
-    let properties = body
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("the input-token request did not serialize as an object"))?;
-    properties.remove("stream");
-    properties.remove("previous_response_id");
-    properties.remove("background");
-    properties.remove("include");
-    properties.remove("service_tier");
-    properties.remove("store");
-    properties.remove("prompt_cache_key");
-    // Completion policy is not part of exact input measurement; compatible
-    // counting endpoints need not accept this Responses-only option.
-    properties.remove("parallel_tool_calls");
-    properties.insert(
-        "input".to_string(),
-        serde_json::Value::Array(
-            std::sync::Arc::try_unwrap(prepared.full_input)
-                .unwrap_or_else(|shared| shared.as_ref().clone()),
-        ),
-    );
+    let prepared = prepare_count_request(model_request, openai, probe)?;
+    let body = Bytes::from(serde_json::to_vec(&RequestBody::count_tokens(&prepared)?)?);
 
     let log_url = crate::connection::redacted_url_for_logging(url.as_str());
     let response = authenticated(
@@ -56,7 +40,8 @@ pub(super) async fn count_full_input_tokens(
                 .post(url.clone())
                 .bearer_auth(lease.expose())
                 .timeout(openai.input_token_count_timeout)
-                .json(&body)
+                .header("content-type", "application/json")
+                .body(body.clone())
                 .send()
         },
         http_unauthorized,
@@ -112,25 +97,7 @@ pub(super) async fn run_remote_compaction(
         return Ok(CompactResult::Unsupported);
     };
     let prepared = prepare_turn_request(model_request, openai).await?;
-    let mut body = prepared.request_properties;
-    crate::prompt_cache::remove_comparison(&mut body);
-    let properties = body
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("the compact request did not serialize as an object"))?;
-    properties.remove("stream");
-    properties.remove("previous_response_id");
-    properties.remove("include");
-    properties.remove("service_tier");
-    properties
-        .entry("parallel_tool_calls".to_string())
-        .or_insert(serde_json::Value::Bool(true));
-    properties.insert(
-        "input".to_string(),
-        serde_json::Value::Array(
-            std::sync::Arc::try_unwrap(prepared.full_input)
-                .unwrap_or_else(|shared| shared.as_ref().clone()),
-        ),
-    );
+    let body = Bytes::from(serde_json::to_vec(&RequestBody::compact(&prepared)?)?);
 
     let log_url = crate::connection::redacted_url_for_logging(url.as_str());
     let response = authenticated(
@@ -142,7 +109,8 @@ pub(super) async fn run_remote_compaction(
                 .post(url.clone())
                 .bearer_auth(lease.expose())
                 .timeout(openai.compaction_timeout)
-                .json(&body)
+                .header("content-type", "application/json")
+                .body(body.clone())
                 .send()
         },
         http_unauthorized,

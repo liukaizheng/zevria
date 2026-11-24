@@ -2,11 +2,11 @@ use rig_core::error::ProviderError as CompletionError;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 
 pub(crate) fn websocket_message_to_text(
-    message: WebSocketMessage,
-) -> anyhow::Result<Option<String>> {
+    message: &WebSocketMessage,
+) -> anyhow::Result<Option<&str>> {
     match message {
-        WebSocketMessage::Text(text) => Ok(Some(text.to_string())),
-        WebSocketMessage::Binary(bytes) => String::from_utf8(bytes.to_vec())
+        WebSocketMessage::Text(text) => Ok(Some(text.as_str())),
+        WebSocketMessage::Binary(bytes) => std::str::from_utf8(bytes)
             .map(Some)
             .map_err(|error| CompletionError::Response(error.to_string()).into()),
         WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_) | WebSocketMessage::Frame(_) => {
@@ -14,9 +14,10 @@ pub(crate) fn websocket_message_to_text(
         }
         WebSocketMessage::Close(frame) => {
             let reason = frame
-                .map(|frame| frame.reason.to_string())
+                .as_ref()
+                .map(|frame| frame.reason.as_str())
                 .filter(|reason| !reason.is_empty())
-                .unwrap_or_else(|| "without a close reason".to_string());
+                .unwrap_or("without a close reason");
             Err(CompletionError::Provider(format!(
                 "The OpenAI websocket connection closed {reason}"
             ))
@@ -32,13 +33,13 @@ mod tests {
     #[test]
     fn websocket_errors_retain_provider_error_categories() {
         let error =
-            websocket_message_to_text(WebSocketMessage::Binary(vec![0xff].into())).unwrap_err();
+            websocket_message_to_text(&WebSocketMessage::Binary(vec![0xff].into())).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<CompletionError>(),
             Some(CompletionError::Response(_))
         ));
 
-        let error = websocket_message_to_text(WebSocketMessage::Close(None)).unwrap_err();
+        let error = websocket_message_to_text(&WebSocketMessage::Close(None)).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<CompletionError>(),
             Some(CompletionError::Provider(message))
@@ -53,7 +54,7 @@ mod tests {
             WebSocketMessage::Binary(b"response payload".to_vec().into()),
         ] {
             assert_eq!(
-                websocket_message_to_text(message).unwrap().as_deref(),
+                websocket_message_to_text(&message).unwrap(),
                 Some("response payload")
             );
         }
@@ -61,7 +62,7 @@ mod tests {
             WebSocketMessage::Ping(vec![1].into()),
             WebSocketMessage::Pong(vec![1].into()),
         ] {
-            assert!(websocket_message_to_text(message).unwrap().is_none());
+            assert!(websocket_message_to_text(&message).unwrap().is_none());
         }
     }
 }

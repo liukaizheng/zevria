@@ -8,6 +8,7 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(30);
 pub(crate) struct StreamCadence {
     last: Option<Instant>,
     dirty: bool,
+    delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl StreamCadence {
@@ -16,16 +17,15 @@ impl StreamCadence {
     }
 
     pub(crate) fn take_due(&mut self, terminal: bool) -> bool {
-        if !self.dirty
-            || (!terminal
-                && self
-                    .last
-                    .is_some_and(|last| last.elapsed() < SNAPSHOT_INTERVAL))
-        {
+        if !self.dirty {
+            return false;
+        }
+        let now = Instant::now();
+        if !terminal && self.last.is_some_and(|last| now < last + SNAPSHOT_INTERVAL) {
             return false;
         }
         self.dirty = false;
-        self.last = Some(Instant::now());
+        self.last = Some(now);
         true
     }
 
@@ -43,11 +43,19 @@ impl StreamCadence {
             }
             let deadline = self
                 .last
-                .map_or_else(Instant::now, |last| last + SNAPSHOT_INTERVAL);
+                .map(|last| last + SNAPSHOT_INTERVAL)
+                .or_else(|| self.delay.as_ref().map(|delay| delay.deadline()))
+                .unwrap_or_else(Instant::now);
+            let delay = self
+                .delay
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+            if delay.deadline() != deadline {
+                delay.as_mut().reset(deadline);
+            }
             tokio::select! {
                 biased;
                 result = &mut next => return result,
-                () = tokio::time::sleep_until(deadline) => {
+                () = delay => {
                     if self.take_due(false) { publish(); }
                 }
             }

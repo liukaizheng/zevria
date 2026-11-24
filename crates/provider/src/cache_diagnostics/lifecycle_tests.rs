@@ -811,7 +811,7 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         let next = Message::user("ok");
         let prepared = crate::turn::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt), reply.as_borrowed(), ModelRequestItem::message(&next)]), &mut provider).await.unwrap();
         let prepared = dispatch(prepared, &mut provider);
-        let mut body = prepared.request_properties.clone();
+        let mut body = prepared.request_properties.as_ref().clone();
         body["stream"] = json!(true);
         body["input"] = json!(prepared.full_input);
         body["input"][0] = json!({"role":"user","content":"WIRE_ONLY_MUTATION"});
@@ -827,7 +827,7 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         let third_prompt = Message::user("after mismatch");
         let prepared = crate::turn::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt), reply.as_borrowed(), ModelRequestItem::message(&next), second_reply.as_borrowed(), ModelRequestItem::message(&third_prompt)]), &mut provider).await.unwrap();
         let prepared = dispatch(prepared, &mut provider);
-        let mut body = prepared.request_properties.clone();
+        let mut body = prepared.request_properties.as_ref().clone();
         body["stream"] = json!(true);
         body["input"] = json!(prepared.full_input);
         crate::cache_diagnostics::transmission(&prepared, &mut provider, "full", 5, None, Some(crate::cache_diagnostics::FullReason::Http), Some(&serde_json::to_vec(&body).unwrap()));

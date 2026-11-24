@@ -18,6 +18,7 @@ pub(crate) struct ContinuationLineage {
     pub(super) input_count: usize,
     pub(super) input_digest: [u8; 32],
     pub(super) projected_prefix_len: usize,
+    pub(super) projection_generation: u64,
 }
 
 pub(super) struct Transmission<'prepared> {
@@ -150,6 +151,7 @@ impl ContinuationState {
             response_id,
             request_properties: prepared.request_properties.clone(),
             lineage: ContinuationLineage {
+                projection_generation: prepared.projection_generation,
                 input_count: prepared.input_count + 1,
                 input_digest: zevria_model::ModelInputIdentity::appended_digest(
                     prepared.input_digest,

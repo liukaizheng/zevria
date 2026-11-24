@@ -18,7 +18,7 @@ use zevria_session_api::ProviderFuture;
 
 use crate::{
     ModelRouting, ProfileProtocol, ResolvedModelProfile, anthropic::AnthropicProvider,
-    connection::OpenAiProvider,
+    connection::OpenAiProvider, responses::ResponsesCountProbe,
 };
 
 #[derive(Clone, Copy)]
@@ -27,10 +27,21 @@ struct Route {
     reasoning_level: ReasoningLevel,
 }
 
+enum InputPurpose {
+    Dispatch,
+    Count,
+}
+
+#[derive(Default)]
+struct ValidatedInput {
+    anthropic_history: Option<Arc<ValidatedHistory>>,
+    responses_count_probe: Option<ResponsesCountProbe>,
+}
+
 struct ProfileSlot {
     profile: ResolvedModelProfile,
     runtime: Option<ProfileRuntime>,
-    responses_preflight: Mutex<zevria_responses::replay::PreflightCache>,
+    responses_cache: Arc<Mutex<crate::responses::ResponsesCache>>,
     anthropic_history: Mutex<crate::anthropic::HistoryCache>,
 }
 
@@ -65,11 +76,15 @@ impl ProfileRuntime {
     fn count_input_tokens<'a>(
         &'a mut self,
         request: ModelRequest<'a>,
-        history: Option<Arc<ValidatedHistory>>,
+        input: ValidatedInput,
     ) -> InputTokenCountFuture<'a> {
         match self {
-            Self::Responses(runtime) => runtime.count_input_tokens(request),
-            Self::Anthropic(runtime) => runtime.count_with_history(request, history),
+            Self::Responses(runtime) => {
+                runtime.count_with_probe(request, input.responses_count_probe)
+            }
+            Self::Anthropic(runtime) => {
+                runtime.count_with_history(request, input.anthropic_history)
+            }
         }
     }
     fn compact<'a>(&'a mut self, request: ModelRequest<'a>) -> CompactFuture<'a> {
@@ -135,7 +150,7 @@ impl ProviderRouter {
                 router.slots.push(ProfileSlot {
                     profile: profile.clone(),
                     runtime: None,
-                    responses_preflight: Mutex::default(),
+                    responses_cache: Default::default(),
                     anthropic_history: Mutex::default(),
                 });
             }
@@ -172,7 +187,7 @@ impl ProviderRouter {
                 slots.push(ProfileSlot {
                     profile,
                     runtime: None,
-                    responses_preflight: Mutex::default(),
+                    responses_cache: Default::default(),
                     anthropic_history: Mutex::default(),
                 });
                 index
@@ -249,47 +264,73 @@ impl ProviderRouter {
         &self,
         index: usize,
         request: &ModelRequest<'_>,
-    ) -> anyhow::Result<Option<Arc<ValidatedHistory>>> {
-        let profile = &self.slots[index].profile;
+        purpose: InputPurpose,
+    ) -> anyhow::Result<ValidatedInput> {
+        let slot = &self.slots[index];
+        let profile = &slot.profile;
+        let probe = matches!(purpose, InputPurpose::Count) && request.input_identity.is_none();
         match &profile.protocol {
-            ProfileProtocol::Responses { endpoint, .. } => {
-                if request.input_identity.is_some() {
-                    let assessment = self.preflight_input_with_identity(
-                        &profile.profile,
-                        &request.input,
-                        request.input_identity,
-                    )?;
-                    anyhow::ensure!(
-                        matches!(
-                            assessment,
-                            zevria_model::models::ReplayPreflight::Compatible(_)
-                        ),
-                        "cannot send replay-only history to target profile {}: conversion required; select its source with /model, confirm a portable summary, or start a fresh session",
-                        profile.profile
-                    );
-                    return Ok(None);
-                }
-                zevria_responses::replay::project_with_compatibility(
+            ProfileProtocol::Responses { endpoint, .. } if probe => {
+                let probe = ResponsesCountProbe::new(
                     &request.input,
-                    &profile.profile,
-                    endpoint.compatibility.developer_messages,
-                    zevria_responses::tools::ToolRendererOptions {
-                        strict_tools: endpoint.compatibility.strict_tools,
+                    zevria_responses::replay::PreflightOptions {
+                        target: &profile.profile,
+                        developer_messages: endpoint.compatibility.developer_messages,
+                        tool_options: zevria_responses::tools::ToolRendererOptions {
+                            strict_tools: endpoint.compatibility.strict_tools,
+                        },
+                        additional_tools: endpoint.compatibility.additional_tools,
+                        policy: &profile.image_accounting,
                     },
-                    endpoint.compatibility.additional_tools,
                 )?;
+                return Ok(ValidatedInput {
+                    responses_count_probe: Some(probe),
+                    ..Default::default()
+                });
+            }
+            ProfileProtocol::Responses { .. } => {
+                let fallback;
+                let identity = match request.input_identity {
+                    Some(identity) => identity,
+                    None => {
+                        fallback = zevria_model::ModelInputIdentity::from_items(&request.input)?;
+                        &fallback
+                    }
+                };
+                let assessment = self.preflight_input_with_identity(
+                    &profile.profile,
+                    &request.input,
+                    Some(identity),
+                )?;
+                anyhow::ensure!(
+                    matches!(
+                        assessment,
+                        zevria_model::models::ReplayPreflight::Compatible(_)
+                    ),
+                    "cannot send replay-only history to target profile {}: conversion required; select its source with /model, confirm a portable summary, or start a fresh session",
+                    profile.profile
+                );
             }
             ProfileProtocol::Anthropic { endpoint, .. } => {
-                let prepared = self.slots[index]
-                    .anthropic_history
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("Anthropic history cache lock poisoned"))?
-                    .prepare(
-                        &request.input,
-                        request.input_identity,
-                        &profile.profile,
-                        &endpoint.compatibility,
-                    )?;
+                let mut scratch;
+                let mut live;
+                let cache = if probe {
+                    scratch = crate::anthropic::HistoryCache::default();
+                    &mut scratch
+                } else {
+                    live = slot
+                        .anthropic_history
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Anthropic history cache lock poisoned"))?;
+                    &mut *live
+                };
+                let prepared = cache.prepare_with_policy(
+                    &request.input,
+                    request.input_identity,
+                    &profile.profile,
+                    &endpoint.compatibility,
+                    &profile.image_accounting,
+                )?;
                 anyhow::ensure!(
                     matches!(
                         prepared.assessment,
@@ -298,10 +339,13 @@ impl ProviderRouter {
                     "cannot send opaque history to profile {}: conversion required",
                     profile.profile
                 );
-                return Ok(prepared.history);
+                return Ok(ValidatedInput {
+                    anthropic_history: prepared.history,
+                    ..Default::default()
+                });
             }
         }
-        Ok(None)
+        Ok(ValidatedInput::default())
     }
 
     async fn initialize_slot(
@@ -317,7 +361,7 @@ impl ProviderRouter {
             let cache_key = profile_cache_key(&self.session_id, &slot.profile);
             let runtime = match &slot.profile.protocol {
                 ProfileProtocol::Responses { .. } => {
-                    let runtime = OpenAiProvider::unconnected(
+                    let mut runtime = OpenAiProvider::unconnected(
                         &slot.profile,
                         level,
                         &self.preamble,
@@ -325,6 +369,7 @@ impl ProviderRouter {
                         &cache_key,
                     )
                     .await?;
+                    runtime.responses_cache = slot.responses_cache.clone();
                     let runtime = Diagnostics::configure_runtime(runtime, &self.diagnostics);
                     ProfileRuntime::Responses(Box::new(runtime))
                 }
@@ -495,9 +540,10 @@ impl ModelProvider for ProviderRouter {
                     &slot.profile.image_accounting,
                 )?),
             ProfileProtocol::Responses { endpoint, .. } => slot
-                .responses_preflight
+                .responses_cache
                 .lock()
-                .map_err(|_| anyhow::anyhow!("Responses preflight cache lock poisoned"))?
+                .map_err(|_| anyhow::anyhow!("Responses slot cache lock poisoned"))?
+                .input
                 .assess_with_policy(
                     input,
                     identity,
@@ -545,46 +591,45 @@ impl ModelProvider for ProviderRouter {
             return Ok(assessment);
         };
         estimate.validate_media_constraints()?;
-        let additions = request
-            .input
-            .iter()
-            .filter_map(|item| match item {
+        let additions = || {
+            request.input.iter().filter_map(|item| match item {
                 zevria_model::ModelRequestItem::AdditionalTools(tools) => Some(*tools),
                 _ => None,
             })
-            .collect::<Vec<_>>();
+        };
         let (instructions, tool_tokens, folded_tokens) = match &slot.profile.protocol {
             ProfileProtocol::Responses { endpoint, .. } => {
-                let options = zevria_responses::tools::ToolRendererOptions {
-                    strict_tools: endpoint.compatibility.strict_tools,
-                };
-                let tools = crate::responses::rendered_tools(
-                    request,
-                    &endpoint.compatibility,
-                    &endpoint.web_search,
-                )?;
-                let mut folded = 0u64;
-                if !endpoint.compatibility.additional_tools {
-                    for tools in &additions {
-                        folded = folded.saturating_add(
+                let mut cache = slot
+                    .responses_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Responses slot cache lock poisoned"))?;
+                let tools =
+                    cache.rendered_tools(request, &endpoint.compatibility, &endpoint.web_search)?;
+                let folded = if endpoint.compatibility.additional_tools {
+                    0
+                } else if let Some(tokens) = request
+                    .input_identity
+                    .and_then(|id| cache.input.folded_tool_tokens(id))
+                {
+                    tokens
+                } else {
+                    // Synthetic views without a trusted identity use a pure,
+                    // uncached assessment so they cannot evict the live prefix.
+                    let options = zevria_responses::tools::ToolRendererOptions {
+                        strict_tools: endpoint.compatibility.strict_tools,
+                    };
+                    additions().try_fold(0u64, |total, tools| -> anyhow::Result<_> {
+                        let rendered = zevria_responses::tools::render(tools, options)?;
+                        Ok(total.saturating_add(
                             zevria_model::compaction::approximate_tokens_from_bytes(
-                                serde_json::to_vec(&zevria_responses::tools::render(
-                                    tools, options,
-                                )?)?
-                                .len(),
+                                serde_json::to_vec(&rendered)?.len(),
                             ),
-                        );
-                    }
-                }
+                        ))
+                    })?
+                };
                 (
                     zevria_model::compaction::approximate_tokens(request.instructions),
-                    if tools.is_empty() {
-                        0
-                    } else {
-                        zevria_model::compaction::approximate_tokens_from_bytes(
-                            serde_json::to_vec(&tools)?.len(),
-                        )
-                    },
+                    tools.tokens,
                     folded,
                 )
             }
@@ -594,7 +639,7 @@ impl ModelProvider for ProviderRouter {
                 let mut folded = 0u64;
                 if !(endpoint.compatibility.inline_tools && endpoint.compatibility.system_messages)
                 {
-                    for tools in &additions {
+                    for tools in additions() {
                         let tools = tools
                             .iter()
                             .map(|tool| {
@@ -657,12 +702,14 @@ impl ModelProvider for ProviderRouter {
                 selection.reasoning_level,
                 selection.profile
             );
-            let history = self.validate_input(index, &request)?;
+            let history = self.validate_input(index, &request, InputPurpose::Dispatch)?;
             self.last_dispatched = Some(index);
             let level = selection.reasoning_level;
             let runtime = self.initialize_slot(index, level).await?;
             runtime.set_reasoning_level(level);
-            runtime.complete(request, progress, history).await
+            runtime
+                .complete(request, progress, history.anthropic_history)
+                .await
         })
     }
 
@@ -682,11 +729,11 @@ impl ModelProvider for ProviderRouter {
                 selection.reasoning_level,
                 selection.profile
             );
-            let history = self.validate_input(index, &request)?;
+            let input = self.validate_input(index, &request, InputPurpose::Count)?;
             let level = selection.reasoning_level;
             let runtime = self.initialize_slot(index, level).await?;
             runtime.set_reasoning_level(level);
-            runtime.count_input_tokens(request, history).await
+            runtime.count_input_tokens(request, input).await
         })
     }
 
@@ -699,12 +746,14 @@ impl ModelProvider for ProviderRouter {
         self.last_dispatched = route.as_ref().ok().map(|route| route.slot);
         Box::pin(async move {
             let route = route?;
-            let history = self.validate_input(route.slot, &request)?;
+            let history = self.validate_input(route.slot, &request, InputPurpose::Dispatch)?;
             let runtime = self
                 .initialize_slot(route.slot, route.reasoning_level)
                 .await?;
             runtime.set_reasoning_level(route.reasoning_level);
-            runtime.complete(request, progress, history).await
+            runtime
+                .complete(request, progress, history.anthropic_history)
+                .await
         })
     }
 
@@ -725,7 +774,7 @@ impl ModelProvider for ProviderRouter {
             ) {
                 return Ok(CompactResult::Unsupported);
             }
-            self.validate_input(route.slot, &request)?;
+            self.validate_input(route.slot, &request, InputPurpose::Dispatch)?;
             let runtime = self
                 .initialize_slot(route.slot, route.reasoning_level)
                 .await?;
@@ -741,12 +790,12 @@ impl ModelProvider for ProviderRouter {
         let route = self.route(request.model_role);
         Box::pin(async move {
             let route = route?;
-            let history = self.validate_input(route.slot, &request)?;
+            let input = self.validate_input(route.slot, &request, InputPurpose::Count)?;
             let runtime = self
                 .initialize_slot(route.slot, route.reasoning_level)
                 .await?;
             runtime.set_reasoning_level(route.reasoning_level);
-            runtime.count_input_tokens(request, history).await
+            runtime.count_input_tokens(request, input).await
         })
     }
 
@@ -828,4 +877,85 @@ pub(crate) fn profile_cache_key(session_id: &str, profile: &ResolvedModelProfile
         hasher.update(component.as_bytes());
     }
     crate::lowercase_hex(&hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ModeAssignments, ModelAssignment, ProviderConfig};
+    use rig_core::message::Message;
+    use serde_json::json;
+    use zevria_model::{ModelInputIdentity, ModelRequestItem};
+
+    #[test]
+    fn identity_less_anthropic_count_does_not_replace_the_live_history() {
+        let provider: ProviderConfig = serde_json::from_value(json!({
+            "protocol":"anthropic.messages", "base_url":"http://127.0.0.1:1/v1/messages", "api_key":"test",
+            "models":{"test-model":{"context_window_tokens":1000000,"max_output_tokens":64000,"retained_user_tokens":20000,"reasoning_levels":["high"]}}
+        })).unwrap();
+        let assignment = ModelAssignment {
+            provider: "anthropic".into(),
+            model: "test-model".into(),
+            reasoning_level: ReasoningLevel::High,
+        };
+        let assignments = ModeAssignments {
+            build: assignment.clone(),
+            plan: assignment.clone(),
+            review: assignment.clone(),
+            explore: assignment.clone(),
+            builder: assignment,
+        };
+        let routing = ModelRouting::resolve(
+            &BTreeMap::from([("anthropic".into(), provider)]),
+            &assignments,
+            90,
+        )
+        .unwrap();
+        let profile = routing.for_role(ModelRole::Build).clone();
+        let router = ProviderRouter::from_routes(
+            [(ModelRole::Build, profile, ReasoningLevel::High)],
+            "stable",
+            "test-session",
+        )
+        .unwrap();
+
+        let first = Message::user("first");
+        let second = Message::user("second");
+        let input = vec![
+            ModelRequestItem::message(&first),
+            ModelRequestItem::message(&second),
+        ];
+        let identity = ModelInputIdentity::from_items(&input).unwrap();
+        let live_request = ModelRequest {
+            input_identity: Some(&identity),
+            input,
+            instructions: "stable",
+            tools: &[],
+            forbid_tool_calls: false,
+            model_role: ModelRole::Build,
+            allowed_tool_names: None,
+        };
+        let live = router
+            .validate_input(0, &live_request, InputPurpose::Dispatch)
+            .unwrap()
+            .anthropic_history
+            .unwrap();
+        let probe_request = ModelRequest {
+            input_identity: None,
+            input: live_request.input[..1].to_vec(),
+            ..live_request.clone()
+        };
+        let probe = router
+            .validate_input(0, &probe_request, InputPurpose::Count)
+            .unwrap()
+            .anthropic_history
+            .unwrap();
+        assert!(!Arc::ptr_eq(&live, &probe));
+        let reused = router
+            .validate_input(0, &live_request, InputPurpose::Count)
+            .unwrap()
+            .anthropic_history
+            .unwrap();
+        assert!(Arc::ptr_eq(&live, &reused));
+    }
 }

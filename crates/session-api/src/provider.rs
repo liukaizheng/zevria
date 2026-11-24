@@ -89,7 +89,7 @@ pub trait ModelProvider: Send + 'static {
         input: &[ModelRequestItem<'_>],
     ) -> anyhow::Result<crate::models::ReplayPreflight> {
         Ok(crate::models::ReplayPreflight::Compatible(
-            estimate_model_input_for_profile(input.to_vec(), target)?,
+            estimate_model_input_for_profile(input, target)?,
         ))
     }
 
@@ -129,7 +129,7 @@ pub trait ModelProvider: Send + 'static {
             != zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved
         {
             estimate = zevria_model::estimates::estimate_model_input_with_policy(
-                request.input.clone(),
+                &request.input,
                 &context.profile,
                 &context.image_accounting,
             )?;

@@ -1,9 +1,9 @@
 //! Request-only compatibility for an explicitly configured diagnostic comparison.
 //! No IDs are inserted automatically and no ordinary request body is normalized.
 use serde_json::Value;
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
-const OPTIONS: &str = "prompt_cache_options";
+pub(crate) const OPTIONS: &str = "prompt_cache_options";
 const COMPARISON: &str = "comparison_response_id";
 
 /// Project only the diagnostic leaf. Absence differs from a pre-existing empty
@@ -22,7 +22,11 @@ pub(crate) fn cache_sensitive_options(options: &Value) -> Option<Cow<'_, Value>>
 }
 
 /// Continuation comparison only. Stored/prepared/wire properties remain exact.
-pub(crate) fn compatible(previous: &Value, next: &Value) -> bool {
+pub(crate) fn compatible(previous: &Arc<Value>, next: &Arc<Value>) -> bool {
+    Arc::ptr_eq(previous, next) || compatible_values(previous, next)
+}
+
+fn compatible_values(previous: &Value, next: &Value) -> bool {
     if previous == next {
         return true;
     }
@@ -41,7 +45,8 @@ pub(crate) fn compatible(previous: &Value, next: &Value) -> bool {
 
 /// Counting and compaction cannot use the completion-only comparison field.
 /// Preserve all siblings and avoid touching the body if it was not configured.
-pub(crate) fn remove_comparison(properties: &mut Value) {
+#[cfg(test)]
+fn remove_comparison(properties: &mut Value) {
     let Some(object) = properties.as_object_mut() else {
         return;
     };
@@ -63,9 +68,9 @@ mod tests {
         let ordinary = json!({"model":"synthetic", "reasoning":{"effort":"high"}});
         let mut comparison = ordinary.clone();
         comparison[OPTIONS] = json!({COMPARISON:"resp_synthetic"});
-        assert!(compatible(&ordinary, &comparison));
+        assert!(compatible_values(&ordinary, &comparison));
         comparison[OPTIONS][COMPARISON] = json!("resp_other");
-        assert!(compatible(&ordinary, &comparison));
+        assert!(compatible_values(&ordinary, &comparison));
         let mut maintenance = comparison.clone();
         remove_comparison(&mut maintenance);
         assert_eq!(maintenance, ordinary);
@@ -78,7 +83,7 @@ mod tests {
         ] {
             let mut changed = ordinary.clone();
             changed[OPTIONS] = options;
-            assert!(!compatible(&ordinary, &changed));
+            assert!(!compatible_values(&ordinary, &changed));
             let original = changed.clone();
             remove_comparison(&mut changed);
             assert_eq!(changed, original);
@@ -88,7 +93,7 @@ mod tests {
         comparison[OPTIONS]["future"] = json!({"keep":[1,2]});
         let mut projected = comparison.clone();
         remove_comparison(&mut projected);
-        assert!(compatible(&comparison, &projected));
+        assert!(compatible_values(&comparison, &projected));
         for (key, value) in [
             ("mode", json!("explicit")),
             ("ttl", Value::Null),
@@ -96,7 +101,7 @@ mod tests {
         ] {
             let mut changed = comparison.clone();
             changed[OPTIONS][key] = value;
-            assert!(!compatible(&comparison, &changed));
+            assert!(!compatible_values(&comparison, &changed));
         }
         for (key, value) in [
             ("model", json!("other")),
@@ -108,7 +113,7 @@ mod tests {
         ] {
             let mut changed = comparison.clone();
             changed[key] = value;
-            assert!(!compatible(&comparison, &changed));
+            assert!(!compatible_values(&comparison, &changed));
         }
         assert!(matches!(
             cache_sensitive_options(&json!({})),

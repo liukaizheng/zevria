@@ -22,19 +22,9 @@ struct Entry {
     prepared: HistoryPreparation,
 }
 
-struct AssessmentEntry {
-    target: ModelProfileRef,
-    compatibility: Compatibility,
-    policy: zevria_foundation::image_accounting::ImageAccountingPolicy,
-    policy_version: u32,
-    input_count: usize,
-    input_digest: [u8; 32],
-    assessment: ReplayPreflight,
-}
 #[derive(Default)]
 pub(crate) struct HistoryCache {
     entry: Option<Entry>,
-    accounting: Option<AssessmentEntry>,
 }
 impl HistoryCache {
     pub(crate) fn assess(
@@ -54,47 +44,12 @@ impl HistoryCache {
                 None,
             );
         };
-        let prior = self.accounting.as_ref().filter(|entry| {
-            entry.target == *target
-                && entry.compatibility == *compatibility
-                && entry.policy == *policy
-                && entry.policy_version == policy.version()
-                && identity.prefix(entry.input_count) == Some(entry.input_digest)
-        });
-        if let Some(prior) = prior
-            && prior.input_count == identity.len()
-        {
-            return Ok(prior.assessment.clone());
-        }
-        let prefix_media = prior.and_then(|entry| {
-            if let ReplayPreflight::Compatible(mut estimate) = entry.assessment {
-                estimate.payload_tokens = 0;
-                estimate.estimated_tokens = 0;
-                estimate.unresolved_media.files = 0;
-                estimate.unresolved_media.opaque_items = 0;
-                Some((entry.input_count, estimate))
-            } else {
-                None
-            }
-        });
-        let assessment = zevria_anthropic::project::assess_history_with_policy(
-            input,
-            target,
-            compatibility,
-            policy,
-            prefix_media,
-        )?;
-        self.accounting = Some(AssessmentEntry {
-            target: target.clone(),
-            compatibility: compatibility.clone(),
-            policy: policy.clone(),
-            policy_version: policy.version(),
-            input_count: identity.len(),
-            input_digest: identity.digest(),
-            assessment: assessment.clone(),
-        });
-        Ok(assessment)
+        Ok(self
+            .prepare_with_policy(input, Some(identity), target, compatibility, policy)?
+            .assessment)
     }
+
+    #[cfg(test)]
     pub(crate) fn prepare(
         &mut self,
         input: &[ModelRequestItem<'_>],
@@ -126,22 +81,36 @@ impl HistoryCache {
                 &fallback
             }
         };
-        if let Some(entry) = &self.entry
-            && entry.target == *target
-            && entry.policy == *policy
-            && entry.policy_version == policy.version()
-            && entry.compatibility == *compatibility
-            && entry.input_count == identity.len()
-            && entry.input_digest == identity.digest()
+        let prior = self.entry.as_ref().filter(|entry| {
+            entry.target == *target
+                && entry.compatibility == *compatibility
+                && entry.policy == *policy
+                && entry.policy_version == policy.version()
+                && identity.prefix(entry.input_count) == Some(entry.input_digest)
+        });
+        if let Some(prior) = prior
+            && prior.input_count == identity.len()
         {
-            return Ok(entry.prepared.clone());
+            return Ok(prior.prepared.clone());
         }
-        let (assessment, history) = zevria_anthropic::project::prepare_history_with_policy(
+        let prefix_media = prior.and_then(|entry| {
+            if let ReplayPreflight::Compatible(mut estimate) = entry.prepared.assessment {
+                estimate.payload_tokens = 0;
+                estimate.estimated_tokens = 0;
+                estimate.unresolved_media.files = 0;
+                estimate.unresolved_media.opaque_items = 0;
+                Some((entry.input_count, estimate))
+            } else {
+                None
+            }
+        });
+        let (assessment, history) = zevria_anthropic::project::assess_and_prepare_history(
             input,
             target,
             compatibility,
             Some(identity),
             policy,
+            prefix_media,
         )?;
         let prepared = HistoryPreparation {
             assessment,
@@ -219,10 +188,27 @@ mod tests {
             zevria_content::image_facts::thread_fact_derivations(),
             before + 1
         );
-        assert!(
-            cache.entry.is_none(),
-            "local estimation never prepares/clones image transport history"
-        );
+        let system = serde_json::json!([]);
+        let tools = serde_json::Value::Null;
+        let full = zevria_anthropic::project::project_with_compatibility(
+            &input,
+            &target,
+            &compatibility,
+            &system,
+            &tools,
+            false,
+        )
+        .unwrap();
+        let cached = cache
+            .entry
+            .unwrap()
+            .prepared
+            .history
+            .unwrap()
+            .completion(&system, &tools, false, &input)
+            .unwrap();
+        assert_eq!(cached.messages, full.messages);
+        assert_eq!(cached.prefix_binding, full.prefix_binding);
     }
 
     #[test]
@@ -233,9 +219,17 @@ mod tests {
         let input = [ModelRequestItem::message(&user)];
         let identity = ModelInputIdentity::from_items(&input).unwrap();
         let mut cache = HistoryCache::default();
-        let first = cache
-            .prepare(&input, Some(&identity), &target, &compatibility)
+        let assessment = cache
+            .assess(
+                &input,
+                Some(&identity),
+                &target,
+                &compatibility,
+                &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+            )
             .unwrap();
+        let first = cache.entry.as_ref().unwrap().prepared.clone();
+        assert_eq!(assessment, first.assessment);
         let again = cache
             .prepare(&input, None, &target, &compatibility)
             .unwrap();

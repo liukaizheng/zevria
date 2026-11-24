@@ -1,8 +1,8 @@
 //! Occurrence-based tool correlation shared with provider projection. Analysis
 //! never rewrites an item or splits a native envelope.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
-use crate::ModelRequestItem;
+use crate::{ModelRequestItem, provider_replay::responses_tool_handles};
 use rig_core::message::{AssistantContent, Message, UserContent};
 
 #[derive(Debug)]
@@ -36,20 +36,25 @@ impl<T> ToolCorrelations<T> {
         self.calls.is_empty()
     }
 
-    pub fn call(&mut self, handles: BTreeSet<String>, value: T) -> anyhow::Result<()> {
+    pub fn call(&mut self, handles: &[Option<&str>], value: T) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !handles.is_empty(),
+            handles.iter().any(Option::is_some),
             "historical tool call has no correlation handle"
         );
         anyhow::ensure!(
             !handles
                 .iter()
-                .filter_map(|handle| self.latest.get(handle))
+                .flatten()
+                .filter_map(|&handle| self.latest.get(handle))
                 .any(|index| !self.calls[*index].completed),
             "ambiguous reused historical tool handle"
         );
-        for handle in handles {
-            self.latest.insert(handle, self.calls.len());
+        for &handle in handles.iter().flatten() {
+            if let Some(index) = self.latest.get_mut(handle) {
+                *index = self.calls.len();
+            } else {
+                self.latest.insert(handle.to_owned(), self.calls.len());
+            }
         }
         self.calls.push(Occurrence {
             value,
@@ -58,16 +63,21 @@ impl<T> ToolCorrelations<T> {
         Ok(())
     }
 
-    pub fn result(&mut self, handles: &BTreeSet<String>) -> anyhow::Result<&T> {
-        let candidates = handles
-            .iter()
-            .filter_map(|handle| self.latest.get(handle).copied())
-            .collect::<BTreeSet<_>>();
-        anyhow::ensure!(
-            candidates.len() == 1,
-            "historical tool result has missing or ambiguous preceding call correlation"
-        );
-        let call = &mut self.calls[*candidates.first().expect("one candidate")];
+    pub fn result(&mut self, handles: &[Option<&str>]) -> anyhow::Result<&T> {
+        const MISSING_OR_AMBIGUOUS: &str =
+            "historical tool result has missing or ambiguous preceding call correlation";
+        let mut candidate = None;
+        for &handle in handles.iter().flatten() {
+            if let Some(&index) = self.latest.get(handle) {
+                anyhow::ensure!(
+                    candidate.is_none_or(|prior| prior == index),
+                    "{MISSING_OR_AMBIGUOUS}"
+                );
+                candidate = Some(index);
+            }
+        }
+        let index = candidate.ok_or_else(|| anyhow::anyhow!(MISSING_OR_AMBIGUOUS))?;
+        let call = &mut self.calls[index];
         anyhow::ensure!(!call.completed, "duplicate historical tool result");
         call.completed = true;
         Ok(&call.value)
@@ -88,36 +98,34 @@ impl<T> ToolCorrelations<T> {
 pub fn replay_safe_prefixes(input: &[ModelRequestItem<'_>]) -> anyhow::Result<Vec<bool>> {
     let mut calls = ToolCorrelations::default();
     let mut crossings = vec![0_i64; input.len() + 2];
-    let mut result =
-        |calls: &mut ToolCorrelations<(usize, bool)>, handles, end| -> anyhow::Result<()> {
-            let (start, _) = *calls.result(&handles)?;
-            crossings[start + 1] += 1;
-            crossings[end + 1] -= 1;
-            Ok(())
-        };
+    let mut result = |calls: &mut ToolCorrelations<(usize, bool)>,
+                      handles: &[Option<&str>],
+                      end|
+     -> anyhow::Result<()> {
+        let (start, _) = *calls.result(handles)?;
+        crossings[start + 1] += 1;
+        crossings[end + 1] -= 1;
+        Ok(())
+    };
     for (index, item) in input.iter().enumerate() {
         if let Some(replay) = item.replay_ref() {
-            replay.portable_projection()?;
+            replay.validate_known_items()?;
             if replay.protocol() == Some(crate::ReplayProtocol::Anthropic) {
                 for (handles, external) in replay.tool_call_handles() {
-                    calls.call(handles, (index, external))?;
+                    calls.call(&handles, (index, external))?;
                 }
                 continue;
             }
-            let mut native_calls = replay.tool_call_handles().into_iter();
             for native in &replay.items {
                 let kind = native
                     .get("type")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                let handles = ["id", "call_id"]
-                    .into_iter()
-                    .filter_map(|key| native.get(key)?.as_str())
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned)
-                    .collect::<BTreeSet<_>>();
+                let handles = responses_tool_handles(native);
+                let external = matches!(kind, "function_call" | "custom_tool_call");
+                let has_handle = handles.iter().any(Option::is_some);
                 anyhow::ensure!(
-                    !matches!(kind, "function_call" | "custom_tool_call") || !handles.is_empty(),
+                    !external || has_handle,
                     "historical tool call has no correlation handle"
                 );
                 if matches!(kind, "function_call_output" | "custom_tool_call_output") {
@@ -125,10 +133,9 @@ pub fn replay_safe_prefixes(input: &[ModelRequestItem<'_>]) -> anyhow::Result<Ve
                         native.get("output").is_some(),
                         "malformed native tool output"
                     );
-                    result(&mut calls, handles, index)?;
-                } else if kind.ends_with("_call") && !handles.is_empty() {
-                    let (handles, external) = native_calls.next().expect("native call handles");
-                    calls.call(handles, (index, external))?;
+                    result(&mut calls, &handles, index)?;
+                } else if kind.ends_with("_call") && has_handle {
+                    calls.call(&handles, (index, external))?;
                 }
             }
         } else if let Some(message) = item.message_ref() {
@@ -136,24 +143,20 @@ pub fn replay_safe_prefixes(input: &[ModelRequestItem<'_>]) -> anyhow::Result<Ve
                 Message::Assistant(assistant) => {
                     for block in &assistant.content {
                         if let AssistantContent::ToolCall(call) = block {
-                            let mut handles = BTreeSet::from([call.id.to_string()]);
-                            if let Some(item) = call.native.as_ref().map(|native| &native.item) {
-                                handles.extend(
-                                    item.get("id")
-                                        .and_then(serde_json::Value::as_str)
-                                        .filter(|id| !id.is_empty())
-                                        .map(str::to_owned),
-                                );
-                            }
-                            calls.call(handles, (index, true))?;
+                            let id = call.id.wire();
+                            let alias = call
+                                .native
+                                .as_ref()
+                                .and_then(|native| native.item["id"].as_str())
+                                .filter(|id| !id.is_empty());
+                            calls.call(&[Some(&id), alias], (index, true))?;
                         }
                     }
                 }
                 Message::User { content } => {
                     for block in content {
                         if let UserContent::ToolResult(output) = block {
-                            let handles = BTreeSet::from([output.call.to_string()]);
-                            result(&mut calls, handles, index)?;
+                            result(&mut calls, &[Some(&output.call.wire())], index)?;
                         }
                     }
                 }

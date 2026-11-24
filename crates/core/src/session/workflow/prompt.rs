@@ -620,7 +620,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             None
         };
         let addition = zevria_model::estimates::estimate_model_input_with_policy(
-            prepared
+            &prepared
                 .records
                 .iter()
                 .filter_map(TranscriptItem::model_request_item)
@@ -629,7 +629,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                         .as_ref()
                         .and_then(TranscriptItem::model_request_item),
                 )
-                .collect(),
+                .collect::<Vec<_>>(),
             &limits.profile,
             &limits.image_accounting,
         )

@@ -31,6 +31,19 @@ pub struct OutputMessage {
     pub content: Vec<AssistantContent>,
 }
 
+impl OutputMessage {
+    pub fn into_portable_content(self) -> impl Iterator<Item = CanonicalContent> {
+        self.content
+            .into_iter()
+            .map(|block| match CanonicalContent::from(block) {
+                CanonicalContent::Text(text) if text.native.is_some() => {
+                    CanonicalContent::text(crate::citations::render_text(&text))
+                }
+                text => text,
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputRole {
@@ -171,13 +184,112 @@ fn reasoning_texts<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Str
         .into_iter()
         .map(|value| match value {
             Value::String(text) => Ok(text),
-            Value::Object(mut object) => object
-                .remove("text")
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .ok_or_else(|| serde::de::Error::custom("reasoning content requires text")),
+            Value::Object(mut object) => match object.remove("text") {
+                Some(Value::String(text)) => Ok(text),
+                _ => Err(serde::de::Error::custom("reasoning content requires text")),
+            },
             _ => Err(serde::de::Error::custom("invalid reasoning content")),
         })
         .collect()
+}
+
+fn required_string<'a>(object: &'a Value, key: &str) -> serde_json::Result<&'a str> {
+    object[key]
+        .as_str()
+        .ok_or_else(|| serde::de::Error::custom(format!("expected string {key}")))
+}
+
+fn required_array<'a>(object: &'a Value, key: &str) -> serde_json::Result<&'a [Value]> {
+    object[key]
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| serde::de::Error::custom(format!("expected array {key}")))
+}
+
+impl Output {
+    /// Check the native shape without copying strings, annotations, arguments,
+    /// or opaque data merely to discard the decoded value.
+    pub(crate) fn validate_known(value: &Value) -> serde_json::Result<()> {
+        use serde::de::Error as _;
+        match value["type"].as_str() {
+            Some("message") => {
+                required_string(value, "id")?;
+                OutputRole::deserialize(&value["role"])?;
+                required_string(value, "status")?;
+                for block in required_array(value, "content")? {
+                    match required_string(block, "type")? {
+                        "output_text" => {
+                            required_string(block, "text")?;
+                        }
+                        "refusal" => {
+                            required_string(block, "refusal")?;
+                        }
+                        _ => {
+                            return Err(serde_json::Error::custom(
+                                "unknown assistant content type",
+                            ));
+                        }
+                    }
+                }
+            }
+            Some("function_call") => {
+                if value.get("id").is_some() {
+                    required_string(value, "id")?;
+                }
+                required_string(value, "arguments")?;
+                required_string(value, "call_id")?;
+                if required_string(value, "name")?.is_empty() {
+                    return Err(serde_json::Error::custom("a tool name cannot be empty"));
+                }
+                ToolStatus::deserialize(&value["status"])?;
+            }
+            Some("reasoning") => {
+                required_string(value, "id")?;
+                if value.get("summary").is_some() {
+                    for block in required_array(value, "summary")? {
+                        if required_string(block, "type")? != "summary_text" {
+                            return Err(serde_json::Error::custom(
+                                "unknown reasoning summary type",
+                            ));
+                        }
+                        required_string(block, "text")?;
+                    }
+                }
+                if value.get("content").is_some() {
+                    for block in required_array(value, "content")? {
+                        if !block.is_string() {
+                            required_string(block, "text")?;
+                        }
+                    }
+                }
+                if !value["encrypted_content"].is_null() {
+                    required_string(value, "encrypted_content")?;
+                }
+                Option::<ToolStatus>::deserialize(&value["status"])?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Decode only known shapes without copying the raw item or its unused fields.
+    pub fn decode_known(value: &Value) -> serde_json::Result<Option<Self>> {
+        Ok(Some(match value.get("type").and_then(Value::as_str) {
+            Some("message") => Self::Message(Deserialize::deserialize(value)?),
+            Some("function_call") => Self::FunctionCall(Deserialize::deserialize(value)?),
+            Some("reasoning") => {
+                let item = ReasoningItem::deserialize(value)?;
+                Self::Reasoning {
+                    id: item.id,
+                    summary: item.summary,
+                    content: item.content,
+                    encrypted_content: item.encrypted_content,
+                    status: item.status,
+                }
+            }
+            _ => return Ok(None),
+        }))
+    }
 }
 
 impl<'de> Deserialize<'de> for Output {

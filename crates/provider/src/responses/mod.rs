@@ -40,10 +40,9 @@ pub(crate) use errors::{is_websocket_disconnect, message_reports_upstream_discon
 use maintenance::count_full_input_tokens;
 use maintenance::run_remote_compaction;
 pub(crate) use prepare::PreparedRequest;
-pub(crate) use prepare::ProjectionCache;
 #[cfg(test)]
 pub(crate) use prepare::prepare_turn_request;
-pub(crate) use prepare::rendered_tools;
+pub(crate) use prepare::{PropertiesCache, ResponsesCache, ResponsesCountProbe};
 use recovery_loop::run_model_request_with_reconnect;
 #[cfg(test)]
 use recovery_loop::{run_model_request_with_recovery, run_prepared_with_recovery};
@@ -191,6 +190,16 @@ pub(crate) async fn run_turn_request_with_recovery(
     Ok(())
 }
 
+impl OpenAiProvider {
+    pub(crate) fn count_with_probe<'a>(
+        &'a mut self,
+        request: ModelRequest<'a>,
+        probe: Option<ResponsesCountProbe>,
+    ) -> InputTokenCountFuture<'a> {
+        Box::pin(async move { count_full_input_tokens(&request, self, probe).await })
+    }
+}
+
 impl ModelProvider for OpenAiProvider {
     fn tool_append_preserves_prefix(&self, _target: &zevria_foundation::ModelProfileRef) -> bool {
         self.compatibility.additional_tools
@@ -233,7 +242,7 @@ impl ModelProvider for OpenAiProvider {
         &'a mut self,
         request: ModelRequest<'a>,
     ) -> InputTokenCountFuture<'a> {
-        Box::pin(async move { count_full_input_tokens(&request, self).await })
+        self.count_with_probe(request, None)
     }
 
     fn reset(&mut self) {

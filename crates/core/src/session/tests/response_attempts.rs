@@ -74,8 +74,8 @@ fn activity_round_trip_is_model_and_capacity_inert() {
     );
     assert_eq!(zevria_transcript::transcript::model_input(&items).len(), 1);
     assert_eq!(
-        estimate_model_input(zevria_transcript::transcript::model_input(&items)),
-        estimate_model_input(zevria_transcript::transcript::model_input(&items[..1]))
+        estimate_model_input(&zevria_transcript::transcript::model_input(&items)),
+        estimate_model_input(&zevria_transcript::transcript::model_input(&items[..1]))
     );
     assert_eq!(attempt.hosted_activity[0].status, Status::Completed);
     assert_eq!(attempt.hosted_activity[1].status, Status::Searching);

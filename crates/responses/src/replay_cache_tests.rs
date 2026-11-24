@@ -211,6 +211,46 @@ fn incremental_preflight_matches_full_across_appends_edits_and_compatibility_cha
 }
 
 #[test]
+fn slot_reuses_wire_projection_and_fences_rebuilt_continuation_prefixes() {
+    let target = ModelProfileRef::new("test", "model");
+    let history = history(&target);
+    let input = history
+        .iter()
+        .map(OwnedModelRequestItem::as_borrowed)
+        .collect::<Vec<_>>();
+    let mut cache = PreflightCache::default();
+    let assess = |cache: &mut PreflightCache, end| {
+        let prefix = &input[..end];
+        cache
+            .assess(
+                prefix,
+                &ModelInputIdentity::from_items(prefix).unwrap(),
+                &target,
+                true,
+                ToolRendererOptions::default(),
+                true,
+            )
+            .unwrap();
+        cache.projected_input().unwrap()
+    };
+
+    let admitted = assess(&mut cache, 3);
+    let dispatched = assess(&mut cache, 3);
+    assert!(std::sync::Arc::ptr_eq(&admitted.input, &dispatched.input));
+    assert_eq!(admitted.input[2]["call_id"], "zevria_call_000000");
+    let extended = assess(&mut cache, 4);
+    assert_eq!(extended.generation, admitted.generation);
+    assert_eq!(&extended.input[..admitted.input.len()], &*admitted.input);
+
+    // A native call arriving during admission can force a prior neutral ID
+    // to change. The cached wire payload must carry that rebuild to dispatch.
+    let rebuilt = assess(&mut cache, input.len());
+    assert_ne!(rebuilt.generation, extended.generation);
+    assert_eq!(*rebuilt.input, project(&input, &target).unwrap().0);
+    assert_eq!(rebuilt.input[2]["call_id"], "zevria_call_000000_1");
+}
+
+#[test]
 fn failed_or_foreign_preflight_does_not_install_a_partial_cache() {
     let target = ModelProfileRef::new("test", "model");
     let history = history(&target);

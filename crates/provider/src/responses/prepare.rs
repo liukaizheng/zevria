@@ -1,23 +1,46 @@
 //! Responses prepare responsibilities.
 use crate::diagnostics::Diagnostics;
-use zevria_model::ModelRequest;
-use zevria_responses::tools::ToolRendererOptions;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::sync::{Arc, OnceLock};
+use zevria_model::{ModelInputIdentity, ModelRequest, ModelRequestItem};
+use zevria_responses::{
+    replay::{PreflightOptions, ProjectedInput, ResponsesSlotCache},
+    tools::ToolRendererOptions,
+};
 
 use crate::{config::validate_additional_params, connection::OpenAiProvider, replay::ReplaySource};
 
-pub(crate) struct ProjectionCache {
-    pub(super) profile: zevria_foundation::ModelProfileRef,
-    pub(super) compatibility: [bool; 3],
-    pub(super) input_count: usize,
-    pub(super) input_digest: [u8; 32],
-    pub(super) projection: zevria_responses::replay::InputProjection,
-    pub(super) input: std::sync::Arc<Vec<serde_json::Value>>,
+#[derive(Default)]
+pub(crate) struct ResponsesCache {
+    pub(crate) input: ResponsesSlotCache,
+    tools: Option<ToolCache>,
+}
+
+struct ToolCache {
+    digest: [u8; 32],
+    compatibility: [bool; 2],
+    web_search: Option<zevria_responses::WebSearchConfig>,
+    rendered: Arc<RenderedTools>,
+}
+
+pub(crate) struct RenderedTools {
+    values: Vec<Value>,
+    pub(crate) tokens: u64,
+}
+
+pub(crate) struct PropertiesCache {
+    base: Vec<u8>,
+    tools: Arc<RenderedTools>,
+    properties: Arc<Value>,
 }
 
 pub(crate) struct PreparedRequest {
     pub(crate) cache_diagnostics: crate::diagnostics::RequestDiagnostics,
-    pub(crate) request_properties: serde_json::Value,
-    pub(crate) full_input: std::sync::Arc<Vec<serde_json::Value>>,
+    pub(crate) request_properties: Arc<Value>,
+    pub(crate) full_input: Arc<Vec<Value>>,
+    pub(super) http_body: OnceLock<bytes::Bytes>,
+    pub(super) projection_generation: u64,
     pub(super) input_count: usize,
     pub(super) input_digest: [u8; 32],
     pub(super) input_matches_continuation: bool,
@@ -25,62 +48,199 @@ pub(crate) struct PreparedRequest {
     pub(super) replay_source: ReplaySource,
 }
 
-/// Pure declaration rendering shared by transport and local capacity assessment.
-/// Folding replaces declarations in place, rather than counting every revision.
-pub(crate) fn rendered_tools(
-    request: &ModelRequest<'_>,
-    compatibility: &crate::config::ResponsesCompatibilityConfig,
-    web_search: &zevria_responses::WebSearchConfig,
-) -> anyhow::Result<Vec<serde_json::Value>> {
-    let options = ToolRendererOptions {
-        strict_tools: compatibility.strict_tools,
-    };
-    let declarations = zevria_model::ToolDeclarations::new(request.tools.to_vec())?;
-    let declarations = if compatibility.additional_tools {
-        declarations
-    } else {
-        declarations.fold(request.input.iter().filter_map(|item| match item {
-            zevria_model::ModelRequestItem::AdditionalTools(tools) => Some(*tools),
-            _ => None,
-        }))
-    };
-    let mut tools = zevria_responses::tools::render(&declarations, options)?;
-    if web_search.enabled
-        && request.allowed_tool_names.is_none_or(|names| {
-            names
-                .iter()
-                .any(|name| name == zevria_foundation::WEB_SEARCH_TOOL_NAME)
-        })
-    {
-        tools.push(serde_json::to_value(web_search.tool()?)?);
+impl ResponsesCache {
+    /// Render the exact declarations, reusing both their wire array and token
+    /// estimate between admission and dispatch. Fold revisions in place.
+    pub(crate) fn rendered_tools(
+        &mut self,
+        request: &ModelRequest<'_>,
+        compatibility: &crate::config::ResponsesCompatibilityConfig,
+        web_search: &zevria_responses::WebSearchConfig,
+    ) -> anyhow::Result<Arc<RenderedTools>> {
+        struct HashWriter(Sha256);
+        impl std::io::Write for HashWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let fold = !compatibility.additional_tools;
+        let mut digest = HashWriter(Sha256::new());
+        serde_json::to_writer(&mut digest, request.tools)?;
+        if fold {
+            for addition in tool_additions(request) {
+                serde_json::to_writer(&mut digest, addition)?;
+            }
+        }
+        let digest: [u8; 32] = digest.0.finalize().into();
+        let key = [compatibility.strict_tools, compatibility.additional_tools];
+        let hosted = (web_search.enabled
+            && request.allowed_tool_names.is_none_or(|names| {
+                names
+                    .iter()
+                    .any(|name| name == zevria_foundation::WEB_SEARCH_TOOL_NAME)
+            }))
+        .then_some(web_search);
+        if let Some(cache) = &self.tools
+            && cache.digest == digest
+            && cache.compatibility == key
+            && cache.web_search.as_ref() == hosted
+        {
+            return Ok(cache.rendered.clone());
+        }
+        let declarations = zevria_model::ToolDeclarations::new(request.tools.to_vec())?;
+        let declarations = if fold {
+            declarations.fold(tool_additions(request))
+        } else {
+            declarations
+        };
+        let mut values = zevria_responses::tools::render(
+            &declarations,
+            ToolRendererOptions {
+                strict_tools: compatibility.strict_tools,
+            },
+        )?;
+        if let Some(hosted) = hosted {
+            values.push(serde_json::to_value(hosted.tool()?)?);
+        }
+        let tokens = if values.is_empty() {
+            0
+        } else {
+            zevria_model::compaction::approximate_tokens_from_bytes(
+                serde_json::to_vec(&values)?.len(),
+            )
+        };
+        let rendered = Arc::new(RenderedTools { values, tokens });
+        self.tools = Some(ToolCache {
+            digest,
+            compatibility: key,
+            web_search: hosted.cloned(),
+            rendered: rendered.clone(),
+        });
+        Ok(rendered)
     }
-    Ok(tools)
+}
+
+fn tool_additions<'a>(
+    request: &'a ModelRequest<'a>,
+) -> impl Iterator<Item = &'a zevria_model::ToolDeclarations> {
+    request.input.iter().filter_map(|item| match item {
+        zevria_model::ModelRequestItem::AdditionalTools(tools) => Some(*tools),
+        _ => None,
+    })
+}
+
+/// An identity-less count is a temporary view, not a continuation prefix.
+/// Carry its validated wire projection through lazy runtime initialization so
+/// counts reject bad replay locally without projecting the history twice.
+pub(crate) struct ResponsesCountProbe {
+    identity: ModelInputIdentity,
+    projected: ProjectedInput,
+}
+
+impl ResponsesCountProbe {
+    pub(crate) fn new(
+        input: &[ModelRequestItem<'_>],
+        options: PreflightOptions<'_>,
+    ) -> anyhow::Result<Self> {
+        let identity = ModelInputIdentity::from_items(input)?;
+        let projected = project_input(
+            &mut ResponsesSlotCache::default(),
+            input,
+            &identity,
+            options,
+        )?;
+        Ok(Self {
+            identity,
+            projected,
+        })
+    }
+}
+
+fn preflight_options(openai: &OpenAiProvider) -> PreflightOptions<'_> {
+    PreflightOptions {
+        target: &openai.profile,
+        developer_messages: openai.compatibility.developer_messages,
+        tool_options: ToolRendererOptions {
+            strict_tools: openai.compatibility.strict_tools,
+        },
+        additional_tools: openai.compatibility.additional_tools,
+        policy: &openai.image_accounting,
+    }
 }
 
 pub(crate) async fn prepare_turn_request(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
 ) -> anyhow::Result<PreparedRequest> {
+    prepare_request(model_request, openai, None)
+}
+
+pub(super) fn prepare_count_request(
+    model_request: &ModelRequest<'_>,
+    openai: &mut OpenAiProvider,
+    probe: Option<ResponsesCountProbe>,
+) -> anyhow::Result<PreparedRequest> {
+    let probe = match (probe, model_request.input_identity) {
+        (None, None) => Some(ResponsesCountProbe::new(
+            &model_request.input,
+            preflight_options(openai),
+        )?),
+        (probe, _) => probe,
+    };
+    prepare_request(model_request, openai, probe)
+}
+
+fn prepare_request(
+    model_request: &ModelRequest<'_>,
+    openai: &mut OpenAiProvider,
+    probe: Option<ResponsesCountProbe>,
+) -> anyhow::Result<PreparedRequest> {
+    let use_live_cache = probe.is_none();
+    let (probe_identity, probe_projection) = match probe {
+        Some(ResponsesCountProbe {
+            identity,
+            projected,
+        }) => (Some(identity), Some(projected)),
+        None => (None, None),
+    };
+    let fallback_identity;
+    let identity = match probe_identity.as_ref().or(model_request.input_identity) {
+        Some(identity) if identity.len() == model_request.input.len() => identity,
+        _ => {
+            fallback_identity = ModelInputIdentity::from_items(&model_request.input)?;
+            &fallback_identity
+        }
+    };
+    let mut scratch;
+    let mut live;
+    let cache = if use_live_cache {
+        live = openai
+            .responses_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Responses slot cache lock poisoned"))?;
+        &mut *live
+    } else {
+        scratch = ResponsesCache::default();
+        &mut scratch
+    };
     let tool_options = ToolRendererOptions {
         strict_tools: openai.compatibility.strict_tools,
     };
-    let additions = model_request
-        .input
-        .iter()
-        .filter_map(|item| match item {
-            zevria_model::ModelRequestItem::AdditionalTools(tools) => Some(*tools),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let tools = rendered_tools(model_request, &openai.compatibility, &openai.web_search)?;
+    let tools = cache.rendered_tools(model_request, &openai.compatibility, &openai.web_search)?;
 
     let mut request_properties = openai
         .prepared_responses_parameters()
         .unwrap_or_else(|| serde_json::json!({}));
     request_properties["model"] = openai.profile.model.clone().into();
     request_properties["instructions"] = model_request.instructions.into();
-    if !tools.is_empty() {
-        request_properties["tools"] = tools.into();
+    if !tools.values.is_empty() {
+        // Reserve the original property position, without copying the tool
+        // schemas just to check whether the properties can be shared.
+        request_properties["tools"] = Value::Null;
     }
     if openai.compatibility.send_store {
         request_properties["store"] = false.into();
@@ -96,14 +256,10 @@ pub(crate) async fn prepare_turn_request(
     properties.remove("previous_response_id");
     if model_request.forbid_tool_calls {
         properties.insert("tool_choice".into(), serde_json::json!("none"));
-    } else {
-        let mut declared = properties
-            .get("tools")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+    } else if properties.contains_key("tool_choice") {
+        let mut declared = tools.values.clone();
         if openai.compatibility.additional_tools {
-            for addition in &additions {
+            for addition in tool_additions(model_request) {
                 declared.extend(zevria_responses::tools::render(addition, tool_options)?);
             }
         }
@@ -113,85 +269,93 @@ pub(crate) async fn prepare_turn_request(
         ))?;
     }
 
-    let fallback_identity;
-    let identity = match model_request.input_identity {
-        Some(identity) if identity.len() == model_request.input.len() => identity,
-        _ => {
-            fallback_identity = zevria_model::ModelInputIdentity::from_items(&model_request.input)?;
-            &fallback_identity
+    let base = use_live_cache
+        .then(|| serde_json::to_vec(&request_properties))
+        .transpose()?;
+    let request_properties = match (&openai.request_properties_cache, base) {
+        (Some(cache), Some(base)) if cache.base == base && Arc::ptr_eq(&cache.tools, &tools) => {
+            cache.properties.clone()
+        }
+        (_, base) => {
+            if !tools.values.is_empty() {
+                request_properties["tools"] = Value::Array(tools.values.clone());
+            }
+            let properties = Arc::new(request_properties);
+            if let Some(base) = base {
+                openai.request_properties_cache = Some(PropertiesCache {
+                    base,
+                    tools,
+                    properties: properties.clone(),
+                });
+            }
+            properties
         }
     };
-    let input_matches_continuation = openai
-        .ws
-        .continuation
-        .as_ref()
-        .map(|continuation| continuation.lineage)
-        .is_some_and(|lineage| {
-            identity.len() > lineage.input_count
-                && identity.prefix(lineage.input_count) == Some(lineage.input_digest)
-        });
-    let compatibility = [
-        openai.compatibility.developer_messages,
-        tool_options.strict_tools,
-        openai.compatibility.additional_tools,
-    ];
-    let cached = openai.input_projection.take().filter(|cache| {
-        cache.profile == openai.profile
-            && cache.compatibility == compatibility
-            && identity.prefix(cache.input_count) == Some(cache.input_digest)
-    });
-    let (mut projection, start, projection_extended) = match cached {
-        Some(cache)
-            if cache
-                .projection
-                .can_extend(&model_request.input[cache.input_count..], &openai.profile)? =>
-        {
-            let mut projection = cache.projection;
-            projection.restore_input(
-                std::sync::Arc::try_unwrap(cache.input)
-                    .unwrap_or_else(|shared| shared.as_ref().clone()),
-            );
-            (projection, cache.input_count, true)
-        }
-        _ => (
-            zevria_responses::replay::InputProjection::default(),
-            0,
-            false,
-        ),
+
+    let projected = match probe_projection {
+        Some(projected) => projected,
+        None => project_input(
+            &mut cache.input,
+            &model_request.input,
+            identity,
+            preflight_options(openai),
+        )?,
     };
-    projection.extend(
-        &model_request.input[start..],
-        &openai.profile,
-        openai.compatibility.developer_messages,
-        tool_options,
-        openai.compatibility.additional_tools,
-    )?;
-    let replay_source = projection.source();
-    let full_input = std::sync::Arc::new(projection.take_input());
     anyhow::ensure!(
-        !full_input.is_empty(),
+        !projected.input.is_empty(),
         "the OpenAI Responses request contained no input items"
     );
-    openai.input_projection = Some(ProjectionCache {
-        profile: openai.profile.clone(),
-        compatibility,
-        input_count: identity.len(),
-        input_digest: identity.digest(),
-        projection,
-        input: full_input.clone(),
-    });
+    let input_matches_continuation = use_live_cache
+        && openai.ws.continuation.as_ref().is_some_and(|continuation| {
+            let lineage = continuation.lineage;
+            projected.generation == lineage.projection_generation
+                && identity.len() > lineage.input_count
+                && identity.prefix(lineage.input_count) == Some(lineage.input_digest)
+        });
     Ok(PreparedRequest {
         cache_diagnostics: Diagnostics::empty_request(),
         request_properties,
-        full_input,
+        full_input: projected.input,
+        http_body: OnceLock::new(),
+        projection_generation: projected.generation,
         input_count: identity.len(),
         input_digest: identity.digest(),
         // Rebuilding may rename portable call IDs to reserve new native
         // handles, or change projection compatibility. Never chain that prefix.
-        input_matches_continuation: input_matches_continuation && projection_extended,
+        input_matches_continuation,
         history_message_count: model_request.input.len().saturating_sub(1),
-        replay_source,
+        replay_source: projected.source,
     })
+}
+
+fn project_input(
+    cache: &mut ResponsesSlotCache,
+    input: &[ModelRequestItem<'_>],
+    identity: &ModelInputIdentity,
+    options: PreflightOptions<'_>,
+) -> anyhow::Result<ProjectedInput> {
+    let assessment = cache.assess_with_policy(input, identity, options)?;
+    if let zevria_model::models::ReplayPreflight::ConversionRequired { .. } = assessment {
+        let replay = input
+            .iter()
+            .find_map(|item| match item {
+                ModelRequestItem::ReplayOnly(replay)
+                    if &replay.source_profile != options.target
+                        || replay.protocol() != Some(zevria_model::ReplayProtocol::Responses) =>
+                {
+                    Some(replay)
+                }
+                _ => None,
+            })
+            .expect("conversion requires a foreign replay-only item");
+        anyhow::bail!(
+            "cannot send replay-only {} history from source profile {} to foreign target profile {}: conversion required",
+            replay.provider,
+            replay.source_profile,
+            options.target
+        );
+    }
+    Ok(cache.projected_input().expect("compatible projection"))
 }
 
 pub(super) fn validate_tool_choice(

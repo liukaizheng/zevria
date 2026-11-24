@@ -3,6 +3,7 @@
 //! nested properties and projected input never need a serialization-time copy.
 use serde::{Serialize, Serializer, ser::SerializeMap};
 use serde_json::Value;
+use std::borrow::Cow;
 
 use super::prepare::PreparedRequest;
 
@@ -10,6 +11,7 @@ use super::prepare::PreparedRequest;
 #[serde(untagged)]
 enum Entry<'a> {
     Property(&'a Value),
+    Projected(Value),
     Input(&'a [Value]),
     Text(&'a str),
     Flag(bool),
@@ -70,6 +72,54 @@ impl<'a> RequestBody<'a> {
         body.insert("stream", Entry::Flag(true));
         Ok(body)
     }
+
+    fn maintenance(prepared: &'a PreparedRequest) -> anyhow::Result<Self> {
+        let mut body = Self::properties(prepared)?;
+        let key = crate::prompt_cache::OPTIONS;
+        if let Some(options) = prepared.request_properties.get(key) {
+            match crate::prompt_cache::cache_sensitive_options(options) {
+                None => body.remove(key),
+                Some(Cow::Owned(value)) => body.insert(key, Entry::Projected(value)),
+                Some(Cow::Borrowed(_)) => {}
+            }
+        }
+        Ok(body)
+    }
+
+    pub(super) fn count_tokens(prepared: &'a PreparedRequest) -> anyhow::Result<Self> {
+        let mut body = Self::maintenance(prepared)?;
+        // Preserve the exact removal sequence of the original wire map.
+        for key in [
+            "stream",
+            "previous_response_id",
+            "background",
+            "include",
+            "service_tier",
+            "store",
+            "prompt_cache_key",
+            "parallel_tool_calls",
+        ] {
+            body.remove(key);
+        }
+        body.insert("input", Entry::Input(&prepared.full_input));
+        Ok(body)
+    }
+
+    pub(super) fn compact(prepared: &'a PreparedRequest) -> anyhow::Result<Self> {
+        let mut body = Self::maintenance(prepared)?;
+        for key in ["stream", "previous_response_id", "include", "service_tier"] {
+            body.remove(key);
+        }
+        if !body
+            .entries
+            .iter()
+            .any(|(name, _)| *name == "parallel_tool_calls")
+        {
+            body.insert("parallel_tool_calls", Entry::Flag(true));
+        }
+        body.insert("input", Entry::Input(&prepared.full_input));
+        Ok(body)
+    }
 }
 
 impl Serialize for RequestBody<'_> {
@@ -85,19 +135,38 @@ impl Serialize for RequestBody<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Map, json};
+
+    fn for_each_property_order(order: &mut [&str], index: usize, check: &mut impl FnMut(&[&str])) {
+        if index == order.len() {
+            check(order);
+            return;
+        }
+        for next in index..order.len() {
+            order.swap(index, next);
+            for_each_property_order(order, index + 1, check);
+            order.swap(index, next);
+        }
+    }
+
+    fn prepare(properties: &Map<String, Value>, input: &[Value]) -> PreparedRequest {
+        PreparedRequest {
+            cache_diagnostics: crate::diagnostics::Diagnostics::empty_request(),
+            request_properties: Value::Object(properties.clone()).into(),
+            http_body: Default::default(),
+            projection_generation: 0,
+            full_input: std::sync::Arc::new(input.to_vec()),
+            input_count: 1,
+            input_digest: [0; 32],
+            input_matches_continuation: false,
+            history_message_count: 0,
+            replay_source: crate::replay::ReplaySource::None,
+        }
+    }
 
     #[test]
     fn borrowed_bodies_match_legacy_map_bytes_for_every_property_order() {
-        fn check(order: &mut [&str], index: usize) {
-            if index < order.len() {
-                for next in index..order.len() {
-                    order.swap(index, next);
-                    check(order, index + 1);
-                    order.swap(index, next);
-                }
-                return;
-            }
+        let mut check = |order: &[&str]| {
             for length in 0..=order.len() {
                 let properties = order[..length]
                     .iter()
@@ -106,16 +175,7 @@ mod tests {
                 let input = vec![
                     json!({"role":"user","content":[{"type":"input_text","text":"borrow me"}]}),
                 ];
-                let prepared = PreparedRequest {
-                    cache_diagnostics: crate::diagnostics::Diagnostics::empty_request(),
-                    request_properties: Value::Object(properties.clone()),
-                    full_input: std::sync::Arc::new(input.clone()),
-                    input_count: 1,
-                    input_digest: [0; 32],
-                    input_matches_continuation: false,
-                    history_message_count: 0,
-                    replay_source: crate::replay::ReplaySource::None,
-                };
+                let prepared = prepare(&properties, &input);
                 for previous in [None, Some("response-id")] {
                     let mut legacy = properties.clone();
                     legacy.insert("type".into(), json!("response.create"));
@@ -143,10 +203,103 @@ mod tests {
                     "HTTP {order:?}, length={length}"
                 );
             }
-        }
-        check(
+        };
+        for_each_property_order(
             &mut ["type", "input", "previous_response_id", "stream", "nested"],
             0,
+            &mut check,
+        );
+    }
+
+    #[test]
+    fn maintenance_bodies_match_legacy_map_bytes_for_every_property_order() {
+        let input =
+            vec![json!({"role":"user","content":[{"type":"input_text","text":"borrow me"}]})];
+        let options = [
+            json!({"comparison_response_id":"old"}),
+            json!({"comparison_response_id":"old", "mode":"implicit", "ttl":"30m"}),
+            json!({"mode":"implicit", "ttl":"30m"}),
+            json!({}),
+        ];
+        let mut check = |order: &[&str]| {
+            for length in 0..=order.len() {
+                for options in &options {
+                    // The other removals are always present so the permutation
+                    // also exercises their swap_remove ordering.
+                    let mut legacy = Map::from_iter([
+                        ("model".into(), json!("test")),
+                        ("background".into(), json!(true)),
+                        ("include".into(), json!(["reasoning.encrypted_content"])),
+                        ("nested".into(), json!({"original":["🦀", 1.25, false]})),
+                        ("service_tier".into(), json!("auto")),
+                        ("store".into(), json!(false)),
+                        ("prompt_cache_key".into(), json!("session")),
+                    ]);
+                    for &key in &order[..length] {
+                        legacy.insert(
+                            key.into(),
+                            match key {
+                                "prompt_cache_options" => options.clone(),
+                                "parallel_tool_calls" => json!(false),
+                                _ => json!("original"),
+                            },
+                        );
+                    }
+                    let prepared = prepare(&legacy, &input);
+
+                    // Independently apply the original owned-map maintenance builders.
+                    if legacy
+                        .get_mut("prompt_cache_options")
+                        .and_then(Value::as_object_mut)
+                        .is_some_and(|options| {
+                            options.remove("comparison_response_id").is_some() && options.is_empty()
+                        })
+                    {
+                        legacy.remove("prompt_cache_options");
+                    }
+                    let mut count = legacy.clone();
+                    for key in [
+                        "stream",
+                        "previous_response_id",
+                        "background",
+                        "include",
+                        "service_tier",
+                        "store",
+                        "prompt_cache_key",
+                        "parallel_tool_calls",
+                    ] {
+                        count.remove(key);
+                    }
+                    count.insert("input".into(), Value::Array(input.clone()));
+                    assert_eq!(
+                        serde_json::to_vec(&RequestBody::count_tokens(&prepared).unwrap()).unwrap(),
+                        serde_json::to_vec(&count).unwrap(),
+                        "count_tokens {order:?}, length={length}, options={options}"
+                    );
+
+                    for key in ["stream", "previous_response_id", "include", "service_tier"] {
+                        legacy.remove(key);
+                    }
+                    legacy.entry("parallel_tool_calls").or_insert(json!(true));
+                    legacy.insert("input".into(), Value::Array(input.clone()));
+                    assert_eq!(
+                        serde_json::to_vec(&RequestBody::compact(&prepared).unwrap()).unwrap(),
+                        serde_json::to_vec(&legacy).unwrap(),
+                        "compact {order:?}, length={length}, options={options}"
+                    );
+                }
+            }
+        };
+        for_each_property_order(
+            &mut [
+                "input",
+                "previous_response_id",
+                "stream",
+                "prompt_cache_options",
+                "parallel_tool_calls",
+            ],
+            0,
+            &mut check,
         );
     }
 }

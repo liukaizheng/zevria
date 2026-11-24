@@ -49,7 +49,7 @@ impl ModelProvider for MaintenanceProvider {
             // Force a cancellable preparation step, without a conversation turn.
             ContextTokenEstimate::new(900, 900)
         } else {
-            estimate_model_input_for_profile(input.to_vec(), target)?
+            estimate_model_input_for_profile(input, target)?
         };
         Ok(zevria_model::models::ReplayPreflight::Compatible(estimate))
     }

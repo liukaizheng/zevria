@@ -24,10 +24,15 @@ use super::driver::{DriverContext, DriverFailure, DriverTransport, ResponseDrive
 use super::errors::classify_input_size;
 use super::errors::{structured_input_size, validation_input_size_rejection};
 use super::prepare::PreparedRequest;
-pub(super) fn http_request_body(
-    prepared: &PreparedRequest,
-) -> anyhow::Result<super::serialize::RequestBody<'_>> {
-    super::serialize::RequestBody::http(prepared)
+fn http_request_body(prepared: &PreparedRequest) -> anyhow::Result<&bytes::Bytes> {
+    if let Some(body) = prepared.http_body.get() {
+        return Ok(body);
+    }
+    // A WebSocket-only request never has to encode an HTTP body. If it falls
+    // back, all attempts and credential refreshes use the same encoded bytes.
+    let body = super::serialize::RequestBody::http(prepared)?;
+    let body = bytes::Bytes::from(serde_json::to_vec(&body)?);
+    Ok(prepared.http_body.get_or_init(|| body))
 }
 
 pub(super) fn successful_http_model_response(
@@ -120,7 +125,8 @@ pub(super) async fn run_http_model_request_inner(
         .http
         .post(openai.responses_url.clone())
         .header(reqwest::header::ACCEPT, "text/event-stream")
-        .json(&body);
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.clone());
     Diagnostics::http_transmission(prepared, openai, &request, request_attempt)?;
     let response = authenticated(
         &openai.api_key,
@@ -244,7 +250,7 @@ pub(super) async fn run_http_model_request_inner(
     attempt_progress
         .status(NetworkStatus::AwaitingResponse)
         .await;
-    let mut clock = ProgressClock::new(policy);
+    let mut clock = ProgressClock::new(policy, attempt_progress);
     let response_progress = ResponseProgress::default();
     let mut driver = ResponseDriver::new(
         DriverTransport::Http {
@@ -257,7 +263,7 @@ pub(super) async fn run_http_model_request_inner(
 
     loop {
         let event = state
-            .next_event(clock.next(events.next(), attempt_progress), progress)
+            .next_event(clock.next(events.next()), progress)
             .await
             .map_err(|error| {
                 HttpAttemptError::retryable_response(
@@ -310,7 +316,6 @@ pub(super) async fn run_http_model_request_inner(
                     progress,
                     telemetry: &mut telemetry,
                     clock: &mut clock,
-                    attempt_progress,
                 },
                 raw,
                 payload.len(),

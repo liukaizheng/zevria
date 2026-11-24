@@ -186,7 +186,7 @@ impl OpenAiTransport {
 pub(crate) struct ContinuationState {
     pub(crate) socket_generation: u64,
     pub(crate) response_id: String,
-    pub(crate) request_properties: serde_json::Value,
+    pub(crate) request_properties: std::sync::Arc<serde_json::Value>,
     pub(crate) lineage: crate::turn::ContinuationLineage,
 }
 
@@ -355,7 +355,9 @@ pub(crate) enum HttpFallback {
 pub struct OpenAiProvider {
     pub(crate) cache_diagnostics: crate::diagnostics::Diagnostics,
     pub(crate) profile: ModelProfileRef,
-    pub(crate) input_projection: Option<crate::turn::ProjectionCache>,
+    pub(crate) responses_cache: std::sync::Arc<std::sync::Mutex<crate::responses::ResponsesCache>>,
+    pub(crate) request_properties_cache: Option<crate::responses::PropertiesCache>,
+    pub(crate) image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy,
     #[allow(dead_code)]
     pub(crate) context_window_tokens: u64,
     pub(crate) preamble: String,
@@ -570,7 +572,9 @@ impl OpenAiProvider {
                 transport == OpenAiTransport::Http && endpoint.supports_websockets,
             ),
             profile: profile.profile.clone(),
-            input_projection: None,
+            responses_cache: Default::default(),
+            request_properties_cache: None,
+            image_accounting: profile.image_accounting.clone(),
             context_window_tokens: profile.context_window_tokens,
             preamble: preamble.to_string(),
             responses_parameters: Some(responses_parameters),

@@ -348,7 +348,7 @@ async fn request_preparation_shares_one_instruction_render_across_round_consumer
         let scope = ToolExecutionScope::new(&engine, SessionMode::Build, &policy, &turn, &gate);
         assert!(Arc::ptr_eq(
             &first.instructions,
-            &scope.instructions.as_ref().unwrap().instructions
+            &scope.instructions.instructions
         ));
         let committed = engine.request_plan(&policy);
         assert!(Arc::ptr_eq(

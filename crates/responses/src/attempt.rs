@@ -16,6 +16,8 @@ mod tests;
 #[derive(Default)]
 struct LiveText {
     raw: String,
+    // Maintained at writes so a plain delta never scans the existing prefix.
+    needs_render: bool,
     refusal: bool,
     annotations: BTreeMap<u64, Value>,
     annotation_sequences: HashMap<u64, u64>,
@@ -31,12 +33,11 @@ pub struct AttemptReducer {
     // Only display-visible mutations advance the attempt revision. Authority
     // fences and raw text/annotation bookkeeping are not themselves changes.
     changed: bool,
-    // Raw native completed parts are never sanitized or used as model input.
-    completed_text: BTreeMap<(u64, u64), Text>,
     live_text: BTreeMap<(u64, u64), LiveText>,
     display_text: BTreeMap<(u64, u64), Text>,
     display_sources: BTreeMap<(u64, u64), Vec<CitedSource>>,
     dirty_text: std::collections::BTreeSet<(u64, u64)>,
+    answers_dirty: bool,
     // Zero is a growing message; completed items also fence unknown late parts.
     text_outputs: BTreeMap<u64, u8>,
     authority: HashMap<u64, u8>,
@@ -48,10 +49,8 @@ impl AttemptReducer {
     pub fn attempt(&self) -> &ResponseAttempt {
         &self.attempt
     }
-    pub fn completed_text(&self) -> &BTreeMap<(u64, u64), Text> {
-        &self.completed_text
-    }
     pub fn attempt_mut(&mut self) -> &mut ResponseAttempt {
+        self.materialize();
         &mut self.attempt
     }
 
@@ -60,7 +59,6 @@ impl AttemptReducer {
         Self {
             attempt,
             changed: false,
-            completed_text: BTreeMap::new(),
             text_outputs: BTreeMap::new(),
             authority: HashMap::new(),
             finalized_parts: Default::default(),
@@ -70,6 +68,7 @@ impl AttemptReducer {
             display_text: Default::default(),
             display_sources: Default::default(),
             dirty_text: Default::default(),
+            answers_dirty: false,
         }
     }
 
@@ -192,6 +191,7 @@ impl AttemptReducer {
             return;
         }
         live.raw = raw.into();
+        live.needs_render = needs_display_render(raw);
         live.refusal = kind == Some("refusal");
         live.text_authority = authority;
         if let Some(annotations) = part.get("annotations").and_then(Value::as_array) {
@@ -208,17 +208,8 @@ impl AttemptReducer {
             live.annotations.clear();
             live.annotation_authority = authority;
         }
-        if authority >= 2 {
-            let mut text = Text::new(raw);
-            if let Some(annotations) = part.get("annotations").and_then(Value::as_array) {
-                text = zevria_content::citations::text_with_openai_extras(
-                    raw,
-                    serde_json::json!({"annotations": annotations}),
-                );
-            }
-            self.completed_text.insert(key, text);
-        }
         self.dirty_text.insert(key);
+        self.answers_dirty = true;
     }
 
     fn text(
@@ -229,7 +220,10 @@ impl AttemptReducer {
         refusal: bool,
         sequence: Option<u64>,
     ) {
-        let (output, _) = key;
+        use zevria_content::{
+            AssistantPartIdentity::Content, AssistantPresentationContent::Answer,
+        };
+        let (output, content) = key;
         if self
             .text_outputs
             .get(&output)
@@ -248,15 +242,32 @@ impl AttemptReducer {
         {
             return;
         }
+        live.refusal = refusal;
+        live.sequence = sequence.or(live.sequence);
         if done {
             live.raw = text.into();
+            live.needs_render = needs_display_render(text);
             live.text_authority = 1;
         } else {
             live.raw.push_str(text);
+            live.needs_render |= needs_display_render(text);
+            if !live.needs_render
+                && live.annotations.is_empty()
+                && !self.dirty_text.contains(&key)
+                && let Some(part) = self.attempt.presentation.iter_mut().find(|part| {
+                    part.source.output_index == output && part.source.part == Content(content)
+                })
+                && let Answer { text: answer, .. } = &mut part.content
+                && let Some(display) = self.display_text.get_mut(&key)
+            {
+                answer.push_str(text);
+                display.text.push_str(text);
+                self.changed |= !text.is_empty();
+                return;
+            }
         }
-        live.refusal = refusal;
-        live.sequence = sequence.or(live.sequence);
         self.dirty_text.insert(key);
+        self.answers_dirty = true;
     }
 
     fn annotation(
@@ -289,6 +300,7 @@ impl AttemptReducer {
         if live.annotations.get(&index) != Some(annotation) {
             live.annotations.insert(index, annotation.clone());
             self.dirty_text.insert(key);
+            self.answers_dirty = true;
         }
     }
 
@@ -298,6 +310,11 @@ impl AttemptReducer {
             .get(&index)
             .is_none_or(|(_, prior)| authority > *prior)
         {
+            self.answers_dirty |= self.text_outputs.contains_key(&index)
+                && self
+                    .item_ids
+                    .get(&index)
+                    .is_none_or(|(prior_id, _)| prior_id != id);
             self.item_ids.insert(index, (id.into(), authority));
         }
     }
@@ -327,34 +344,37 @@ impl AttemptReducer {
                 {
                     return;
                 }
+                let readable = [("summary", true), ("content", false)]
+                    .into_iter()
+                    .flat_map(|(field, summary)| {
+                        item.get(field)
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .enumerate()
+                            .filter_map(move |(part_index, part)| {
+                                let text =
+                                    zevria_content::readable::readable_reasoning_value(part)?;
+                                let identity = if summary {
+                                    zevria_content::AssistantPartIdentity::Summary(
+                                        part_index as u64,
+                                    )
+                                } else {
+                                    zevria_content::AssistantPartIdentity::Content(
+                                        part_index as u64,
+                                    )
+                                };
+                                Some((identity, zevria_content::readable::sanitize_readable(text)))
+                            })
+                    });
                 if authority > 0 {
-                    // A final item replaces the complete set, but retaining
-                    // identical parts avoids treating a duplicate terminal as
-                    // a removal followed by an insertion.
-                    let keep = [("summary", true), ("content", false)]
-                        .into_iter()
-                        .flat_map(|(field, summary)| {
-                            item.get(field)
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                                .enumerate()
-                                .filter_map(move |(part_index, part)| {
-                                    let text =
-                                        zevria_content::readable::readable_reasoning_value(part)?;
-                                    (!zevria_content::readable::sanitize_readable(text)
-                                        .trim()
-                                        .is_empty())
-                                    .then_some(if summary {
-                                        zevria_content::AssistantPartIdentity::Summary(
-                                            part_index as u64,
-                                        )
-                                    } else {
-                                        zevria_content::AssistantPartIdentity::Content(
-                                            part_index as u64,
-                                        )
-                                    })
-                                })
+                    // Reconcile the complete set using the same sanitized text
+                    // that will be installed below.
+                    let readable = readable.collect::<Vec<_>>();
+                    let keep = readable
+                        .iter()
+                        .filter_map(|(identity, text)| {
+                            (!text.trim().is_empty()).then_some(*identity)
                         })
                         .collect::<std::collections::HashSet<_>>();
                     let before = self.attempt.presentation.len();
@@ -362,27 +382,12 @@ impl AttemptReducer {
                         part.source.output_index != index || keep.contains(&part.source.part)
                     });
                     self.changed |= before != self.attempt.presentation.len();
-                }
-                for (field, summary) in [("summary", true), ("content", false)] {
-                    if let Some(parts) = item.get(field).and_then(Value::as_array) {
-                        for (part_index, part) in parts.iter().enumerate() {
-                            let identity = if summary {
-                                zevria_content::AssistantPartIdentity::Summary(part_index as u64)
-                            } else {
-                                zevria_content::AssistantPartIdentity::Content(part_index as u64)
-                            };
-                            if let Some(text) =
-                                zevria_content::readable::readable_reasoning_value(part)
-                            {
-                                self.reasoning(
-                                    index,
-                                    identity,
-                                    text,
-                                    false,
-                                    if authority > 0 { authority + 1 } else { 0 },
-                                );
-                            }
-                        }
+                    for (identity, text) in readable {
+                        self.readable_reasoning(index, identity, text, false, authority + 1);
+                    }
+                } else {
+                    for (identity, text) in readable {
+                        self.readable_reasoning(index, identity, text, false, 0);
                     }
                 }
             }
@@ -414,8 +419,8 @@ impl AttemptReducer {
                         self.live_text.retain(|key, _| keep(key));
                         self.display_text.retain(|key, _| keep(key));
                         self.display_sources.retain(|key, _| keep(key));
-                        self.completed_text.retain(|key, _| keep(key));
                         self.dirty_text.retain(keep);
+                        self.answers_dirty = true;
                     }
                     for (content, part) in parts.iter().enumerate() {
                         self.part(index, content as u64, part, authority);
@@ -465,6 +470,23 @@ impl AttemptReducer {
         append: bool,
         authority: u8,
     ) {
+        self.readable_reasoning(
+            output,
+            identity,
+            zevria_content::readable::sanitize_readable(text),
+            append,
+            authority,
+        );
+    }
+
+    fn readable_reasoning(
+        &mut self,
+        output: u64,
+        identity: zevria_content::AssistantPartIdentity,
+        text: String,
+        append: bool,
+        authority: u8,
+    ) {
         use zevria_content::AssistantPresentationContent::Reasoning;
         if self
             .finalized_parts
@@ -483,7 +505,6 @@ impl AttemptReducer {
         {
             return;
         }
-        let text = zevria_content::readable::sanitize_readable(text);
         if append
             && let Some(part) = self
                 .attempt
@@ -572,6 +593,14 @@ impl AttemptReducer {
         for (output, content, text, sources) in answers {
             self.set_part(output, Content(content), Answer { text, sources });
         }
+    }
+
+    /// Reconcile display-only work at publication, close and cancellation.
+    pub fn materialize(&mut self) {
+        self.changed = false;
+        if std::mem::take(&mut self.answers_dirty) {
+            self.refresh_answers();
+        }
         let key = |part: &zevria_content::AssistantPresentationPart| {
             (part.source.output_index, part.source.part)
         };
@@ -583,6 +612,9 @@ impl AttemptReducer {
         {
             self.attempt.presentation.sort_by_key(key);
             self.changed = true;
+        }
+        if self.changed {
+            self.attempt.touch();
         }
     }
 
@@ -741,9 +773,15 @@ impl AttemptReducer {
                 // A terminal event with an unusable ledger is still a failed attempt.
             }
         }
-        self.refresh_answers();
         if self.changed {
             self.attempt.touch();
         }
     }
+}
+
+fn needs_display_render(text: &str) -> bool {
+    text.chars().any(|c| {
+        (c.is_control() && !matches!(c, '\n' | '\t'))
+            || matches!(c, '\u{e200}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+    })
 }

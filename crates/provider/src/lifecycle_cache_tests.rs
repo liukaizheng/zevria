@@ -156,6 +156,28 @@ async fn cancellation_collector_does_not_keep_the_frontend_event_channel_alive()
     drop(attempt);
 }
 
+#[tokio::test]
+async fn inspecting_the_stream_materializes_an_unpublished_answer() {
+    let progress = discard_updates();
+    let mut state = AttemptState {
+        attempt: Some(crate::attempt::AttemptStream::new(
+            test_profile_ref(),
+            &progress,
+        )),
+        ..Default::default()
+    };
+    state.observe_attempt_value(&json!({
+        "type":"response.output_text.delta", "output_index":0, "content_index":0,
+        "delta":"answer before flush"
+    }));
+    let Message::Assistant(assistant) = state.streaming_message().unwrap() else {
+        panic!("expected assistant stream message");
+    };
+    assert!(assistant.content.iter().any(|block| matches!(
+        block, AssistantContent::Text(text) if text.text == "answer before flush"
+    )));
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancelling_before_the_cadence_tick_retains_the_latest_ingested_attempt() {
     use std::future::Future;

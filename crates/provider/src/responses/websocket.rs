@@ -164,7 +164,7 @@ pub(super) async fn run_model_request_inner(
     attempt_progress
         .status(NetworkStatus::AwaitingResponse)
         .await;
-    let mut clock = ProgressClock::new(policy);
+    let mut clock = ProgressClock::new(policy, attempt_progress);
     let mut response_progress = ResponseProgress::new(prior_terminal_id.clone());
     for id in &state.response_ids {
         response_progress.exclude_response(id.clone());
@@ -182,10 +182,7 @@ pub(super) async fn run_model_request_inner(
 
     loop {
         let inbound = match state
-            .next_event(
-                clock.next(openai.ws.session.next(), attempt_progress),
-                progress,
-            )
+            .next_event(clock.next(openai.ws.session.next()), progress)
             .await
         {
             Ok(inbound) => inbound,
@@ -266,7 +263,7 @@ pub(super) async fn run_model_request_inner(
             return Err(error.into());
         }
 
-        let message = match websocket_message_to_text(message) {
+        let message = match websocket_message_to_text(&message) {
             Ok(Some(message)) => message,
             Ok(None) => continue,
             Err(error) => {
@@ -279,7 +276,7 @@ pub(super) async fn run_model_request_inner(
             continue;
         }
         let raw: serde_json::Value =
-            serde_json::from_str(&message).map_err(CompletionError::from)?;
+            serde_json::from_str(message).map_err(CompletionError::from)?;
         if let Some(response) = driver
             .process(
                 DriverContext {
@@ -289,7 +286,6 @@ pub(super) async fn run_model_request_inner(
                     progress,
                     telemetry: &mut telemetry,
                     clock: &mut clock,
-                    attempt_progress,
                 },
                 raw,
                 message.len(),

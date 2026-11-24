@@ -596,9 +596,9 @@ fn prospective_additions_become_input_without_changing_shape_or_double_counting(
     let build = engine.policies.policy(SessionMode::Build).clone();
     let shape = engine.request_shape(&build).unwrap();
     let fixed = engine.fixed_input_tokens(&build);
-    let before = estimate_model_input(engine.conversation.model_input()).estimated_tokens + fixed;
+    let before = estimate_model_input(&engine.conversation.model_input()).estimated_tokens + fixed;
     engine.reconcile_before_dispatch(&build).unwrap();
-    let after = estimate_model_input(engine.conversation.model_input()).estimated_tokens
+    let after = estimate_model_input(&engine.conversation.model_input()).estimated_tokens
         + engine.fixed_input_tokens(&build);
     assert_eq!(shape, engine.request_shape(&build).unwrap());
     assert!(fixed > engine.fixed_input_tokens(&build));

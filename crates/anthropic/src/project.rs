@@ -48,6 +48,7 @@ struct Turn {
 struct HistoryProjection {
     turns: Vec<Turn>,
     accounting_media: zevria_model::ContextTokenEstimate,
+    deferred_media: bool,
     native: bool,
     portable: bool,
     generic: bool,
@@ -57,6 +58,7 @@ struct HistoryProjection {
 struct Projection {
     turns: Vec<Turn>,
     accounting: bool,
+    deferred_media: bool,
     image_policy: Option<zevria_foundation::image_accounting::ImageAccountingPolicy>,
     accounting_media: zevria_model::ContextTokenEstimate,
     directives: Vec<Value>,
@@ -68,7 +70,7 @@ struct Projection {
     generic: bool,
 }
 impl Projection {
-    fn call(&mut self, handles: BTreeSet<String>, native: Option<&str>) -> anyhow::Result<String> {
+    fn call(&mut self, handles: &[Option<&str>], native: Option<&str>) -> anyhow::Result<String> {
         let id = if let Some(id) = native {
             anyhow::ensure!(
                 !id.is_empty()
@@ -134,16 +136,16 @@ impl Projection {
         target: &ModelProfileRef,
         system_messages: bool,
     ) -> anyhow::Result<()> {
-        let portable = replay.portable_projection()?;
         self.flush_directives(system_messages)?;
         if replay
             .native_items_for(target, ReplayProtocol::Anthropic)?
             .is_some()
         {
+            replay.validate_known_items()?;
             self.native = true;
             for (handles, _) in replay.tool_call_handles() {
-                let id = handles.first().expect("validated tool_use").clone();
-                self.call(handles, Some(&id))?;
+                let id = handles[0].expect("validated tool_use");
+                self.call(&handles, Some(id))?;
             }
             self.push(
                 "assistant",
@@ -154,8 +156,9 @@ impl Projection {
                 },
             );
         } else {
+            let portable = replay.portable_projection()?;
             self.portable = true;
-            let aliases = replay.tool_call_handles();
+            let aliases = replay.tool_call_handles().collect::<Vec<_>>();
             let mut blocks = Vec::new();
             if let Some(Message::Assistant(assistant)) = portable.message {
                 for block in assistant.content {
@@ -167,7 +170,7 @@ impl Projection {
                             let handles = aliases
                                 .iter()
                                 .find(|(handles, _)| {
-                                    handles.iter().any(|handle| {
+                                    handles.iter().flatten().any(|&handle| {
                                         portable
                                             .tool_correlations
                                             .get(handle)
@@ -175,9 +178,8 @@ impl Projection {
                                     })
                                 })
                                 .ok_or_else(|| anyhow::anyhow!("missing portable tool handles"))?
-                                .0
-                                .clone();
-                            let id = self.call(handles, None)?;
+                                .0;
+                            let id = self.call(&handles, None)?;
                             blocks.push(tool_use(&call, id));
                         }
                         _ => {}
@@ -190,6 +192,7 @@ impl Projection {
     }
     fn image(&mut self, image: &Image) -> anyhow::Result<Value> {
         let value = image_input_with_accounting(image, self.accounting)?;
+        self.deferred_media |= self.accounting;
         if let Some(policy) = &self.image_policy {
             self.accounting_media = self.accounting_media.saturating_add(
                 zevria_model::media_accounting::canonical_image(image, policy),
@@ -209,11 +212,11 @@ impl Projection {
                         AssistantContent::Text(text) if !text.text.is_empty() => blocks.push(json!({"type":"text", "text":zevria_content::citations::render_text(text)})),
                         AssistantContent::Text(_) | AssistantContent::Reasoning(_) => {},
                         AssistantContent::ToolCall(call) => {
-                            let mut handles = BTreeSet::from([call.id.to_string()]);
-                            if let Some(native) = &call.native {
-                                handles.extend(["id", "call_id"].iter().filter_map(|key| native.item[*key].as_str()).filter(|id| !id.is_empty()).map(str::to_owned));
-                            }
-                            let id = self.call(handles, None)?;
+                            let wire = call.id.wire();
+                            let [id, call_id] = call.native.as_ref().map_or([None; 2], |native| {
+                                zevria_model::provider_replay::responses_tool_handles(&native.item)
+                            });
+                            let id = self.call(&[Some(&wire), id, call_id], None)?;
                             blocks.push(tool_use(call, id));
                         }
                         _ => anyhow::bail!("unsupported Anthropic assistant content"),
@@ -230,11 +233,14 @@ impl Projection {
                         UserContent::Image(image) => blocks.push(self.image(image)?),
                         UserContent::Document(document) => blocks.push(match &document.data {
                             DocumentData::Text(text) => json!({"type":"text", "text":text}),
-                            DocumentData::File(DocumentSourceKind::Base64(data)) if document.media_type.as_ref().is_none_or(|media| media.to_mime_type() == "application/pdf") => json!({"type":"document", "source":{"type":"base64", "media_type":"application/pdf", "data":if self.accounting { "" } else { data.as_str() }}}),
+                            DocumentData::File(DocumentSourceKind::Base64(data)) if document.media_type.as_ref().is_none_or(|media| media.to_mime_type() == "application/pdf") => {
+                                self.deferred_media |= self.accounting;
+                                json!({"type":"document", "source":{"type":"base64", "media_type":"application/pdf", "data":if self.accounting { "" } else { data.as_str() }}})
+                            }
                             _ => anyhow::bail!("unsupported Anthropic document source (expected base64 PDF)"),
                         }),
                         UserContent::ToolResult(result) => {
-                            let id = self.calls.result(&BTreeSet::from([result.call.to_string()]))?.clone();
+                            let id = self.calls.result(&[Some(&result.call.wire())])?.clone();
                             let content = result.content.iter().map(|block| match block {
                                 ToolResultContent::Text(text) => Ok(json!({"type":"text", "text":text.text})),
                                 ToolResultContent::Json { value } => Ok(json!({"type":"text", "text":value.to_string()})),
@@ -333,11 +339,12 @@ fn project_impl(
     completion: bool,
 ) -> anyhow::Result<ProjectedMessages> {
     bind_projection(
-        project_history(input, target, compatibility)?,
+        &project_history(input, target, compatibility)?,
         system,
         tools,
         strip_all_thinking,
         completion,
+        None,
     )
 }
 
@@ -370,8 +377,8 @@ fn project_history_accounting(
             projection.reserved.extend(
                 replay
                     .tool_call_handles()
-                    .into_iter()
-                    .flat_map(|(handles, _)| handles),
+                    .flat_map(|(handles, _)| handles.into_iter().flatten())
+                    .map(str::to_owned),
             );
         }
     }
@@ -420,6 +427,7 @@ fn project_history_accounting(
     projection.flush_directives(system_messages)?;
     Ok(HistoryProjection {
         accounting_media: projection.accounting_media,
+        deferred_media: projection.deferred_media,
         turns: projection.turns,
         native: projection.native,
         portable: projection.portable,
@@ -434,7 +442,22 @@ impl ValidatedHistory {
         compatibility: &crate::Compatibility,
         identity: Option<&zevria_model::ModelInputIdentity>,
     ) -> anyhow::Result<Self> {
-        let projection = project_history(input, target, compatibility)?;
+        Self::from_projection(
+            project_history(input, target, compatibility)?,
+            input,
+            target,
+            compatibility,
+            identity,
+        )
+    }
+
+    fn from_projection(
+        projection: HistoryProjection,
+        input: &[ModelRequestItem<'_>],
+        target: &ModelProfileRef,
+        compatibility: &crate::Compatibility,
+        identity: Option<&zevria_model::ModelInputIdentity>,
+    ) -> anyhow::Result<Self> {
         let fallback;
         let identity = match identity {
             Some(identity) if identity.len() == input.len() => identity,
@@ -481,99 +504,187 @@ impl ValidatedHistory {
         system: &Value,
         tools: &Value,
         strip_all_thinking: bool,
+        input: &[ModelRequestItem<'_>],
     ) -> anyhow::Result<ProjectedMessages> {
         bind_projection(
-            self.projection.clone(),
+            &self.projection,
             system,
             tools,
             strip_all_thinking,
             true,
+            self.projection.deferred_media.then_some(input),
         )
     }
 }
 
+// Accounting projects the same user blocks in the same order, without their
+// base64 payloads. Restore them only when binding the actual request.
+fn user_payloads<'a>(input: &'a [ModelRequestItem<'a>]) -> impl Iterator<Item = &'a str> {
+    input
+        .iter()
+        .filter_map(|item| match item.message_ref() {
+            Some(Message::User { content }) => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|block| {
+            let base64 = match block {
+                UserContent::Image(image) => match &image.data {
+                    DocumentSourceKind::Base64(data) => Some(data.as_str()),
+                    _ => None,
+                },
+                UserContent::Document(document) => match &document.data {
+                    DocumentData::File(DocumentSourceKind::Base64(data)) => Some(data.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let results = match block {
+                UserContent::ToolResult(result) => Some(&result.content),
+                _ => None,
+            };
+            base64
+                .into_iter()
+                .chain(
+                    results
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|block| match block {
+                            ToolResultContent::Image(Image {
+                                data: DocumentSourceKind::Base64(data),
+                                ..
+                            }) => Some(data.as_str()),
+                            _ => None,
+                        }),
+                )
+        })
+}
+
+fn wire_message(role: &str, blocks: Vec<Value>) -> Value {
+    let mut message = json!({"role": role});
+    message["content"] = Value::Array(blocks);
+    message
+}
+
 fn bind_projection(
-    projection: HistoryProjection,
+    projection: &HistoryProjection,
     system: &Value,
     tools: &Value,
     strip_all_thinking: bool,
     completion: bool,
+    transport_input: Option<&[ModelRequestItem<'_>]>,
 ) -> anyhow::Result<ProjectedMessages> {
     let mut messages: Vec<Value> = Vec::new();
     let mut binding = PrefixBinding::new(system, tools);
+    let mut prev_binding = binding.clone();
+    let mut before_directive = binding.clone();
+    let mut payloads = transport_input.map(user_payloads);
     let mut stripped = 0;
     let mut pending_system = Vec::new();
-    for turn in projection.turns {
+    for turn in &projection.turns {
         if turn.role == "system" {
-            pending_system.extend(turn.segments.into_iter().flat_map(|segment| segment.blocks));
+            pending_system.extend(
+                turn.segments
+                    .iter()
+                    .flat_map(|segment| &segment.blocks)
+                    .cloned(),
+            );
             continue;
         }
-        if turn.role == "assistant" && !pending_system.is_empty() {
-            let directive = json!({"role":"system", "content":std::mem::take(&mut pending_system)});
+        let staged_directive = turn.role == "assistant" && !pending_system.is_empty();
+        if staged_directive {
+            let directive = wire_message("system", std::mem::take(&mut pending_system));
+            // A discarded assistant can undo this push without changing the
+            // checkpoint used to merge into the previous committed message.
+            before_directive.clone_from(&binding);
             binding.push(&directive);
             messages.push(directive);
         }
-        let prefix = binding.finish();
         let mut blocks = Vec::new();
-        for (index, segment) in turn.segments.into_iter().enumerate() {
-            let keep =
-                !strip_all_thinking && index == 0 && segment.binding.as_deref() == Some(&prefix);
+        for (index, segment) in turn.segments.iter().enumerate() {
+            let keep = !strip_all_thinking
+                && index == 0
+                && segment
+                    .binding
+                    .as_deref()
+                    .is_some_and(|prefix| binding.finish() == prefix);
             if segment.native && !keep && segment.blocks.iter().any(is_thinking) {
                 stripped += 1;
             }
-            blocks.extend(segment.blocks.into_iter().filter(|block| {
-                if segment.native && !keep {
-                    matches!(block["type"].as_str(), Some("text" | "tool_use"))
-                } else {
-                    !is_thinking(block) || keep
-                }
-            }));
+            blocks.extend(
+                segment
+                    .blocks
+                    .iter()
+                    .filter(|block| {
+                        if segment.native && !keep {
+                            matches!(block["type"].as_str(), Some("text" | "tool_use"))
+                        } else {
+                            !is_thinking(block) || keep
+                        }
+                    })
+                    .cloned(),
+            );
         }
         if blocks.is_empty() {
             // A thinking-only assistant can disappear under the guard. Its
             // preceding system turn must move past the next user, not become
             // an illegal system -> user sequence (nor change later bindings).
-            if turn.role == "assistant" && messages.last().is_some_and(|m| m["role"] == "system") {
-                pending_system.extend(
-                    messages.pop().unwrap()["content"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .cloned(),
-                );
-                binding = PrefixBinding::new(system, tools);
-                for message in &messages {
-                    binding.push(message);
-                }
+            if staged_directive {
+                let mut directive = messages.pop().expect("staged system message");
+                pending_system.append(directive["content"].as_array_mut().expect("content"));
+                binding.clone_from(&before_directive);
             }
             continue;
         }
         if turn.role == "user" {
+            if let Some(payloads) = &mut payloads {
+                let mut restore = |block: &mut Value| -> anyhow::Result<()> {
+                    let data = payloads
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing Anthropic media payload"))?;
+                    block["source"]["data"] = data.into();
+                    Ok(())
+                };
+                for block in &mut blocks {
+                    match block["type"].as_str() {
+                        Some("image" | "document") => restore(block)?,
+                        Some("tool_result") => {
+                            for block in block["content"]
+                                .as_array_mut()
+                                .expect("tool result content")
+                            {
+                                if block["type"] == "image" {
+                                    restore(block)?;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             blocks.sort_by_key(|block| block["type"] != "tool_result");
         }
-        let message = json!({"role":turn.role, "content":blocks});
         if let Some(last) = messages.last_mut().filter(|last| last["role"] == turn.role) {
-            last["content"]
-                .as_array_mut()
-                .expect("content")
-                .extend(message["content"].as_array().unwrap().iter().cloned());
+            let content = last["content"].as_array_mut().expect("content");
+            content.append(&mut blocks);
             if turn.role == "user" {
-                last["content"]
-                    .as_array_mut()
-                    .unwrap()
-                    .sort_by_key(|block| block["type"] != "tool_result");
+                content.sort_by_key(|block| block["type"] != "tool_result");
             }
-            binding = PrefixBinding::new(system, tools);
-            for message in &messages {
-                binding.push(message);
-            }
+            binding.clone_from(&prev_binding);
+            binding.push(last);
         } else {
+            let message = wire_message(turn.role, blocks);
+            prev_binding.clone_from(&binding);
             binding.push(&message);
             messages.push(message);
         }
     }
+    anyhow::ensure!(
+        payloads.is_none_or(|mut payloads| payloads.next().is_none()),
+        "unused Anthropic media payload"
+    );
     if !pending_system.is_empty() {
-        let directive = json!({"role":"system", "content":pending_system});
+        let directive = wire_message("system", pending_system);
         binding.push(&directive);
         messages.push(directive);
     }
@@ -705,30 +816,27 @@ pub fn prepare_history_with_policy(
     identity: Option<&zevria_model::ModelInputIdentity>,
     policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
 ) -> anyhow::Result<(ReplayPreflight, Option<ValidatedHistory>)> {
-    let mut sources = BTreeSet::new();
-    for item in input {
-        if let Some(replay) = item.replay_ref() {
-            replay.portable_projection()?;
-        }
-        if let ModelRequestItem::ReplayOnly(replay) = item
-            && replay
-                .native_items_for(target, ReplayProtocol::Anthropic)?
-                .is_none()
-        {
-            sources.insert(replay.source_profile.clone());
-        }
-    }
-    if !sources.is_empty() {
-        return Ok((
-            ReplayPreflight::ConversionRequired {
-                sources: sources.into_iter().collect(),
-            },
-            None,
-        ));
-    }
-    let assessment = assess_history_with_policy(input, target, compatibility, policy, None)?;
-    let history = ValidatedHistory::new(input, target, compatibility, identity)?;
-    Ok((assessment, Some(history)))
+    assess_and_prepare_history(input, target, compatibility, identity, policy, None)
+}
+
+/// Keep the exact unbound projection used for admission; only media bytes
+/// are deferred until actual request serialization.
+pub fn assess_and_prepare_history(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+    identity: Option<&zevria_model::ModelInputIdentity>,
+    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+    measured_prefix: Option<(usize, zevria_model::ContextTokenEstimate)>,
+) -> anyhow::Result<(ReplayPreflight, Option<ValidatedHistory>)> {
+    let (assessment, projection) =
+        assess_projection(input, target, compatibility, policy, measured_prefix)?;
+    let history = projection
+        .map(|projection| {
+            ValidatedHistory::from_projection(projection, input, target, compatibility, identity)
+        })
+        .transpose()?;
+    Ok((assessment, history))
 }
 
 /// Pure management/admission projection. Images/PDF bytes are substituted BEFORE
@@ -741,30 +849,47 @@ pub fn assess_history_with_policy(
     policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
     measured_prefix: Option<(usize, zevria_model::ContextTokenEstimate)>,
 ) -> anyhow::Result<ReplayPreflight> {
+    assess_projection(input, target, compatibility, policy, measured_prefix)
+        .map(|(assessment, _)| assessment)
+}
+
+fn assess_projection(
+    input: &[ModelRequestItem<'_>],
+    target: &ModelProfileRef,
+    compatibility: &crate::Compatibility,
+    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+    measured_prefix: Option<(usize, zevria_model::ContextTokenEstimate)>,
+) -> anyhow::Result<(ReplayPreflight, Option<HistoryProjection>)> {
     policy.validate(true)?;
-    let mut sources = BTreeSet::new();
-    for item in input {
-        if let Some(replay) = item.replay_ref() {
-            replay.portable_projection()?;
-        }
-        if let ModelRequestItem::ReplayOnly(replay) = item
-            && replay
-                .native_items_for(target, ReplayProtocol::Anthropic)?
-                .is_none()
-        {
-            sources.insert(replay.source_profile.clone());
-        }
-    }
+    let sources = input
+        .iter()
+        .filter_map(|item| match item {
+            ModelRequestItem::ReplayOnly(replay)
+                if replay.source_profile != *target
+                    || replay.protocol() != Some(ReplayProtocol::Anthropic) =>
+            {
+                Some(replay.source_profile.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     if !sources.is_empty() {
-        return Ok(ReplayPreflight::ConversionRequired {
-            sources: sources.into_iter().collect(),
-        });
+        // Even incompatible histories must not mask malformed known records.
+        for replay in input.iter().filter_map(|item| item.replay_ref()) {
+            replay.validate_known_items()?;
+        }
+        return Ok((
+            ReplayPreflight::ConversionRequired {
+                sources: sources.into_iter().collect(),
+            },
+            None,
+        ));
     }
     let (prefix, media) = measured_prefix.unwrap_or_default();
     let projection =
         project_history_accounting(input, target, compatibility, Some(policy), prefix, media)?;
     let media = projection.accounting_media;
-    let projected = bind_projection(projection, &json!([]), &json!([]), false, false)?;
+    let projected = bind_projection(&projection, &json!([]), &json!([]), false, false, None)?;
     let mut estimate = zevria_model::media_accounting::anthropic_input(
         &projected.messages,
         0,
@@ -795,8 +920,9 @@ pub fn assess_history_with_policy(
             }
         }
     }
-    Ok(ReplayPreflight::Compatible(
-        estimate.enforce_request_constraints(policy),
+    Ok((
+        ReplayPreflight::Compatible(estimate.enforce_request_constraints(policy)),
+        Some(projection),
     ))
 }
 

@@ -225,7 +225,6 @@ impl ContextTokenEstimate {
 
 const ENCRYPTED_REASONING_MARKER: &str = "[encrypted reasoning]";
 const REDACTED_REASONING_MARKER: &str = "[redacted reasoning]";
-const SIGNATURE_MARKER: &str = "[reasoning signature]";
 
 /// Count one JSON value as user-visible semantic data. Object keys remain
 /// payload: a tool argument such as `{ "id": 7 }` must not lose `id` merely
@@ -235,26 +234,34 @@ pub(crate) fn semantic_json_bytes(value: &serde_json::Value) -> usize {
         serde_json::Value::Null => 4,
         serde_json::Value::Bool(true) => 4,
         serde_json::Value::Bool(false) => 5,
-        serde_json::Value::Number(number) => number.to_string().len(),
+        serde_json::Value::Number(number) => {
+            use std::fmt::Write as _;
+            #[derive(Default)]
+            struct ByteCount(usize);
+            impl std::fmt::Write for ByteCount {
+                fn write_str(&mut self, text: &str) -> std::fmt::Result {
+                    self.0 += text.len();
+                    Ok(())
+                }
+            }
+            let mut count = ByteCount::default();
+            write!(count, "{number}").expect("counting cannot fail");
+            count.0
+        }
         serde_json::Value::String(value) => value.len(),
         serde_json::Value::Array(values) => values.iter().fold(0, |total, value| {
             total.saturating_add(semantic_json_bytes(value))
         }),
-        serde_json::Value::Object(values) => values.iter().fold(0, |total, (key, value)| {
-            total
-                .saturating_add(key.len())
-                .saturating_add(semantic_json_bytes(value))
-        }),
+        serde_json::Value::Object(values) => semantic_object_bytes(values),
     }
 }
 
-fn json_argument_bytes(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::String(value) => serde_json::from_str(value)
-            .as_ref()
-            .map_or(value.len(), semantic_json_bytes),
-        value => semantic_json_bytes(value),
-    }
+fn semantic_object_bytes(values: &serde_json::Map<String, serde_json::Value>) -> usize {
+    values.iter().fold(0, |total, (key, value)| {
+        total
+            .saturating_add(key.len())
+            .saturating_add(semantic_json_bytes(value))
+    })
 }
 
 fn serialized_semantic_bytes<T: Serialize>(value: &T) -> usize {
@@ -263,7 +270,15 @@ fn serialized_semantic_bytes<T: Serialize>(value: &T) -> usize {
         .map_or(0, semantic_json_bytes)
 }
 
-fn message_payload_bytes(message: &Message) -> usize {
+fn message_payload_bytes(
+    message: &Message,
+    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
+    media: &mut ContextTokenEstimate,
+) -> usize {
+    let image = |media: &mut ContextTokenEstimate, image: &rig_core::message::Image| {
+        *media = media.saturating_add(crate::media_accounting::canonical_image(image, policy));
+        0
+    };
     match message {
         Message::System { content } => content.len(),
         Message::User { content } => content.iter().fold(0, |total, item| {
@@ -274,28 +289,40 @@ fn message_payload_bytes(message: &Message) -> usize {
                         total.saturating_add(match item {
                             ToolResultContent::Text(text) => text.text.len(),
                             ToolResultContent::Json { value } => semantic_json_bytes(value),
-                            ToolResultContent::Image(_) => 0,
+                            ToolResultContent::Image(value) => image(media, value),
                         })
                     }),
                 ),
-                UserContent::Image(_) => 0,
-                UserContent::Audio(_) => 0,
-                UserContent::Video(_) => 0,
+                UserContent::Image(value) => image(media, value),
+                UserContent::Audio(_) | UserContent::Video(_) => {
+                    media.add_file();
+                    0
+                }
                 UserContent::Document(document) => match &document.data {
                     rig_core::message::DocumentData::Text(text) => text.len(),
-                    _ => 0,
+                    rig_core::message::DocumentData::File(_) => {
+                        media.add_file();
+                        0
+                    }
                 },
             };
             total.saturating_add(bytes)
         }),
         Message::Assistant(assistant) => assistant.content.iter().fold(0, |total, item| {
-            let bytes = match item {
-                AssistantContent::Text(text) => text.text.len(),
-                AssistantContent::ToolCall(call) => call.function.name.len().saturating_add(
-                    json_argument_bytes(&serde_json::Value::String(call.function.raw_arguments())),
-                ),
-                AssistantContent::Reasoning(reasoning) => {
-                    reasoning::blocks(reasoning)
+            let bytes =
+                match item {
+                    AssistantContent::Text(text) => text.text.len(),
+                    AssistantContent::ToolCall(call) => call.function.name.len().saturating_add(
+                        call.function.invalid_arguments.as_deref().map_or_else(
+                            || semantic_object_bytes(&call.function.arguments),
+                            |raw| {
+                                serde_json::from_str(raw)
+                                    .as_ref()
+                                    .map_or(raw.len(), semantic_json_bytes)
+                            },
+                        ),
+                    ),
+                    AssistantContent::Reasoning(reasoning) => reasoning::blocks(reasoning)
                         .iter()
                         .fold(0_usize, |total, item| {
                             total.saturating_add(match item {
@@ -306,60 +333,13 @@ fn message_payload_bytes(message: &Message) -> usize {
                                     REDACTED_REASONING_MARKER.len()
                                 }
                             })
-                        })
-                }
-                AssistantContent::Image(_) => 0,
-                other => serialized_semantic_bytes(other),
-            };
+                        }),
+                    AssistantContent::Image(value) => image(media, value),
+                    other => serialized_semantic_bytes(other),
+                };
             total.saturating_add(bytes)
         }),
     }
-}
-
-/// Return an opaque-safe clone of provider-owned JSON. This is deliberately
-/// scoped to provider replay; callers must never apply it to arbitrary tool
-/// arguments or results, where identically named keys are user data.
-pub fn opaque_safe_provider_json(value: &serde_json::Value) -> serde_json::Value {
-    fn walk(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Array(values) => {
-                for value in values {
-                    walk(value);
-                }
-            }
-            serde_json::Value::Object(values) => {
-                let kind = values
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned);
-                for (key, value) in values.iter_mut() {
-                    if key == "encrypted_content" {
-                        *value = serde_json::Value::String(ENCRYPTED_REASONING_MARKER.to_string());
-                    } else if key == "signature" {
-                        *value = serde_json::Value::String(SIGNATURE_MARKER.to_string());
-                    } else {
-                        walk(value);
-                    }
-                }
-                if matches!(
-                    kind.as_deref(),
-                    Some("redacted" | "redacted_reasoning" | "redacted_thinking")
-                ) {
-                    if let Some(data) = values.get_mut("data") {
-                        *data = serde_json::Value::String(REDACTED_REASONING_MARKER.to_string());
-                    }
-                    if let Some(content) = values.get_mut("content") {
-                        *content = serde_json::Value::String(REDACTED_REASONING_MARKER.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut sanitized = value.clone();
-    walk(&mut sanitized);
-    sanitized
 }
 
 /// Destination-independent fallback is explicitly incomplete for every image.
@@ -373,50 +353,11 @@ pub fn estimate_message_tokens_with_policy(
     message: &Message,
     policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
 ) -> ContextTokenEstimate {
-    let payload = approximate_tokens_from_bytes(message_payload_bytes(message));
-    let mut estimate = ContextTokenEstimate::new(payload, payload.saturating_add(16));
-    let mut image = |image: &rig_core::message::Image| {
-        estimate = estimate.saturating_add(crate::media_accounting::canonical_image(image, policy));
-    };
-    match message {
-        Message::User { content } => {
-            for block in content {
-                match block {
-                    UserContent::Image(value) => image(value),
-                    UserContent::ToolResult(result) => {
-                        for block in &result.content {
-                            if let ToolResultContent::Image(value) = block {
-                                image(value);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Message::Assistant(assistant) => {
-            for block in &assistant.content {
-                if let AssistantContent::Image(value) = block {
-                    image(value);
-                }
-            }
-        }
-        _ => {}
-    }
-    if let Message::User { content } = message {
-        for block in content {
-            match block {
-                UserContent::Document(document)
-                    if matches!(document.data, rig_core::message::DocumentData::File(_)) =>
-                {
-                    estimate.add_file()
-                }
-                UserContent::Audio(_) | UserContent::Video(_) => estimate.add_file(),
-                _ => {}
-            }
-        }
-    }
-    estimate.enforce_request_constraints(policy)
+    let mut media = ContextTokenEstimate::default();
+    let payload = approximate_tokens_from_bytes(message_payload_bytes(message, policy, &mut media));
+    ContextTokenEstimate::new(payload, payload.saturating_add(16))
+        .saturating_add(media)
+        .enforce_request_constraints(policy)
 }
 pub use crate::media_accounting::ResponsesInputEstimate;
 pub fn estimate_responses_input_tokens(

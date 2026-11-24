@@ -31,6 +31,28 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
     let url = format!("ws://{}/v1/responses", listener.local_addr().unwrap());
     let mut a = profile("A", &url);
     a.responses_endpoint_mut().supports_websockets = true;
+    let count_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let count_config = &mut a.responses_endpoint_mut().input_token_count;
+    count_config.enabled = true;
+    count_config.url = Some(format!(
+        "http://{}/input_tokens",
+        count_listener.local_addr().unwrap()
+    ));
+    let count_server = tokio::spawn(async move {
+        let (mut stream, _) = count_listener.accept().await.unwrap();
+        let request = receive_http_json(&mut stream).await;
+        assert!(request.headers.starts_with("POST /input_tokens "));
+        let input = request.body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert!(input[0].to_string().contains("short summary probe"));
+        send_http_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            "{\"input_tokens\":42}",
+        )
+        .await;
+    });
     let cache_key = crate::router::profile_cache_key("reasoning-root", &a);
     let server = tokio::spawn(async move {
         // All three requests must arrive on this one socket, with no reconnect.
@@ -110,6 +132,28 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
                 Some(previous.as_str()),
                 "install must not reset continuation"
             );
+        } else if index == 2 {
+            // A summary count may examine a different, shorter input without
+            // committing a replacement. The next send must still use reason-2.
+            let probe = Message::user("short summary probe");
+            assert_eq!(
+                router
+                    .count_profile(
+                        &ModelSelection::new(a.profile.clone(), Level::High),
+                        ModelRequest {
+                            input_identity: None,
+                            tools: &[],
+                            forbid_tool_calls: false,
+                            instructions: test_instructions(),
+                            input: vec![ModelRequestItem::message(&probe)],
+                            model_role: ModelRole::Build,
+                            allowed_tool_names: Some(&["command".into()]),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+                zevria_model::InputTokenCount::Exact(42),
+            );
         }
         let response = router
             .complete(
@@ -136,6 +180,7 @@ async fn reasoning_switch_keeps_socket_prefix_and_cache_key_then_resumes_continu
     }
     assert_eq!(router.initialized_profile_count(), 1);
     server.await.unwrap();
+    count_server.await.unwrap();
 }
 
 #[tokio::test]

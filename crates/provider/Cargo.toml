@@ -16,6 +16,7 @@ zevria-instructions = { workspace = true }
 zevria-model = { workspace = true }
 zevria-session-api = { workspace = true }
 anyhow = { workspace = true }
+bytes = { workspace = true }
 libc = { workspace = true, optional = true }
 uuid = { workspace = true }
 eventsource-stream = { workspace = true }

@@ -1,6 +1,6 @@
 //! OpenAI request and server-event protocol conversion.
 
-use crate::wire::{ResponseChunk, ResponsesWebSocketEvent};
+use crate::wire::{ItemChunk, ResponseChunk, ResponsesWebSocketEvent};
 use rig_core::message::{
     AssistantContent, DocumentData, DocumentSourceKind, Image, Message, MimeType,
     ToolResultContent, UserContent,
@@ -238,7 +238,17 @@ pub struct ResponseProgress {
     response_id: Option<String>,
     excluded_responses: std::collections::HashSet<String>,
     sequence: Option<u64>,
-    advancements: std::collections::HashMap<String, u8>,
+    advancements: std::collections::HashMap<ProgressKey, u8>,
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct ProgressKey {
+    family: &'static str,
+    item_id: Option<Box<str>>,
+    output_index: Option<u64>,
+    content_index: Option<u64>,
+    summary_index: Option<u64>,
+    annotation_index: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -315,24 +325,32 @@ impl ResponseProgress {
             "response.web_search_call.in_progress" => ("response.web_search_call", 1),
             "response.web_search_call.searching" => ("response.web_search_call", 2),
             "response.web_search_call.completed" => ("response.web_search_call", 3),
-            _ if kind.ends_with(".added") => (kind.trim_end_matches(".added"), 1),
-            _ if kind.ends_with(".done") => (kind.trim_end_matches(".done"), 2),
-            _ => (kind, 1),
+            "response.output_item.added" => ("output_item", 1),
+            "response.output_item.done" => ("output_item", 2),
+            "response.content_part.added" => ("content_part", 1),
+            "response.content_part.done" => ("content_part", 2),
+            "response.reasoning_summary_part.added" => ("reasoning_summary_part", 1),
+            "response.reasoning_summary_part.done" => ("reasoning_summary_part", 2),
+            "response.output_text.annotation.added" => ("annotation", 1),
+            "response.reasoning_summary_text.done" => ("reasoning_summary_text", 2),
+            "response.reasoning_text.done" => ("reasoning_text", 2),
+            "response.function_call_arguments.done" => ("function_call_arguments", 2),
+            "response.output_text.done" => ("output_text", 2),
+            "response.refusal.done" => ("refusal", 2),
+            _ => return Unchanged,
         };
-        let index = if identity.is_some() {
-            &serde_json::Value::Null
-        } else {
-            &event["output_index"]
-        };
-        let key = serde_json::json!([
+        let key = ProgressKey {
             family,
-            identity,
-            index,
-            event["content_index"],
-            event["summary_index"],
-            event["annotation_index"]
-        ])
-        .to_string();
+            item_id: identity.map(Into::into),
+            output_index: if identity.is_none() {
+                event["output_index"].as_u64()
+            } else {
+                None
+            },
+            content_index: event["content_index"].as_u64(),
+            summary_index: event["summary_index"].as_u64(),
+            annotation_index: event["annotation_index"].as_u64(),
+        };
         let previous = self.advancements.entry(key).or_default();
         if rank > *previous {
             *previous = rank;
@@ -352,14 +370,10 @@ pub fn parse_server_event(payload: &str) -> serde_json::Result<Option<ResponsesW
 pub fn parse_server_event_value(
     payload: Value,
 ) -> serde_json::Result<Option<ResponsesWebSocketEvent>> {
-    let kind = payload
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            <serde_json::Error as serde::de::Error>::custom("response event requires a string type")
-        })?
-        .to_owned();
-    match kind.as_str() {
+    let kind = payload.get("type").and_then(Value::as_str).ok_or_else(|| {
+        <serde_json::Error as serde::de::Error>::custom("response event requires a string type")
+    })?;
+    match kind {
         "error" => serde_json::from_value(payload).map(|e| Some(ResponsesWebSocketEvent::Error(e))),
         // AttemptReducer owns these events and has already observed their raw
         // payloads. They must not enter Rig's function-tool stream conversion.
@@ -374,7 +388,7 @@ pub fn parse_server_event_value(
         | "response.incomplete" => serde_json::from_value::<ResponseChunk>(payload)
             .map(|chunk| Some(ResponsesWebSocketEvent::Response(Box::new(chunk)))),
         kind if is_known_streaming_event(kind) => {
-            serde_json::from_value(payload).map(|item| Some(ResponsesWebSocketEvent::Item(item)))
+            ItemChunk::decode(payload).map(|item| Some(ResponsesWebSocketEvent::Item(item)))
         }
         kind => {
             tracing::trace!(target: "zevria_provider::protocol", kind, "ignoring an unknown OpenAI response event");

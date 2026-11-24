@@ -158,28 +158,48 @@ impl ProviderReplay {
 
     /// Ordered native calls and their aliases, including self-contained server
     /// calls (external=false). Compaction and adapters share these correlations.
-    pub fn tool_call_handles(&self) -> Vec<(std::collections::BTreeSet<String>, bool)> {
-        self.items
-            .iter()
-            .filter_map(|item| {
-                let kind = item["type"].as_str()?;
-                let (keys, external): (&[&str], bool) = match self.protocol()? {
-                    ReplayProtocol::Responses if kind.ends_with("_call") => (
-                        &["id", "call_id"],
-                        matches!(kind, "function_call" | "custom_tool_call"),
-                    ),
-                    ReplayProtocol::Anthropic if kind == "tool_use" => (&["id"], true),
-                    _ => return None,
-                };
-                let handles = keys
-                    .iter()
-                    .filter_map(|key| item[*key].as_str())
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned)
-                    .collect::<std::collections::BTreeSet<_>>();
-                (!handles.is_empty() || external).then_some((handles, external))
-            })
-            .collect()
+    pub fn tool_call_handles(&self) -> impl Iterator<Item = ([Option<&str>; 2], bool)> {
+        let protocol = self.protocol();
+        self.items.iter().filter_map(move |item| {
+            let kind = item["type"].as_str()?;
+            let (handles, external) = match protocol? {
+                ReplayProtocol::Responses if kind.ends_with("_call") => (
+                    responses_tool_handles(item),
+                    matches!(kind, "function_call" | "custom_tool_call"),
+                ),
+                ReplayProtocol::Anthropic if kind == "tool_use" => (
+                    [item["id"].as_str().filter(|id| !id.is_empty()), None],
+                    true,
+                ),
+                _ => return None,
+            };
+            (handles.iter().any(Option::is_some) || external).then_some((handles, external))
+        })
+    }
+
+    /// Validate known shapes without building a canonical or portable message.
+    pub fn validate_known_items(&self) -> anyhow::Result<()> {
+        self.validate()
+            .map_err(|reason| anyhow::anyhow!("invalid provider replay envelope: {reason}"))?;
+        let protocol = self.protocol().expect("validated protocol");
+        for (index, item) in self.items.iter().enumerate() {
+            match protocol {
+                ReplayProtocol::Anthropic => crate::anthropic::ContentBlock::validate_known(item)
+                    .with_context(|| {
+                    format!("invalid Anthropic content block at index {index}")
+                })?,
+                ReplayProtocol::Responses => {
+                    Output::validate_known(item).with_context(|| {
+                        format!("invalid OpenAI Responses output item at index {index}")
+                    })?;
+                    anyhow::ensure!(
+                        item["type"] != "function_call" || item["call_id"] != "",
+                        "OpenAI Responses function_call at index {index} had an empty call_id"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Validate the envelope before it is trusted as provider input.
@@ -248,32 +268,10 @@ impl ProviderReplay {
         }
         let mut content = Vec::new();
         let mut tool_correlations = BTreeMap::new();
-        for (index, item) in self.items.iter().cloned().enumerate() {
-            let output: Output = serde_json::from_value(item).with_context(|| {
-                format!("invalid OpenAI Responses output item at index {index}")
-            })?;
-            match output {
-                Output::Message(message) => {
-                    content.extend(message.content.into_iter().map(|block| match block {
-                        OpenAiAssistantContent::OutputText(text) => {
-                            let AssistantContent::Text(text) =
-                                OpenAiAssistantContent::OutputText(text).into()
-                            else {
-                                unreachable!("output_text converts to text")
-                            };
-                            AssistantContent::Text(Text::new(crate::citations::render_text(&text)))
-                        }
-                        OpenAiAssistantContent::Refusal { refusal } => {
-                            AssistantContent::Text(Text::new(refusal))
-                        }
-                    }));
-                }
-                Output::FunctionCall(function) => {
-                    if function.call_id.is_empty() {
-                        anyhow::bail!(
-                            "OpenAI Responses function_call at index {index} had an empty call_id"
-                        );
-                    }
+        for (index, item) in self.items.iter().enumerate() {
+            match decode_responses_item(item, index)? {
+                Some(Output::Message(message)) => content.extend(message.into_portable_content()),
+                Some(Output::FunctionCall(function)) => {
                     let portable_id = portable_tool_call_id(
                         &self.source_profile,
                         &function.call_id,
@@ -293,7 +291,7 @@ impl ProviderReplay {
                         ),
                     )));
                 }
-                Output::Reasoning { .. } | Output::Unknown(_) => {}
+                _ => {}
             }
         }
 
@@ -323,9 +321,9 @@ impl ProviderReplay {
         if self.protocol() == Some(ReplayProtocol::Anthropic) {
             let mut content = Vec::new();
             for (index, item) in self.items.iter().enumerate() {
-                let block: crate::anthropic::ContentBlock = serde_json::from_value(item.clone())
-                    .with_context(|| format!("invalid Anthropic content block at index {index}"))?;
-                content.extend(block.canonical(item.clone()));
+                if let Some(block) = decode_anthropic_block(item, index)? {
+                    content.extend(block.canonical(item));
+                }
             }
             anyhow::ensure!(
                 !content.is_empty(),
@@ -334,10 +332,10 @@ impl ProviderReplay {
             return Ok(Message::from(content));
         }
         let mut content = Vec::new();
-        for (index, item) in self.items.iter().cloned().enumerate() {
-            let output: Output = serde_json::from_value(item).with_context(|| {
-                format!("invalid OpenAI Responses output item at index {index}")
-            })?;
+        for (index, item) in self.items.iter().enumerate() {
+            let Some(output) = decode_responses_item(item, index)? else {
+                continue;
+            };
             match output {
                 Output::Message(message) => {
                     content.extend(message.content.into_iter().map(|block| match block {
@@ -357,11 +355,6 @@ impl ProviderReplay {
                     }));
                 }
                 Output::FunctionCall(function) => {
-                    if function.call_id.is_empty() {
-                        anyhow::bail!(
-                            "OpenAI Responses function_call at index {index} had an empty call_id"
-                        );
-                    }
                     let arguments = normalize_tool_arguments(function.arguments.as_str());
                     content.push(AssistantContent::ToolCall(tool_call_from_wire_text(
                         function.id,
@@ -402,8 +395,9 @@ impl ProviderReplay {
         let mut content = Vec::new();
         let mut tool_correlations = BTreeMap::new();
         for (index, item) in self.items.iter().enumerate() {
-            let block: ContentBlock = serde_json::from_value(item.clone())
-                .with_context(|| format!("invalid Anthropic content block at index {index}"))?;
+            let Some(block) = decode_anthropic_block(item, index)? else {
+                continue;
+            };
             match block {
                 ContentBlock::Text { text, .. } => content.push(AssistantContent::text(text)),
                 ContentBlock::ToolUse { id, name, input } => {
@@ -485,6 +479,33 @@ impl ProviderReplay {
         self.to_message()
             .map(|message| estimate_message_tokens(&message))
     }
+}
+
+pub fn responses_tool_handles(item: &serde_json::Value) -> [Option<&str>; 2] {
+    ["id", "call_id"].map(|key| item[key].as_str().filter(|id| !id.is_empty()))
+}
+
+pub fn decode_responses_item(
+    item: &serde_json::Value,
+    index: usize,
+) -> anyhow::Result<Option<Output>> {
+    let output = Output::decode_known(item)
+        .with_context(|| format!("invalid OpenAI Responses output item at index {index}"))?;
+    if let Some(Output::FunctionCall(function)) = &output {
+        anyhow::ensure!(
+            !function.call_id.is_empty(),
+            "OpenAI Responses function_call at index {index} had an empty call_id"
+        );
+    }
+    Ok(output)
+}
+
+fn decode_anthropic_block(
+    item: &serde_json::Value,
+    index: usize,
+) -> anyhow::Result<Option<crate::anthropic::ContentBlock>> {
+    crate::anthropic::ContentBlock::decode_known(item)
+        .with_context(|| format!("invalid Anthropic content block at index {index}"))
 }
 
 fn semantic_argument_bytes(value: &serde_json::Value) -> usize {
@@ -617,7 +638,7 @@ fn portable_tool_call_id(
     id
 }
 
-fn normalize_tool_arguments(arguments: &str) -> serde_json::Value {
+pub fn normalize_tool_arguments(arguments: &str) -> serde_json::Value {
     if arguments.trim().is_empty() {
         return serde_json::json!({});
     }

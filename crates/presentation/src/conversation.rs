@@ -2421,10 +2421,7 @@ impl ConversationState {
                     let final_answer = assistant
                         && !tool_call_round(&message)
                         && !provider.provider_replay().is_some_and(|replay| {
-                            replay
-                                .tool_call_handles()
-                                .iter()
-                                .any(|(_, external)| *external)
+                            replay.tool_call_handles().any(|(_, external)| external)
                         });
                     let index = self.project_response(
                         message,
