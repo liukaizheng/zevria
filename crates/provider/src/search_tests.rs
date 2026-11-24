@@ -797,11 +797,11 @@ async fn recovery_records_leave_prepared_full_input_and_wire_body_identical() {
             action: Some(json!({"type":"search","query":"must not become input"})),
         });
     abandoned.close(Outcome::Interrupted);
-    let recovery = TranscriptItem::IncompleteResponse(
+    let recovery = TranscriptItem::IncompleteResponse(Box::new(
         IncompleteResponse::from_attempt(&abandoned)
             .unwrap()
             .unwrap(),
-    );
+    ));
     let with_recovery = vec![
         ordinary[0].clone(),
         recovery,

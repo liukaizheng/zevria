@@ -2643,10 +2643,12 @@ fn bounded_captured_decision(
     decision: AgentUserDecisionBatch,
     field_count: usize,
 ) -> CapturedDecision {
-    let serialized_len = serde_json::to_vec(&decision)
-        .map(|serialized| serialized.len())
-        .unwrap_or(usize::MAX);
-    if serialized_len <= MAX_NORMALIZED_USER_DECISION_BYTES {
+    if zevria_foundation::BoundedCountingWriter::json_fits(
+        &decision,
+        MAX_NORMALIZED_USER_DECISION_BYTES,
+    )
+    .unwrap_or(false)
+    {
         CapturedDecision::Available(decision)
     } else {
         CapturedDecision::Unavailable(AgentUnavailableDecision::normalized_payload_too_large(

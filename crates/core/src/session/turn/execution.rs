@@ -174,13 +174,13 @@ pub(in crate::session) fn terminal_records(
     let mut records = Vec::new();
     if let Some(run_id) = ensemble {
         records.push(TranscriptItem::Ensemble(match failure {
-            Failure::Cancelled => EnsembleRecord::Cancelled {
+            Failure::Cancelled => Box::new(EnsembleRecord::Cancelled {
                 run_id: run_id.clone(),
-            },
-            _ => EnsembleRecord::Failed {
+            }),
+            _ => Box::new(EnsembleRecord::Failed {
                 run_id: run_id.clone(),
                 error: error.clone(),
-            },
+            }),
         }));
     }
     records.push(TranscriptItem::Error { error });

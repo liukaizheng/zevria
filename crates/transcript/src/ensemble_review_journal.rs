@@ -1,7 +1,7 @@
 //! Worker-journal review projection and root/worker crash-boundary reconciliation.
 //! Root controls are authority; a worker journal can prove delivery/settlement,
 //! never manufacture acceptance or confirmation.
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use crate::{
     AgentRunEvent, AgentRunTranscriptHeader, AgentRunTranscriptRecord, WorkerInput,
@@ -20,6 +20,19 @@ pub struct WorkerReviewJournal {
     replay: bool,
     collect_events: bool,
 }
+pub(crate) enum JournalChange<'a> {
+    None,
+    StoreInput(&'a WorkerReviewEvent, &'a WorkerInput),
+    Transition {
+        event: Cow<'a, WorkerReviewEvent>,
+        stop_publishing: bool,
+        log: bool,
+    },
+    BeginReplay,
+    EndReplay,
+    BeginPrompt,
+}
+
 impl WorkerReviewJournal {
     pub fn new(header: &AgentRunTranscriptHeader) -> Self {
         Self {
@@ -39,6 +52,21 @@ impl WorkerReviewJournal {
         journal.collect_events = false;
         journal
     }
+    /// Continue from a validated reduction without retaining its audit event log.
+    /// The projection can outlive the writer without forcing a COW clone on append.
+    pub(crate) fn resume_validator(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            inputs: self.inputs.clone(),
+            events: Vec::new(),
+            abandonment: self.abandonment.clone(),
+            run_id: self.run_id.clone(),
+            publishing: self.publishing,
+            replay: self.replay,
+            collect_events: false,
+        }
+    }
+
     pub(crate) fn observes(record: &AgentRunTranscriptRecord) -> bool {
         matches!(
             record,
@@ -55,13 +83,17 @@ impl WorkerReviewJournal {
                 }
         )
     }
-    fn record_event(&mut self, event: WorkerReviewEvent) {
-        if self.collect_events {
-            self.events.push(event);
-        }
+    pub fn apply(&mut self, record: &AgentRunTranscriptRecord) -> Result<(), String> {
+        let change = self.prepare(record)?;
+        self.commit(change);
+        Ok(())
     }
 
-    pub fn apply(&mut self, record: &AgentRunTranscriptRecord) -> Result<(), String> {
+    pub(crate) fn prepare<'a>(
+        &self,
+        record: &'a AgentRunTranscriptRecord,
+    ) -> Result<JournalChange<'a>, String> {
+        use JournalChange::*;
         if self.state.abandoned
             && matches!(
                 record,
@@ -72,163 +104,115 @@ impl WorkerReviewJournal {
         {
             return Err("worker review transition follows terminal abandonment".into());
         }
+        let transition = |event: Cow<'a, WorkerReviewEvent>, stop_publishing, log| {
+            self.state.validate_transition(&event)?;
+            Ok(Transition {
+                event,
+                stop_publishing,
+                log,
+            })
+        };
         match record {
             AgentRunTranscriptRecord::Event { event } => match event {
                 AgentRunEvent::Review { event } => match event.as_ref() {
                     WorkerReviewEvent::InputAccepted { input } => {
                         if let Some(previous) = self.inputs.get(&input.generation) {
-                            if previous != input {
-                                return Err("conflicting worker input mirror".into());
-                            }
-                            return Ok(());
+                            if previous != input { return Err("conflicting worker input mirror".into()); }
+                            return Ok(None);
                         }
-                        self.state.apply(event)?;
-                        self.inputs.insert(input.generation, input.clone());
+                        self.state.validate_transition(event)?;
+                        Ok(StoreInput(event, input))
                     }
-                    WorkerReviewEvent::Dispatched { .. }
-                    | WorkerReviewEvent::Settled { .. }
-                    | WorkerReviewEvent::Recovering { .. } => {
-                        self.state.apply(event)?;
-                        self.publishing = false;
-                        self.record_event(*event.clone());
+                    WorkerReviewEvent::Dispatched { .. } | WorkerReviewEvent::Settled { .. } | WorkerReviewEvent::Recovering { .. } => {
+                        transition(Cow::Borrowed(event), true, true)
                     }
-                    WorkerReviewEvent::Interrupted { .. } => {
-                        self.state.apply(event)?;
-                        self.publishing = false;
+                    WorkerReviewEvent::Interrupted { .. } | WorkerReviewEvent::Abandoned { .. } => {
+                        transition(Cow::Borrowed(event), true, false)
                     }
-                    WorkerReviewEvent::Connection { .. }
-                    | WorkerReviewEvent::ImageCapability { .. } => self.state.apply(event)?,
-                    WorkerReviewEvent::Abandoned { request_id } => {
-                        self.state.apply(event)?;
-                        self.abandonment = Some(request_id.clone());
-                        self.publishing = false;
-                    }
-                    // Host receipt mirrors are audit evidence. Root replay is
-                    // the only authority for control acceptance and sealing.
-                    WorkerReviewEvent::Confirmed { receipt }
-                    | WorkerReviewEvent::BaselineMarked { receipt } => {
-                        if receipt.target.run_id != self.run_id
-                            || !self.state.retained.as_ref().is_some_and(|snapshot| {
-                                receipt.validates_snapshot(snapshot, &self.state.descriptor.id)
-                            })
-                        {
-                            return Err(
-                                "worker confirmation mirror has no exact eligible snapshot".into(),
-                            );
+                    WorkerReviewEvent::Connection { .. } | WorkerReviewEvent::ImageCapability { .. } => transition(Cow::Borrowed(event), false, false),
+                    WorkerReviewEvent::Confirmed { receipt } | WorkerReviewEvent::BaselineMarked { receipt } => {
+                        if receipt.target.run_id != self.run_id || !self.state.retained.as_ref().is_some_and(|snapshot| receipt.validates_snapshot(snapshot, &self.state.descriptor.id)) {
+                            return Err("worker confirmation mirror has no exact eligible snapshot".into());
                         }
+                        Ok(None)
                     }
                     WorkerReviewEvent::CancelRequested { generation } => {
-                        if *generation == 0 || *generation > self.state.accepted_generation {
-                            return Err("worker cancellation mirror has no accepted input".into());
-                        }
-                        // This host mirror may follow actual settlement. Only
-                        // root ordering determines pending cancellation intent.
+                        if *generation == 0 || *generation > self.state.accepted_generation { return Err("worker cancellation mirror has no accepted input".into()); }
+                        Ok(None)
                     }
-                    WorkerReviewEvent::Withdrawn { .. }
-                    | WorkerReviewEvent::BaselineCleared { .. }
-                    | WorkerReviewEvent::Sealed
-                    | WorkerReviewEvent::PayloadChecked { .. } => {}
-                    WorkerReviewEvent::Fatal { .. }
-                    | WorkerReviewEvent::Published { .. }
-                    | WorkerReviewEvent::Removed { .. }
-                    | WorkerReviewEvent::Decisions { .. } => {
-                        return Err("worker journal uses raw durable Plan evidence, not synthetic publication mirrors".into());
+                    WorkerReviewEvent::Withdrawn { .. } | WorkerReviewEvent::BaselineCleared { .. } | WorkerReviewEvent::Sealed | WorkerReviewEvent::PayloadChecked { .. } => Ok(None),
+                    WorkerReviewEvent::Fatal { .. } | WorkerReviewEvent::Published { .. } | WorkerReviewEvent::Removed { .. } | WorkerReviewEvent::Decisions { .. } => {
+                        Err("worker journal uses raw durable Plan evidence, not synthetic publication mirrors".into())
                     }
                 },
-                AgentRunEvent::ReplayBoundary => {
-                    self.replay = true;
-                    self.publishing = false;
+                AgentRunEvent::ReplayBoundary => Ok(BeginReplay),
+                AgentRunEvent::SessionEstablished { .. } => Ok(EndReplay),
+                AgentRunEvent::Prompt { .. } => Ok(BeginPrompt),
+                AgentRunEvent::NativePlanCaptured { capture, .. } if self.publishing && self.state.active.as_ref().is_none_or(|active| active.generation != capture.generation) => {
+                    Err("native capture generation does not match active review input".into())
                 }
-                AgentRunEvent::SessionEstablished { .. } => {
-                    self.replay = false;
+                AgentRunEvent::Plan { plan } | AgentRunEvent::NativePlanCaptured { plan, .. } if self.publishing => {
+                    let generation = self.state.active.as_ref().ok_or("publication without active worker input")?.generation;
+                    transition(Cow::Owned(WorkerReviewEvent::Published { generation, plan: plan.clone(), replay: false }), false, true)
                 }
-                AgentRunEvent::Prompt { .. } => {
-                    self.publishing = self.state.active.is_some() && !self.replay;
+                AgentRunEvent::Elicitation { outcome: crate::AgentElicitationOutcome::Accepted, decision, decision_unavailable, .. } if !self.inputs.is_empty() => {
+                    transition(Cow::Owned(WorkerReviewEvent::Decisions { decision: decision.clone(), unavailable: decision_unavailable.clone() }), false, true)
                 }
-                AgentRunEvent::NativePlanCaptured { capture, .. }
-                    if self.publishing
-                        && self
-                            .state
-                            .active
-                            .as_ref()
-                            .is_none_or(|active| active.generation != capture.generation) =>
-                {
-                    return Err(
-                        "native capture generation does not match active review input".into(),
-                    );
+                AgentRunEvent::PlanRemoved { plan_id } if !self.replay && !self.inputs.is_empty() => {
+                    transition(Cow::Owned(WorkerReviewEvent::Removed { plan_id: plan_id.clone() }), false, true)
                 }
-                AgentRunEvent::Plan { plan } | AgentRunEvent::NativePlanCaptured { plan, .. }
-                    if self.publishing =>
-                {
-                    let generation = self
-                        .state
-                        .active
-                        .as_ref()
-                        .ok_or("publication without active worker input")?
-                        .generation;
-                    let event = WorkerReviewEvent::Published {
-                        generation,
-                        plan: plan.clone(),
-                        replay: false,
-                    };
-                    self.state.apply(&event)?;
-                    self.record_event(event);
-                }
-                AgentRunEvent::Elicitation {
-                    outcome: crate::AgentElicitationOutcome::Accepted,
-                    decision,
-                    decision_unavailable,
-                    ..
-                } if !self.inputs.is_empty() => {
-                    let event = WorkerReviewEvent::Decisions {
-                        decision: decision.clone(),
-                        unavailable: decision_unavailable.clone(),
-                    };
-                    self.state.apply(&event)?;
-                    self.record_event(event);
-                }
-                AgentRunEvent::PlanRemoved { plan_id }
-                    if !self.replay && !self.inputs.is_empty() =>
-                {
-                    let event = WorkerReviewEvent::Removed {
-                        plan_id: plan_id.clone(),
-                    };
-                    self.state.apply(&event)?;
-                    self.record_event(event);
-                }
-                _ => {}
+                _ => Ok(None),
             },
-            AgentRunTranscriptRecord::Outcome { outcome }
-                if outcome.status == crate::AgentRunStatus::Abandoned =>
-            {
+            AgentRunTranscriptRecord::Outcome { outcome } if outcome.status == crate::AgentRunStatus::Abandoned => {
                 if self.abandonment.is_none() || !outcome.is_sanitized_abandonment() {
                     return Err("abandoned outcome requires an abandonment audit mirror and sanitized evidence".into());
                 }
+                Ok(None)
             }
-            AgentRunTranscriptRecord::Outcome { outcome } if self.state.abandoned => {
-                return Err(format!(
-                    "non-abandoned outcome after abandonment: {}",
-                    outcome.status
-                ));
-            }
-            AgentRunTranscriptRecord::Outcome { outcome }
-                if !self.inputs.is_empty() && outcome.confirmation.is_some() =>
-            {
+            AgentRunTranscriptRecord::Outcome { outcome } if self.state.abandoned => Err(format!("non-abandoned outcome after abandonment: {}", outcome.status)),
+            AgentRunTranscriptRecord::Outcome { outcome } if !self.inputs.is_empty() && outcome.confirmation.is_some() => {
                 let confirmed = outcome.confirmation.as_ref().expect("guarded confirmation");
-                // Root sealing orders controls and late provider updates.
-                // A later idle removal cannot revoke an already sealed receipt.
-                // The snapshot must still be the exact successful publication,
-                // while eligibility at the seal is checked in root replay.
                 if self.state.retained.as_ref() != Some(&confirmed.snapshot) {
-                    return Err(
-                        "terminal worker snapshot differs from its durable settled review evidence"
-                            .into(),
-                    );
+                    return Err("terminal worker snapshot differs from its durable settled review evidence".into());
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn commit(&mut self, change: JournalChange<'_>) {
+        match change {
+            JournalChange::None => {}
+            JournalChange::StoreInput(event, input) => {
+                self.state.apply_validated_transition(event);
+                self.inputs.insert(input.generation, input.clone());
+            }
+            JournalChange::Transition {
+                event,
+                stop_publishing,
+                log,
+            } => {
+                self.state.apply_validated_transition(&event);
+                if let WorkerReviewEvent::Abandoned { request_id } = event.as_ref() {
+                    self.abandonment = Some(request_id.clone());
+                }
+                if stop_publishing {
+                    self.publishing = false;
+                }
+                if log && self.collect_events {
+                    self.events.push(event.into_owned());
                 }
             }
-            _ => {}
+            JournalChange::BeginReplay => {
+                self.replay = true;
+                self.publishing = false;
+            }
+            JournalChange::EndReplay => self.replay = false,
+            JournalChange::BeginPrompt => {
+                self.publishing = self.state.active.is_some() && !self.replay
+            }
         }
-        Ok(())
     }
 
     /// Reconcile before any writable restoration or provider startup. Worker

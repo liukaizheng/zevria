@@ -127,31 +127,33 @@ pub(super) fn with_explicit_fixture_confirmations(
 ) -> Vec<TranscriptItem> {
     let start = items
         .iter()
-        .find_map(|item| match item {
-            TranscriptItem::Ensemble(EnsembleRecord::Started { start })
-                if start.workflow == EnsembleWorkflow::Plan =>
-            {
+        .find_map(|item| match item.ensemble_record() {
+            Some(EnsembleRecord::Started { start }) if start.workflow == EnsembleWorkflow::Plan => {
                 Some(start.clone())
             }
             _ => None,
         })
         .unwrap();
-    let mut extra = vec![TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
-        run_id: start.run_id.clone(),
-        version: ENSEMBLE_REVIEW_VERSION,
-    })];
+    let mut extra = vec![TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::ReviewStarted {
+            run_id: start.run_id.clone(),
+            version: ENSEMBLE_REVIEW_VERSION,
+        },
+    ))];
     let mut states = Vec::new();
     let mut final_result = None;
     for (index, descriptor) in start.agents.iter().enumerate() {
         let mut state = WorkerReviewState::new(descriptor.clone());
         let mut push = |event: WorkerReviewEvent, result| {
             state.apply(&event).unwrap();
-            extra.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-                run_id: start.run_id.clone(),
-                worker_id: descriptor.id.clone(),
-                event: Box::new(event),
-                result,
-            }));
+            extra.push(TranscriptItem::Ensemble(Box::new(
+                EnsembleRecord::WorkerReview {
+                    run_id: start.run_id.clone(),
+                    worker_id: descriptor.id.clone(),
+                    event: Box::new(event),
+                    result,
+                },
+            )));
         };
         push(
             WorkerReviewEvent::InputAccepted {
@@ -191,12 +193,14 @@ pub(super) fn with_explicit_fixture_confirmations(
             evidence: Box::new(state.evidence.clone()),
         };
         state.apply(&event).unwrap();
-        extra.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-            run_id: start.run_id.clone(),
-            worker_id: descriptor.id.clone(),
-            event: Box::new(event),
-            result: None,
-        }));
+        extra.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::WorkerReview {
+                run_id: start.run_id.clone(),
+                worker_id: descriptor.id.clone(),
+                event: Box::new(event),
+                result: None,
+            },
+        )));
         let receipt = WorkerConfirmationReceipt {
             request_id: WorkerControlId::new(),
             target: WorkerControlTarget {
@@ -220,12 +224,14 @@ pub(super) fn with_explicit_fixture_confirmations(
         let event = WorkerReviewEvent::Confirmed { receipt };
         state.apply(&event).unwrap();
         if index + 1 < start.agents.len() {
-            extra.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-                run_id: start.run_id.clone(),
-                worker_id: descriptor.id.clone(),
-                event: Box::new(event),
-                result: Some(result),
-            }));
+            extra.push(TranscriptItem::Ensemble(Box::new(
+                EnsembleRecord::WorkerReview {
+                    run_id: start.run_id.clone(),
+                    worker_id: descriptor.id.clone(),
+                    event: Box::new(event),
+                    result: Some(result),
+                },
+            )));
         } else {
             final_result = Some(result);
         }
@@ -235,11 +241,13 @@ pub(super) fn with_explicit_fixture_confirmations(
         .iter()
         .map(WorkerReviewState::outcome)
         .collect::<Vec<_>>();
-    extra.push(TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed {
-        run_id: start.run_id.clone(),
-        final_confirmation: final_result.unwrap(),
-        outcomes: outcomes.clone(),
-    }));
+    extra.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkersConfirmed {
+            run_id: start.run_id.clone(),
+            final_confirmation: final_result.unwrap(),
+            outcomes: outcomes.clone(),
+        },
+    )));
     let reports = EnsembleRecord::ReportsReady {
         run_id: start.run_id.clone(),
         synthesis_input: zevria_workflow::ensemble::build_synthesis_prompt(
@@ -253,12 +261,12 @@ pub(super) fn with_explicit_fixture_confirmations(
     };
     let mut output = Vec::new();
     for item in items {
-        match item {
-            TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. }) => {
+        match item.ensemble_record() {
+            Some(EnsembleRecord::ReportsReady { .. }) => {
                 output.append(&mut extra);
-                output.push(TranscriptItem::Ensemble(reports.clone()));
+                output.push(TranscriptItem::Ensemble(Box::new(reports.clone())));
             }
-            other => output.push(other),
+            _ => output.push(item),
         }
     }
     output

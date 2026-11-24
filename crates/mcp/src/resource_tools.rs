@@ -155,12 +155,19 @@ async fn read_resource(
     match result {
         Ok(ServerResult::ReadResourceResult(result)) => {
             let limit = target.limit;
+            let inline = result.contents.iter().all(|block| {
+                matches!(
+                    block,
+                    rmcp::model::ResourceContents::TextResourceContents { .. }
+                )
+            });
             finish(
                 context,
                 &target,
                 MCP_READ_RESOURCE_TOOL_NAME,
                 start,
                 &cancellation,
+                inline,
                 move || read_resource_result_to_output(result, limit),
             )
             .await
@@ -239,9 +246,20 @@ async fn call_tool(
         Ok(ServerResult::CallToolResult(result)) => {
             let server = target.server.clone();
             let limit = target.limit;
-            finish(context, &target, &name, start, &cancellation, move || {
-                call_tool_result_to_output(result, &server, limit)
-            })
+            let inline = result.structured_content.is_none()
+                && result
+                    .content
+                    .iter()
+                    .all(|block| matches!(block, rmcp::model::ContentBlock::Text(_)));
+            finish(
+                context,
+                &target,
+                &name,
+                start,
+                &cancellation,
+                inline,
+                move || call_tool_result_to_output(result, &server, limit),
+            )
             .await
         }
         Ok(_) => Err(ToolExecutionError::other(
@@ -257,8 +275,17 @@ async fn finish(
     name: &str,
     start: Instant,
     cancellation: &CancellationToken,
+    inline: bool,
     convert: impl FnOnce() -> (Result<ToolOutput, ToolExecutionError>, ConversionStats) + Send + 'static,
 ) -> Result<ToolOutput, ToolExecutionError> {
+    if cancellation.is_cancelled() {
+        return fail(context, target, name, start, RequestFailure::Cancelled);
+    }
+    if inline {
+        let (output, stats) = convert();
+        record(context, target, name, start, stats);
+        return output;
+    }
     let conversion = tokio::task::spawn_blocking(convert);
     tokio::select! {
         biased;

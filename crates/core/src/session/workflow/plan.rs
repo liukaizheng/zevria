@@ -111,8 +111,8 @@ pub(in crate::session) fn plan_submission_gate_after_reports(
             .iter()
             .enumerate()
             .rev()
-            .find_map(|(index, item)| match item {
-                TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+            .find_map(|(index, item)| match item.ensemble_record() {
+                Some(EnsembleRecord::ReportsReady {
                     run_id: candidate,
                     agents,
                     ..
@@ -228,10 +228,7 @@ pub(in crate::session) fn plan_submission_gate_after_reports(
         // DraftSaved follows ToolResults within the same atomic commit, so
         // derive only after replaying the entire tail. The accepted-call lock
         // prevents later authoring calls from changing this working copy.
-        if let Ok(state) = replay_plan_state(items.iter().filter_map(|item| match item {
-            TranscriptItem::Plan(record) => Some(record),
-            _ => None,
-        })) {
+        if let Ok(state) = replay_plan_state(items.iter().filter_map(TranscriptItem::plan_record)) {
             let markdown = state
                 .working_copy()
                 .map(|copy| copy.markdown().to_owned())
@@ -366,11 +363,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             .conversation
             .items()
             .iter()
-            .find_map(|item| match item {
-                TranscriptItem::Plan(PlanRecord::DraftSaved { draft }) if draft.target.id == id => {
+            .find_map(|item| match item.plan_record() {
+                Some(PlanRecord::DraftSaved { draft }) if draft.target.id == id => {
                     derived_title(&draft.markdown).ok()
                 }
-                TranscriptItem::Plan(
+                Some(
                     PlanRecord::Ready { artifact: earlier }
                     | PlanRecord::Published {
                         artifact: earlier, ..
@@ -412,8 +409,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         artifact: &PlanArtifact,
     ) -> Result<(), (PathBuf, String)> {
         let direct = self.conversation.items().iter().any(|item| {
-            matches!(item,
-                TranscriptItem::Plan(PlanRecord::Published {
+            matches!(item.plan_record(),
+                Some(PlanRecord::Published {
                     artifact: published,
                     provenance: PlanPublicationProvenance::ConfirmedWorker { .. },
                 }) if published.version == artifact.version
@@ -559,30 +556,30 @@ impl<P: ModelProvider> SessionEngine<P> {
             PlanHandoff::new(artifact.clone(), self.conversation.session_id().to_string());
         let (mut records, operation) = match decision {
             PlanDecision::Revise => (
-                vec![TranscriptItem::Plan(PlanRecord::RevisionRequested {
-                    artifact,
-                })],
+                vec![TranscriptItem::Plan(Box::new(
+                    PlanRecord::RevisionRequested { artifact },
+                ))],
                 "Plan revision decision",
             ),
             PlanDecision::ImplementCurrent => (
                 vec![
-                    TranscriptItem::Plan(PlanRecord::Resolved {
+                    TranscriptItem::Plan(Box::new(PlanRecord::Resolved {
                         id: artifact.version.id,
                         artifact: Some(artifact),
                         resolution: PlanResolution::ImplementedCurrent,
-                    }),
-                    TranscriptItem::Plan(PlanRecord::Handoff {
+                    })),
+                    TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
                         handoff: handoff.clone(),
-                    }),
+                    })),
                 ],
                 "current-session Plan handoff",
             ),
             PlanDecision::ImplementFresh => (
-                vec![TranscriptItem::Plan(PlanRecord::Resolved {
+                vec![TranscriptItem::Plan(Box::new(PlanRecord::Resolved {
                     id: artifact.version.id,
                     artifact: Some(artifact),
                     resolution: PlanResolution::ImplementedFresh,
-                })],
+                }))],
                 "fresh-session Plan decision",
             ),
         };
@@ -676,9 +673,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         if turn.is_cancelled() {
             return Err(Rejection::Cancelled);
         }
-        let mut records = vec![TranscriptItem::Plan(PlanRecord::Handoff {
+        let mut records = vec![TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
             handoff: handoff.clone(),
-        })];
+        }))];
         let policy = self.policies.policy(SessionMode::Build);
         records.extend(self.standard_request_boundary(policy));
         records.extend(self.instruction_updates_from_state(

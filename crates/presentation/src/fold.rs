@@ -1432,11 +1432,11 @@ mod tests {
                 TranscriptItem::Message(prompt),
                 TranscriptItem::Message(tool_round()),
                 item.clone(),
-                TranscriptItem::IncompleteResponse(
+                TranscriptItem::IncompleteResponse(Box::new(
                     IncompleteResponse::from_attempt(&trailing)
                         .unwrap()
                         .unwrap(),
-                ),
+                )),
                 TranscriptItem::Error {
                     error: "trailing notice".into(),
                 },

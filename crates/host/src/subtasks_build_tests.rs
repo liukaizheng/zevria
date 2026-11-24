@@ -601,6 +601,7 @@ fn supervisor_config(
 ) -> SubtaskSupervisorConfig {
     let models = &config;
     SubtaskSupervisorConfig {
+        empty_skills: Arc::new(SkillCatalog::default()),
         explore_factory: ProviderRouterFactory::new(
             ModelRole::Explore,
             models.routing().for_role(ModelRole::Explore).clone(),

@@ -38,7 +38,9 @@ async fn single_messages_router_uses_the_core_local_summary_path() {
         zevria_foundation::ReasoningLevel::High,
     );
     let history = vec![
-        TranscriptItem::SessionModels(SessionModels::new(selection.clone(), selection).unwrap()),
+        TranscriptItem::SessionModels(Box::new(
+            SessionModels::new(selection.clone(), selection).unwrap(),
+        )),
         TranscriptItem::Message(Message::user("old prompt")),
         TranscriptItem::Message(Message::assistant("old answer")),
     ];

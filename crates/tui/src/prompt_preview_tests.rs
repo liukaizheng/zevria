@@ -46,9 +46,9 @@ async fn first_frame_echoes_the_prompt_while_provider_count_is_blocked() {
     )
     .await
     .unwrap();
-    let path = running.restoration().transcript_path.clone();
-    let commands = running.command_sender();
-    let mut updates = running.take_event_receiver().unwrap();
+    let path = running.restored.transcript_path.clone();
+    let commands = running.running.command_sender();
+    let mut updates = running.running.take_event_receiver().unwrap();
     let mut views = SessionViews::new(App::new(), workspace);
     let mut done = false;
     let action = submit(&mut views, PROMPT);
@@ -108,7 +108,7 @@ async fn first_frame_echoes_the_prompt_while_provider_count_is_blocked() {
             .count(),
         1
     );
-    running.shutdown().await.unwrap();
+    running.running.shutdown().await.unwrap();
 }
 
 #[test]

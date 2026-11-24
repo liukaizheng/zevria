@@ -4895,9 +4895,9 @@ fn ctrl_i_restored_fallback_uses_root_agent_then_subtask_order() {
     let agent = navigation_agent("restored-agent");
     let start = navigation_ensemble_start(&run_id, &agent);
     let root_items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
+        })),
         historical_subtask_launch("restored-subtask"),
     ];
     let mut views = test_session_views(App::new());
@@ -4925,9 +4925,9 @@ fn ctrl_i_restored_fallback_uses_root_subtask_then_agent_order() {
     let start = navigation_ensemble_start(&run_id, &agent);
     let root_items = vec![
         historical_subtask_launch("restored-subtask"),
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
+        })),
     ];
     let mut views = test_session_views(App::new());
     views.seed_child_creation_order(&root_items);
@@ -5956,9 +5956,9 @@ fn successful_submit_plan_body_renders_once_live_and_after_restore() {
                 Vec::new(),
             )],
         },
-        TranscriptItem::Plan(PlanRecord::Ready {
+        TranscriptItem::Plan(Box::new(PlanRecord::Ready {
             artifact: artifact.clone(),
-        }),
+        })),
     ]);
     restored.set_view_for_test(0, false);
     let restored_rendered = rendered_text(&mut restored, 160, 80);
@@ -6084,7 +6084,7 @@ fn restored_checkpoint_shows_only_the_marker_and_never_its_summary() {
     app.restore(vec![
         TranscriptItem::Message(Message::user("visible prompt")),
         TranscriptItem::Message(Message::assistant("visible answer")),
-        TranscriptItem::Compaction(checkpoint()),
+        TranscriptItem::Compaction(Box::new(checkpoint())),
     ]);
 
     assert_eq!(app.history().len(), 3);

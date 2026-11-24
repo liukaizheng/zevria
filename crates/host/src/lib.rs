@@ -19,7 +19,7 @@ pub mod theme_store;
 pub use config::Config;
 pub use runtime::{
     RestoredAgentRun, RestoredSession, RestoredSubtask, RunningSession, RuntimeTaskExit,
-    SessionRestoration, SessionStart, start_session,
+    SessionIdentity, SessionStart, StartedSession, start_session,
 };
 pub use session_config::SessionConfig;
 

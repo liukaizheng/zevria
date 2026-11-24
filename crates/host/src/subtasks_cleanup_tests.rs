@@ -181,7 +181,13 @@ async fn permit_wait_cancel_and_execution_failure_release_before_backpressured_t
         let terminal = tokio::spawn(async move {
             let stop_delivery = CancellationToken::new();
             if preparation_failure {
-                run_worker(request, config, Arc::new(Semaphore::new(1)), stop_delivery).await;
+                run_worker(
+                    request,
+                    Arc::new(config),
+                    Arc::new(Semaphore::new(1)),
+                    stop_delivery,
+                )
+                .await;
             } else {
                 finish_cancelled(request, &config, &stop_delivery).await;
             }

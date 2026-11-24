@@ -341,7 +341,11 @@ async fn new_load_and_resume_use_composed_selection_except_ready_lock() {
         factory.selected_mode = SessionMode::Build;
         // Deliberately leave older mode metadata in the transcript: the
         // composition root's selected_mode is the authoritative replay result.
-        Arc::make_mut(&mut factory.persisted).extend(records.into_iter().map(TranscriptItem::Plan));
+        Arc::make_mut(&mut factory.persisted).extend(
+            records
+                .into_iter()
+                .map(|record| TranscriptItem::Plan(Box::new(record))),
+        );
         let commands = factory.commands.clone();
         let notifications = Arc::new(Mutex::new(Vec::<SessionNotification>::new()));
         let log = notifications.clone();

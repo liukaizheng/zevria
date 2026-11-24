@@ -43,8 +43,11 @@ impl<P: ModelProvider> SessionEngineBuilder<P> {
         Ok(self)
     }
 
-    pub fn with_guidance_roots(mut self, roots: GuidanceRoots) -> Self {
-        let mut snapshot = zevria_instructions::load_guidance(&roots);
+    pub fn with_guidance_roots(self, roots: GuidanceRoots) -> Self {
+        self.with_loaded_guidance(zevria_instructions::load_guidance(&roots))
+    }
+
+    pub fn with_loaded_guidance(mut self, mut snapshot: GuidanceSnapshot) -> Self {
         let startup_diagnostics = snapshot.take_diagnostics();
         self.engine.guidance = GuidanceState {
             snapshot: Some(snapshot),

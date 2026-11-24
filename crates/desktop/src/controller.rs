@@ -174,8 +174,8 @@ impl SessionController {
         start: SessionStart,
         notice: Option<String>,
     ) -> anyhow::Result<(RunningSession, WorkspaceModel)> {
-        let mut running = zevria_host::start_session(&config, &workspace, start).await?;
-        let restored = running.take_restored();
+        let zevria_host::StartedSession { running, restored } =
+            zevria_host::start_session(&config, &workspace, start).await?;
         // Projection and restoration I/O never run on the GPUI main thread.
         let model = tokio::task::spawn_blocking(move || WorkspaceModel::restore(restored)).await;
         match model {

@@ -17,7 +17,7 @@ fn directives(items: &[TranscriptItem]) -> Vec<&zevria_instructions::DirectiveCo
     items
         .iter()
         .filter_map(|item| match item {
-            TranscriptItem::Directive(directive) => Some(directive),
+            TranscriptItem::Directive(directive) => Some(directive.as_ref()),
             _ => None,
         })
         .collect()

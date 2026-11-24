@@ -17,13 +17,13 @@ fn saved_root(fixture: &Fixture, id: &str, extra: Vec<TranscriptItem>) -> PathBu
     let mut writer =
         TranscriptWriter::create_with_id(&transcript::sessions_dir(fixture.directory.path()), id)
             .unwrap();
-    let mut items = vec![TranscriptItem::SessionModels(
+    let mut items = vec![TranscriptItem::SessionModels(Box::new(
         zevria_model::models::SessionModels::new(
             fixture.config.modes().build.selection(),
             fixture.config.modes().plan.selection(),
         )
         .unwrap(),
-    )];
+    ))];
     items.extend(extra);
     writer.rewrite(&items).unwrap();
     writer.path().to_path_buf()
@@ -45,7 +45,7 @@ fn start_record() -> EnsembleStart {
     }
 }
 
-async fn assert_rejected(fixture: &Fixture, root: &Path, bad: &Path) {
+async fn assert_terminal_rejected(fixture: &Fixture, root: &Path, bad: &Path) {
     let root_before = std::fs::read(root).unwrap();
     let bad_before = std::fs::read(bad).unwrap();
     let config_before = std::fs::read(&fixture.path).unwrap();
@@ -57,31 +57,8 @@ async fn assert_rejected(fixture: &Fixture, root: &Path, bad: &Path) {
     .await
     {
         Ok(running) => {
-            running.shutdown().await.unwrap();
+            running.running.shutdown().await.unwrap();
             panic!("terminal runtime published an unsupported session");
-        }
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .downcast_ref::<transcript::UnsupportedHistory>()
-            .is_some(),
-        "{error:#}"
-    );
-    let factory = crate::acp_host::AcpHostFactory::new(Arc::new(load(&fixture.path).unwrap()));
-    let error = match factory
-        .start(StartSessionRequest {
-            mcp_servers: Vec::new(),
-            workspace: fixture.directory.path().to_path_buf(),
-            start: SessionStart::Existing {
-                session_id: root.file_stem().unwrap().to_str().unwrap().into(),
-            },
-        })
-        .await
-    {
-        Ok(started) => {
-            started.lifecycle.shutdown().await.unwrap();
-            panic!("ACP published an unsupported session");
         }
         Err(error) => error,
     };
@@ -102,8 +79,25 @@ async fn assert_rejected(fixture: &Fixture, root: &Path, bad: &Path) {
     zevria_host::test_support::RootSessionLease::acquire(root).unwrap();
 }
 
+async fn assert_acp_skips_dependency_restoration(fixture: &Fixture, root: &Path) {
+    let expected = transcript::load(root).unwrap();
+    let factory = crate::acp_host::AcpHostFactory::new(Arc::new(load(&fixture.path).unwrap()));
+    let started = factory
+        .start(StartSessionRequest {
+            mcp_servers: Vec::new(),
+            workspace: fixture.directory.path().to_path_buf(),
+            start: SessionStart::Existing {
+                session_id: root.file_stem().unwrap().to_str().unwrap().into(),
+            },
+        })
+        .await
+        .expect("ACP needs only the root transcript");
+    assert_eq!(started.transcript_items, expected);
+    started.lifecycle.shutdown().await.unwrap();
+}
+
 #[tokio::test]
-async fn unsupported_child_prevents_root_repair_and_acp_publication() {
+async fn unsupported_child_prevents_terminal_root_repair_but_acp_skips_the_child() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
     let root = saved_root(
@@ -114,7 +108,7 @@ async fn unsupported_child_prevents_root_repair_and_acp_publication() {
         ))],
     );
     let mut original = std::fs::read(&root).unwrap();
-    original.extend_from_slice(b"{\"partial\":");
+    original.extend_from_slice(b"{\"type\":\"message\",\"message\":");
     std::fs::write(&root, &original).unwrap();
     let children = transcript::subsessions_dir(fixture.directory.path(), "children");
     let mut child = TranscriptWriter::create_with_id(&children, "valid-child").unwrap();
@@ -125,22 +119,25 @@ async fn unsupported_child_prevents_root_repair_and_acp_publication() {
         .unwrap();
     let bad = children.join("unsupported-child.jsonl");
     std::fs::write(&bad, b"{\"zevria_skill_activation_v2\":{}}\n{\"partial\":").unwrap();
-    assert_rejected(&fixture, &root, &bad).await;
+    assert_terminal_rejected(&fixture, &root, &bad).await;
     assert_eq!(std::fs::read(&root).unwrap(), original);
+    assert_acp_skips_dependency_restoration(&fixture, &root).await;
     assert!(server.requests.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn all_referenced_workers_are_preflighted_before_any_session_or_launch() {
+async fn terminal_preflights_referenced_workers_but_acp_skips_restoration() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
     let start = start_record();
     let root = saved_root(
         &fixture,
         "workers",
-        vec![TranscriptItem::Ensemble(EnsembleRecord::Started {
-            start: start.clone(),
-        })],
+        vec![TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::Started {
+                start: start.clone(),
+            },
+        ))],
     );
     let logs = agent_runs_dir(fixture.directory.path(), "workers");
     let mut paths = Vec::new();
@@ -166,7 +163,8 @@ async fn all_referenced_workers_are_preflighted_before_any_session_or_launch() {
     let mut original = std::fs::read(bad).unwrap();
     original.extend_from_slice(b"{\"record\":\"event\",\"event\":{\"type\":\"elicitation\",\"field_count\":1,\"outcome\":\"accepted\"}}\n{\"partial\":");
     std::fs::write(bad, &original).unwrap();
-    assert_rejected(&fixture, &root, bad).await;
+    assert_terminal_rejected(&fixture, &root, bad).await;
+    assert_acp_skips_dependency_restoration(&fixture, &root).await;
     assert_eq!(std::fs::read(&paths[0]).unwrap(), valid_before);
     assert!(!agent_run_path(&logs, &start.run_id, &start.agents[2].id).exists());
     assert!(server.requests.try_recv().is_err());
@@ -180,9 +178,11 @@ async fn never_created_worker_logs_and_model_header_free_children_remain_valid()
     let root = saved_root(
         &fixture,
         "interrupted",
-        vec![TranscriptItem::Ensemble(EnsembleRecord::Started {
-            start: start.clone(),
-        })],
+        vec![TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::Started {
+                start: start.clone(),
+            },
+        ))],
     );
     let child_dir = transcript::subsessions_dir(fixture.directory.path(), "interrupted");
     let mut child = TranscriptWriter::create_with_id(&child_dir, "child").unwrap();
@@ -198,7 +198,7 @@ async fn never_created_worker_logs_and_model_header_free_children_remain_valid()
     let running = fixture
         .start(runtime::SessionStart::Resume(root.clone()))
         .await;
-    running.shutdown().await.unwrap();
+    running.running.shutdown().await.unwrap();
     assert!(
         std::fs::read(&root).unwrap().starts_with(&before),
         "current recovery may append a terminal cancellation, never rewrite the saved prefix"
@@ -224,7 +224,7 @@ async fn root_and_worker_startup_sweep_only_their_namespace_and_preserve_discove
             let mut writer = TranscriptWriter::create_with_id(directory, id).unwrap();
             writer
                 .rewrite(&[
-                    TranscriptItem::SessionModels(models.clone()),
+                    TranscriptItem::SessionModels(Box::new(models.clone())),
                     TranscriptItem::Message(rig_core::message::Message::user(format!(
                         "saved {id}"
                     ))),
@@ -288,10 +288,10 @@ async fn root_and_worker_startup_sweep_only_their_namespace_and_preserve_discove
     for name in ["older.jsonl.lock", "orphan.jsonl.lock"] {
         assert!(!workers.join(name).exists());
     }
-    root.shutdown().await.unwrap();
+    root.running.shutdown().await.unwrap();
     assert!(!roots.join("shared.jsonl.lock").exists());
     assert!(workers.join("shared.jsonl.lock").exists());
-    worker.shutdown().await.unwrap();
+    worker.running.shutdown().await.unwrap();
     assert!(!workers.join("shared.jsonl.lock").exists());
     for (path, original) in originals {
         assert_eq!(std::fs::read(path).unwrap(), original);
@@ -317,11 +317,11 @@ async fn fresh_root_keeps_metadata_in_memory_without_a_transcript_and_releases_s
             inherited_models: None,
         })
         .await;
-    let path = root.restoration().transcript_path.clone();
+    let path = root.restored.transcript_path.clone();
     assert!(!path.exists());
-    assert_eq!(root.restoration().selected_mode, SessionMode::Build);
+    assert_eq!(root.restored.selected_mode, SessionMode::Build);
     assert!(matches!(
-        root.restoration().transcript_items.as_slice(),
+        root.restored.transcript_items.as_slice(),
         [
             TranscriptItem::SessionModels(_),
             TranscriptItem::SessionMode(SessionMode::Build)
@@ -329,7 +329,7 @@ async fn fresh_root_keeps_metadata_in_memory_without_a_transcript_and_releases_s
     ));
     assert!(!transcript::is_abandoned_root(&path));
     assert!(path.with_extension("jsonl.lock").exists());
-    root.shutdown().await.unwrap();
+    root.running.shutdown().await.unwrap();
     assert!(!path.exists());
     assert!(!path.with_extension("jsonl.lock").exists());
     assert!(path.parent().unwrap().join(".leases.lock").is_file());
@@ -368,9 +368,9 @@ async fn models_only_root_shutdown_removes_transcript_and_sidecar() {
     let root = fixture
         .start(runtime::SessionStart::Resume(path.clone()))
         .await;
-    assert_eq!(root.restoration().selected_mode, SessionMode::Build);
+    assert_eq!(root.restored.selected_mode, SessionMode::Build);
     assert!(path.with_extension("jsonl.lock").exists());
-    root.shutdown().await.unwrap();
+    root.running.shutdown().await.unwrap();
     assert!(!path.exists());
     assert!(!path.with_extension("jsonl.lock").exists());
     assert!(path.parent().unwrap().join(".leases.lock").is_file());
@@ -395,7 +395,7 @@ async fn native_workers_reject_plan_handoffs_before_startup_work() {
     .await
     {
         Ok(running) => {
-            running.shutdown().await.unwrap();
+            running.running.shutdown().await.unwrap();
             panic!("worker startup accepted a Plan handoff");
         }
         Err(error) => error,
@@ -468,13 +468,13 @@ async fn root_and_native_worker_resume_refresh_current_application_including_cle
         let directory = runtime::sessions_dir(&workspace, profile);
         let mut writer = TranscriptWriter::create_with_id(&directory, "prompt-refresh").unwrap();
         let items = vec![
-            TranscriptItem::SessionModels(
+            TranscriptItem::SessionModels(Box::new(
                 zevria_model::models::SessionModels::new(
                     fixture.config.modes().build.selection(),
                     fixture.config.modes().plan.selection(),
                 )
                 .unwrap(),
-            ),
+            )),
             TranscriptItem::Message(rig_core::message::Message::user("previous turn")),
             TranscriptItem::Message(rig_core::message::Message::assistant("completed")),
         ];
@@ -499,7 +499,7 @@ async fn root_and_native_worker_resume_refresh_current_application_including_cle
             )
             .await
             .unwrap();
-            let restored = &running.restoration().transcript_items;
+            let restored = &running.restored.transcript_items;
             assert_eq!(restored, &before);
             let state = zevria_transcript::replay_directives(restored).unwrap();
             assert!(
@@ -508,7 +508,7 @@ async fn root_and_native_worker_resume_refresh_current_application_including_cle
             );
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             assert!(!String::from_utf8_lossy(&bytes).contains("old saved application"));
-            running.shutdown().await.unwrap();
+            running.running.shutdown().await.unwrap();
             assert!(
                 server.requests.try_recv().is_err(),
                 "restoration never calls a model"

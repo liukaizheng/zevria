@@ -248,7 +248,7 @@ fn tui_recalled_skill_edit_sends_name_and_leaves_snapshot_choice_to_engine() {
         SkillApplication::Activate(snapshot.clone()),
     );
     let mut app = App::new().with_skill_context(&context);
-    app.restore(vec![TranscriptItem::SkillInvocation(invocation)]);
+    app.restore(vec![TranscriptItem::SkillInvocation(Box::new(invocation))]);
     app.select_for_test(cursor(0, 0));
     ctrl_e(&mut app);
     app.set_input_for_test("$review changed args", "$review changed args".len());

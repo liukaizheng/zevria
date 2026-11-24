@@ -6,11 +6,13 @@ fn skill_invocations_preview_as_their_compact_form() {
     let dir = tempfile::tempdir().expect("temp dir should create");
     let mut writer = TranscriptWriter::create(dir.path()).expect("writer should create");
     writer
-        .append(&TranscriptItem::SkillInvocation(SkillInvocation::new(
-            SkillName::parse("commit").expect("name"),
-            "ship it",
-            SkillApplication::Activate(
-                SkillSnapshot::new("commit".parse().unwrap(), "Commit", "Commit body").unwrap(),
+        .append(&TranscriptItem::SkillInvocation(Box::new(
+            SkillInvocation::new(
+                SkillName::parse("commit").expect("name"),
+                "ship it",
+                SkillApplication::Activate(
+                    SkillSnapshot::new("commit".parse().unwrap(), "Commit", "Commit body").unwrap(),
+                ),
             ),
         )))
         .expect("append should succeed");
@@ -177,9 +179,9 @@ fn ensemble_image_previews_use_actual_commands_without_raster_decoding() {
         let path = directory.path().join("preview.jsonl");
         // Picker projection is intentionally independent of image validation;
         // opening this corrupt history still rejects at the durable boundary.
-        std::fs::write(&path, serde_json::json!({(ENSEMBLE_RECORD_KEY): {"start": {"workflow": workflow, "prompt": [{"type":"image", "value":{"mime_type":"image/png", "data":"not a valid bitmap"}}]}}}).to_string()).unwrap();
+        std::fs::write(&path, serde_json::json!({"type":"ensemble", "ensemble": {"start": {"workflow": workflow, "prompt": [{"type":"image", "value":{"mime_type":"image/png", "data":"not a valid bitmap"}}]}}}).to_string()).unwrap();
         assert_eq!(
-            session_preview(&path).unwrap(),
+            scan_root(&path, true).1.unwrap(),
             format!("{} [image]", workflow.slash_command())
         );
     }

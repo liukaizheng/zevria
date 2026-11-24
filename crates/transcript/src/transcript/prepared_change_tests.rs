@@ -9,7 +9,9 @@ fn request(text: &str) -> Vec<TranscriptItem> {
             message: Message::user(text),
             request: request.clone(),
         },
-        TranscriptItem::RequestDirective(zevria_instructions::RequestDirective::boundary(request)),
+        TranscriptItem::RequestDirective(Box::new(
+            zevria_instructions::RequestDirective::boundary(request),
+        )),
     ]
 }
 
@@ -104,13 +106,12 @@ fn invalid_proposals_never_write_or_poison_the_healthy_branch() {
         .unwrap();
     let original = conversation.items().to_vec();
     let bytes = std::fs::read(conversation.path()).unwrap();
-    let missing_pin = TranscriptItem::SkillInvocation(crate::SkillInvocation::new(
+    let missing_pin = TranscriptItem::SkillInvocation(Box::new(crate::SkillInvocation::new(
         "missing".parse().unwrap(),
         "apply",
         crate::SkillApplication::Reapply("missing".parse().unwrap()),
-    ));
+    )));
     for records in [
-        vec![TranscriptItem::SessionMode(SessionMode::Plan)],
         vec![missing_pin],
         vec![request("missing boundary").remove(0)],
     ] {
@@ -183,7 +184,7 @@ fn borrowed_request_projection_matches_flattened_history_at_every_split() {
     .unwrap();
     let mut items = request("old");
     items.push(TranscriptItem::Message(Message::assistant("answer")));
-    items.push(TranscriptItem::Compaction(checkpoint));
+    items.push(TranscriptItem::Compaction(Box::new(checkpoint)));
     items.extend(request("new"));
     let expected = model_input(&items)
         .into_iter()

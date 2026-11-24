@@ -15,7 +15,6 @@ use zevria_session_api::question::QuestionResponder;
 use zevria_session_api::turn::TurnContext;
 use zevria_session_api::worker::WorkerControlRouter;
 use zevria_transcript::SessionReplayError;
-use zevria_transcript::transcript::TranscriptItem;
 use zevria_workflow::ensemble::latest_ensemble_recovery;
 use zevria_workflow::ensemble_review::WorkerControlResult;
 
@@ -129,8 +128,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         if !self.conversation.is_read_only()
             && let Some(recovery) =
                 latest_ensemble_recovery(self.conversation.items().iter().filter_map(|item| {
-                    match item {
-                        TranscriptItem::Ensemble(record) => Some(record),
+                    match item.ensemble_record() {
+                        Some(record) => Some(record),
                         _ => None,
                     }
                 }))

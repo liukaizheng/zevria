@@ -1,8 +1,6 @@
 //! MCP uses a session-local adapter and the same gate at declaration and dispatch.
 use tokio_util::sync::CancellationToken;
-use zevria_foundation::{
-    McpManagementRequest, McpManagementResult, McpServerStatus, TurnPolicy, is_mcp_tool_name,
-};
+use zevria_foundation::{McpManagementRequest, McpManagementResult, TurnPolicy, is_mcp_tool_name};
 use zevria_session_api::{ModelProvider, SessionEvent, SessionEventSender, mcp::McpSessionService};
 
 use crate::session::SessionEngine;
@@ -30,30 +28,17 @@ pub(in crate::session) fn query(
 impl<P: ModelProvider> SessionEngine<P> {
     pub(in crate::session) async fn sync_mcp(&mut self, events: &SessionEventSender) {
         if let Some(mcp) = self.capabilities.mcp.clone()
-            && mcp.sync_pending_updates().await
+            && let Some(summary) = mcp.sync_pending_updates().await
         {
             self.invalidate_mode_accounting();
-            if let McpManagementResult::View { view } = mcp.query_view(&McpManagementRequest::List)
-            {
-                let connected = view
-                    .servers
-                    .iter()
-                    .filter(|s| matches!(s.status, McpServerStatus::Connected))
-                    .count();
-                let _ = events
-                    .send(SessionEvent::McpChanged {
-                        revision: view.revision,
-                        connected,
-                        total: view.servers.len(),
-                        tool_count: view
-                            .servers
-                            .iter()
-                            .filter(|s| matches!(s.status, McpServerStatus::Connected))
-                            .map(|s| s.tool_count)
-                            .sum(),
-                    })
-                    .await;
-            }
+            let _ = events
+                .send(SessionEvent::McpChanged {
+                    revision: summary.revision,
+                    connected: summary.connected,
+                    total: summary.total,
+                    tool_count: summary.tool_count,
+                })
+                .await;
         }
     }
 

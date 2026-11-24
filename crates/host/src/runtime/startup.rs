@@ -2,11 +2,12 @@
 //! Read/validate every dependency before preparing a writable transcript. Root
 //! capabilities and dependent-task lifetime remain explicit profile choices.
 use super::{
-    MCP_SHUTDOWN_GRACE, RestoredAgentRun, RestoredSubtask, RunningSession, SessionRestoration,
-    SessionStart, SubtaskSupervisor, append_guidance_notices, build_explore_tools,
-    build_session_policies, build_tools, command_job_limits, ensure_worker_ignore_guard,
-    guidance_roots, load_session_skills, preflight_restoration, prepare_session_lease,
-    sessions_dir, spawn_observed, transcript_recovery_notice, worker_policies, worker_tools,
+    MCP_SHUTDOWN_GRACE, RestoredAgentRun, RestoredSession, RestoredSubtask, RunningSession,
+    SessionIdentity, SessionStart, StartedSession, SubtaskSupervisor, append_guidance_notices,
+    build_explore_tools, build_session_policies, build_tools, canonical_workspace,
+    command_job_limits, ensure_worker_ignore_guard, guidance_roots, load_session_skills,
+    preflight_restoration, prepare_session_lease, sessions_dir, spawn_observed,
+    transcript_recovery_notice, worker_policies, worker_tools,
 };
 use crate::{
     config::Config,
@@ -113,8 +114,9 @@ struct BuiltEngine {
     event_rx: SessionEventReceiver,
     command_jobs: Option<CommandJobs>,
     startup_notices: Vec<String>,
-    mcp: Option<McpStartup>,
-    root: Option<RootTasks>,
+    mcp: Option<Arc<McpManager>>,
+    model_snapshots: Vec<zevria_model::ContextTokenSnapshot>,
+    root: Option<(RootTasks, Arc<SubtaskSupervisorConfig>)>,
 }
 
 pub(super) async fn start(
@@ -123,16 +125,18 @@ pub(super) async fn start(
     start: SessionStart,
     profile: ExecutionProfile,
     mcp_servers: Vec<AcpMcpServerSpec>,
-) -> anyhow::Result<RunningSession> {
+    include_children: bool,
+    workspace_is_canonical: bool,
+) -> anyhow::Result<StartedSession> {
     anyhow::ensure!(
         !profile.is_worker() || mcp_servers.is_empty(),
         "ensemble workers cannot connect to delegated MCP servers"
     );
-    let resolved = resolve(config, workspace, start, profile).await?;
-    let mut storage = open_storage(resolved).await?;
+    let resolved = resolve(config, workspace, start, profile, workspace_is_canonical).await?;
+    let mut storage = open_storage(resolved, include_children).await?;
     let services = build_services(&storage, mcp_servers).await?;
     let engine = build_engine(&mut storage, services).await?;
-    spawn(storage, engine).await
+    spawn(storage, engine)
 }
 
 async fn resolve<'a>(
@@ -140,6 +144,7 @@ async fn resolve<'a>(
     workspace: &Path,
     start: SessionStart,
     profile: ExecutionProfile,
+    workspace_is_canonical: bool,
 ) -> anyhow::Result<ResolvedStartup<'a>> {
     if profile.is_worker() {
         match &start {
@@ -156,36 +161,52 @@ async fn resolve<'a>(
     }
     zevria_foundation::shell::prepare_native().await?;
     zevria_foundation::shell::prepare_environment(config.command.shell_environment).await;
-    let workspace = if profile.is_worker() {
-        #[cfg(windows)]
-        {
-            zevria_foundation::windows_io::checked_directory_path(workspace)
-                .context("unsupported protected Windows worker workspace")?
-        }
-        #[cfg(not(windows))]
-        {
-            std::fs::canonicalize(workspace)?
-        }
-    } else {
-        workspace.to_path_buf()
+    let workspace = workspace.to_path_buf();
+    let config_paths = config.source_path.clone().map(|path| {
+        let models = config
+            .models_path
+            .clone()
+            .unwrap_or_else(|| zevria_foundation::config::models_path_for(&path));
+        (path, models)
+    });
+    let resume = match &start {
+        SessionStart::Resume(path) => Some(path.clone()),
+        _ => None,
     };
-    let directory = sessions_dir(&workspace, profile);
-    if profile.is_worker() {
-        if let SessionStart::Resume(path) = &start {
-            anyhow::ensure!(
-                path.parent() == Some(directory.as_path()),
-                "worker transcript must be in the ensemble-sessions namespace"
-            );
-        }
-        ensure_worker_ignore_guard(&directory)?;
-    }
-    // Only model configuration is refreshed; running behavior and inherited
-    // selections keep the same roots/permissions as the caller's config.
-    let refreshed_models = config
-        .source_path
-        .as_deref()
-        .map(crate::models::load)
-        .transpose()?;
+    let (workspace, directory, refreshed_models) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let workspace = if workspace_is_canonical {
+                workspace
+            } else {
+                canonical_workspace(&workspace)?
+            };
+            let directory = sessions_dir(&workspace, profile);
+            if let Some(path) = resume {
+                if profile.is_worker() {
+                    anyhow::ensure!(
+                        path.parent() == Some(directory.as_path()),
+                        "worker transcript must be in the ensemble-sessions namespace"
+                    );
+                }
+                let metadata = std::fs::metadata(&path).with_context(|| {
+                    format!("failed to inspect session transcript at {}", path.display())
+                })?;
+                anyhow::ensure!(
+                    metadata.is_file(),
+                    "session transcript at {} is not a regular file",
+                    path.display()
+                );
+            }
+            if profile.is_worker() {
+                ensure_worker_ignore_guard(&directory)?;
+            }
+            let models = config_paths
+                .map(|(path, models)| Config::load_existing(&path, &models))
+                .transpose()?;
+            Ok((workspace, directory, models))
+        })
+        .await
+        .context("startup configuration and workspace task failed")??;
     let (id, path) = match &start {
         SessionStart::Resume(path) => {
             let id = path
@@ -219,7 +240,10 @@ async fn resolve<'a>(
     })
 }
 
-async fn open_storage(resolved: ResolvedStartup<'_>) -> anyhow::Result<OpenedStorage<'_>> {
+async fn open_storage(
+    resolved: ResolvedStartup<'_>,
+    include_children: bool,
+) -> anyhow::Result<OpenedStorage<'_>> {
     let lease = prepare_session_lease(&resolved.path).await?;
     let loaded = if matches!(resolved.start, SessionStart::Resume(_)) {
         let path = resolved.path.clone();
@@ -235,11 +259,6 @@ async fn open_storage(resolved: ResolvedStartup<'_>) -> anyhow::Result<OpenedSto
     } else {
         None
     };
-    if resolved.profile.is_worker()
-        && let Some(loaded) = &loaded
-    {
-        loaded.ensure_resumable()?;
-    }
     let inherited = match &resolved.start {
         SessionStart::New { inherited_models }
         | SessionStart::FromPlan {
@@ -253,24 +272,30 @@ async fn open_storage(resolved: ResolvedStartup<'_>) -> anyhow::Result<OpenedSto
         loaded.as_ref(),
         inherited,
     )?;
-    let (restored_subtasks, restored_agent_runs) = if !resolved.profile.is_worker() {
-        match &loaded {
-            Some(outcome) => {
-                preflight_restoration(
-                    &transcript::subsessions_dir(&resolved.workspace, &resolved.id),
-                    &agent_runs_dir(&resolved.workspace, &resolved.id),
-                    outcome.items(),
-                )
-                .await?
+    let (restored_subtasks, restored_agent_runs) =
+        if include_children && !resolved.profile.is_worker() {
+            match &loaded {
+                Some(outcome) => {
+                    preflight_restoration(
+                        &transcript::subsessions_dir(&resolved.workspace, &resolved.id),
+                        &agent_runs_dir(&resolved.workspace, &resolved.id),
+                        outcome.items(),
+                    )
+                    .await?
+                }
+                None => (Vec::new(), Vec::new()),
             }
-            None => (Vec::new(), Vec::new()),
+        } else {
+            (Vec::new(), Vec::new())
+        };
+    let mut initial_items = Vec::new();
+    if loaded.is_none() {
+        initial_items.push(TranscriptItem::SessionModels(Box::new(
+            models.selections.clone(),
+        )));
+        if !resolved.profile.is_worker() {
+            initial_items.push(TranscriptItem::SessionMode(SessionMode::Build));
         }
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let mut initial_items = vec![TranscriptItem::SessionModels(models.selections.clone())];
-    if !resolved.profile.is_worker() {
-        initial_items.push(TranscriptItem::SessionMode(SessionMode::Build));
     }
     Ok(OpenedStorage {
         resolved,
@@ -334,16 +359,13 @@ async fn build_services(
         Some(path) => path.clone(),
         None => zevria_foundation::config::config_path()?,
     };
-    let loader_path = skill_config_path.clone();
-    let startup_skill_settings = config.skills.clone();
+    let settings = resolved.model_config().skills.clone();
     let skill_catalog = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let discovery = load_session_skills(&skill_workspace);
-        let settings = crate::skills::load_skill_config(&loader_path)?.settings;
-        if settings != startup_skill_settings {
-            tracing::info!(target: "zevria::runtime", "new session adopts updated skill behavior; mode permissions remain unchanged");
-        }
         Ok(Arc::new(SkillCatalog::from_discovery(discovery, settings)?))
-    }).await.context("skill catalog loader failed")??;
+    })
+    .await
+    .context("skill catalog loader failed")??;
     let skill_context = SkillContext {
         catalog: skill_catalog.clone(),
         pins: active_skills,
@@ -391,13 +413,9 @@ async fn build_services(
         &resolved.id,
     )?;
     let startup_notices = startup_preflight(storage, &provider);
-    let source = if let Some(path) = config.source_path.clone() {
-        tokio::task::spawn_blocking(move || crate::mcp::load_mcp_config(&path)).await??
-    } else {
-        McpConfigSource {
-            config: config.mcp.clone(),
-            revision: "memory".into(),
-        }
+    let source = McpConfigSource {
+        config: resolved.model_config().mcp.clone(),
+        revision: resolved.model_config().mcp_revision.clone(),
     };
     let mcp = if source.config.enabled
         && (!source.config.servers.is_empty() || !mcp_servers.is_empty())
@@ -501,10 +519,16 @@ async fn prepare_writer(
         } else {
             "transcript writer preparation failed"
         })?,
-        None => Ok((
-            TranscriptWriter::allocate_with_id(&storage.resolved.directory, &storage.resolved.id)?,
-            None,
-        )),
+        None => {
+            let directory = storage.resolved.directory.clone();
+            let id = storage.resolved.id.clone();
+            let writer = tokio::task::spawn_blocking(move || {
+                TranscriptWriter::allocate_with_id(&directory, &id)
+            })
+            .await
+            .context("transcript allocation task failed")??;
+            Ok((writer, None))
+        }
     }
 }
 
@@ -543,17 +567,29 @@ async fn build_engine(
     }
     // The ensemble validates after writer preparation, at the same boundary as
     // before staging. It is never constructed for a restricted worker.
-    let root = root
-        .map(|root| -> anyhow::Result<_> {
-            let ensemble = Arc::new(EnsembleSupervisor::new(
-                config.ensemble.clone(),
-                &resolved.workspace,
-                agent_runs_dir(&resolved.workspace, &resolved.id),
+    let root = if let Some(root) = root {
+        let ensemble_config = config.ensemble.clone();
+        let workspace = resolved.workspace.clone();
+        let agent_runs_root = agent_runs_dir(&workspace, &resolved.id);
+        let ensemble = tokio::task::spawn_blocking(move || {
+            EnsembleSupervisor::new(
+                ensemble_config,
+                &workspace,
+                agent_runs_root,
                 root.ensemble_questions,
-            )?);
-            Ok((ensemble, root.requests, root.keepalive, root.skill_service))
+            )
         })
-        .transpose()?;
+        .await
+        .context("ensemble setup task failed")??;
+        Some((
+            Arc::new(ensemble),
+            root.requests,
+            root.keepalive,
+            root.skill_service,
+        ))
+    } else {
+        None
+    };
     let engine = match loaded {
         Some(outcome) => SessionEngine::builder_from_loaded(
             provider,
@@ -566,15 +602,20 @@ async fn build_engine(
         None => SessionEngine::builder(provider, tools, policies, writer, skill_catalog.clone())?
             .with_transcript_items(std::mem::take(&mut storage.initial_items))?,
     };
+    let workspace = resolved.workspace.clone();
+    let guidance = tokio::task::spawn_blocking(move || {
+        zevria_instructions::load_guidance(&guidance_roots(&workspace))
+    })
+    .await
+    .context("workspace guidance loader failed")?;
     let (engine, root) = match root {
         Some((ensemble, requests, keepalive, skill_service)) => {
             let mut engine = engine
                 .with_incremental_tools(config.session.incremental_tools || mcp.is_some())
-                .with_skill_catalog(skill_catalog.clone())?
                 .with_mode_management()
                 .with_idle_notifications()
                 .with_subtask_concurrency(config.session.max_concurrent_subtasks)
-                .with_guidance_roots(guidance_roots(&resolved.workspace))
+                .with_loaded_guidance(guidance)
                 .with_skill_management(skill_service, [true, config.session.plan.allow_skills])?
                 .with_compaction_policy(storage.models.compaction.clone())
                 .with_question_responder(responder)
@@ -609,7 +650,7 @@ async fn build_engine(
         None => (
             engine
                 .with_incremental_tools(config.session.incremental_tools)
-                .with_guidance_roots(guidance_roots(&resolved.workspace))
+                .with_loaded_guidance(guidance)
                 .with_compaction_policy(storage.models.compaction.clone())
                 .with_question_responder(responder),
             None,
@@ -617,43 +658,6 @@ async fn build_engine(
     };
     let mut engine = engine.build()?;
     append_guidance_notices(&mut startup_notices, engine.refresh_application_guidance()?);
-    Ok(BuiltEngine {
-        engine,
-        skill_catalog,
-        active_skills,
-        event_tx,
-        event_rx,
-        command_jobs,
-        startup_notices,
-        mcp,
-        root,
-    })
-}
-
-async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result<RunningSession> {
-    let OpenedStorage {
-        resolved,
-        lease,
-        models,
-        restored_subtasks,
-        restored_agent_runs,
-        ..
-    } = storage;
-    let BuiltEngine {
-        mut engine,
-        skill_catalog,
-        active_skills,
-        event_tx,
-        event_rx,
-        command_jobs,
-        mut startup_notices,
-        mcp,
-        root,
-    } = built;
-    let config = resolved.config;
-    let transcript_items = engine.conversation().items().to_vec();
-    let plan_state = engine.plan_state()?.clone();
-    let selected_mode = engine.selected_mode();
     let root = root
         .map(|root| -> anyhow::Result<_> {
             let config = SubtaskSupervisorConfig {
@@ -686,20 +690,12 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
                     &resolved.model_config().session.preamble,
                 ),
                 explore_tools: build_explore_tools(&resolved.workspace, config.command)?,
-                startup_workspace: {
-                    #[cfg(windows)]
-                    {
-                        zevria_foundation::windows_io::checked_directory_path(&resolved.workspace)?
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        std::fs::canonicalize(&resolved.workspace)?
-                    }
-                },
+                startup_workspace: resolved.workspace.clone(),
+                empty_skills: Arc::new(SkillCatalog::default()),
                 command_config: config.command,
                 events: event_tx.clone(),
                 subsessions_dir: transcript::subsessions_dir(&resolved.workspace, &resolved.id),
-                compaction: models.compaction.clone(),
+                compaction: storage.models.compaction.clone(),
                 max_concurrent_subtasks: config.session.max_concurrent_subtasks,
                 incremental_tools: config.session.incremental_tools,
                 guidance: engine
@@ -707,23 +703,9 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
                     .expect("root captured guidance")
                     .clone(),
             };
-            Ok((root, config))
+            Ok((root, Arc::new(config)))
         })
         .transpose()?;
-    let (command_tx, command_rx) = unbounded_channel();
-    let cleanup_abandoned_history = matches!(resolved.start, SessionStart::Resume(_));
-    if let SessionStart::FromPlan { handoff, .. } = resolved.start {
-        // Queue the opening command while we still own the receiver and have
-        // not started any background services.
-        command_tx
-            .send(SessionCommand::Turn(
-                zevria_session_api::TurnCommand::StartFromPlan {
-                    handoff: Box::new(handoff),
-                },
-            ))
-            .expect("the opening command receiver is still held");
-    }
-
     // Start external processes only after the writer, guidance, ensemble and
     // child workspace have all been prepared. No runtime tasks are spawned
     // until the MCP-dependent restoration snapshot is ready.
@@ -758,6 +740,58 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
         }
     };
 
+    Ok(BuiltEngine {
+        engine,
+        skill_catalog,
+        active_skills,
+        event_tx,
+        event_rx,
+        command_jobs,
+        startup_notices,
+        mcp,
+        model_snapshots,
+        root,
+    })
+}
+
+fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result<StartedSession> {
+    let OpenedStorage {
+        resolved,
+        lease,
+        models,
+        restored_subtasks,
+        restored_agent_runs,
+        ..
+    } = storage;
+    let BuiltEngine {
+        engine,
+        skill_catalog,
+        active_skills,
+        event_tx,
+        event_rx,
+        command_jobs,
+        startup_notices,
+        mcp,
+        model_snapshots,
+        root,
+    } = built;
+    let transcript_items = engine.conversation().items().to_vec();
+    let plan_state = engine.plan_state()?.clone();
+    let selected_mode = engine.selected_mode();
+    let (command_tx, command_rx) = unbounded_channel();
+    let cleanup_abandoned_history = matches!(resolved.start, SessionStart::Resume(_));
+    if let SessionStart::FromPlan { handoff, .. } = resolved.start {
+        // Queue the opening command while we still own the receiver and have
+        // not started any background services.
+        command_tx
+            .send(SessionCommand::Turn(
+                zevria_session_api::TurnCommand::StartFromPlan {
+                    handoff: Box::new(handoff),
+                },
+            ))
+            .expect("the opening command receiver is still held");
+    }
+
     let (exit_tx, exit_rx) = unbounded_channel();
     let (supervisor, child_guard) = if let Some((root, config)) = root {
         let shutdown = tokio_util::sync::CancellationToken::new();
@@ -784,14 +818,12 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
     let mcp_prompts = mcp
         .as_ref()
         .map_or_else(Vec::new, |mcp| mcp.prompt_catalog());
-    Ok(RunningSession {
-        command_jobs,
-        mcp,
-        cleanup_abandoned_history,
-        restored_taken: false,
-        restored_subtasks,
-        restored_agent_runs,
-        restoration: SessionRestoration {
+    let identity = SessionIdentity {
+        session_id: resolved.id.clone(),
+        transcript_path: resolved.path.clone(),
+    };
+    Ok(StartedSession {
+        restored: RestoredSession {
             model_contexts: models.routing.context_policies(),
             reasoning_levels: std::array::from_fn(|index| {
                 models
@@ -812,14 +844,22 @@ async fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result
             mcp_prompts,
             plan_state,
             selected_mode,
+            subtasks: restored_subtasks,
+            agent_runs: restored_agent_runs,
         },
-        _lease: Some(lease),
-        command_tx: Some(command_tx),
-        event_tx: Some(event_tx),
-        event_rx: Some(event_rx),
-        exit_rx: Some(exit_rx),
-        engine_task: Some(engine_task),
-        supervisor,
+        running: RunningSession {
+            command_jobs,
+            mcp,
+            cleanup_abandoned_history,
+            identity,
+            _lease: Some(lease),
+            command_tx: Some(command_tx),
+            event_tx: Some(event_tx),
+            event_rx: Some(event_rx),
+            exit_rx: Some(exit_rx),
+            engine_task: Some(engine_task),
+            supervisor,
+        },
     })
 }
 

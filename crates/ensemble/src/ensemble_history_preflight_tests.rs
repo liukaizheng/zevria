@@ -4,7 +4,7 @@
 #[test]
 #[ignore = "requires an explicitly supplied local root history; read-only"]
 fn existing_root_history_passes_read_only_replay_and_preflight() -> anyhow::Result<()> {
-    use zevria_transcript::transcript::{self, TranscriptItem};
+    use zevria_transcript::transcript;
     use zevria_workflow::EnsembleRecord;
 
     let workspace = PathBuf::from(std::env::var("ZEVRIA_REPLAY_WORKSPACE")?);
@@ -18,8 +18,8 @@ fn existing_root_history_passes_read_only_replay_and_preflight() -> anyhow::Resu
         zevria_transcript::project_worker_reviews(&items).map_err(anyhow::Error::msg)?;
         let starts = items
             .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::Ensemble(EnsembleRecord::Started { start }) => Some(start),
+            .filter_map(|item| match item.ensemble_record() {
+                Some(EnsembleRecord::Started { start }) => Some(start),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -78,14 +78,14 @@ fn existing_root_history_passes_read_only_replay_and_preflight() -> anyhow::Resu
                 terminal_displays += worker_displays;
             }
             preflight_existing_logs(&logs, start)?;
-            let sealed = items.iter().any(|item| matches!(item,
-                TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { run_id, .. }) if run_id == &start.run_id
+            let sealed = items.iter().any(|item| matches!(item.ensemble_record(),
+                Some(EnsembleRecord::WorkersConfirmed { run_id, .. }) if run_id == &start.run_id
             ));
             if start.workflow == EnsembleWorkflow::Plan && !sealed {
                 let history = items
                     .iter()
-                    .filter_map(|item| match item {
-                        TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
+                    .filter_map(|item| match item.ensemble_record() {
+                        Some(EnsembleRecord::WorkerReview {
                             run_id,
                             worker_id,
                             event,

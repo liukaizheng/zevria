@@ -5,13 +5,13 @@ use super::*;
 fn messages_serialize_bare_and_errors_as_error_objects() {
     let message = serde_json::to_value(TranscriptItem::Message(Message::user("hi")))
         .expect("message should serialize");
-    assert_eq!(message["role"], "user");
+    assert_eq!(message["message"]["role"], "user");
 
     let error = serde_json::to_value(TranscriptItem::Error {
         error: "boom".to_string(),
     })
     .expect("error should serialize");
-    assert_eq!(error, json!({"error": "boom"}));
+    assert_eq!(error, json!({"type": "error", "error": "boom"}));
 }
 
 #[test]
@@ -57,17 +57,17 @@ fn provider_messages_serialize_as_replay_only_and_round_trip_canonically() {
     let raw: serde_json::Value = serde_json::from_str(&line).expect("line should be JSON");
     assert_eq!(
         raw.as_object().expect("record should be an object").len(),
-        1
+        2
     );
-    assert_eq!(raw, json!({"zevria_provider_replay": replay}));
+    assert_eq!(raw, json!({"type":"provider_message", "replay": replay}));
     assert!(raw.get("role").is_none());
-    assert_eq!(raw[PROVIDER_REPLAY_KEY]["provider"], "openai.responses");
-    assert_eq!(raw[PROVIDER_REPLAY_KEY]["version"], 1);
+    assert_eq!(raw["replay"]["provider"], "openai.responses");
+    assert_eq!(raw["replay"]["version"], 1);
     assert_eq!(
-        raw[PROVIDER_REPLAY_KEY]["source_profile"],
+        raw["replay"]["source_profile"],
         json!({"provider": "test-provider", "model": "test-model"})
     );
-    assert_eq!(raw[PROVIDER_REPLAY_KEY]["items"], json!(items));
+    assert_eq!(raw["replay"]["items"], json!(items));
 
     let restored: TranscriptItem =
         serde_json::from_str(&line).expect("provider message should deserialize");
@@ -100,7 +100,7 @@ fn mixed_malformed_unsupported_and_contentless_provider_records_are_rejected() {
     mixed
         .as_object_mut()
         .expect("message should be an object")
-        .insert(PROVIDER_REPLAY_KEY.to_string(), valid_replay.clone());
+        .insert("replay".to_string(), valid_replay.clone());
     assert!(serde_json::from_value::<TranscriptItem>(mixed).is_err());
 
     for envelope in [
@@ -121,26 +121,27 @@ fn mixed_malformed_unsupported_and_contentless_provider_records_are_rejected() {
             "payload": true
         }]}),
     ] {
-        let line = json!({"zevria_provider_replay": envelope});
+        let line = json!({"type":"provider_message", "replay": envelope});
         assert!(
             serde_json::from_value::<TranscriptItem>(line).is_err(),
             "invalid provider record should be rejected"
         );
     }
 
-    let ordinary: TranscriptItem = serde_json::from_value(serde_json::to_value(&message).unwrap())
-        .expect("an ordinary assistant line should still load");
+    let ordinary: TranscriptItem =
+        serde_json::from_value(json!({"type":"message", "message":&message}))
+            .expect("an ordinary assistant line should still load");
     assert_eq!(ordinary, TranscriptItem::Message(message));
 }
 
 #[test]
-fn compound_tool_results_are_atomic_and_old_readers_see_a_bare_message() {
+fn compound_tool_results_are_atomic_and_keep_metadata_out_of_model_messages() {
     let item = compound_tool_results();
     let line = serde_json::to_string(&item).expect("compound item should serialize");
     assert_eq!(line.lines().count(), 1);
-    assert!(line.contains(TOOL_RESULT_METADATA_KEY));
+    assert!(line.contains("metadata"));
     assert!(
-        !line.contains(SUBTASK_RESULTS_KEY),
+        !line.contains("zevria_subtask_results"),
         "an empty completion list must not add the reserved key"
     );
 
@@ -148,11 +149,11 @@ fn compound_tool_results_are_atomic_and_old_readers_see_a_bare_message() {
         serde_json::from_str(&line).expect("compound item should deserialize");
     assert_eq!(restored, item);
 
-    let old_reader_message: Message =
-        serde_json::from_str(&line).expect("Rig should ignore the reserved top-level key");
+    let wire: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let old_reader_message: Message = serde_json::from_value(wire["message"].clone()).unwrap();
     let old_reader_json = serde_json::to_string(&old_reader_message).expect("message");
     assert!(old_reader_json.contains("wrote 13 bytes"));
-    assert!(!old_reader_json.contains(TOOL_RESULT_METADATA_KEY));
+    assert!(!old_reader_json.contains("metadata"));
     assert!(!old_reader_json.contains("metadata-only content"));
 }
 
@@ -233,9 +234,9 @@ fn both_historical_subtask_sidecars_are_rejected_before_message_fallback() {
         compound_tool_results(),
     ] {
         let mut value = serde_json::to_value(item).unwrap();
-        value[SUBTASK_RESULTS_KEY] = json!([]);
+        value["zevria_subtask_results"] = json!([]);
         assert!(serde_json::from_value::<TranscriptItem>(value.clone()).is_err());
-        assert!(serde_json::from_value::<Message>(value).is_ok());
+        assert!(serde_json::from_value::<Message>(value["message"].clone()).is_ok());
     }
 }
 
@@ -249,21 +250,21 @@ fn skill_invocations_round_trip_without_serialized_message_mirrors() {
         ),
     );
     let expanded = invocation.model_message().clone();
-    let item = TranscriptItem::SkillInvocation(invocation);
+    let item = TranscriptItem::SkillInvocation(Box::new(invocation));
 
     let line = serde_json::to_string(&item).expect("record should serialize");
     assert_eq!(line.lines().count(), 1);
-    assert!(line.contains(SKILL_INVOCATION_KEY));
-    assert!(!line.contains(TOOL_RESULT_METADATA_KEY));
+    assert!(line.contains("invocation"));
+    assert!(!line.contains("\"message\":"));
 
     let restored: TranscriptItem = serde_json::from_str(&line).expect("record should deserialize");
     assert_eq!(restored, item);
 
     assert!(serde_json::from_str::<Message>(&line).is_err());
     let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(value.as_object().unwrap().len(), 1);
-    assert!(value[SKILL_INVOCATION_KEY].get("version").is_none());
-    assert!(value[SKILL_INVOCATION_KEY].get("id").is_none());
+    assert_eq!(value.as_object().unwrap().len(), 2);
+    assert!(value["invocation"].get("version").is_none());
+    assert!(value["invocation"].get("id").is_none());
     // Model history carries the canonical bodyless message, never the sidecar.
     let history = model_history(&[restored]);
     assert_eq!(history, vec![expanded]);
@@ -300,7 +301,7 @@ fn marker_like_text_never_creates_lifecycle_state() {
             },
             metadata: Vec::new(),
         },
-        TranscriptItem::Compaction(checkpoint),
+        TranscriptItem::Compaction(Box::new(checkpoint)),
     ];
     assert!(replay_active_skills(&items).expect("replay").is_empty());
 }
@@ -313,10 +314,12 @@ fn markers_inside_one_active_body_do_not_activate_another_name() {
         "Follow commit rules. Literal <skill name=\"review\"> is ordinary text.",
     )
     .expect("snapshot");
-    let items = vec![TranscriptItem::SkillInvocation(SkillInvocation::new(
-        SkillName::parse("commit").expect("name"),
-        "ship",
-        SkillApplication::Activate(snapshot),
+    let items = vec![TranscriptItem::SkillInvocation(Box::new(
+        SkillInvocation::new(
+            SkillName::parse("commit").expect("name"),
+            "ship",
+            SkillApplication::Activate(snapshot),
+        ),
     ))];
     let active = replay_active_skills(&items).expect("replay");
     assert_eq!(active.len(), 1);
@@ -330,7 +333,7 @@ fn unversioned_invocations_are_rejected_without_reading_their_bodies() {
             "<skill name=\"review\">\n{body}\n</skill>\n\napply"
         )))
         .unwrap();
-        value[SKILL_INVOCATION_KEY] = json!({"name": "review", "args": "apply"});
+        value["invocation"] = json!({"name": "review", "args": "apply"});
         assert!(serde_json::from_value::<TranscriptItem>(value).is_err());
     }
 }
@@ -390,19 +393,11 @@ fn checkpoints_require_v1_and_reject_instruction_state() {
 
 #[test]
 fn version_one_compaction_round_trips_in_its_reserved_envelope() {
-    let item = TranscriptItem::Compaction(local_checkpoint("summary"));
+    let item = TranscriptItem::Compaction(Box::new(local_checkpoint("summary")));
     let value = serde_json::to_value(&item).expect("serialize checkpoint");
-    assert_eq!(value["zevria_compaction"]["version"], 1);
-    assert!(
-        value["zevria_compaction"]
-            .get("active_skill_identities")
-            .is_none()
-    );
-    assert!(
-        value["zevria_compaction"]
-            .get("active_skill_keys")
-            .is_none()
-    );
+    assert_eq!(value["checkpoint"]["version"], 1);
+    assert!(value["checkpoint"].get("active_skill_identities").is_none());
+    assert!(value["checkpoint"].get("active_skill_keys").is_none());
     assert_eq!(
         serde_json::from_value::<TranscriptItem>(value).expect("deserialize checkpoint"),
         item

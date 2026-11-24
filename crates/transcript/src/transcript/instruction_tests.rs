@@ -3,13 +3,13 @@ use super::*;
 use crate::{DirectiveContent, DirectivePayload, DirectiveState, SessionMode};
 
 fn directive(text: &str) -> TranscriptItem {
-    TranscriptItem::Directive(
+    TranscriptItem::Directive(Box::new(
         DirectiveContent::new(DirectivePayload::SkillRevocation {
             name: "review".parse().unwrap(),
             reason: text.into(),
         })
         .unwrap(),
-    )
+    ))
 }
 
 fn models() -> SessionModels {
@@ -33,8 +33,8 @@ fn assert_projection(conversation: &Conversation) {
     assert!(!text.contains("PRIVATE_APPLICATION"));
     for line in text.lines() {
         let value: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert!(value.get(INSTRUCTION_PREFIX_KEY).is_none());
-        assert!(value.get(DIRECTIVE_KEY).is_none());
+        assert!(value.get("zevria_instruction_prefix").is_none());
+        assert!(value.get("zevria_directive").is_none());
     }
 }
 
@@ -43,14 +43,14 @@ fn directive_append_inserts_newline_and_preserves_read_only_guards() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("newline.jsonl");
     let pin = crate::SkillSnapshot::new("review".parse().unwrap(), "Review", "pin").unwrap();
-    let invocation = TranscriptItem::SkillInvocation(crate::SkillInvocation::new(
+    let invocation = TranscriptItem::SkillInvocation(Box::new(crate::SkillInvocation::new(
         pin.name().clone(),
         "",
         crate::SkillApplication::Activate(pin.clone()),
-    ));
+    )));
     let original = serde_json::to_string(&invocation).unwrap();
     std::fs::write(&path, &original).unwrap();
-    let item = TranscriptItem::Directive(DirectiveContent::skill(&pin));
+    let item = TranscriptItem::Directive(Box::new(DirectiveContent::skill(&pin)));
     let record = serde_json::to_string(&item).unwrap();
     let owned = item.model_request_item().unwrap().to_owned_item().unwrap();
     assert!(serde_json::to_value(owned).is_ok());
@@ -85,13 +85,13 @@ fn rewrites_batches_edits_headers_and_degraded_repair_preserve_all_items() {
         .unwrap();
     conversation
         .push_required_batch(vec![
-            TranscriptItem::SkillInvocation(crate::SkillInvocation::new(
+            TranscriptItem::SkillInvocation(Box::new(crate::SkillInvocation::new(
                 "review".parse().unwrap(),
                 "",
                 crate::SkillApplication::Activate(
                     crate::SkillSnapshot::new("review".parse().unwrap(), "Review", "pin").unwrap(),
                 ),
-            )),
+            ))),
             directive("first revocation"),
             TranscriptItem::Message(Message::user("first")),
         ])
@@ -154,16 +154,18 @@ fn rewrites_batches_edits_headers_and_degraded_repair_preserve_all_items() {
         .unwrap();
     assert!(conversation.prompt_position(1).is_none());
     assert_projection(&conversation);
-    // Directives cannot precede the physical or logical session header.
+    // Metadata may appear after instructions and remains invisible to projection.
     let bytes = std::fs::read(conversation.path()).unwrap();
     let proposed = vec![
-        directive("invalid header position"),
-        TranscriptItem::SessionModels(models()),
+        TranscriptItem::SessionModels(Box::new(models())),
         TranscriptItem::SessionMode(SessionMode::Build),
     ];
-    assert!(crate::SessionReplayError::validate(&proposed).is_err());
-    assert!(conversation.writer.rewrite(&proposed).is_err());
-    assert_eq!(std::fs::read(conversation.path()).unwrap(), bytes);
+    conversation.commit_anchored(None, proposed, None).unwrap();
+    assert!(
+        std::fs::read(conversation.path())
+            .unwrap()
+            .starts_with(&bytes)
+    );
     assert_projection(&conversation);
 }
 
@@ -178,18 +180,18 @@ fn borrowed_checkpoint_fold_matches_effective_state_through_replacements_and_rev
         },
         DirectiveContent::skill(&skill).payload,
     ];
-    let mut items = vec![TranscriptItem::SkillInvocation(
+    let mut items = vec![TranscriptItem::SkillInvocation(Box::new(
         crate::SkillInvocation::new(
             skill.name().clone(),
             "",
             crate::SkillApplication::Activate(skill),
         ),
-    )];
+    ))];
     let mut state = DirectiveState::default();
     for (index, payload) in updates.into_iter().enumerate() {
         let update = DirectiveContent::new(payload).unwrap();
         state.apply(&update).unwrap();
-        items.push(TranscriptItem::Directive(update));
+        items.push(TranscriptItem::Directive(Box::new(update)));
         assert_eq!(
             crate::effective_directives(&items)
                 .into_iter()
@@ -206,7 +208,7 @@ fn borrowed_checkpoint_fold_matches_effective_state_through_replacements_and_rev
             vec![],
         )
         .unwrap();
-        items.push(TranscriptItem::Compaction(checkpoint));
+        items.push(TranscriptItem::Compaction(Box::new(checkpoint)));
         let projected = model_input(&items);
         assert_eq!(
             projected[0].message_ref(),
@@ -242,15 +244,13 @@ fn borrowed_checkpoint_fold_matches_effective_state_through_replacements_and_rev
 fn abandoned_roots_are_only_empty_or_valid_models_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("root.jsonl");
-    let header = serde_json::to_string(&TranscriptItem::SessionModels(models())).unwrap();
+    let header = serde_json::to_string(&TranscriptItem::SessionModels(Box::new(models()))).unwrap();
     for (bytes, abandoned) in [
         (String::new(), true),
         (format!("{header}\n"), true),
         (format!("{header}\n \t\n"), true),
         (
-            format!(
-                "{header}\n{{\"zevria_session_mode\":{{\"version\":1,\"selected\":\"build\"}}}}\n"
-            ),
+            format!("{header}\n{{\"type\":\"session_mode\",\"selected\":\"build\"}}\n"),
             false,
         ),
         (
@@ -269,7 +269,7 @@ fn abandoned_roots_are_only_empty_or_valid_models_only() {
     for items in [
         vec![TranscriptItem::SessionMode(SessionMode::Build)],
         vec![
-            TranscriptItem::SessionModels(models()),
+            TranscriptItem::SessionModels(Box::new(models())),
             TranscriptItem::SessionMode(SessionMode::Plan),
         ],
     ] {

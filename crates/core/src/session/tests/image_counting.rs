@@ -683,7 +683,7 @@ async fn rejection_recovery_stops_for_resumed_disarm_spent_predictive_budget_or_
             transcript
                 .rewrite(&[
                     TranscriptItem::SessionMode(SessionMode::Build),
-                    TranscriptItem::Compaction(
+                    TranscriptItem::Compaction(Box::new(
                         zevria_model::CompactionCheckpoint::new(
                             zevria_model::CompactionTrigger::AutomaticPreTurn,
                             zevria_model::CompactionBackend::LocalSummary,
@@ -693,7 +693,7 @@ async fn rejection_recovery_stops_for_resumed_disarm_spent_predictive_budget_or_
                             vec![],
                         )
                         .unwrap(),
-                    ),
+                    )),
                 ])
                 .unwrap();
         }
@@ -795,13 +795,13 @@ fn tool_revisions_keep_inline_baselines_but_invalidate_folded_fixed_prefixes() {
             parameters: json!({"type":"object","properties":{}}),
         }])
         .unwrap();
-        let item = TranscriptItem::ToolDeclarations(
+        let item = TranscriptItem::ToolDeclarations(Box::new(
             zevria_transcript::ToolDeclarationRecord::new(
                 zevria_transcript::ToolDeclarationPlacement::Additional,
                 tools,
             )
             .unwrap(),
-        );
+        ));
         context.on_committed(&[item], |_| inline);
         assert_eq!(
             context.projected_estimate(&profile, shape, 100).is_some(),

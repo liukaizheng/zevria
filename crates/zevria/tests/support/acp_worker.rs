@@ -536,8 +536,8 @@ fn fresh_native_worker_and_parent_synthesis_inspection_smoke() {
             let mut session = zevria_host::runtime::start_session(
                 &config, &std::env::current_dir().unwrap(), zevria_host::runtime::SessionStart::New { inherited_models: None },
             ).await.unwrap();
-            let mut events = session.take_event_receiver().unwrap();
-            session.command_sender().send(zevria_session_api::SessionCommand::Turn(
+            let mut events = session.running.take_event_receiver().unwrap();
+            session.running.command_sender().send(zevria_session_api::SessionCommand::Turn(
                 zevria_session_api::TurnCommand::RunEnsemble {
                     workflow: zevria_workflow::EnsembleWorkflow::Review,
                     prompt: "Inspect source.txt and the external synthetic home diagnostic; fetch the controlled loopback fixture into private OS-temp scratch and run the contained validation. Leave source unchanged, clean up owned scratch, then independently verify the evidence in parent synthesis.".into(),
@@ -559,7 +559,7 @@ fn fresh_native_worker_and_parent_synthesis_inspection_smoke() {
                 }
                 panic!("smoke ended without parent synthesis");
             }).await.expect("native ensemble smoke deadline");
-            session.shutdown().await.unwrap();
+            session.running.shutdown().await.unwrap();
         });
         return;
     }
@@ -861,7 +861,7 @@ fn actual_worker_routes_models_questions_and_proof_and_recovers_without_mutating
     assert_eq!(transcript::list_sessions(&worker_dir).unwrap().len(), 2);
     let records =
         transcript::load(&worker_dir.join(format!("{}.jsonl", plan_id.as_str().unwrap()))).unwrap();
-    assert!(records.iter().any(|item| matches!(item, transcript::TranscriptItem::Plan(zevria_workflow::PlanRecord::Ready { artifact }) if artifact.markdown == MARKDOWN)));
+    assert!(records.iter().any(|item| matches!(item.plan_record(), Some(zevria_workflow::PlanRecord::Ready { artifact }) if artifact.markdown == MARKDOWN)));
     for tool in ["command", "question", "create_plan", "submit_plan"] {
         assert!(records.iter().any(|item| matches!(item,
             transcript::TranscriptItem::ToolResults { metadata, .. }

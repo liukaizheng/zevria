@@ -222,19 +222,18 @@ impl<P: ModelProvider> SessionEngine<P> {
                 PROMPT_PLAN_PREFIX_REPLAYS.set(PROMPT_PLAN_PREFIX_REPLAYS.get() + 1);
                 #[cfg(feature = "test-support")]
                 crate::session::pipeline_probe::record(|counts| counts.plan_prefix_replays += 1);
-                let plan = replay_plan_state(source.iter().filter_map(|item| match item {
-                    TranscriptItem::Plan(record) => Some(record),
-                    _ => None,
-                }))
-                .map_err(|error| {
-                    format!("cannot edit a transcript with an invalid Plan workflow: {error:#}")
-                })?;
+                let plan = replay_plan_state(source.iter().filter_map(TranscriptItem::plan_record))
+                    .map_err(|error| {
+                        format!("cannot edit a transcript with an invalid Plan workflow: {error:#}")
+                    })?;
                 Ok(PromptAnchorState {
                     instructions: Cow::Owned(instructions),
                     plan: Cow::Owned(plan),
                     replaced_invocation: self.conversation.items().get(index).and_then(|item| {
                         match item {
-                            TranscriptItem::SkillInvocation(invocation) => Some(invocation),
+                            TranscriptItem::SkillInvocation(invocation) => {
+                                Some(invocation.as_ref())
+                            }
                             _ => None,
                         }
                     }),
@@ -352,12 +351,12 @@ impl<P: ModelProvider> SessionEngine<P> {
                         message,
                         request: request.clone(),
                     });
-                    records.push(TranscriptItem::RequestDirective(
+                    records.push(TranscriptItem::RequestDirective(Box::new(
                         RequestDirective::boundary_with_file_mutation_scope(
                             request.clone(),
                             context.policy.file_mutation_scope,
                         ),
-                    ));
+                    )));
                 } else {
                     records.push(TranscriptItem::Message(message));
                 }
@@ -402,7 +401,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                         zevria_foundation::RequestBehavior::Standard,
                     )
                 });
-                records.push(TranscriptItem::SkillInvocation(invocation));
+                records.push(TranscriptItem::SkillInvocation(Box::new(invocation)));
                 records.extend(
                     request
                         .clone()
@@ -412,7 +411,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                                 context.policy.file_mutation_scope,
                             )
                         })
-                        .map(TranscriptItem::RequestDirective),
+                        .map(|record| TranscriptItem::RequestDirective(Box::new(record))),
                 );
                 // Reuse the post-invocation update that passed the skill capacity
                 // check. Its body follows its owner, never pre-prompt reconciliation.
@@ -472,10 +471,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             TurnAnchor::ReplaceFrom(index) => replay_plan_state(
                 self.conversation.items()[..index]
                     .iter()
-                    .filter_map(|item| match item {
-                        TranscriptItem::Plan(record) => Some(record),
-                        _ => None,
-                    }),
+                    .filter_map(TranscriptItem::plan_record),
             )
             .map_err(|error| format!("{invalid_prefix_context}: {error:#}")),
         }
@@ -830,7 +826,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         let mut records = Vec::new();
         let metadata = if let Some(CheckpointPlacement::FoldedIntoCommit(checkpoint)) = checkpoint {
             let metadata = (checkpoint.trigger, checkpoint.backend);
-            records.push(TranscriptItem::Compaction(checkpoint));
+            records.push(TranscriptItem::Compaction(Box::new(checkpoint)));
             Some(metadata)
         } else {
             None
@@ -840,10 +836,14 @@ impl<P: ModelProvider> SessionEngine<P> {
             // Match an explicit Revise followed by a prompt so editing the feedback
             // sees a Planning prefix. The record is not model-visible, so request
             // bytes are unchanged. Started/Abandoned still follow their prompt.
-            records.extend(plan_transition.take().map(TranscriptItem::Plan));
+            records.extend(
+                plan_transition
+                    .take()
+                    .map(|record| TranscriptItem::Plan(Box::new(record))),
+            );
         }
         records.extend(prepared.records);
-        records.extend(plan_transition.map(TranscriptItem::Plan));
+        records.extend(plan_transition.map(|record| TranscriptItem::Plan(Box::new(record))));
         let previous = self.plan_state()?.clone();
         let committed = {
             let _phase = timings.phase(PromptPhase::Commit);

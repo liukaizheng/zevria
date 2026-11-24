@@ -5,17 +5,18 @@ use zevria_model::models::{ModelSelection, SessionModels};
 use zevria_session_api::ManagementCommand;
 
 async fn change(
-    running: &runtime::RunningSession,
+    running: &runtime::StartedSession,
     events: &mut SessionEventReceiver,
     mode: SessionMode,
     scope: Scope,
     revision: String,
 ) {
     let role = zevria_model::models::mode_role(mode);
-    let profile = running.restoration().model_contexts[role.index()]
+    let profile = running.restored.model_contexts[role.index()]
         .profile
         .clone();
     running
+        .running
         .command_sender()
         .send(SessionCommand::Manage(ManagementCommand::Models {
             request_id: "selection".into(),
@@ -51,7 +52,7 @@ async fn native_worker_resume_rejects_removed_reasoning_without_mutation_or_prov
     .unwrap();
     writer
         .rewrite(&[
-            TranscriptItem::SessionModels(selections),
+            TranscriptItem::SessionModels(Box::new(selections)),
             TranscriptItem::Message(rig_core::message::Message::user("saved worker prompt")),
         ])
         .unwrap();
@@ -90,10 +91,10 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
                 })
                 .await;
             let role = zevria_model::models::mode_role(mode);
-            let context = running.restoration().model_contexts[role.index()].clone();
-            let initial = running.restoration().reasoning_levels;
-            let path = running.restoration().transcript_path.clone();
-            let mut events = running.take_event_receiver().unwrap();
+            let context = running.restored.model_contexts[role.index()].clone();
+            let initial = running.restored.reasoning_levels;
+            let path = running.restored.transcript_path.clone();
+            let mut events = running.running.take_event_receiver().unwrap();
             change(&running, &mut events, mode, scope, revision_before.clone()).await;
             assert_eq!(std::fs::read(&fixture.models_path).unwrap(), model_bytes);
             assert!(
@@ -124,6 +125,7 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
                 }
             }
             running
+                .running
                 .command_sender()
                 .send(SessionCommand::Turn(
                     zevria_session_api::TurnCommand::Submit {
@@ -153,13 +155,13 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
                     .reasoning_for_mode(mode),
                 Level::High
             );
-            running.shutdown().await.unwrap();
+            running.running.shutdown().await.unwrap();
             let resumed = fixture
                 .start(runtime::SessionStart::Resume(path.clone()))
                 .await;
             for other in ModelRole::ALL {
                 assert_eq!(
-                    resumed.restoration().reasoning_levels[other.index()],
+                    resumed.restored.reasoning_levels[other.index()],
                     if other == role {
                         Level::High
                     } else {
@@ -167,21 +169,21 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
                     }
                 );
             }
-            resumed.shutdown().await.unwrap();
+            resumed.running.shutdown().await.unwrap();
             let fresh = fixture
                 .start(runtime::SessionStart::New {
                     inherited_models: None,
                 })
                 .await;
             assert_eq!(
-                fresh.restoration().reasoning_levels[role.index()],
+                fresh.restored.reasoning_levels[role.index()],
                 if scope == Scope::SessionOnly {
                     initial[role.index()]
                 } else {
                     Level::High
                 }
             );
-            fresh.shutdown().await.unwrap();
+            fresh.running.shutdown().await.unwrap();
 
             // Later config reasoning defaults cannot retarget an existing root.
             let mut config: toml::Table =
@@ -191,11 +193,8 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
             let resumed = fixture
                 .start(runtime::SessionStart::Resume(path.clone()))
                 .await;
-            assert_eq!(
-                resumed.restoration().reasoning_levels[role.index()],
-                Level::High
-            );
-            resumed.shutdown().await.unwrap();
+            assert_eq!(resumed.restored.reasoning_levels[role.index()], Level::High);
+            resumed.running.shutdown().await.unwrap();
 
             let mut models: Value = serde_json::from_slice(&model_bytes).unwrap();
             models["providers"][&context.profile.provider]["models"][&context.profile.model]["reasoning_levels"] =

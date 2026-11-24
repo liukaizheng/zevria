@@ -379,9 +379,11 @@ async fn changed_context_conversion_for_same_profile_uses_captured_explicit_reas
     let TranscriptItem::SessionModels(models) = &mut items[0] else {
         panic!("header")
     };
-    *models = models
-        .with_selection(SessionMode::Plan, target.clone())
-        .unwrap();
+    *models = Box::new(
+        models
+            .with_selection(SessionMode::Plan, target.clone())
+            .unwrap(),
+    );
     engine = with_changed_plan_context(engine.with_transcript_items(items).unwrap(), &a, &b);
     let Result::ConfirmationRequired(preview) = manage(
         &mut engine,
@@ -488,7 +490,7 @@ async fn changed_context_opaque_source_must_support_captured_level_without_fallb
     let TranscriptItem::SessionModels(models) = &mut items[0] else {
         panic!("header")
     };
-    *models = models.with_selection(SessionMode::Plan, current).unwrap();
+    *models = Box::new(models.with_selection(SessionMode::Plan, current).unwrap());
     engine = with_changed_plan_context(engine.with_transcript_items(items).unwrap(), &a, &b);
     let before = std::fs::read(engine.conversation().path()).unwrap();
     for scope in [Scope::SessionOnly, Scope::SessionAndDefault] {

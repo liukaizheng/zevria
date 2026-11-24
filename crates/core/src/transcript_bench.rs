@@ -149,7 +149,7 @@ pub fn fixture(workload: Workload, minimum_records: usize, payload_bytes: usize)
     assert!(!matches!(workload, Workload::Images) || minimum_records <= 100);
     let text = "x".repeat(payload_bytes);
     let mut items = vec![
-        TranscriptItem::SessionModels(
+        TranscriptItem::SessionModels(Box::new(
             SessionModels::new(
                 zevria_model::models::ModelSelection::new(
                     profile(),
@@ -161,7 +161,7 @@ pub fn fixture(workload: Workload, minimum_records: usize, payload_bytes: usize)
                 ),
             )
             .unwrap(),
-        ),
+        )),
         TranscriptItem::SessionMode(SessionMode::Build),
     ];
     while items.len() < minimum_records {
@@ -197,48 +197,52 @@ pub fn fixture(workload: Workload, minimum_records: usize, payload_bytes: usize)
                 let application = SkillApplication::Activate(
                     SkillSnapshot::new(name.clone(), "synthetic direct pin", &text).unwrap(),
                 );
-                items.push(TranscriptItem::SkillInvocation(SkillInvocation::new(
-                    name.clone(),
-                    "direct args",
-                    application,
+                items.push(TranscriptItem::SkillInvocation(Box::new(
+                    SkillInvocation::new(name.clone(), "direct args", application),
                 )));
-                items.push(TranscriptItem::Directive(DirectiveContent::skill(
-                    &SkillSnapshot::new(name.clone(), "synthetic direct pin", &text).unwrap(),
+                items.push(TranscriptItem::Directive(Box::new(
+                    DirectiveContent::skill(
+                        &SkillSnapshot::new(name.clone(), "synthetic direct pin", &text).unwrap(),
+                    ),
                 )));
-                items.push(TranscriptItem::SkillInvocation(SkillInvocation::new(
-                    name.clone(),
-                    "reapply",
-                    SkillApplication::Reapply(name),
+                items.push(TranscriptItem::SkillInvocation(Box::new(
+                    SkillInvocation::new(name.clone(), "reapply", SkillApplication::Reapply(name)),
                 )));
                 let id = PlanId::from_uuid(uuid::Uuid::from_u128(index as u128));
-                items.push(TranscriptItem::Plan(PlanRecord::Started { id }));
-                items.push(TranscriptItem::Plan(PlanRecord::Resolved {
+                items.push(TranscriptItem::Plan(Box::new(PlanRecord::Started { id })));
+                items.push(TranscriptItem::Plan(Box::new(PlanRecord::Resolved {
                     id,
                     artifact: None,
                     resolution: PlanResolution::Abandoned,
-                }));
+                })));
                 let run_id = EnsembleRunId::from_string(format!("ensemble-{index}"));
-                items.push(TranscriptItem::Ensemble(EnsembleRecord::Started {
-                    start: EnsembleStart {
-                        run_id: run_id.clone(),
-                        workflow: EnsembleWorkflow::Plan,
-                        prompt: text.clone().into(),
-                        agents: vec![zevria_workflow::AgentRunDescriptor {
-                            id: zevria_workflow::AgentRunId::from_string(format!("worker-{index}")),
-                            agent: "synthetic".into(),
-                            label: "Benchmark worker".into(),
-                            safe_mode: "read-only".into(),
-                        }],
+                items.push(TranscriptItem::Ensemble(Box::new(
+                    EnsembleRecord::Started {
+                        start: EnsembleStart {
+                            run_id: run_id.clone(),
+                            workflow: EnsembleWorkflow::Plan,
+                            prompt: text.clone().into(),
+                            agents: vec![zevria_workflow::AgentRunDescriptor {
+                                id: zevria_workflow::AgentRunId::from_string(format!(
+                                    "worker-{index}"
+                                )),
+                                agent: "synthetic".into(),
+                                label: "Benchmark worker".into(),
+                                safe_mode: "read-only".into(),
+                            }],
+                        },
                     },
-                }));
-                items.push(TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
-                    run_id: run_id.clone(),
-                    version: zevria_workflow::ENSEMBLE_REVIEW_VERSION,
-                }));
-                items.push(TranscriptItem::Ensemble(EnsembleRecord::Cancelled {
-                    run_id,
-                }));
-                items.push(TranscriptItem::Compaction(
+                )));
+                items.push(TranscriptItem::Ensemble(Box::new(
+                    EnsembleRecord::ReviewStarted {
+                        run_id: run_id.clone(),
+                        version: zevria_workflow::ENSEMBLE_REVIEW_VERSION,
+                    },
+                )));
+                items.push(TranscriptItem::Ensemble(Box::new(
+                    EnsembleRecord::Cancelled { run_id },
+                )));
+                items.push(TranscriptItem::Compaction(Box::new(
                     CompactionCheckpoint::new(
                         CompactionTrigger::Manual,
                         CompactionBackend::LocalSummary,
@@ -249,13 +253,13 @@ pub fn fixture(workload: Workload, minimum_records: usize, payload_bytes: usize)
                         vec![text.clone()],
                     )
                     .unwrap(),
-                ));
-                items.push(TranscriptItem::Compaction(CompactionCheckpoint::new(
+                )));
+                items.push(TranscriptItem::Compaction(Box::new(CompactionCheckpoint::new(
                     CompactionTrigger::Manual, CompactionBackend::OpenaiResponsesCompact,
                     vec![OwnedModelRequestItem::replay_only(ProviderReplay::openai_responses(profile(),
                         vec![json!({"type":"compaction", "encrypted_content":text, "opaque_future":true})],
                     )).unwrap()], vec![],
-                ).unwrap()));
+                ).unwrap())));
                 let mut attempt = zevria_content::ResponseAttempt::new(profile());
                 attempt.id = format!("attempt-{index}");
                 attempt
@@ -271,11 +275,11 @@ pub fn fixture(workload: Workload, minimum_records: usize, payload_bytes: usize)
                         },
                     });
                 attempt.close(zevria_content::ResponseAttemptOutcome::Interrupted);
-                items.push(TranscriptItem::IncompleteResponse(
+                items.push(TranscriptItem::IncompleteResponse(Box::new(
                     zevria_transcript::IncompleteResponse::from_attempt(&attempt)
                         .unwrap()
                         .unwrap(),
-                ));
+                )));
                 items.push(TranscriptItem::Error {
                     error: "synthetic failure".into(),
                 });
@@ -411,55 +415,31 @@ mod tests {
 
     #[test]
     fn persisted_corpora_match_independent_bytes() {
-        // Originally captured from the archived pre-split implementation, with
-        // the skill directive line added explicitly to the mixed corpus and
-        // session-model headers updated to complete selections. Owned schemas
-        // now use v1 with v1-domain snapshot digests. Canonical message fixtures
-        // use Rig 0.46's absent turn IDs and typed call identities, without the
-        // old empty call-signature fields. Native items, ordering, correlation
-        // values, image bytes and unrelated values are unchanged.
-        // Never generated by the code under test. Includes headers, native replay/
-        // unknown fields, skills, Plan/ensemble, both checkpoints, images, and
-        // display attempts.
-        // Workspace feature unification can enable serde_json/preserve_order.
-        // Pin both original configurations without normalizing the actual bytes.
-        let order_probe = serde_json::json!({"z": 0, "a": 1});
-        let preserve_order = order_probe.as_object().unwrap().keys().next().unwrap() == "z";
-        let cases: [(Workload, [&[u8]; 2]); 4] = [
+        // The original independent goldens were wrapped in the v2 format
+        // without re-encoding through TranscriptItem. The projection hashes
+        // above continue to pin the same exact model input.
+        let cases: [(Workload, &[u8]); 4] = [
             (
                 Workload::Plain,
-                [
-                    include_bytes!("../tests/fixtures/plain.jsonl"),
-                    include_bytes!("../tests/fixtures/plain.preserve-order.jsonl"),
-                ],
+                include_bytes!("../tests/fixtures/plain.jsonl"),
             ),
             (
                 Workload::Replay,
-                [
-                    include_bytes!("../tests/fixtures/replay.jsonl"),
-                    include_bytes!("../tests/fixtures/replay.preserve-order.jsonl"),
-                ],
+                include_bytes!("../tests/fixtures/replay.jsonl"),
             ),
             (
                 Workload::Mixed,
-                [
-                    include_bytes!("../tests/fixtures/mixed.jsonl"),
-                    include_bytes!("../tests/fixtures/mixed.preserve-order.jsonl"),
-                ],
+                include_bytes!("../tests/fixtures/mixed.jsonl"),
             ),
             (
                 Workload::Images,
-                [
-                    include_bytes!("../tests/fixtures/images.jsonl"),
-                    include_bytes!("../tests/fixtures/images.preserve-order.jsonl"),
-                ],
+                include_bytes!("../tests/fixtures/images.jsonl"),
             ),
         ];
         for (workload, expected) in cases {
-            assert_eq!(
-                String::from_utf8(fixture(workload, 10, 128).jsonl).unwrap(),
-                std::str::from_utf8(expected[usize::from(preserve_order)]).unwrap(),
-                "{} persisted bytes changed (preserve_order={preserve_order})",
+            assert!(
+                fixture(workload, 10, 128).jsonl == expected,
+                "{} persisted bytes changed",
                 workload.name()
             );
         }

@@ -73,7 +73,10 @@ async fn target_counting_uses_portable_input_and_exact_or_conservative_admission
             } else {
                 assert!(matches!(result, Result::ConfirmationRequired(_)));
             }
-            assert_eq!(&engine.conversation().items()[1..], history);
+            assert_eq!(
+                &engine.conversation().items()[1..1 + history.len()],
+                history
+            );
             assert_eq!(engine.provider().initialized_profile_count(), 1);
             assert_eq!(
                 settings.save_calls.load(Ordering::Relaxed),
@@ -95,7 +98,7 @@ async fn pending_plan_and_readonly_history_reject_model_management() {
         let a = profile("A", "http://127.0.0.1:1/v1/responses");
         let b = profile("B", &a.responses_endpoint().unwrap().base_url);
         let id = PlanId::new();
-        let history=vec![TranscriptItem::Plan(PlanRecord::Started {id}),TranscriptItem::Plan(PlanRecord::Ready {artifact:PlanArtifact {version:PlanVersion {id,revision:1},title:"Pending Model Selection".into(),markdown:"# Pending Model Selection\n\n## Goal\nDone\n\n## Decisions\nDone\n\n## Implementation\nDone\n\n## Validation\nDone\n\n## Risks\nNone".into(),source_turn_id:TurnId::new(1)}})];
+        let history=vec![TranscriptItem::Plan(Box::new(PlanRecord::Started {id})),TranscriptItem::Plan(Box::new(PlanRecord::Ready {artifact:PlanArtifact {version:PlanVersion {id,revision:1},title:"Pending Model Selection".into(),markdown:"# Pending Model Selection\n\n## Goal\nDone\n\n## Decisions\nDone\n\n## Implementation\nDone\n\n## Validation\nDone\n\n## Risks\nNone".into(),source_turn_id:TurnId::new(1)}}))];
         let settings = Arc::new(Settings::default());
         let (_directory, mut ready) = engine(a.clone(), b.clone(), history, settings.clone());
         assert!(
@@ -151,7 +154,10 @@ async fn unavailable_or_multiple_opaque_sources_fail_without_inference() {
                     ..
                 }
             ));
-            assert_eq!(&engine.conversation().items()[1..], history);
+            assert_eq!(
+                &engine.conversation().items()[1..1 + history.len()],
+                history
+            );
             assert_eq!(engine.provider().initialized_profile_count(), 0);
             assert_eq!(settings.save_calls.load(Ordering::Relaxed), 0);
         }
@@ -261,7 +267,10 @@ async fn session_only_revalidates_configuration_after_async_counting_and_convers
             matches!(result, Result::Rejected { checkpoint_installed: false, current_revision: None, message, .. } if message.contains("configuration conflict"))
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert_eq!(&engine.conversation().items()[1..], history);
+        assert_eq!(
+            &engine.conversation().items()[1..1 + history.len()],
+            history
+        );
         assert_eq!(
             &engine
                 .conversation()

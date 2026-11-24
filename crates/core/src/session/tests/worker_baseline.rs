@@ -40,13 +40,13 @@ fn fixture(
     };
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                 run_id: start.run_id.clone(),
                 version: ENSEMBLE_REVIEW_VERSION,
-            }),
+            })),
         ])
         .unwrap();
     (directory, engine, launcher, start)
@@ -280,7 +280,7 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
     // without any worker audit mirror or frontend notification.
     let items = engine.conversation.items();
     for (index, item) in items.iter().enumerate() {
-        if let TranscriptItem::Ensemble(EnsembleRecord::WorkerReview { event, .. }) = item
+        if let Some(EnsembleRecord::WorkerReview { event, .. }) = item.ensemble_record()
             && matches!(
                 event.as_ref(),
                 WorkerReviewEvent::BaselineMarked { .. }
@@ -301,11 +301,14 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
     let mut corrupt = items.to_vec();
     let seal = corrupt
         .iter_mut()
-        .find_map(|item| match item {
-            TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { outcomes, .. }) => {
-                Some(outcomes)
+        .find_map(|item| {
+            let TranscriptItem::Ensemble(record) = item else {
+                return None;
+            };
+            match record.as_mut() {
+                EnsembleRecord::WorkersConfirmed { outcomes, .. } => Some(outcomes),
+                _ => None,
             }
-            _ => None,
         })
         .unwrap();
     let first = seal[0].confirmation.as_mut().unwrap();
@@ -314,7 +317,8 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
     assert!(zevria_transcript::validate_ensemble_review_history(&corrupt).is_err());
     let mut corrupt = items.to_vec();
     for item in &mut corrupt {
-        if let TranscriptItem::Ensemble(EnsembleRecord::WorkerReview { event, result, .. }) = item
+        if let TranscriptItem::Ensemble(record) = item
+            && let EnsembleRecord::WorkerReview { event, result, .. } = record.as_mut()
             && matches!(event.as_ref(), WorkerReviewEvent::BaselineMarked { .. })
         {
             *result = None;
@@ -435,8 +439,8 @@ async fn baseline_seals_single_worker_and_multiworker_recovery_keeps_synthesis_g
                 .items()
                 .iter()
                 .filter(|item| matches!(
-                    item,
-                    TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { .. })
+                    item.ensemble_record(),
+                    Some(EnsembleRecord::WorkersConfirmed { .. })
                 ))
                 .count(),
             1
@@ -460,19 +464,21 @@ async fn baseline_seals_single_worker_and_multiworker_recovery_keeps_synthesis_g
                 application: "Use the baseline's stated viable preference".into(),
             };
         let mut items = engine.conversation.items().to_vec();
-        items.push(TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
-            run_id: run_id.clone(),
-            synthesis_input: Message::user(
-                zevria_workflow::build_synthesis_input(
-                    EnsembleWorkflow::Plan,
-                    "plan it",
-                    &outcomes,
-                    usize::MAX,
-                )
-                .unwrap(),
-            ),
-            agents: outcomes.iter().map(AgentRunOutcome::summary).collect(),
-        }));
+        items.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::ReportsReady {
+                run_id: run_id.clone(),
+                synthesis_input: Message::user(
+                    zevria_workflow::build_synthesis_input(
+                        EnsembleWorkflow::Plan,
+                        "plan it",
+                        &outcomes,
+                        usize::MAX,
+                    )
+                    .unwrap(),
+                ),
+                agents: outcomes.iter().map(AgentRunOutcome::summary).collect(),
+            },
+        )));
         items.extend([
             TranscriptItem::Message(command_call("inspection", "rtk rg -n plan crates/core/src")),
             successful_tool_result("inspection", "command", "inspected"),
@@ -494,13 +500,12 @@ async fn baseline_seals_single_worker_and_multiworker_recovery_keeps_synthesis_g
         assert!(recovered.can_submit());
         assert_eq!(recovered.reconciliation.unwrap().declaration, declaration);
         let mut corrupt = items;
-        if let Some(TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { agents, .. })) =
-            corrupt.iter_mut().find(|item| {
-                matches!(
-                    item,
-                    TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. })
-                )
-            })
+        if let Some(TranscriptItem::Ensemble(record)) = corrupt.iter_mut().find(|item| {
+            matches!(
+                item.ensemble_record(),
+                Some(EnsembleRecord::ReportsReady { .. })
+            )
+        }) && let EnsembleRecord::ReportsReady { agents, .. } = record.as_mut()
         {
             agents[0]
                 .confirmation
@@ -555,10 +560,12 @@ async fn unmarked_v2_reports_ready_evidence_remains_byte_for_byte_compatible() {
         legacy
     );
     let mut items = engine.conversation.items().to_vec();
-    items.push(TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
-        run_id,
-        synthesis_input: Message::user(legacy),
-        agents: outcomes.iter().map(AgentRunOutcome::summary).collect(),
-    }));
+    items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::ReportsReady {
+            run_id,
+            synthesis_input: Message::user(legacy),
+            agents: outcomes.iter().map(AgentRunOutcome::summary).collect(),
+        },
+    )));
     zevria_transcript::validate_ensemble_review_history(&items).unwrap();
 }

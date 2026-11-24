@@ -29,6 +29,7 @@ pub(crate) struct AuthenticatingHttpClient {
     credentials: Arc<Vec<(HeaderName, McpCredentialSource)>>,
     bearer_token: Option<McpCredentialSource>,
     stop: CancellationToken,
+    can_retry: bool,
 }
 
 impl AuthenticatingHttpClient {
@@ -42,11 +43,16 @@ impl AuthenticatingHttpClient {
             .iter()
             .map(|(name, source)| Ok((name.parse()?, source.clone())))
             .collect::<anyhow::Result<_>>()?;
+        let can_retry = headers
+            .values()
+            .chain(bearer_token.iter())
+            .any(McpCredentialSource::is_command);
         Ok(Self {
             client,
             credentials: Arc::new(credentials),
             bearer_token,
             stop,
+            can_retry,
         })
     }
 
@@ -54,10 +60,10 @@ impl AuthenticatingHttpClient {
         &self,
         headers: Headers,
         auth: Option<String>,
-        send: F,
+        mut send: F,
     ) -> Result<T, HttpError>
     where
-        F: Fn(Headers, Option<String>) -> Fut + Send,
+        F: FnMut(Headers, Option<String>) -> Fut + Send,
         Fut: Future<Output = Result<T, HttpError>> + Send,
         T: Send,
     {
@@ -92,6 +98,7 @@ impl AuthenticatingHttpClient {
             match send(resolved, auth).await {
                 Err(error)
                     if attempt == 0
+                        && self.can_retry
                         && rejected.iter().any(Option::is_some)
                         && unauthorized(&error) => {}
                 result => return result.map_err(scrub),
@@ -168,10 +175,15 @@ impl StreamableHttpClient for AuthenticatingHttpClient {
         headers: Headers,
         limits: StreamableHttpResponseLimits,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
+        let mut message = Some(message);
         let post = self.with_auth(headers, auth, |headers, auth| {
             self.client.post_message_with_response_limits(
                 uri.clone(),
-                message.clone(),
+                if self.can_retry {
+                    message.as_ref().expect("retryable message").clone()
+                } else {
+                    message.take().expect("single send")
+                },
                 session.clone(),
                 auth,
                 headers,

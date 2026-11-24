@@ -224,7 +224,7 @@ struct ConfigFile {
     session: SessionConfig,
     #[serde(default)]
     skills: SkillsConfig,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::mcp::deserialize_config")]
     mcp: zevria_mcp::McpConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<ThemeSelector>,
@@ -265,6 +265,7 @@ pub struct Config {
     pub(crate) session: SessionConfig,
     pub(crate) skills: SkillsConfig,
     pub(crate) mcp: zevria_mcp::McpConfig,
+    pub(crate) mcp_revision: String,
     pub(crate) theme: Option<ThemeSelector>,
     pub(crate) acp: AcpConfig,
     pub(crate) ensemble: EnsembleConfig,
@@ -290,29 +291,26 @@ impl Config {
             "created the Zevria configuration skeleton at {}. Configure providers and model capabilities in models.jsonc for the mode assignments in config.toml, then start Zevria again",
             created.join(" and ")
         );
-        let source = crate::skills::load_skill_config(&path)?;
-        let contents = source
-            .contents
-            .context("configuration disappeared while loading")?;
-        crate::mcp::parse_mcp_config(&contents)?;
-        let file: ConfigFile = toml::from_str(&contents)
-            .with_context(|| format!("failed to parse configuration at {}", path.display()))?;
-        anyhow::ensure!(
-            file.skills == source.settings,
-            "full and skill-only configuration loaders disagree"
-        );
-        let models = std::fs::read_to_string(&models_path).with_context(|| {
+        Self::load_existing(&path, &models_path)
+    }
+
+    pub(crate) fn load_existing(path: &Path, models_path: &Path) -> anyhow::Result<Self> {
+        let contents = crate::settings::read_regular(path)
+            .with_context(|| format!("failed to read configuration at {}", path.display()))?;
+        let models = crate::settings::read_regular(models_path).with_context(|| {
             format!(
                 "failed to read models configuration at {}",
                 models_path.display()
             )
         })?;
-        let mut config = Self::from_files(file, parse_models(&models, &models_path)?)?;
+        let mut config = Self::parse_at(&contents, &models, models_path)
+            .with_context(|| format!("failed to load configuration at {}", path.display()))?;
         config
             .mcp
             .bind_config_directory(path.parent().unwrap_or(Path::new(".")));
-        config.source_path = Some(path);
-        config.models_path = Some(models_path);
+        config.mcp_revision = crate::mcp::config_revision(&contents);
+        config.source_path = Some(path.to_path_buf());
+        config.models_path = Some(models_path.to_path_buf());
         Ok(config)
     }
 
@@ -339,6 +337,7 @@ impl Config {
             session: file.session,
             skills: file.skills,
             mcp: file.mcp,
+            mcp_revision: "memory".into(),
             theme: file.theme,
             acp: file.acp,
             ensemble: file.ensemble,
@@ -389,10 +388,8 @@ impl Config {
         models: &str,
         models_path: &Path,
     ) -> anyhow::Result<Self> {
-        crate::skills::parse_skill_config(contents)?;
-        crate::mcp::parse_mcp_config(contents)?;
         let mut config = Self::from_files(
-            toml::from_str(contents)?,
+            partial_document(contents)?.try_into()?,
             parse_models(models, models_path)?,
         )?;
         config
@@ -452,31 +449,42 @@ pub(crate) const MODELS_PARSE_OPTIONS: jsonc_parser::ParseOptions = jsonc_parser
     allow_unary_plus_numbers: false,
 };
 
+fn jsonc_value(value: jsonc_parser::ast::Value<'_>) -> anyhow::Result<serde_json::Value> {
+    use jsonc_parser::ast::Value as Ast;
+    use serde_json::Value;
+    Ok(match value {
+        Ast::StringLit(lit) => Value::String(lit.value.into_owned()),
+        Ast::NumberLit(lit) => Value::Number(lit.value.parse()?),
+        Ast::BooleanLit(lit) => Value::Bool(lit.value),
+        Ast::NullKeyword(_) => Value::Null,
+        Ast::Array(array) => Value::Array(
+            array
+                .elements
+                .into_iter()
+                .map(jsonc_value)
+                .collect::<anyhow::Result<_>>()?,
+        ),
+        Ast::Object(object) => {
+            let mut map = serde_json::Map::new();
+            for property in object.properties {
+                let key = property.name.as_str();
+                anyhow::ensure!(
+                    !map.contains_key(key),
+                    "duplicate property {key:?} in models configuration"
+                );
+                map.insert(key.to_owned(), jsonc_value(property.value)?);
+            }
+            Value::Object(map)
+        }
+    })
+}
+
 fn parse_models(text: &str, path: &Path) -> anyhow::Result<ModelsFile> {
     (|| -> anyhow::Result<ModelsFile> {
         // Reject ambiguous keys before serde's map conversion can discard one.
         // CST writes and reads must always refer to the same unique property.
         let parsed = jsonc_parser::parse_to_ast(text, &Default::default(), &MODELS_PARSE_OPTIONS)?;
-        let mut pending = parsed.value.as_ref().into_iter().collect::<Vec<_>>();
-        while let Some(value) = pending.pop() {
-            match value {
-                jsonc_parser::ast::Value::Object(object) => {
-                    let mut keys = std::collections::BTreeSet::new();
-                    for property in &object.properties {
-                        let key = property.name.as_str();
-                        anyhow::ensure!(
-                            keys.insert(key),
-                            "duplicate property {key:?} in models configuration"
-                        );
-                        pending.push(&property.value);
-                    }
-                }
-                jsonc_parser::ast::Value::Array(array) => pending.extend(&array.elements),
-                _ => {}
-            }
-        }
-        let value: serde_json::Value =
-            jsonc_parser::parse_to_serde_value(text, &MODELS_PARSE_OPTIONS)?;
+        let value = jsonc_value(parsed.value.context("empty models configuration")?)?;
         let mut models: ModelsFile = serde_json::from_value(value)?;
         let parent = path
             .parent()

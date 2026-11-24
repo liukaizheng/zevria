@@ -1,13 +1,16 @@
-//! Transcript sessions responsibilities.
-use super::item::ENSEMBLE_RECORD_KEY;
-use super::item::MAX_ROOT_RECORD_BYTES;
-use super::item::SKILL_INVOCATION_KEY;
-use super::item::SUBTASK_RESULTS_KEY;
-use super::item::SessionModelsEnvelope;
-use super::item::TOOL_RESULT_METADATA_KEY;
+//! Transcript session discovery.
+use super::item::{MAX_ROOT_RECORD_BYTES, RecordType, read_batch_version, read_record_type};
 use anyhow::Context as _;
+use serde::{
+    Deserialize, Deserializer,
+    de::{IgnoredAny, MapAccess, SeqAccess, Visitor, value::MapAccessDeserializer},
+};
 use std::path::Path;
 use std::path::PathBuf;
+use std::{
+    borrow::Cow,
+    io::{self, BufRead, BufReader, Read as _},
+};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -113,15 +116,15 @@ const PREVIEW_SCAN_LINES: usize = 16;
 const PREVIEW_MAX_CHARS: usize = 80;
 
 /// Every resumable session in the directory, newest-first. Empty files and
-/// legacy models-plus-prefix-only roots are skipped. A saved mode is meaningful
+/// models-only roots are skipped. A saved mode is meaningful
 /// session state even without a message and must remain reopenable.
 pub fn list_sessions(sessions_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> {
     let mut summaries = Vec::new();
     for (modified, session_id, path) in session_files_by_mtime(sessions_dir)?.into_iter().rev() {
-        if is_abandoned_root(&path) {
+        let (abandoned, preview) = scan_root(&path, true);
+        if abandoned {
             continue;
         }
-        let preview = session_preview(&path);
         summaries.push(SessionSummary {
             id: session_id,
             path,
@@ -132,106 +135,271 @@ pub fn list_sessions(sessions_dir: &Path) -> anyhow::Result<Vec<SessionSummary>>
     Ok(summaries)
 }
 
-pub(super) fn bounded_record_lines<R: std::io::BufRead>(
-    mut reader: R,
-) -> impl Iterator<Item = std::io::Result<Vec<u8>>> {
-    use std::io::{BufRead as _, Read as _};
-    let mut done = false;
-    std::iter::from_fn(move || {
-        if done {
-            return None;
+/// Read one physical line with a fixed bound, reusing the caller's buffer.
+pub(super) fn read_record_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<bool> {
+    line.clear();
+    let bytes = reader
+        .take(MAX_ROOT_RECORD_BYTES as u64 + 1)
+        .read_until(b'\n', line)?;
+    if bytes > MAX_ROOT_RECORD_BYTES {
+        return Err(io::Error::other("root record exceeds the 64 MiB limit"));
+    }
+    Ok(bytes != 0)
+}
+
+/// Peek at a record without constructing a transcript item, decoding raster
+/// data or building a generic JSON object. Unused fields use Serde's skip path.
+#[derive(Default)]
+struct Discovery {
+    substantive: bool,
+    preview: Option<String>,
+}
+
+impl Discovery {
+    fn merge(&mut self, other: Self) {
+        self.substantive |= other.substantive;
+        if self.preview.is_none() {
+            self.preview = other.preview;
         }
-        let mut line = Vec::new();
-        match (&mut reader)
-            .take(MAX_ROOT_RECORD_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)
-        {
-            Ok(0) => {
-                done = true;
+    }
+}
+
+struct PickerLine<const ALLOW_BATCH: bool>(Discovery);
+
+impl<'de, const ALLOW_BATCH: bool> Deserialize<'de> for PickerLine<ALLOW_BATCH> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(Self(Discovery::default()))
+    }
+}
+
+impl<'de, const ALLOW_BATCH: bool> Visitor<'de> for PickerLine<ALLOW_BATCH> {
+    type Value = Self;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a tagged transcript record")
+    }
+    fn visit_map<A: MapAccess<'de>>(mut self, mut map: A) -> Result<Self, A::Error> {
+        let record_type = read_record_type(&mut map)?;
+        let fields = MapAccessDeserializer::new(map);
+        self.0.substantive = true;
+        self.0.preview = match record_type {
+            RecordType::Batch if ALLOW_BATCH => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Batch {
+                    #[serde(rename = "version", deserialize_with = "read_batch_version")]
+                    _version: u32,
+                    records: PickerBatch,
+                }
+                self.0 = Batch::deserialize(fields)?.records.0;
+                return Ok(self);
+            }
+            RecordType::Batch => return Err(serde::de::Error::custom("nested transcript batch")),
+            RecordType::SessionModels => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Models {
+                    #[serde(rename = "models")]
+                    _models: crate::models::SessionModels,
+                }
+                Models::deserialize(fields)?;
+                self.0.substantive = false;
                 None
             }
-            Ok(_) if line.len() > MAX_ROOT_RECORD_BYTES => {
-                done = true;
-                Some(Err(std::io::Error::other(
-                    "root record exceeds the 64 MiB limit",
+            RecordType::Message | RecordType::RequestPrompt => {
+                #[derive(Deserialize)]
+                struct Prompt<'a> {
+                    #[serde(borrow)]
+                    message: PromptMessage<'a>,
+                }
+                #[derive(Deserialize)]
+                struct PromptMessage<'a> {
+                    #[serde(borrow)]
+                    role: Cow<'a, str>,
+                    #[serde(default)]
+                    content: PreviewBlocks,
+                }
+                let prompt = Prompt::deserialize(fields)?.message;
+                (prompt.role == "user" && !prompt.content.0.is_empty())
+                    .then(|| preview_line(&prompt.content.0))
+            }
+            RecordType::SkillInvocation => {
+                #[derive(Deserialize)]
+                struct Skill<'a> {
+                    #[serde(borrow)]
+                    invocation: Invocation<'a>,
+                }
+                #[derive(Deserialize)]
+                struct Invocation<'a> {
+                    #[serde(borrow)]
+                    name: Cow<'a, str>,
+                    arguments: PreviewBlocks,
+                }
+                let invocation = Skill::deserialize(fields)?.invocation;
+                Some(preview_line(&format!(
+                    "${} {}",
+                    invocation.name, invocation.arguments.0
                 )))
             }
-            Ok(_) => Some(Ok(line)),
-            Err(error) => {
-                done = true;
-                Some(Err(error))
+            RecordType::Ensemble => {
+                #[derive(Deserialize)]
+                struct Ensemble {
+                    ensemble: StartRecord,
+                }
+                #[derive(Deserialize)]
+                struct StartRecord {
+                    start: Option<Start>,
+                }
+                #[derive(Deserialize)]
+                struct Start {
+                    workflow: crate::EnsembleWorkflow,
+                    prompt: PreviewBlocks,
+                }
+                Ensemble::deserialize(fields)?.ensemble.start.map(|start| {
+                    preview_line(&format!(
+                        "{} {}",
+                        start.workflow.slash_command(),
+                        start.prompt.0
+                    ))
+                })
             }
-        }
-    })
-}
-
-/// The first plain user prompt within the file's leading lines, flattened to
-/// one bounded display line. Unreadable, malformed, or absent content simply
-/// yields no preview — a session must remain listable regardless.
-pub(super) fn session_preview(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    for line in bounded_record_lines(reader).take(PREVIEW_SCAN_LINES) {
-        let line = String::from_utf8(line.ok()?).ok()?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        // Only user prompts qualify: compound tool-result and subtask-result
-        // records are engine traffic, not the user's prompt. A direct skill
-        // invocation previews as its compact `$name` form.
-        let value: serde_json::Value = serde_json::from_str(&line).ok()?;
-        // Picker previews never instantiate a validated image or decode pixels.
-        if let Some(start) = value.get(ENSEMBLE_RECORD_KEY).and_then(|e| e.get("start")) {
-            let workflow: crate::EnsembleWorkflow =
-                serde_json::from_value(start.get("workflow")?.clone()).ok()?;
-            let prefix = workflow.slash_command();
-            return Some(preview_line(&format!(
-                "{prefix} {}",
-                preview_blocks(start.get("prompt")?, true)
-            )));
-        }
-        if let Some(invocation) = value.get(SKILL_INVOCATION_KEY) {
-            return Some(preview_line(&format!(
-                "${} {}",
-                invocation.get("name")?.as_str()?,
-                preview_blocks(invocation.get("arguments")?, true)
-            )));
-        }
-        if value.get("role").and_then(serde_json::Value::as_str) == Some("user")
-            && !value.as_object()?.contains_key(TOOL_RESULT_METADATA_KEY)
-            && !value.as_object()?.contains_key(SUBTASK_RESULTS_KEY)
-        {
-            let preview = preview_blocks(value.get("content")?, false);
-            if !preview.is_empty() {
-                return Some(preview_line(&preview));
+            _ => {
+                IgnoredAny::deserialize(fields)?;
+                None
             }
-        }
+        };
+        Ok(self)
     }
-    None
 }
 
-fn preview_blocks(value: &serde_json::Value, typed: bool) -> String {
-    let mut preview = String::new();
-    if let Some(blocks) = value.as_array() {
-        for block in blocks {
-            match block.get("type").and_then(serde_json::Value::as_str) {
-                Some("text") => {
-                    if let Some(text) = block
-                        .get(if typed { "value" } else { "text" })
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        preview.extend(text.chars().take(PREVIEW_MAX_CHARS + 1));
+struct PickerBatch(Discovery);
+impl<'de> Deserialize<'de> for PickerBatch {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Batch;
+        impl<'de> Visitor<'de> for Batch {
+            type Value = PickerBatch;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a nonempty array of transcript items")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<PickerBatch, A::Error> {
+                let mut result = seq
+                    .next_element::<PickerLine<false>>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty transcript batch"))?
+                    .0;
+                while let Some(line) = seq.next_element::<PickerLine<false>>()? {
+                    result.merge(line.0);
+                }
+                Ok(PickerBatch(result))
+            }
+        }
+        deserializer.deserialize_seq(Batch)
+    }
+}
+
+#[derive(Default)]
+struct PreviewBlocks(String);
+impl<'de> Deserialize<'de> for PreviewBlocks {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Blocks;
+        impl<'de> Visitor<'de> for Blocks {
+            type Value = PreviewBlocks;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("prompt content blocks")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<PreviewBlocks, A::Error> {
+                // `value` belongs to typed prompt blocks, where it can also be
+                // an image object. Read text only and skip objects recursively.
+                #[derive(Deserialize)]
+                struct Block<'a> {
+                    #[serde(rename = "type", borrow)]
+                    kind: Cow<'a, str>,
+                    #[serde(default, borrow)]
+                    text: Option<Cow<'a, str>>,
+                    #[serde(default)]
+                    value: PreviewValue,
+                }
+                let mut preview = String::new();
+                while preview.chars().count() <= PREVIEW_MAX_CHARS {
+                    let Some(block) = seq.next_element::<Block<'_>>()? else {
+                        return Ok(PreviewBlocks(preview));
+                    };
+                    match block.kind.as_ref() {
+                        "text" => preview.extend(
+                            block
+                                .text
+                                .as_deref()
+                                .unwrap_or(&block.value.0)
+                                .chars()
+                                .take(PREVIEW_MAX_CHARS + 1),
+                        ),
+                        "image" => preview.push_str("[image]"),
+                        _ => {}
                     }
                 }
-                Some("image") => preview.push_str("[image]"),
-                _ => {}
-            }
-            if preview.chars().count() > PREVIEW_MAX_CHARS {
-                break;
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(PreviewBlocks(preview))
             }
         }
+        deserializer.deserialize_seq(Blocks)
     }
-    preview
+}
+
+#[derive(Default)]
+struct PreviewValue(String);
+impl<'de> Deserialize<'de> for PreviewValue {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Value;
+        impl<'de> Visitor<'de> for Value {
+            type Value = PreviewValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a text or image prompt value")
+            }
+            fn visit_str<E>(self, text: &str) -> Result<PreviewValue, E> {
+                Ok(PreviewValue(
+                    text.chars().take(PREVIEW_MAX_CHARS + 1).collect(),
+                ))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<PreviewValue, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(PreviewValue::default())
+            }
+        }
+        d.deserialize_any(Value)
+    }
+}
+
+fn scan_root(path: &Path, want_preview: bool) -> (bool, Option<String>) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return (false, None);
+    };
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return (false, None);
+    }
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    let mut lines = 0;
+    let mut substantive = false;
+    let mut models_only = false;
+    loop {
+        match read_record_line(&mut reader, &mut buffer) {
+            Ok(false) => return (!substantive && (lines == 0 || models_only), None),
+            Err(_) => return (false, None),
+            Ok(true) => {}
+        }
+        lines += 1;
+        if !buffer.iter().all(u8::is_ascii_whitespace) {
+            let Ok(PickerLine(found)) = serde_json::from_slice::<PickerLine<true>>(&buffer) else {
+                return (false, None);
+            };
+            substantive |= found.substantive;
+            models_only |= !found.substantive;
+            if want_preview && let Some(preview) = found.preview {
+                return (false, Some(preview));
+            }
+        }
+        if substantive && (!want_preview || lines >= PREVIEW_SCAN_LINES) {
+            return (false, None);
+        }
+    }
 }
 
 /// Flatten prompt text to its first line, char-truncated with an ellipsis.
@@ -259,21 +427,30 @@ pub fn latest_session_file(sessions_dir: &Path) -> anyhow::Result<Option<PathBuf
 /// it may be the result of an explicit Plan → Build selection. Unreadable,
 /// malformed, and substantive histories also stay visible.
 pub fn is_abandoned_root(path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
-        return false;
+    scan_root(path, false).0
+}
+
+/// Resolve one root by its filename without scanning other sessions. As with
+/// the picker, symlinks are not resumable entries. An explicit ID lookup
+/// does not read transcript contents; startup validates the selected log.
+pub fn find_session_file(directory: &Path, session_id: &str) -> anyhow::Result<Option<PathBuf>> {
+    use std::path::Component;
+    let mut components = Path::new(session_id).components();
+    if !matches!(components.next(), Some(Component::Normal(name)) if name == session_id)
+        || components.next().is_some()
+        || session_id.contains('\0')
+    {
+        return Ok(None);
     }
-    let mut lines = bounded_record_lines(std::io::BufReader::new(file));
-    match lines.next() {
-        None => return true,
-        Some(Ok(line)) if serde_json::from_slice::<SessionModelsEnvelope>(&line).is_ok() => {}
-        _ => return false,
+    let path = directory.join(format!("{session_id}.jsonl"));
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(Some(path)),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to inspect session file {}", path.display()))
+        }
     }
-    // Stop as soon as history is substantive/damaged; listing should not load
-    // and validate entire conversations just to exclude abandoned roots.
-    lines.all(|line| line.is_ok_and(|line| line.iter().all(u8::is_ascii_whitespace)))
 }
 
 #[cfg(test)]

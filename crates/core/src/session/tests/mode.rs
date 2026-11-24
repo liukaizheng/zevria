@@ -138,12 +138,20 @@ async fn every_selection_restriction_applies_even_to_equal_modes() {
             "persistence_degraded" => {
                 // A rejected required append latches degraded persistence while
                 // preserving the current authoritative branch.
+                let path = engine.conversation.path().to_path_buf();
+                let backup = path.with_extension("backup");
+                std::fs::rename(&path, &backup).unwrap();
+                std::fs::create_dir(&path).unwrap();
                 assert!(
                     engine
                         .conversation
-                        .push_required(TranscriptItem::SessionMode(SessionMode::Plan))
+                        .push_required_batch(vec![TranscriptItem::Error {
+                            error: "failed append".into()
+                        }])
                         .is_err()
                 );
+                std::fs::remove_dir(&path).unwrap();
+                std::fs::rename(&backup, &path).unwrap();
             }
             "busy" => {
                 engine.enter_turn().unwrap();
@@ -196,39 +204,39 @@ pub(super) fn published_history(artifact: &PlanArtifact) -> Vec<TranscriptItem> 
         ..start.agents[0].clone()
     });
     with_explicit_fixture_confirmations(vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::Started {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started {
             id: artifact.version.id,
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("fixture reports"),
             agents: Vec::new(),
-        }),
-        TranscriptItem::Plan(PlanRecord::Published {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Published {
             artifact: artifact.clone(),
             provenance: PlanPublicationProvenance::Synthesized,
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::Completed {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Completed {
             run_id: start.run_id,
-        }),
+        })),
     ])
 }
 
 fn workflow_histories() -> Vec<(Vec<TranscriptItem>, SessionMode)> {
     let (artifact, ready) = ready_plan_fixture();
-    let started = vec![TranscriptItem::Plan(PlanRecord::Started {
+    let started = vec![TranscriptItem::Plan(Box::new(PlanRecord::Started {
         id: artifact.version.id,
-    })];
+    }))];
     let published = published_history(&artifact);
     let mut resolved = ready.clone();
-    resolved.push(TranscriptItem::Plan(PlanRecord::Resolved {
+    resolved.push(TranscriptItem::Plan(Box::new(PlanRecord::Resolved {
         id: artifact.version.id,
         artifact: Some(artifact),
         resolution: PlanResolution::ImplementedCurrent,
-    }));
+    })));
     vec![
         (Vec::new(), SessionMode::Build),
         (started, SessionMode::Plan),
@@ -405,7 +413,7 @@ async fn plan_implementation_and_fresh_handoff_commit_ordinary_build_atomically(
                     .conversation
                     .items()
                     .iter()
-                    .any(|item| matches!(item, TranscriptItem::Plan(PlanRecord::Handoff { .. })))
+                    .any(|item| matches!(item.plan_record(), Some(PlanRecord::Handoff { .. })))
             );
             assert_eq!(
                 engine.provider.requests.lock().unwrap()[0].instructions,

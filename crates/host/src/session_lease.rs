@@ -6,13 +6,14 @@
 //! locking identities are unsupported, as are filesystems with broken OS locks.
 
 use std::{
-    fs::{self, File, Metadata, OpenOptions, TryLockError},
+    fs::{self, File, Metadata, TryLockError},
     io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::Context as _;
+use zevria_foundation::open_lock_file;
 
 #[cfg(test)]
 #[path = "session_lease_tests.rs"]
@@ -34,10 +35,20 @@ pub struct RootSessionLease {
 }
 
 impl RootSessionLease {
-    /// Synchronous, bounded-wait acquisition. Startup calls this on a blocking
-    /// worker, before opening or repairing the transcript. Never truncate a
-    /// customized sidecar, and never delete a failed contender's locking path.
+    /// Acquire a lease without sweeping inactive sidecars, for lifecycle tests.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn acquire(transcript: &Path) -> anyhow::Result<Self> {
+        Self::acquire_inner(transcript, false)
+    }
+
+    /// Synchronous, bounded-wait acquisition with a sweep of inactive sidecars.
+    /// Startup calls this on a blocking worker before opening or repairing the
+    /// transcript.
+    pub(crate) fn acquire_sweeping(transcript: &Path) -> anyhow::Result<Self> {
+        Self::acquire_inner(transcript, true)
+    }
+
+    fn acquire_inner(transcript: &Path, sweep: bool) -> anyhow::Result<Self> {
         let parent = transcript
             .parent()
             .context("session transcript has no parent")?;
@@ -45,8 +56,11 @@ impl RootSessionLease {
             .with_context(|| format!("cannot create session directory {}", parent.display()))?;
         let coordinator_path = parent.join(COORDINATOR_NAME);
         let _coordinator = DirectoryCoordinator::acquire(&coordinator_path, COORDINATOR_WAIT)?;
+        if sweep {
+            sweep_locked(parent);
+        }
         let path = transcript.with_extension("jsonl.lock");
-        let file = open_regular(&path, true)
+        let file = open_lock_file(&path, true)
             .with_context(|| format!("cannot open session lease {}", path.display()))?;
         match file.try_lock() {
             Ok(()) => Ok(Self {
@@ -95,15 +109,15 @@ impl Drop for RootSessionLease {
 }
 
 /// This locking identity is permanent: never remove it, even if no sidecars
-/// remain. Hold it only for short lease filesystem operations, not directory
-/// enumeration, transcript IO, asynchronous work, or the runtime lifetime.
+/// remain. Hold it only for lease bookkeeping, including the inactive-sidecar
+/// sweep, never for transcript IO, asynchronous work, or the runtime lifetime.
 struct DirectoryCoordinator {
     _file: File,
 }
 
 impl DirectoryCoordinator {
     fn acquire(path: &Path, wait: Duration) -> anyhow::Result<Self> {
-        let file = open_regular(path, true)
+        let file = open_lock_file(path, true)
             .with_context(|| format!("cannot open session lease coordinator {}", path.display()))?;
         let deadline = Instant::now() + wait;
         loop {
@@ -128,46 +142,6 @@ impl DirectoryCoordinator {
             }
         }
     }
-}
-
-/// Do not follow links or block on special files. Recheck the opened handle in
-/// addition to the path; neither lock kind may truncate an existing file.
-fn open_regular(path: &Path, create: bool) -> io::Result<File> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "lease path must be a regular file",
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if create && error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .create(create)
-        .truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(not(windows))]
-    let file = options.open(path)?;
-    #[cfg(windows)]
-    let file = zevria_foundation::windows_io::open_lock(path, create)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "lease handle must be a regular file",
-        ));
-    }
-    Ok(file)
 }
 
 fn eligible_name(path: &Path) -> bool {
@@ -211,12 +185,17 @@ fn remove_eligible(path: &Path, file: File) -> io::Result<()> {
     Ok(())
 }
 
-/// Best-effort, non-recursive startup maintenance for exactly one namespace.
-/// Enumeration is outside coordination. Every candidate is reopened without
-/// creation and revalidated under coordination; only actual OS lock acquisition
-/// establishes inactivity, even when no corresponding transcript exists yet.
-/// Run this on a blocking worker, never directly on the async executor.
+/// Best-effort maintenance of the selected namespace while coordinated.
+#[cfg(test)]
 pub(crate) fn sweep_inactive(directory: &Path) {
+    if let Ok(_coordinator) =
+        DirectoryCoordinator::acquire(&directory.join(COORDINATOR_NAME), COORDINATOR_WAIT)
+    {
+        sweep_locked(directory);
+    }
+}
+
+fn sweep_locked(directory: &Path) {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return,
@@ -226,27 +205,28 @@ pub(crate) fn sweep_inactive(directory: &Path) {
         }
     };
     for entry in entries {
-        let result = (|| -> anyhow::Result<()> {
-            let path = entry?.path();
-            if eligible_sidecar(&path)? {
-                sweep_candidate(&path)?;
-            }
-            Ok(())
-        })();
+        let result = entry
+            .map_err(anyhow::Error::from)
+            .and_then(|entry| sweep_candidate_locked(&entry.path()));
         if let Err(error) = result {
             tracing::warn!(target: "zevria::session_lease", path = %directory.display(), %error, "inactive session lease cleanup deferred until a later startup");
         }
     }
 }
 
+#[cfg(test)]
 fn sweep_candidate(path: &Path) -> anyhow::Result<()> {
     let parent = path.parent().context("session lease has no parent")?;
     let _coordinator =
         DirectoryCoordinator::acquire(&parent.join(COORDINATOR_NAME), COORDINATOR_WAIT)?;
+    sweep_candidate_locked(path)
+}
+
+fn sweep_candidate_locked(path: &Path) -> anyhow::Result<()> {
     if !eligible_sidecar(path)? {
         return Ok(());
     }
-    let file = match open_regular(path, false) {
+    let file = match open_lock_file(path, false) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {

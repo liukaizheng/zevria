@@ -43,11 +43,9 @@ async fn recovery_group_has_one_physical_append_and_one_replay_installation() {
     let suffix = &after[before.len()..];
     assert_eq!(suffix.iter().filter(|byte| **byte == b'\n').count(), 1);
     let value: serde_json::Value = serde_json::from_slice(suffix).unwrap();
-    assert_eq!(value["zevria_batch"]["version"], 1);
-    assert_eq!(
-        value["zevria_batch"]["records"].as_array().unwrap().len(),
-        3
-    );
+    assert_eq!(value["type"], "batch");
+    assert_eq!(value["version"], 2);
+    assert_eq!(value["records"].as_array().unwrap().len(), 3);
     assert!(engine.conversation.items().ends_with(&group));
     assert_eq!(
         zevria_transcript::load(&path).unwrap(),

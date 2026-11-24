@@ -228,7 +228,7 @@ async fn missing_skill_cannot_revise_a_ready_plan_and_valid_name_uses_plan_mode(
         PlanWorkflowState::Planning { .. }
     ));
     assert_eq!(engine.active_skills().unwrap().len(), 1);
-    assert!(engine.conversation.items().iter().any(|item| matches!(item, TranscriptItem::Plan(PlanRecord::RevisionRequested { artifact: recorded }) if recorded.version == artifact.version)));
+    assert!(engine.conversation.items().iter().any(|item| matches!(item.plan_record(), Some(PlanRecord::RevisionRequested { artifact: recorded }) if recorded.version == artifact.version)));
 }
 
 #[tokio::test]
@@ -697,9 +697,9 @@ async fn skill_replacements_enforce_the_selected_modes_tool_policy_before_commit
     let old_start =
         ensemble_start_fixture("skill-policy-edit", EnsembleWorkflow::Review, "old review");
     let original = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: old_start.clone(),
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("old tail")),
     ];
     let provider = ScriptedProvider::new(std::iter::empty::<anyhow::Result<Message>>());
@@ -1191,11 +1191,11 @@ async fn resumed_skill_pin_is_reapplied_by_stateless_dispatch() {
     let (_directory, transcript) = test_transcript();
     let skills = test_skills();
     let prior = vec![
-        TranscriptItem::SkillInvocation(SkillInvocation::new(
+        TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
             SkillName::parse("commit").expect("name"),
             "ship it",
             SkillApplication::Activate(skills.get("commit").expect("commit").snapshot()),
-        )),
+        ))),
         TranscriptItem::Message(Message::assistant("committed")),
     ];
     let mut engine = SessionEngine::new(provider, tools, test_policies(), transcript, skills)

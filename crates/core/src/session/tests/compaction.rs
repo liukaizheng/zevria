@@ -168,8 +168,8 @@ async fn ensemble_reports_run_normal_pre_synthesis_compaction() {
         .iter()
         .position(|item| {
             matches!(
-                item,
-                TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. })
+                item.ensemble_record(),
+                Some(EnsembleRecord::ReportsReady { .. })
             )
         })
         .expect("reports boundary");
@@ -1658,7 +1658,7 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
                 .all(|item| !zevria_transcript::transcript::is_prompt_item(item))
         );
         assert!(
-            matches!(&loaded[0], TranscriptItem::Plan(PlanRecord::Handoff { handoff: durable }) if durable == &handoff)
+            matches!(loaded[0].plan_record(), Some(PlanRecord::Handoff { handoff: durable }) if durable == &handoff)
         );
         let TranscriptItem::Compaction(checkpoint) = &loaded[1] else {
             panic!("handoff-only history must install a pre-turn checkpoint");
@@ -1764,9 +1764,9 @@ async fn resumed_plan_handoff_history_compacts_manually_or_before_a_new_prompt()
     for (manual, tool_history) in [(true, false), (true, true), (false, true)] {
         let (artifact, _) = ready_plan_fixture();
         let handoff = PlanHandoff::new(artifact, "source-session");
-        let mut items = vec![TranscriptItem::Plan(PlanRecord::Handoff {
+        let mut items = vec![TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
             handoff: handoff.clone(),
-        })];
+        }))];
         if tool_history {
             let evidence = "tool evidence ".repeat(180);
             items.extend([

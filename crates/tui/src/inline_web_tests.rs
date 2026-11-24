@@ -479,11 +479,11 @@ fn restore_numbers_each_committed_response_once_and_keeps_incomplete_rows_header
         let mut restored = App::new();
         restored.restore(vec![
             TranscriptItem::Message(Message::user("prompt")),
-            TranscriptItem::IncompleteResponse(
+            TranscriptItem::IncompleteResponse(Box::new(
                 zevria_transcript::IncompleteResponse::from_attempt(&abandoned)
                     .unwrap()
                     .unwrap(),
-            ),
+            )),
             response,
             TranscriptItem::Message(Message::assistant("next response")),
         ]);

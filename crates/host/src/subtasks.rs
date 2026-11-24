@@ -46,14 +46,14 @@ use zevria_transcript::transcript::TranscriptWriter;
 #[cfg(test)]
 use zevria_foundation::ModelRole;
 
-/// Everything one child run needs, cloned per worker.
-#[derive(Clone)]
+/// Shared, immutable configuration across all children of one root.
 pub(crate) struct SubtaskSupervisorConfig {
     /// Session-opening assignments, independent of root model switching.
     pub explore_factory: ProviderRouterFactory,
     pub builder_factory: ProviderRouterFactory,
     pub explore_tools: ToolServerHandle,
     pub startup_workspace: PathBuf,
+    pub empty_skills: Arc<SkillCatalog>,
     pub command_config: crate::config::CommandConfig,
     /// The parent/frontend event channel receiving tagged child events.
     pub events: SessionEventSender,
@@ -112,7 +112,7 @@ fn build_policies(child_workspace: &Path, startup_workspace: &Path) -> SessionPo
 /// future instead aborts the workers via its `JoinSet`.
 pub(crate) async fn run_supervisor(
     mut requests: Receiver<SubtaskLaunchRequest>,
-    config: SubtaskSupervisorConfig,
+    config: Arc<SubtaskSupervisorConfig>,
     shutdown: CancellationToken,
 ) {
     let mut workers = JoinSet::new();
@@ -137,7 +137,7 @@ pub(crate) async fn run_supervisor(
 
 async fn run_worker(
     request: SubtaskLaunchRequest,
-    config: SubtaskSupervisorConfig,
+    config: Arc<SubtaskSupervisorConfig>,
     permits: Arc<Semaphore>,
     stop_delivery: CancellationToken,
 ) {
@@ -175,13 +175,13 @@ fn spawn_supervisor(
     config: SubtaskSupervisorConfig,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run_supervisor(requests, config, shutdown))
+    tokio::spawn(run_supervisor(requests, Arc::new(config), shutdown))
 }
 
 /// Run one child to its terminal state and always resolve the launch oneshot.
 async fn run_child(
     mut request: SubtaskLaunchRequest,
-    config: SubtaskSupervisorConfig,
+    config: Arc<SubtaskSupervisorConfig>,
     permit: OwnedSemaphorePermit,
     cancellation: &CancellationToken,
     stop_delivery: &CancellationToken,
@@ -198,7 +198,7 @@ async fn run_child(
     // five registered tools spawns detached mutations beyond command cleanup.
     let child = ChildSession {
         descriptor: request.descriptor.clone(),
-        prompt: request.prompt.clone(),
+        prompt: std::mem::take(&mut request.prompt),
         // This preparation context has no delegation capability. The execution
         // context below is bound to the child's composed policy, never the parent's.
         turn: zevria_session_api::TurnContext::new(
@@ -212,11 +212,7 @@ async fn run_child(
     let stop_forwarding = stop_delivery.clone();
     let execution = tokio::spawn(async move {
         let _permit = permit;
-        let result = run_child_session(&child, &execution_config, stop_forwarding).await;
-        // Retain ownership through engine/tool cleanup, but never through
-        // terminal outcome/status publication (which may be backpressured).
-        drop(child.workspace);
-        result
+        run_child_session(child, &execution_config, stop_forwarding).await
     });
     let result = match execution.await {
         Ok(result) => result,
@@ -275,12 +271,17 @@ struct ChildSession {
 }
 
 async fn run_child_session(
-    request: &ChildSession,
+    request: ChildSession,
     config: &SubtaskSupervisorConfig,
     stop_delivery: CancellationToken,
 ) -> anyhow::Result<String> {
     let id = request.descriptor.id.clone();
-    let transcript = TranscriptWriter::allocate_with_id(&config.subsessions_dir, id.as_str())?;
+    let directory = config.subsessions_dir.clone();
+    let child_id = id.clone();
+    let transcript = tokio::task::spawn_blocking(move || {
+        TranscriptWriter::allocate_with_id(&directory, child_id.as_str())
+    })
+    .await??;
     if request.turn.is_cancelled() {
         anyhow::bail!("subtask cancelled before its model turn started");
     }
@@ -323,7 +324,7 @@ async fn run_child_session(
         tools,
         policies,
         transcript,
-        Arc::new(SkillCatalog::default()),
+        config.empty_skills.clone(),
     )?
     .with_incremental_tools(config.incremental_tools)
     .with_guidance_snapshot(config.guidance.clone())
@@ -386,7 +387,7 @@ async fn run_child_session(
     let execution = engine
         .handle_turn(
             zevria_session_api::TurnCommand::Submit {
-                text: zevria_content::UserPrompt::from_text(request.prompt.clone()),
+                text: zevria_content::UserPrompt::from_text(request.prompt),
                 mode: SessionMode::Build,
                 behavior: zevria_foundation::RequestBehavior::Standard,
             },
@@ -611,6 +612,7 @@ mod tests {
             retained_user_tokens,
         };
         SubtaskSupervisorConfig {
+            empty_skills: Arc::new(SkillCatalog::default()),
             explore_factory: ProviderRouterFactory::new(
                 ModelRole::Explore,
                 profile.clone(),
@@ -675,13 +677,9 @@ mod tests {
                 workspace: None,
             };
             assert!(
-                run_child_session(
-                    &request,
-                    &config,
-                    tokio_util::sync::CancellationToken::new()
-                )
-                .await
-                .is_err()
+                run_child_session(request, &config, tokio_util::sync::CancellationToken::new())
+                    .await
+                    .is_err()
             );
             assert!(!directory.join("cancelled.jsonl").exists());
         }

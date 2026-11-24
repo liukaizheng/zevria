@@ -852,12 +852,12 @@ fn resumed_ready_plan_is_deduplicated_and_copyable() {
     };
     let mut app = App::new();
     app.restore(vec![
-        TranscriptItem::Plan(PlanRecord::Started {
+        TranscriptItem::Plan(Box::new(PlanRecord::Started {
             id: artifact.version.id,
-        }),
-        TranscriptItem::Plan(PlanRecord::Ready {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Ready {
             artifact: artifact.clone(),
-        }),
+        })),
     ]);
     app.restore_plan_state(state);
 
@@ -943,27 +943,29 @@ fn plan_restoration_matrix_seeds_ui_without_turns_and_accepts_live_transitions()
     ] {
         let mut items = Vec::new();
         if !matches!(state, PlanWorkflowState::Idle) {
-            items.push(TranscriptItem::Plan(PlanRecord::Started {
+            items.push(TranscriptItem::Plan(Box::new(PlanRecord::Started {
                 id: artifact.version.id,
-            }));
+            })));
         }
         if state.artifact().is_some() {
-            items.push(TranscriptItem::Plan(PlanRecord::Ready {
+            items.push(TranscriptItem::Plan(Box::new(PlanRecord::Ready {
                 artifact: artifact.clone(),
-            }));
+            })));
         }
         match &state {
             PlanWorkflowState::Planning {
                 previous: Some(_), ..
-            } => items.push(TranscriptItem::Plan(PlanRecord::RevisionRequested {
-                artifact: artifact.clone(),
-            })),
+            } => items.push(TranscriptItem::Plan(Box::new(
+                PlanRecord::RevisionRequested {
+                    artifact: artifact.clone(),
+                },
+            ))),
             PlanWorkflowState::Resolved { resolution, .. } => {
-                items.push(TranscriptItem::Plan(PlanRecord::Resolved {
+                items.push(TranscriptItem::Plan(Box::new(PlanRecord::Resolved {
                     id: artifact.version.id,
                     artifact: Some(artifact.clone()),
                     resolution: *resolution,
-                }))
+                })))
             }
             _ => {}
         }
@@ -1154,9 +1156,9 @@ fn handoff_is_a_semantic_selectable_row_instead_of_user_prose() {
     );
 
     let mut restored = App::new();
-    restored.restore(vec![TranscriptItem::Plan(PlanRecord::Handoff {
+    restored.restore(vec![TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
         handoff: handoff.clone(),
-    })]);
+    }))]);
     assert!(matches!(
         restored.history(),
         [HistoryEntry::PlanHandoff(saved, _)] if saved == &handoff
@@ -1300,17 +1302,17 @@ fn resumed_fresh_resolution_returns_to_build_and_exposes_typed_retry() {
     let expected = artifact.version;
     let mut app = App::new();
     app.restore(vec![
-        TranscriptItem::Plan(PlanRecord::Started {
+        TranscriptItem::Plan(Box::new(PlanRecord::Started {
             id: artifact.version.id,
-        }),
-        TranscriptItem::Plan(PlanRecord::Ready {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Ready {
             artifact: artifact.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::Resolved {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Resolved {
             id: artifact.version.id,
             artifact: Some(artifact.clone()),
             resolution: PlanResolution::ImplementedFresh,
-        }),
+        })),
     ]);
     app.reduce_without_effects(SessionEvent::PlanStateChanged {
         state: PlanWorkflowState::Resolved {
@@ -3240,7 +3242,7 @@ fn inspect_only_panes_never_invoke_skills() {
 fn recalled_skill_resubmitted_unchanged_remains_a_typed_skill_edit() {
     let mut app = app_with_skills();
     app.restore(vec![
-        TranscriptItem::SkillInvocation(SkillInvocation::new(
+        TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
             SkillName::parse("commit").expect("name"),
             "ship it",
             SkillApplication::Activate(
@@ -3251,7 +3253,7 @@ fn recalled_skill_resubmitted_unchanged_remains_a_typed_skill_edit() {
                 )
                 .unwrap(),
             ),
-        )),
+        ))),
         TranscriptItem::Message(Message::assistant("committed")),
     ]);
     app.select_for_test(cursor(0, 0));
@@ -3278,7 +3280,7 @@ fn recalled_skill_resubmitted_unchanged_remains_a_typed_skill_edit() {
 fn restored_skill_activations_are_invisible_and_invocations_show_the_dollar_form_only() {
     let mut app = App::new();
     app.restore(vec![
-        TranscriptItem::SkillInvocation(SkillInvocation::new(
+        TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
             SkillName::parse("commit").expect("name"),
             "ship it",
             SkillApplication::Activate(
@@ -3289,7 +3291,7 @@ fn restored_skill_activations_are_invisible_and_invocations_show_the_dollar_form
                 )
                 .unwrap(),
             ),
-        )),
+        ))),
         TranscriptItem::Message(Message::assistant("committed")),
     ]);
 

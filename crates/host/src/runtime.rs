@@ -331,6 +331,21 @@ fn worker_tools(
         .run())
 }
 
+pub(crate) fn canonical_workspace(workspace: &Path) -> anyhow::Result<PathBuf> {
+    #[cfg(windows)]
+    let canonical = zevria_foundation::windows_io::checked_directory_path(workspace)
+        .context("unsupported protected Windows workspace")?;
+    #[cfg(not(windows))]
+    let canonical = std::fs::canonicalize(workspace)
+        .with_context(|| format!("failed to resolve workspace at {}", workspace.display()))?;
+    anyhow::ensure!(
+        canonical.is_dir(),
+        "workspace {} is not a directory",
+        canonical.display()
+    );
+    Ok(canonical)
+}
+
 /// Child native transcripts and leases never participate in root discovery.
 pub fn sessions_dir(workspace: &Path, profile: ExecutionProfile) -> PathBuf {
     match profile {
@@ -374,10 +389,7 @@ async fn prepare_session_lease(
 ) -> anyhow::Result<Arc<crate::session_lease::RootSessionLease>> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let directory = path.parent().context("session transcript has no parent")?;
-        std::fs::create_dir_all(directory)?;
-        crate::session_lease::sweep_inactive(directory);
-        crate::session_lease::RootSessionLease::acquire(&path).map(Arc::new)
+        crate::session_lease::RootSessionLease::acquire_sweeping(&path).map(Arc::new)
     })
     .await
     .context("session lease startup task failed")?
@@ -388,7 +400,7 @@ pub async fn start_session_with_profile(
     workspace: &Path,
     start: SessionStart,
     profile: ExecutionProfile,
-) -> anyhow::Result<RunningSession> {
+) -> anyhow::Result<StartedSession> {
     start_session_with_mcp(config, workspace, start, profile, Vec::new()).await
 }
 
@@ -398,8 +410,27 @@ pub async fn start_session_with_mcp(
     start: SessionStart,
     profile: ExecutionProfile,
     mcp_servers: Vec<zevria_foundation::AcpMcpServerSpec>,
-) -> anyhow::Result<RunningSession> {
-    startup::start(config, workspace, start, profile, mcp_servers).await
+) -> anyhow::Result<StartedSession> {
+    startup::start(config, workspace, start, profile, mcp_servers, true, false).await
+}
+
+pub(crate) async fn start_acp_session(
+    config: &Config,
+    canonical_workspace: &Path,
+    start: SessionStart,
+    profile: ExecutionProfile,
+    mcp_servers: Vec<zevria_foundation::AcpMcpServerSpec>,
+) -> anyhow::Result<StartedSession> {
+    startup::start(
+        config,
+        canonical_workspace,
+        start,
+        profile,
+        mcp_servers,
+        false,
+        true,
+    )
+    .await
 }
 
 /// Capture startup discovery once: native global skills overridden by project
@@ -462,31 +493,15 @@ async fn join_with_grace(
     }
 }
 
-/// Metadata frontends use to restore their own presentation state.
-pub struct SessionRestoration {
-    pub model_contexts: [zevria_foundation::ModelContextPolicy; ModelRole::COUNT],
-    pub reasoning_levels: [zevria_foundation::ReasoningLevel; ModelRole::COUNT],
-    pub model_snapshots: Vec<zevria_model::ContextTokenSnapshot>,
-    pub sessions_dir: PathBuf,
+pub struct StartedSession {
+    pub running: RunningSession,
+    pub restored: RestoredSession,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionIdentity {
     pub session_id: String,
-    pub subsessions_dir: PathBuf,
-    pub agent_runs_root: PathBuf,
-    /// Intended path; a new unused session has no transcript file yet.
     pub transcript_path: PathBuf,
-    /// Authoritative startup items, including pending in-memory metadata.
-    pub transcript_items: Vec<TranscriptItem>,
-    pub skill_catalog: Arc<zevria_instructions::skill::SkillCatalog>,
-    /// Validated startup pins; frontends must not replay the transcript again.
-    pub active_skills: zevria_instructions::skill::ActiveSkills,
-    pub startup_notices: Vec<String>,
-    pub mcp_prompts: Vec<(
-        zevria_foundation::McpServerName,
-        zevria_foundation::McpPromptInfo,
-    )>,
-    /// Snapshot from the fully configured engine, captured before spawning it.
-    pub plan_state: PlanWorkflowState,
-    /// Authoritative selection from the engine, independent of Plan presentation.
-    pub selected_mode: SessionMode,
 }
 
 /// One-time, host-loaded frontend restoration payload. Frontends never reopen
@@ -552,10 +567,7 @@ pub struct RunningSession {
     // path may acquire a competing file after allocation; shutdown must not
     // delete someone else's file after rejected no-clobber publication.
     cleanup_abandoned_history: bool,
-    restored_taken: bool,
-    restored_subtasks: Vec<RestoredSubtask>,
-    restored_agent_runs: Vec<RestoredAgentRun>,
-    pub(crate) restoration: SessionRestoration,
+    pub(super) identity: SessionIdentity,
     // Held until background shutdown and abandoned-root cleanup finish. The
     // engine also owns an Arc: dropping a frontend must not release a live engine.
     _lease: Option<Arc<crate::session_lease::RootSessionLease>>,
@@ -568,40 +580,8 @@ pub struct RunningSession {
 }
 
 impl RunningSession {
-    /// Read-only frontend restoration data. The runtime retains the authoritative
-    /// transcript path used during shutdown and abandoned-root cleanup.
-    pub fn restoration(&self) -> &SessionRestoration {
-        &self.restoration
-    }
-
-    /// Move the startup payload exactly once. Subsequent attempts are programmer
-    /// errors, like taking the sole receiver twice, rather than empty restores.
-    pub fn take_restored(&mut self) -> RestoredSession {
-        assert!(
-            !self.restored_taken,
-            "session restoration payload was already taken"
-        );
-        self.restored_taken = true;
-        let meta = &mut self.restoration;
-        RestoredSession {
-            model_contexts: meta.model_contexts.clone(),
-            reasoning_levels: meta.reasoning_levels,
-            model_snapshots: std::mem::take(&mut meta.model_snapshots),
-            sessions_dir: meta.sessions_dir.clone(),
-            session_id: meta.session_id.clone(),
-            subsessions_dir: meta.subsessions_dir.clone(),
-            agent_runs_root: meta.agent_runs_root.clone(),
-            transcript_path: meta.transcript_path.clone(),
-            transcript_items: std::mem::take(&mut meta.transcript_items),
-            skill_catalog: meta.skill_catalog.clone(),
-            active_skills: std::mem::take(&mut meta.active_skills),
-            startup_notices: std::mem::take(&mut meta.startup_notices),
-            mcp_prompts: std::mem::take(&mut meta.mcp_prompts),
-            plan_state: std::mem::take(&mut meta.plan_state),
-            selected_mode: meta.selected_mode,
-            subtasks: std::mem::take(&mut self.restored_subtasks),
-            agent_runs: std::mem::take(&mut self.restored_agent_runs),
-        }
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.identity
     }
 
     pub fn command_sender(&self) -> UnboundedSender<SessionCommand> {
@@ -674,15 +654,18 @@ impl RunningSession {
             },
         );
 
-        let transcript_is_empty = self.cleanup_abandoned_history
-            && transcript::is_abandoned_root(&self.restoration.transcript_path);
-        if transcript_is_empty
-            && let Err(error) = std::fs::remove_file(&self.restoration.transcript_path)
-        {
-            tracing::warn!(target: "zevria::runtime",
-                "failed to remove the empty session file at {}: {error}",
-                self.restoration.transcript_path.display()
-            );
+        let path = self.identity.transcript_path;
+        let cleanup = self.cleanup_abandoned_history;
+        let lease = self._lease.take();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            if cleanup && transcript::is_abandoned_root(&path)
+                && let Err(error) = std::fs::remove_file(&path)
+            {
+                tracing::warn!(target: "zevria::runtime", path = %path.display(), %error, "failed to remove the empty session file");
+            }
+            drop(lease);
+        }).await {
+            tracing::warn!(target: "zevria::runtime", %error, "session cleanup task failed");
         }
 
         match (engine_shutdown, supervisor_shutdown) {
@@ -699,7 +682,7 @@ pub async fn start_session(
     app_config: &Config,
     workspace: &Path,
     start: SessionStart,
-) -> anyhow::Result<RunningSession> {
+) -> anyhow::Result<StartedSession> {
     start_session_with_profile(app_config, workspace, start, ExecutionProfile::Interactive).await
 }
 
@@ -823,8 +806,6 @@ pub(crate) fn rendered_instructions(policy: &TurnPolicy) -> String {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use zevria_instructions::SkillCatalog;
-    use zevria_instructions::SkillDefinition;
     use zevria_session_api::SessionCommand;
     use zevria_workflow::PlanWorkflowState;
 
@@ -1001,11 +982,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let path = worker.restoration.transcript_path.clone();
+        let path = worker.restored.transcript_path.clone();
         assert!(!path.exists());
-        assert_eq!(worker.restoration.plan_state, PlanWorkflowState::Idle);
-        assert_eq!(worker.restoration.selected_mode, SessionMode::Build);
-        assert!(worker.supervisor.is_none());
+        assert_eq!(worker.restored.plan_state, PlanWorkflowState::Idle);
+        assert_eq!(worker.restored.selected_mode, SessionMode::Build);
+        assert!(worker.running.supervisor.is_none());
         assert!(crate::session_lease::RootSessionLease::acquire(&path).is_err());
         assert!(
             transcript::list_sessions(&transcript::sessions_dir(workspace.path()))
@@ -1017,7 +998,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        worker.shutdown().await.unwrap();
+        worker.running.shutdown().await.unwrap();
         assert!(!path.exists());
         assert_session_lease_reclaimed(&path).await;
         assert!(!path.with_extension("jsonl.lock").exists());
@@ -1035,6 +1016,33 @@ mod tests {
         );
         assert!(!transcript::plans_dir(workspace.path()).exists());
         assert!(!workspace.path().join(".zevria/agent-runs").exists());
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_non_file_before_creating_the_worker_guard_or_lease() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canonical = canonical_workspace(workspace.path()).unwrap();
+        let profile = ExecutionProfile::EnsembleWorker;
+        let directory = sessions_dir(&canonical, profile);
+        let path = directory.join("not-a-file.jsonl");
+        std::fs::create_dir_all(&path).unwrap();
+        let Err(error) = start_session_with_profile(
+            &crate::config::test_config(),
+            &canonical,
+            SessionStart::Resume(path.clone()),
+            profile,
+        )
+        .await
+        else {
+            panic!("startup accepted a directory as a transcript");
+        };
+        assert!(
+            error.to_string().contains("is not a regular file"),
+            "{error:#}"
+        );
+        assert!(!directory.join(".gitignore").exists());
+        assert!(!directory.join(".leases.lock").exists());
+        assert!(!path.with_extension("jsonl.lock").exists());
     }
 
     #[tokio::test]
@@ -1162,11 +1170,10 @@ mod tests {
             )
             .await
             .unwrap();
-            let path = worker.restoration.transcript_path.clone();
+            let path = worker.restored.transcript_path.clone();
             assert!(!path.exists());
             let bytes = if models_only {
-                let mut bytes =
-                    serde_json::to_vec(&worker.restoration.transcript_items[0]).unwrap();
+                let mut bytes = serde_json::to_vec(&worker.restored.transcript_items[0]).unwrap();
                 bytes.push(b'\n');
                 bytes
             } else {
@@ -1174,8 +1181,9 @@ mod tests {
             };
             std::fs::write(&path, &bytes).unwrap();
             assert!(transcript::is_abandoned_root(&path));
-            let mut events = worker.take_event_receiver().unwrap();
+            let mut events = worker.running.take_event_receiver().unwrap();
             worker
+                .running
                 .command_sender()
                 .send(SessionCommand::Turn(
                     zevria_session_api::TurnCommand::Submit {
@@ -1198,7 +1206,7 @@ mod tests {
                 ),
                 "{event:?}"
             );
-            worker.shutdown().await.unwrap();
+            worker.running.shutdown().await.unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             assert_session_lease_reclaimed(&path).await;
             assert!(!path.with_extension("jsonl.lock").exists());
@@ -1219,12 +1227,12 @@ mod tests {
             )
             .await
             .unwrap();
-            let path = worker.restoration.transcript_path.clone();
+            let path = worker.restored.transcript_path.clone();
             let sidecar = path.with_extension("jsonl.lock");
-            let commands = worker.command_sender();
-            let _events = worker.take_event_receiver().unwrap();
-            let lease = Arc::downgrade(worker._lease.as_ref().unwrap());
-            let task = worker.engine_task.take().unwrap();
+            let commands = worker.running.command_sender();
+            let _events = worker.running.take_event_receiver().unwrap();
+            let lease = Arc::downgrade(worker.running._lease.as_ref().unwrap());
+            let task = worker.running.engine_task.take().unwrap();
             drop(worker);
             assert_eq!(lease.strong_count(), 1, "only the engine retains ownership");
             assert!(sidecar.exists());
@@ -1292,9 +1300,6 @@ mod tests {
                 .expect("shutdown order lock poisoned")
                 .push("supervisor");
         });
-        let skills = Arc::new(
-            SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
-        );
         let jobs = CommandJobs::new(
             command_job_limits(CommandConfig::default()),
             Some(event_tx.clone()),
@@ -1337,26 +1342,10 @@ mod tests {
             mcp: None,
             command_jobs: Some(jobs),
             cleanup_abandoned_history: true,
-            restored_taken: false,
-            restored_subtasks: Vec::new(),
-            restored_agent_runs: Vec::new(),
             _lease: Some(lease),
-            restoration: SessionRestoration {
-                mcp_prompts: vec![],
-                model_contexts: crate::config::test_config().routing().context_policies(),
-                reasoning_levels: [zevria_foundation::ReasoningLevel::Medium; ModelRole::COUNT],
-                model_snapshots: Vec::new(),
-                sessions_dir: directory.path().to_path_buf(),
+            identity: SessionIdentity {
                 session_id: "empty".to_string(),
-                subsessions_dir: directory.path().join("subsessions"),
-                agent_runs_root: directory.path().join("agent-runs"),
                 transcript_path: transcript_path.clone(),
-                transcript_items: Vec::new(),
-                skill_catalog: skills.clone(),
-                active_skills: Default::default(),
-                startup_notices: Vec::new(),
-                plan_state: PlanWorkflowState::Idle,
-                selected_mode: SessionMode::Build,
             },
             command_tx: Some(command_tx),
             event_tx: Some(event_tx),
@@ -1404,33 +1393,14 @@ mod tests {
             panic!("scripted engine failure");
         });
         let supervisor_task = tokio::spawn(async {});
-        let skills = Arc::new(
-            SkillCatalog::new(Vec::<SkillDefinition>::new()).expect("empty skill registry"),
-        );
         let running = RunningSession {
             mcp: None,
             command_jobs: None,
             cleanup_abandoned_history: true,
-            restored_taken: false,
-            restored_subtasks: Vec::new(),
-            restored_agent_runs: Vec::new(),
             _lease: None,
-            restoration: SessionRestoration {
-                mcp_prompts: vec![],
-                model_contexts: crate::config::test_config().routing().context_policies(),
-                reasoning_levels: [zevria_foundation::ReasoningLevel::Medium; ModelRole::COUNT],
-                model_snapshots: Vec::new(),
-                sessions_dir: directory.path().to_path_buf(),
+            identity: SessionIdentity {
                 session_id: "failed".to_string(),
-                subsessions_dir: directory.path().join("subsessions"),
-                agent_runs_root: directory.path().join("agent-runs"),
-                transcript_path,
-                transcript_items: Vec::new(),
-                skill_catalog: skills.clone(),
-                active_skills: Default::default(),
-                startup_notices: Vec::new(),
-                plan_state: PlanWorkflowState::Idle,
-                selected_mode: SessionMode::Build,
+                transcript_path: transcript_path,
             },
             command_tx: Some(command_tx),
             event_tx: Some(event_tx),
@@ -1472,14 +1442,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(running.mcp.is_some());
-        assert!(running.supervisor.is_some());
-        let path = running.restoration.transcript_path.clone();
+        assert!(running.running.mcp.is_some());
+        assert!(running.running.supervisor.is_some());
+        let path = running.restored.transcript_path.clone();
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), running.shutdown())
-            .await
-            .expect("shutdown with active McpManager must not stall for supervisor grace")
-            .expect("clean shutdown");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            running.running.shutdown(),
+        )
+        .await
+        .expect("shutdown with active McpManager must not stall for supervisor grace")
+        .expect("clean shutdown");
         assert_session_lease_reclaimed(&path).await;
     }
 }

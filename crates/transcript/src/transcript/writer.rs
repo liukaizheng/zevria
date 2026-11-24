@@ -1,18 +1,17 @@
 //! Transcript writer responsibilities.
-use super::header::session_mode;
-use super::header::validate_header;
-use super::item::MAX_ROOT_RECORD_BYTES;
+use super::header::is_leading_metadata;
 use super::item::TranscriptItem;
+use super::item::{BatchRef, MAX_ROOT_RECORD_BYTES};
 use super::load::TranscriptLoadOutcome;
-use super::load::load;
 use super::load::load_report;
 use super::projection::is_conversation_item;
 use super::sessions::pick_session_id;
+use crate::jsonl::with_record_buffer;
 use anyhow::Context as _;
-use serde::Serialize;
-use std::io::Write as _;
+use std::io::{BufWriter, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 use std::path::PathBuf;
+use zevria_foundation::sync_directory;
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -26,6 +25,7 @@ pub struct TranscriptWriter {
     path: PathBuf,
     recovered_malformed_lines: usize,
     pub(super) needs_newline: bool,
+    line: Vec<u8>,
 }
 
 pub(super) enum TranscriptFile {
@@ -43,6 +43,28 @@ impl TranscriptFile {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct IndeterminateAppend {
+    write: std::io::Error,
+    rollback: std::io::Error,
+}
+
+impl std::fmt::Display for IndeterminateAppend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "transcript append durability is indeterminate: rollback failed ({}); inspect the session before resuming",
+            self.rollback
+        )
+    }
+}
+
+impl std::error::Error for IndeterminateAppend {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.write)
+    }
+}
+
 /// A failed append is rolled back before returning. If the storage device
 /// also rejects rollback, no code can promise which bytes survived: expose
 /// that ambiguity rather than claiming the required operation was uncommitted.
@@ -53,9 +75,11 @@ pub(super) fn append_or_rollback(
     if let Err(error) = append() {
         if let Err(rollback) = rollback() {
             tracing::warn!(%error, %rollback, "transcript append durability is indeterminate");
-            return Err(anyhow::Error::new(error).context(format!(
-                "transcript append durability is indeterminate: rollback failed ({rollback}); inspect the session before resuming"
-            )));
+            return Err(IndeterminateAppend {
+                write: error,
+                rollback,
+            }
+            .into());
         }
         return Err(error.into());
     }
@@ -104,6 +128,7 @@ impl TranscriptWriter {
                 path,
                 recovered_malformed_lines: 0,
                 needs_newline: false,
+                line: Vec::new(),
             })),
             Err(error) => Err(anyhow::Error::from(error).context(format!(
                 "failed to inspect the intended session file at {}",
@@ -161,6 +186,7 @@ impl TranscriptWriter {
                 path,
                 recovered_malformed_lines: 0,
                 needs_newline: false,
+                line: Vec::new(),
             })),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
             Err(error) => Err(anyhow::Error::from(error).context(format!(
@@ -233,6 +259,7 @@ impl TranscriptWriter {
             path,
             recovered_malformed_lines: 0,
             needs_newline,
+            line: Vec::new(),
         })
     }
 
@@ -255,22 +282,17 @@ impl TranscriptWriter {
     /// Append an item as a JSON line and flush it to disk.
     pub fn append(&mut self, item: &TranscriptItem) -> anyhow::Result<()> {
         self.ensure_writable()?;
-        let file = self
-            .file
-            .handle()
-            .context("pending transcripts must be mutated through Conversation")?;
-        if matches!(item, TranscriptItem::SessionModels(_)) {
-            anyhow::ensure!(
-                file.metadata()?.len() == 0,
-                "session models must be a unique first record; replace the canonical header instead"
-            );
+        anyhow::ensure!(
+            !self.is_pending(),
+            "pending transcripts must be mutated through Conversation"
+        );
+        if is_leading_metadata(item) {
+            load_report(&self.path)?
+                .replay()
+                .instructions
+                .ensure_metadata_boundary()?;
         }
-        if matches!(item, TranscriptItem::SessionMode(_)) {
-            let mut proposed = load(&self.path)?;
-            proposed.push(item.clone());
-            session_mode(&proposed)?;
-        }
-        self.persist_records(std::slice::from_ref(item), true)
+        self.append_record(item)
     }
 
     // Only public checked append and the private validated transaction call this.
@@ -293,53 +315,23 @@ impl TranscriptWriter {
                 "the canonical session transcript is missing or is not a regular file"
             );
         }
-        let mut line = if items.len() == 1 {
-            serialize_record(&items[0])?
-        } else {
-            // Serialize only the suffix, with the same bound as any physical
-            // record. A torn final line exposes none of this batch on reload.
-            #[derive(Serialize)]
-            struct BatchRef<'a> {
-                version: u32,
-                records: &'a [TranscriptItem],
-            }
-            #[derive(Serialize)]
-            struct EnvelopeRef<'a> {
-                zevria_batch: BatchRef<'a>,
-            }
-            let mut bytes = serde_json::to_vec(&EnvelopeRef {
-                zevria_batch: BatchRef {
-                    version: 1,
-                    records: items,
-                },
-            })?;
-            anyhow::ensure!(
-                bytes.len() < MAX_ROOT_RECORD_BYTES,
-                "root transcript record exceeds the 64 MiB limit"
-            );
-            bytes.push(b'\n');
-            bytes
-        };
-        if self.needs_newline {
-            line.insert(0, b'\n');
-        }
         let TranscriptFile::Writable(file) = &mut self.file else {
             anyhow::bail!("appending requires a materialized writable transcript");
         };
-        let original_len = file.metadata()?.len();
-        // Writable handles retain resize rights rather than using append-only
-        // access. Seek also restores the cursor after a failed append rollback.
-        use std::io::{Seek as _, SeekFrom};
-        file.seek(SeekFrom::End(0))?;
-        append_or_rollback(
-            || (&*file).write_all(&line).and_then(|()| file.sync_data()),
-            || file.set_len(original_len).and_then(|()| file.sync_data()),
-        )
-        .with_context(|| {
-            format!(
-                "failed to append to the session file at {}",
-                self.path.display()
+        with_record_buffer(&mut self.line, |line| {
+            serialize_line(line, self.needs_newline, items)?;
+            // Seeking restores the cursor after a failed append rollback.
+            let original_len = file.seek(SeekFrom::End(0))?;
+            append_or_rollback(
+                || (&*file).write_all(line).and_then(|()| file.sync_data()),
+                || file.set_len(original_len).and_then(|()| file.sync_data()),
             )
+            .with_context(|| {
+                format!(
+                    "failed to append to the session file at {}",
+                    self.path.display()
+                )
+            })
         })?;
         self.needs_newline = false;
         Ok(())
@@ -358,54 +350,49 @@ impl TranscriptWriter {
             !self.is_pending(),
             "pending transcripts must be mutated through Conversation"
         );
-        validate_header(items.iter())?;
-        self.persist_records(items, false)
+        self.rewrite_records(items, items.len())
     }
 
-    /// Raw mutation paths preserve their existing header checks. Pending
-    /// proposals additionally need lifecycle validation before memory-only
-    /// acceptance. Prepared anchored proposals already validated exactly once.
-    pub(super) fn persist_unprepared(
-        &mut self,
-        items: &[TranscriptItem],
-        single_append: bool,
-    ) -> anyhow::Result<()> {
+    pub(super) fn persist_unprepared(&mut self, items: &[TranscriptItem]) -> anyhow::Result<()> {
         if self.is_pending() {
             crate::validate_session_replay(items)?;
-        } else {
-            validate_header(items.iter())?;
         }
-        self.persist_records(items, single_append)
+        self.persist_records(items)
     }
 
-    /// The one storage decision for all Conversation mutations and repair.
-    /// Pending metadata stays exclusively in Conversation.items. The first
-    /// substantive proposal publishes the complete sequence, never just a tail.
-    pub(super) fn persist_records(
+    pub(super) fn persist_records(&mut self, items: &[TranscriptItem]) -> anyhow::Result<()> {
+        self.persist_edit(items, items.len())
+    }
+
+    /// For a revision, keep the carried metadata and new records together in
+    /// one physical commit, even though publication itself is atomic as well.
+    pub(super) fn persist_edit(
         &mut self,
         items: &[TranscriptItem],
-        single_append: bool,
+        suffix: usize,
     ) -> anyhow::Result<()> {
         self.ensure_writable()?;
         if self.is_pending() {
             if items.iter().any(is_conversation_item) {
-                self.publish_records(items)?;
+                self.publish_records(items, suffix)
             } else {
-                // Memory-only acceptance must not bypass serialization or the
-                // same per-record bounds enforced by durable writes.
                 for item in items {
-                    serialize_record(item)?;
+                    self.validate_record(item)?;
                 }
+                Ok(())
             }
-            Ok(())
-        } else if single_append {
-            self.append_record(items.last().context("missing appended item")?)
         } else {
-            self.rewrite_records(items)
+            self.rewrite_records(items, suffix)
         }
     }
 
-    fn publish_records(&mut self, items: &[TranscriptItem]) -> anyhow::Result<()> {
+    pub(super) fn validate_record(&mut self, item: &TranscriptItem) -> anyhow::Result<()> {
+        with_record_buffer(&mut self.line, |line| {
+            serialize_line(line, false, std::slice::from_ref(item))
+        })
+    }
+
+    fn publish_records(&mut self, items: &[TranscriptItem], suffix: usize) -> anyhow::Result<()> {
         let parent = self
             .path
             .parent()
@@ -416,7 +403,13 @@ impl TranscriptWriter {
                 self.path.display()
             )
         })?;
-        write_items(staged.as_file_mut(), &self.path, items)?;
+        write_items(
+            staged.as_file_mut(),
+            &self.path,
+            &mut self.line,
+            items,
+            suffix,
+        )?;
         staged.as_file().sync_all().with_context(|| {
             format!(
                 "failed to sync the initial session file for {}",
@@ -446,9 +439,7 @@ impl TranscriptWriter {
         Ok(())
     }
 
-    // Private persistence primitive: callers either validate raw headers above,
-    // or hold the exact immutable PreparedChange validated across all domains.
-    fn rewrite_records(&mut self, items: &[TranscriptItem]) -> anyhow::Result<()> {
+    fn rewrite_records(&mut self, items: &[TranscriptItem], suffix: usize) -> anyhow::Result<()> {
         let parent = self.path.parent().with_context(|| {
             format!(
                 "session file {} has no parent directory",
@@ -469,7 +460,13 @@ impl TranscriptWriter {
                     format!("failed to preserve permissions for {}", self.path.display())
                 })?;
         }
-        write_items(staged.as_file_mut(), &self.path, items)?;
+        write_items(
+            staged.as_file_mut(),
+            &self.path,
+            &mut self.line,
+            items,
+            suffix,
+        )?;
         staged.as_file().sync_all().with_context(|| {
             format!(
                 "failed to sync the staged session file for {}",
@@ -526,48 +523,60 @@ impl TranscriptWriter {
     }
 }
 
-fn serialize_record(item: &TranscriptItem) -> anyhow::Result<Vec<u8>> {
-    let mut line = serde_json::to_vec(item).context("failed to serialize a transcript item")?;
+fn serialize_line(
+    line: &mut Vec<u8>,
+    needs_newline: bool,
+    items: &[TranscriptItem],
+) -> anyhow::Result<()> {
+    line.clear();
+    if needs_newline {
+        line.push(b'\n');
+    }
+    match items {
+        [item] => serde_json::to_writer(&mut *line, item),
+        _ => serde_json::to_writer(&mut *line, &BatchRef::new(items)),
+    }
+    .context("failed to serialize a transcript record")?;
     anyhow::ensure!(
-        line.len() < MAX_ROOT_RECORD_BYTES,
+        line.len() - usize::from(needs_newline) < MAX_ROOT_RECORD_BYTES,
         "root transcript record exceeds the 64 MiB limit"
     );
     line.push(b'\n');
-    Ok(line)
+    Ok(())
 }
 
-/// Write every item to an already-created staged file.
+/// Write to the stage only; flush explicitly before syncing and publishing.
 fn write_items(
     file: &mut std::fs::File,
     destination: &Path,
+    line: &mut Vec<u8>,
     items: &[TranscriptItem],
+    suffix: usize,
 ) -> anyhow::Result<()> {
-    for item in items {
-        let line = serialize_record(item)?;
-        file.write_all(&line).with_context(|| {
+    with_record_buffer(line, |line| {
+        let mut writer = BufWriter::new(file);
+        let mut write_line = |items: &[TranscriptItem]| -> anyhow::Result<()> {
+            serialize_line(line, false, items)?;
+            writer.write_all(line).with_context(|| {
+                format!(
+                    "failed to write the staged session file for {}",
+                    destination.display()
+                )
+            })
+        };
+        for item in &items[..suffix] {
+            write_line(std::slice::from_ref(item))?;
+        }
+        if suffix < items.len() {
+            write_line(&items[suffix..])?;
+        }
+        writer.flush().with_context(|| {
             format!(
-                "failed to write the staged session file for {}",
+                "failed to flush the session file at {}",
                 destination.display()
             )
-        })?;
-    }
-    file.flush().with_context(|| {
-        format!(
-            "failed to flush the session file at {}",
-            destination.display()
-        )
-    })?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
+        })
+    })
 }
 
 #[cfg(test)]

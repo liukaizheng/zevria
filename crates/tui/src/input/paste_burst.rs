@@ -6,15 +6,14 @@
 //! back to back, far faster than anyone types, so an input burst containing a
 //! line break is folded into one `Event::Paste` at the terminal boundary.
 
-use std::collections::VecDeque;
 use std::io;
 #[cfg(windows)]
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
 use futures_util::StreamExt as _;
-use ratatui::crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-};
+use ratatui::crossterm::event::{Event, EventStream};
+#[cfg(any(windows, test))]
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// Longest silence still treated as part of one synthetic paste.
 #[cfg(windows)]
@@ -24,6 +23,7 @@ const PASTE_GAP: Duration = Duration::from_millis(8);
 const MAX_BURST: usize = 64 * 1024;
 
 /// The text a key contributes to a paste, or `None` when the key ends a run.
+#[cfg(any(windows, test))]
 fn paste_text(key: &KeyEvent) -> Option<char> {
     match key.code {
         KeyCode::Enter => Some('\n'),
@@ -38,12 +38,14 @@ fn paste_text(key: &KeyEvent) -> Option<char> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn is_text_press(event: &Event) -> bool {
     matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release && paste_text(key).is_some())
 }
 
 /// Fold each run of text keys that contains a line break into one paste.
 /// Runs without a line break, and single keystrokes, are left untouched.
+#[cfg(any(windows, test))]
 pub(crate) fn coalesce(events: Vec<Event>) -> Vec<Event> {
     let mut output = Vec::with_capacity(events.len());
     let mut run: Vec<Event> = Vec::new();
@@ -89,8 +91,9 @@ pub(crate) fn coalesce(events: Vec<Event>) -> Vec<Event> {
 /// await, so a dropped `next()` future loses nothing.
 pub(crate) struct InputReader {
     stream: EventStream,
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(windows)]
     burst: Vec<Event>,
+    #[cfg(windows)]
     ready: VecDeque<Event>,
 }
 
@@ -98,15 +101,14 @@ impl InputReader {
     pub(crate) fn new() -> Self {
         Self {
             stream: EventStream::new(),
+            #[cfg(windows)]
             burst: Vec::new(),
+            #[cfg(windows)]
             ready: VecDeque::new(),
         }
     }
 
     pub(crate) async fn next(&mut self) -> Option<io::Result<Event>> {
-        if let Some(event) = self.ready.pop_front() {
-            return Some(Ok(event));
-        }
         #[cfg(windows)]
         {
             self.next_burst().await
@@ -119,6 +121,9 @@ impl InputReader {
 
     #[cfg(windows)]
     async fn next_burst(&mut self) -> Option<io::Result<Event>> {
+        if let Some(event) = self.ready.pop_front() {
+            return Some(Ok(event));
+        }
         if self.burst.is_empty() {
             match self.stream.next().await? {
                 Ok(event) if is_text_press(&event) => self.burst.push(event),

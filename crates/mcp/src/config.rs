@@ -1,6 +1,6 @@
 //! User configuration and the host-owned persistence boundary.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     path::{Path, PathBuf},
     time::Duration,
@@ -52,9 +52,9 @@ pub struct McpServerConfig {
     pub tool_timeout_seconds: Option<u64>,
     pub required: bool,
     pub plan_mode: PlanMcpPolicy,
-    pub enabled_tools: Option<Vec<String>>,
-    pub disabled_tools: Vec<String>,
-    pub plan_tools: Vec<String>,
+    pub enabled_tools: Option<HashSet<String>>,
+    pub disabled_tools: HashSet<String>,
+    pub plan_tools: HashSet<String>,
 }
 
 impl Default for McpServerConfig {
@@ -74,8 +74,8 @@ impl Default for McpServerConfig {
             required: false,
             plan_mode: PlanMcpPolicy::default(),
             enabled_tools: None,
-            disabled_tools: vec![],
-            plan_tools: vec![],
+            disabled_tools: HashSet::new(),
+            plan_tools: HashSet::new(),
         }
     }
 }
@@ -299,13 +299,13 @@ impl McpServerConfig {
     pub(crate) fn tool_enabled(&self, name: &str) -> bool {
         self.enabled_tools
             .as_ref()
-            .is_none_or(|names| names.iter().any(|n| n == name))
-            && !self.disabled_tools.iter().any(|n| n == name)
+            .is_none_or(|names| names.contains(name))
+            && !self.disabled_tools.contains(name)
     }
 
     pub(crate) fn plan_tool_allowed(&self, name: &str, read_only: bool) -> bool {
         self.tool_enabled(name)
-            && (self.plan_tools.iter().any(|n| n == name)
+            && (self.plan_tools.contains(name)
                 || self.plan_mode == PlanMcpPolicy::All
                 || (self.plan_mode == PlanMcpPolicy::ReadOnly && read_only))
     }

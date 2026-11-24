@@ -129,6 +129,58 @@ fn skill_settings_are_defaulted_strict_and_cannot_change_roots() {
 }
 
 #[test]
+fn full_config_scrubs_malformed_mcp_values_like_offline_config() {
+    const SECRET: &str = "private-mcp-credential";
+    for invalid in [
+        format!("mcp = '{SECRET}'\n{REQUIRED_CONFIG}"),
+        format!("{REQUIRED_CONFIG}\n[mcp.servers.fixture]\nenabled = '{SECRET}'"),
+        format!(
+            "{REQUIRED_CONFIG}\n[mcp.servers.fixture]\nbearer_token = {{ command = ['{SECRET}'] }}"
+        ),
+    ] {
+        for error in [
+            Config::parse(&invalid, REQUIRED_MODELS).unwrap_err(),
+            crate::mcp::parse_mcp_config(&invalid).unwrap_err(),
+        ] {
+            let diagnostic = format!("{error:#}");
+            assert!(diagnostic.contains("invalid [mcp] structure, field name, or value type"));
+            assert!(!diagnostic.contains(SECRET));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn load_existing_requires_a_regular_non_symlink_models_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let models = models_path_for(&path);
+    let target = dir.path().join("catalog.jsonc");
+    std::fs::write(&path, REQUIRED_CONFIG).unwrap();
+    std::fs::write(&target, REQUIRED_MODELS).unwrap();
+    std::os::unix::fs::symlink(&target, &models).unwrap();
+    let error = Config::load_existing(&path, &models).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("failed to read models configuration")
+    );
+
+    std::fs::remove_file(&models).unwrap();
+    std::fs::create_dir(&models).unwrap();
+    let error = Config::load_existing(&path, &models).unwrap_err();
+    assert!(format!("{error:#}").contains("configuration must be a regular file"));
+
+    std::fs::remove_dir(&models).unwrap();
+    std::fs::rename(target, &models).unwrap();
+    let loaded = crate::models::load(&path).unwrap();
+    assert_eq!(
+        loaded.mcp_revision,
+        crate::mcp::config_revision(REQUIRED_CONFIG)
+    );
+}
+
+#[test]
 fn required_provider_catalog_and_independent_modes_resolve() {
     use zevria_foundation::{ModelProfileRef, ModelRole};
     let config = parse("").unwrap();

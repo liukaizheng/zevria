@@ -37,23 +37,23 @@ fn plan_records_round_trip_and_only_handoffs_are_model_visible_and_compactable()
     let artifact = handoff.artifact.clone();
     let items = vec![
         mode_item(),
-        TranscriptItem::Plan(PlanRecord::Started {
+        TranscriptItem::Plan(Box::new(PlanRecord::Started {
             id: artifact.version.id,
-        }),
-        TranscriptItem::Plan(PlanRecord::Ready {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Ready {
             artifact: artifact.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::RevisionRequested {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::RevisionRequested {
             artifact: artifact.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::Resolved {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Resolved {
             id: artifact.version.id,
             artifact: Some(artifact.clone()),
             resolution: crate::PlanResolution::ImplementedFresh,
-        }),
-        TranscriptItem::Plan(PlanRecord::Handoff {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
             handoff: handoff.clone(),
-        }),
+        })),
     ];
     let directory = tempfile::tempdir().expect("directory");
     let mut writer =
@@ -81,10 +81,7 @@ fn plan_records_round_trip_and_only_handoffs_are_model_visible_and_compactable()
         vec![handoff.prompt]
     );
     let ready = serde_json::to_value(&loaded[2]).expect("serialize Ready");
-    assert_eq!(
-        ready[PLAN_RECORD_KEY]["artifact"]["markdown"],
-        artifact.markdown
-    );
+    assert_eq!(ready["plan"]["artifact"]["markdown"], artifact.markdown);
     assert!(ready.get("role").is_none());
 
     let mut conversation = Conversation::new(writer);
@@ -115,7 +112,7 @@ fn model_history_extracts_messages_without_exposing_metadata() {
     assert_eq!(history.len(), 2);
     let serialized = serde_json::to_string(&history).expect("history should serialize");
     assert!(serialized.contains("wrote 13 bytes"));
-    assert!(!serialized.contains(TOOL_RESULT_METADATA_KEY));
+    assert!(!serialized.contains("metadata"));
     assert!(!serialized.contains("fn main"));
 }
 
@@ -126,9 +123,9 @@ fn newest_checkpoint_replaces_only_model_history_not_the_transcript() {
     let items = vec![
         TranscriptItem::Message(Message::user("original prompt")),
         TranscriptItem::Message(Message::assistant("original answer")),
-        TranscriptItem::Compaction(first),
+        TranscriptItem::Compaction(Box::new(first)),
         TranscriptItem::Message(Message::user("between checkpoints")),
-        TranscriptItem::Compaction(second),
+        TranscriptItem::Compaction(Box::new(second)),
         TranscriptItem::Message(Message::assistant("suffix")),
     ];
 
@@ -162,14 +159,14 @@ fn plan_handoff_retention_is_bounded_and_carried_forward_once_after_reload() {
         let run_id = crate::EnsembleRunId::new();
         for item in [
             TranscriptItem::Message(Message::user("old instruction")),
-            TranscriptItem::Plan(PlanRecord::Handoff {
+            TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
                 handoff: handoff.clone(),
-            }),
+            })),
             TranscriptItem::Message(Message::user("new instruction")),
             TranscriptItem::Message(Message::user(format!(
                 "{SUMMARY_PREFIX}\nnot an instruction"
             ))),
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: crate::EnsembleStart {
                     run_id: run_id.clone(),
                     workflow: crate::EnsembleWorkflow::Review,
@@ -181,12 +178,12 @@ fn plan_handoff_retention_is_bounded_and_carried_forward_once_after_reload() {
                         safe_mode: "read-only".into(),
                     }],
                 },
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
                 run_id,
                 synthesis_input: Message::user("worker evidence is not a retained instruction"),
                 agents: Vec::new(),
-            }),
+            })),
             compound_tool_results(),
         ] {
             conversation.push_required(item).expect("seed history");
@@ -224,7 +221,7 @@ fn plan_handoff_retention_is_bounded_and_carried_forward_once_after_reload() {
             )
             .expect("checkpoint");
             conversation
-                .push_required(TranscriptItem::Compaction(checkpoint))
+                .push_required(TranscriptItem::Compaction(Box::new(checkpoint)))
                 .expect("persist checkpoint");
             drop(conversation);
             let loaded = load(&path).expect("reload history");
@@ -241,8 +238,8 @@ fn plan_handoff_retention_is_bounded_and_carried_forward_once_after_reload() {
                     .collect::<Vec<_>>()
             );
             assert!(matches!(
-                &conversation.items()[2],
-                TranscriptItem::Plan(PlanRecord::Handoff { handoff: durable }) if durable == &handoff
+                conversation.items()[2].plan_record(),
+                Some(PlanRecord::Handoff { handoff: durable }) if durable == &handoff
             ));
             if summary == "first summary" {
                 conversation
@@ -278,7 +275,7 @@ fn opaque_remote_compaction_output_projects_verbatim_without_a_message() {
         vec!["question".to_string()],
     )
     .expect("checkpoint");
-    let items = vec![TranscriptItem::Compaction(checkpoint)];
+    let items = vec![TranscriptItem::Compaction(Box::new(checkpoint))];
 
     assert!(model_history(&items).is_empty());
     assert_eq!(
@@ -289,11 +286,11 @@ fn opaque_remote_compaction_output_projects_verbatim_without_a_message() {
 
 #[test]
 fn ensemble_evidence_is_compactable_but_not_an_editable_prompt_row() {
-    let item = TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+    let item = TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
         run_id: crate::EnsembleRunId::new(),
         synthesis_input: Message::user("bounded worker evidence"),
         agents: Vec::new(),
-    });
+    }));
 
     assert!(!is_prompt_item(&item));
     assert!(is_compaction_prompt_item(&item));

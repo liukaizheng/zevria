@@ -63,11 +63,11 @@ impl OrchestrationGate {
             return None;
         }
         self.corrected = true;
-        Some(TranscriptItem::RequestDirective(
+        Some(TranscriptItem::RequestDirective(Box::new(
             zevria_instructions::RequestDirective::correction(
                 self.request.clone().expect("required request"),
             ),
-        ))
+        )))
     }
 }
 

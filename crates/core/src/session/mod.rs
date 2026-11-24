@@ -334,9 +334,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         } else {
             return None;
         };
-        Some(TranscriptItem::ToolDeclarations(
+        Some(TranscriptItem::ToolDeclarations(Box::new(
             ToolDeclarationRecord::new(placement, tools).expect("valid declaration update"),
-        ))
+        )))
     }
 
     /// Message-bearing compatibility view of the active model projection.

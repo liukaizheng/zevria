@@ -494,24 +494,24 @@ fn ensemble_cancellation_history_requires_a_correlated_explicit_host_control() {
     let input = accept(&mut state, "initial");
     let run_id = EnsembleRunId::new();
     let base = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: EnsembleStart {
                 run_id: run_id.clone(),
                 workflow: EnsembleWorkflow::Plan,
                 prompt: input.text.clone(),
                 agents: vec![state.descriptor.clone()],
             },
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
             run_id: run_id.clone(),
             version: ENSEMBLE_REVIEW_VERSION,
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::WorkerReview {
             run_id: run_id.clone(),
             worker_id: state.descriptor.id.clone(),
             event: Box::new(WorkerReviewEvent::InputAccepted { input }),
             result: None,
-        }),
+        })),
     ];
     let result = WorkerControlResult {
         control: WorkerControl {
@@ -554,22 +554,23 @@ fn ensemble_cancellation_history_requires_a_correlated_explicit_host_control() {
         ),
     ] {
         let mut items = base.clone();
-        items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-            run_id: run_id.clone(),
-            worker_id: state.descriptor.id.clone(),
-            event: Box::new(WorkerReviewEvent::CancelRequested { generation }),
-            result,
-        }));
+        items.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::WorkerReview {
+                run_id: run_id.clone(),
+                worker_id: state.descriptor.id.clone(),
+                event: Box::new(WorkerReviewEvent::CancelRequested { generation }),
+                result,
+            },
+        )));
         assert_eq!(
             crate::validate_ensemble_review_history(&items).is_ok(),
             valid
         );
     }
     let mut legacy_current_version = base;
-    legacy_current_version.push(TranscriptItem::Ensemble(EnsembleRecord::ControlResult {
-        run_id,
-        result,
-    }));
+    legacy_current_version.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::ControlResult { run_id, result },
+    )));
     crate::validate_ensemble_review_history(&legacy_current_version).unwrap();
 }
 

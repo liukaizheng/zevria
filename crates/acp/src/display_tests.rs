@@ -356,7 +356,7 @@ fn incomplete_replay_and_live_display_have_identical_content_and_status() {
         .unwrap()
         .unwrap();
     let items = [zevria_transcript::TranscriptItem::IncompleteResponse(
-        record.clone(),
+        Box::new(record.clone()),
     )];
     let replay = display(crate::replay::replay_transcript(
         &items,

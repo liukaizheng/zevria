@@ -199,15 +199,15 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
     let root_dir = transcript::sessions_dir(&workspace);
     let mut parent = TranscriptWriter::create_with_id(&root_dir, "parent").unwrap();
     let mut root_items = vec![
-        TranscriptItem::SessionModels(models.clone()),
-        TranscriptItem::Plan(PlanRecord::Started { id: PlanId::new() }),
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::SessionModels(Box::new(models.clone())),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id: PlanId::new() })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
             run_id: start.run_id.clone(),
             version: ENSEMBLE_REVIEW_VERSION,
-        }),
+        })),
     ];
     let parent_path = parent.path().to_path_buf();
     let worker_dir = zevria_foundation::runtime_paths::workspace_state_root(&workspace)
@@ -215,17 +215,17 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
     let mut child = TranscriptWriter::create_with_id(&worker_dir, "native-worker").unwrap();
     child
         .rewrite(&[
-            TranscriptItem::SessionModels(models),
-            TranscriptItem::Plan(PlanRecord::Started {
+            TranscriptItem::SessionModels(Box::new(models)),
+            TranscriptItem::Plan(Box::new(PlanRecord::Started {
                 id: artifact.version.id,
-            }),
+            })),
             TranscriptItem::Message(rig_core::message::Message::user("independent analysis")),
             TranscriptItem::Message(rig_core::message::Message::assistant(
                 "worker report complete",
             )),
-            TranscriptItem::Plan(PlanRecord::Ready {
+            TranscriptItem::Plan(Box::new(PlanRecord::Ready {
                 artifact: artifact.clone(),
-            }),
+            })),
         ])
         .unwrap();
     let child_path = child.path().to_path_buf();
@@ -259,12 +259,14 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
         },
     ] {
         state.apply(&event).unwrap();
-        root_items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-            run_id: start.run_id.clone(),
-            worker_id: descriptor.id.clone(),
-            event: Box::new(event.clone()),
-            result: None,
-        }));
+        root_items.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::WorkerReview {
+                run_id: start.run_id.clone(),
+                worker_id: descriptor.id.clone(),
+                event: Box::new(event.clone()),
+                result: None,
+            },
+        )));
         evidence
             .append(&AgentRunTranscriptRecord::Event {
                 event: AgentRunEvent::Review {
@@ -310,12 +312,14 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
         replay: false,
     };
     state.apply(&published).unwrap();
-    root_items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-        run_id: start.run_id.clone(),
-        worker_id: descriptor.id.clone(),
-        event: Box::new(published),
-        result: None,
-    }));
+    root_items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkerReview {
+            run_id: start.run_id.clone(),
+            worker_id: descriptor.id.clone(),
+            event: Box::new(published),
+            result: None,
+        },
+    )));
     let mut settled_evidence = state.evidence.clone();
     settled_evidence.plan = Some(plan);
     settled_evidence.acp_session_id = Some("native-worker".into());
@@ -326,12 +330,14 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
         evidence: Box::new(settled_evidence),
     };
     state.apply(&settled).unwrap();
-    root_items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-        run_id: start.run_id.clone(),
-        worker_id: descriptor.id.clone(),
-        event: Box::new(settled.clone()),
-        result: None,
-    }));
+    root_items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkerReview {
+            run_id: start.run_id.clone(),
+            worker_id: descriptor.id.clone(),
+            event: Box::new(settled.clone()),
+            result: None,
+        },
+    )));
     evidence
         .append(&AgentRunTranscriptRecord::Event {
             event: AgentRunEvent::Review {
@@ -344,8 +350,8 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
     let root = transcript::load(&parent_path).unwrap();
     let restored_start = root
         .iter()
-        .find_map(|item| match item {
-            TranscriptItem::Ensemble(EnsembleRecord::Started { start }) => Some(start.clone()),
+        .find_map(|item| match item.ensemble_record() {
+            Some(EnsembleRecord::Started { start }) => Some(start.clone()),
             _ => None,
         })
         .unwrap();
@@ -405,11 +411,13 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
         .apply(&WorkerReviewEvent::Confirmed { receipt })
         .unwrap();
     let outcomes = vec![state.outcome()];
-    root_items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed {
-        run_id: start.run_id.clone(),
-        final_confirmation: result,
-        outcomes: outcomes.clone(),
-    }));
+    root_items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkersConfirmed {
+            run_id: start.run_id.clone(),
+            final_confirmation: result,
+            outcomes: outcomes.clone(),
+        },
+    )));
     parent.rewrite(&root_items).unwrap();
     transcript::load(&parent_path).unwrap();
     let (acknowledgement, received) = oneshot::channel();

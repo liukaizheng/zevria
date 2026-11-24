@@ -101,9 +101,9 @@ fn real_acp_pending_mode_only_selection_stays_unsaved_and_historical_modes_resum
             zevria_foundation::ReasoningLevel::Medium,
         );
         let items = vec![
-            TranscriptItem::SessionModels(
+            TranscriptItem::SessionModels(Box::new(
                 SessionModels::new(selection.clone(), selection).unwrap(),
-            ),
+            )),
             TranscriptItem::SessionMode(selected_mode),
         ];
         let mut writer = TranscriptWriter::create_with_id(path.parent().unwrap(), &id).unwrap();
@@ -173,9 +173,9 @@ fn write_saved_session(directory: &Path, id: &str, prompt: &str) -> PathBuf {
     let mut writer = TranscriptWriter::create_with_id(directory, id).unwrap();
     writer
         .rewrite(&[
-            TranscriptItem::SessionModels(
+            TranscriptItem::SessionModels(Box::new(
                 SessionModels::new(selection.clone(), selection).unwrap(),
-            ),
+            )),
             TranscriptItem::Message(rig_core::message::Message::user(prompt)),
             TranscriptItem::Message(rig_core::message::Message::assistant("durable reply")),
         ])
@@ -367,7 +367,7 @@ fn real_acp_load_replays_resume_does_not_and_unsupported_roots_fail() {
     .unwrap();
     writer
         .rewrite(&[
-            TranscriptItem::SessionModels(selections),
+            TranscriptItem::SessionModels(Box::new(selections)),
             TranscriptItem::Message(rig_core::message::Message::user("durable user")),
             TranscriptItem::Message(rig_core::message::Message::assistant("durable assistant")),
         ])

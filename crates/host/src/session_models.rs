@@ -175,7 +175,7 @@ mod tests {
         let mut writer = TranscriptWriter::create(directory.path()).unwrap();
         writer
             .rewrite(&[
-                TranscriptItem::SessionModels(inherited.clone()),
+                TranscriptItem::SessionModels(Box::new(inherited.clone())),
                 TranscriptItem::SessionMode(SessionMode::Build),
             ])
             .unwrap();

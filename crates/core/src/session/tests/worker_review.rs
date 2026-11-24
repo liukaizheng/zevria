@@ -216,13 +216,13 @@ async fn image_synthesis_capacity_rejects_confirmation_before_a_durable_seal() {
     };
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                 run_id: start.run_id.clone(),
                 version: ENSEMBLE_REVIEW_VERSION,
-            }),
+            })),
         ])
         .unwrap();
     let router = engine.capabilities.worker_controls.clone();
@@ -261,8 +261,8 @@ async fn image_synthesis_capacity_rejects_confirmation_before_a_durable_seal() {
     assert!(matches!(runner.await.unwrap(), Err(Failure::Cancelled)));
     let items = zevria_transcript::transcript::load(&path).unwrap();
     assert!(!items.iter().any(|item| matches!(
-        item,
-        TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { .. })
+        item.ensemble_record(),
+        Some(EnsembleRecord::WorkersConfirmed { .. })
     )));
     assert!(
         zevria_transcript::project_worker_reviews(&items)
@@ -307,13 +307,13 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
     };
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                 run_id: start.run_id.clone(),
                 version: ENSEMBLE_REVIEW_VERSION,
-            }),
+            })),
         ])
         .unwrap();
     let router = engine.capabilities.worker_controls.clone();
@@ -395,8 +395,8 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
     assert!(requests.lock().unwrap().is_empty());
     let items = zevria_transcript::transcript::load(&path).unwrap();
     assert_eq!(items, engine.conversation.items());
-    let accepted_feedback = items.iter().filter_map(|item| match item {
-        TranscriptItem::Ensemble(EnsembleRecord::WorkerReview { event, result: Some(result), .. }) if matches!(event.as_ref(), WorkerReviewEvent::InputAccepted { input } if input.generation == 2) => Some(result),
+    let accepted_feedback = items.iter().filter_map(|item| match item.ensemble_record() {
+        Some(EnsembleRecord::WorkerReview { event, result: Some(result), .. }) if matches!(event.as_ref(), WorkerReviewEvent::InputAccepted { input } if input.generation == 2) => Some(result),
         _ => None,
     }).collect::<Vec<_>>();
     assert_eq!(
@@ -413,8 +413,8 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
         items
             .iter()
             .filter(|item| matches!(
-                item,
-                TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { .. })
+                item.ensemble_record(),
+                Some(EnsembleRecord::WorkersConfirmed { .. })
             ))
             .count(),
         1
@@ -448,13 +448,13 @@ async fn ensemble_seal_drains_bounded_worker_updates_before_terminal_acknowledge
     };
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                 run_id: start.run_id.clone(),
                 version: ENSEMBLE_REVIEW_VERSION,
-            }),
+            })),
         ])
         .unwrap();
     let router = engine.capabilities.worker_controls.clone();
@@ -513,13 +513,13 @@ async fn ensemble_payload_ineligibility_is_durable_before_confirmation() {
     };
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                 run_id: start.run_id.clone(),
                 version: ENSEMBLE_REVIEW_VERSION,
-            }),
+            })),
         ])
         .unwrap();
     let (events, mut receiver) = session_event_channel(128);
@@ -538,10 +538,10 @@ async fn ensemble_payload_ineligibility_is_durable_before_confirmation() {
     cancellation.cancel();
     assert!(matches!(runner.await.unwrap(), Err(Failure::Cancelled)));
     let items = zevria_transcript::transcript::load(&path).unwrap();
-    assert!(items.iter().any(|item| matches!(item, TranscriptItem::Ensemble(EnsembleRecord::WorkerReview { event, .. }) if matches!(event.as_ref(), WorkerReviewEvent::PayloadChecked { error: Some(_) }))));
+    assert!(items.iter().any(|item| matches!(item.ensemble_record(), Some(EnsembleRecord::WorkerReview { event, .. }) if matches!(event.as_ref(), WorkerReviewEvent::PayloadChecked { error: Some(_) }))));
     assert!(!items.iter().any(|item| matches!(
-        item,
-        TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { .. })
+        item.ensemble_record(),
+        Some(EnsembleRecord::WorkersConfirmed { .. })
     )));
 }
 
@@ -571,13 +571,13 @@ async fn ensemble_root_cancellation_returns_results_for_every_routed_control() {
     };
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                 run_id: start.run_id.clone(),
                 version: ENSEMBLE_REVIEW_VERSION,
-            }),
+            })),
         ])
         .unwrap();
     let router = engine.capabilities.worker_controls.clone();

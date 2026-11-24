@@ -1,12 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use crate::{
-        ModelProfileRef, ModelResponse, ProviderReplay,
-        provider_replay::count_canonical_derivations, transcript::TranscriptItem,
-    };
+    use crate::{ModelProfileRef, ModelResponse, ProviderReplay, transcript::TranscriptItem};
     use rig_core::message::{AssistantContent, Message};
     use serde_json::json;
     use zevria_model::MessageRecord;
+    use zevria_model::provider_replay::count_canonical_derivations;
 
     fn replay() -> ProviderReplay {
         ProviderReplay::openai_responses(

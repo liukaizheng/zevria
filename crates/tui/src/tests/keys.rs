@@ -1353,9 +1353,9 @@ fn live_and_restored_ensemble_entries_display_prompts_but_copy_full_commands() {
                 let start = editable_ensemble_start("display-run", workflow, prompt);
                 let mut app = App::new();
                 if restored {
-                    app.restore(vec![TranscriptItem::Ensemble(EnsembleRecord::Started {
-                        start,
-                    })]);
+                    app.restore(vec![TranscriptItem::Ensemble(Box::new(
+                        EnsembleRecord::Started { start },
+                    ))]);
                 } else {
                     app.reduce_without_effects(SessionEvent::EnsembleStarted {
                         turn_id: TEST_TURN_ID,

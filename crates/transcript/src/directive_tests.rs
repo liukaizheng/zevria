@@ -11,29 +11,29 @@ fn snapshot() -> SkillSnapshot {
 }
 fn invocation() -> TranscriptItem {
     let skill = snapshot();
-    TranscriptItem::SkillInvocation(SkillInvocation::new(
+    TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
         skill.name().clone(),
         "inspect",
         SkillApplication::Activate(skill),
-    ))
+    )))
 }
 fn body() -> TranscriptItem {
-    TranscriptItem::Directive(DirectiveContent::skill(&snapshot()))
+    TranscriptItem::Directive(Box::new(DirectiveContent::skill(&snapshot())))
 }
 fn revoke() -> TranscriptItem {
-    TranscriptItem::Directive(
+    TranscriptItem::Directive(Box::new(
         DirectiveContent::new(DirectivePayload::SkillRevocation {
             name: snapshot().name().clone(),
             reason: "disabled".into(),
         })
         .unwrap(),
-    )
+    ))
 }
 fn header() -> TranscriptItem {
     TranscriptItem::SessionMode(SessionMode::Build)
 }
 fn checkpoint() -> TranscriptItem {
-    TranscriptItem::Compaction(
+    TranscriptItem::Compaction(Box::new(
         CompactionCheckpoint::new(
             CompactionTrigger::Manual,
             CompactionBackend::LocalSummary,
@@ -41,7 +41,7 @@ fn checkpoint() -> TranscriptItem {
             vec![],
         )
         .unwrap(),
-    )
+    ))
 }
 fn call() -> TranscriptItem {
     TranscriptItem::Message(Message::Assistant(
@@ -73,8 +73,8 @@ fn skill_directives_and_provider_content_round_trip_and_reject_tampering() {
     let mut items = vec![header(), invocation()];
     for item in [body(), revoke()] {
         let value = serde_json::to_value(&item).unwrap();
-        let record = &value["zevria_skill_directive"];
-        assert_eq!(value.as_object().unwrap().len(), 1);
+        let record = &value["directive"];
+        assert_eq!(value.as_object().unwrap().len(), 2);
         assert_eq!(record.as_object().unwrap().len(), 2);
         assert_eq!(
             record["version"],
@@ -109,7 +109,7 @@ fn skill_directives_and_provider_content_round_trip_and_reject_tampering() {
         );
         assert!(
             serde_json::to_value(OwnedModelRequestItem::DeveloperInstruction(
-                directive.clone()
+                *directive.clone()
             ))
             .is_err()
         );
@@ -148,7 +148,7 @@ fn persisted_directive_bodies_and_digests_must_match_their_full_pins() {
         ("digest", serde_json::to_value(different.digest()).unwrap()),
     ] {
         let mut value = serde_json::to_value(body()).unwrap();
-        value["zevria_skill_directive"]["payload"][field] = changed;
+        value["directive"]["payload"][field] = changed;
         let directive: TranscriptItem = serde_json::from_value(value).unwrap();
         let items = vec![invocation(), directive];
         let error = replay_directives(&items).unwrap_err();
@@ -172,7 +172,7 @@ fn unsupported_directive_envelopes_are_never_repaired_away() {
     let leading = serde_json::to_string(&invocation()).unwrap();
     let valid = serde_json::to_value(body()).unwrap();
     let mut old_version = valid.clone();
-    old_version["zevria_skill_directive"]["version"] = serde_json::json!(2);
+    old_version["directive"]["version"] = serde_json::json!(2);
     let error = serde_json::from_value::<TranscriptItem>(old_version.clone()).unwrap_err();
     assert!(
         error
@@ -180,7 +180,7 @@ fn unsupported_directive_envelopes_are_never_repaired_away() {
             .contains("unsupported directive version; start a fresh session")
     );
     let mut previous_version = valid.clone();
-    previous_version["zevria_skill_directive"]["version"] = serde_json::json!(4);
+    previous_version["directive"]["version"] = serde_json::json!(4);
     assert!(
         serde_json::from_value::<TranscriptItem>(previous_version.clone())
             .unwrap_err()
@@ -188,9 +188,9 @@ fn unsupported_directive_envelopes_are_never_repaired_away() {
             .contains("unsupported directive version; start a fresh session")
     );
     let mut text = valid.clone();
-    text["zevria_skill_directive"]["text"] = serde_json::json!("unexpected rendered banner");
+    text["directive"]["text"] = serde_json::json!("unexpected rendered banner");
     let mut payload = valid.clone();
-    payload["zevria_skill_directive"]["payload"]["body"] = serde_json::json!("");
+    payload["directive"]["payload"]["body"] = serde_json::json!("");
     let mut extra = valid.clone();
     extra["error"] = serde_json::json!("not a standalone record");
     let mut sidecar = valid;
@@ -221,7 +221,7 @@ fn unsupported_directive_envelopes_are_never_repaired_away() {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         }
         // A complete invalid inner directive cannot be disguised as tail damage.
-        if value.as_object().unwrap().len() == 1 {
+        if value.as_object().unwrap().len() <= 2 {
             let original = format!("{leading}\n{}", &record[..record.len() - 1]);
             std::fs::write(&path, &original).unwrap();
             assert!(load_report(&path).is_err());
@@ -239,8 +239,8 @@ fn incomplete_trailing_skill_directives_are_recoverable_without_losing_pins() {
     for item in [body(), revoke()] {
         let record = serde_json::to_string(&item).unwrap();
         for tail in [
-            r#"{"zevria_skill_directive":"#,
-            r#"{"zevria_skill_directive":{"version":1,"payload":"#,
+            r#"{"type":"directive","directive":"#,
+            r#"{"type":"directive","directive":{"version":1,"payload":"#,
             &record[..record.len() - 3],
             &record[..record.len() - 1],
         ] {
@@ -304,7 +304,7 @@ fn checkpoint_boundaries_and_full_snapshot_digest_are_validated() {
     assert!(
         replay_directives(&[TranscriptItem::Message(Message::user("no prefix needed"))]).is_ok()
     );
-    assert!(replay_directives(&[header(), header()]).is_err());
+    assert!(replay_directives(&[header(), header()]).is_ok());
     let different = SkillSnapshot::new(
         "review".parse().unwrap(),
         "Different metadata",
@@ -316,7 +316,7 @@ fn checkpoint_boundaries_and_full_snapshot_digest_are_validated() {
         replay_directives(&[
             header(),
             invocation(),
-            TranscriptItem::Directive(DirectiveContent::skill(&different))
+            TranscriptItem::Directive(Box::new(DirectiveContent::skill(&different)))
         ])
         .is_err()
     );
@@ -326,7 +326,7 @@ fn checkpoint_boundaries_and_full_snapshot_digest_are_validated() {
 fn combined_replay_and_suffixes_preserve_causal_pins_and_directives() {
     let profile = ModelProfileRef::new("test", "model");
     let mut items = vec![
-        TranscriptItem::SessionModels(
+        TranscriptItem::SessionModels(Box::new(
             models::SessionModels::new(
                 zevria_model::models::ModelSelection::new(
                     profile.clone(),
@@ -338,15 +338,15 @@ fn combined_replay_and_suffixes_preserve_causal_pins_and_directives() {
                 ),
             )
             .unwrap(),
-        ),
+        )),
         header(),
         invocation(),
         body(),
-        TranscriptItem::SkillInvocation(SkillInvocation::new(
+        TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
             snapshot().name().clone(),
             "reapply",
             SkillApplication::Reapply(snapshot().name().clone()),
-        )),
+        ))),
     ];
     let active = ActiveSkills::from_snapshots([snapshot()]).unwrap();
     let complete = InstructionReplayState::replay(&items).unwrap();
@@ -391,11 +391,11 @@ fn suffix_retains_unresolved_calls_and_exact_lifecycle_and_header_positions() {
     let mut full = prefix;
     full.extend(suffix);
     assert_eq!(continued, InstructionReplayState::replay(&full).unwrap());
-    let missing_pin = TranscriptItem::SkillInvocation(SkillInvocation::new(
+    let missing_pin = TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
         "missing".parse().unwrap(),
         "",
         SkillApplication::Reapply("missing".parse().unwrap()),
-    ));
+    )));
     let error = state.clone().apply_suffix(&[missing_pin]).unwrap_err();
     assert!(format!("{error:#}").contains("invalid skill lifecycle at record 4"));
     assert!(
@@ -403,17 +403,11 @@ fn suffix_retains_unresolved_calls_and_exact_lifecycle_and_header_positions() {
             .apply_suffix(&[header()])
             .unwrap_err()
             .to_string()
-            .contains("session mode must be unique")
+            .contains("session metadata cannot split a tool call/result batch")
     );
     let without_header =
         InstructionReplayState::replay(&[TranscriptItem::Message(Message::user("first"))]).unwrap();
-    assert!(
-        without_header
-            .apply_suffix(&[header()])
-            .unwrap_err()
-            .to_string()
-            .contains("session mode must be first")
-    );
+    assert!(without_header.apply_suffix(&[header()]).is_ok());
 }
 
 #[test]

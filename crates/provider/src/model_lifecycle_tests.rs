@@ -159,8 +159,10 @@ async fn confirmed_capacity_conversion_uses_large_source_not_small_destination()
         let plan_id = zevria_workflow::PlanId::new();
         let history = vec![
             TranscriptItem::Message(Message::user("long input ".repeat(1000))),
-            TranscriptItem::Plan(zevria_workflow::PlanRecord::Started { id: plan_id }),
-            TranscriptItem::Plan(zevria_workflow::PlanRecord::DraftSaved {
+            TranscriptItem::Plan(Box::new(zevria_workflow::PlanRecord::Started {
+                id: plan_id,
+            })),
+            TranscriptItem::Plan(Box::new(zevria_workflow::PlanRecord::DraftSaved {
                 draft: zevria_workflow::PlanDraft {
                     target: zevria_workflow::PlanVersion {
                         id: plan_id,
@@ -172,7 +174,7 @@ async fn confirmed_capacity_conversion_uses_large_source_not_small_destination()
                             .into(),
                     source_turn_id: zevria_foundation::TurnId::new(1),
                 },
-            }),
+            })),
         ];
         let settings = Arc::new(Settings::default());
         let (_directory, mut engine) = engine(a.clone(), b.clone(), history, settings.clone());

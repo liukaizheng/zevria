@@ -12,20 +12,7 @@ use zevria_model::models::{ModelSelection, ModelSettingsService};
 mod tests;
 
 pub fn load(config_path: &Path) -> anyhow::Result<Config> {
-    let models_path = models_path_for(config_path);
-    let mut config = Config::parse_at(
-        &settings::read_regular(config_path)?,
-        &settings::read_regular(&models_path).with_context(|| {
-            format!(
-                "failed to read models configuration at {}",
-                models_path.display()
-            )
-        })?,
-        &models_path,
-    )?;
-    config.source_path = Some(config_path.to_path_buf());
-    config.models_path = Some(models_path);
-    Ok(config)
+    Config::load_existing(config_path, &models_path_for(config_path))
 }
 
 pub fn revision(config: &Config) -> anyhow::Result<String> {

@@ -444,15 +444,11 @@ impl WorkerReviewState {
         outcome
     }
     pub fn apply(&mut self, event: &WorkerReviewEvent) -> Result<(), String> {
-        // Validate on a copy: rejection must never partially mutate authority.
-        let mut next = self.clone();
-        next.reduce(event)?;
-        if next.baseline.is_some() && next.confirmed_plan().is_none() {
-            return Err("baseline requires an exact valid confirmation".into());
-        }
-        *self = next;
+        self.validate_transition(event)?;
+        self.apply_validated_transition(event);
         Ok(())
     }
+
     fn invalidate_confirmation(&mut self) {
         self.confirmation = None;
         self.baseline = None;
@@ -473,7 +469,8 @@ impl WorkerReviewState {
         Ok(())
     }
 
-    fn reduce(&mut self, event: &WorkerReviewEvent) -> Result<(), String> {
+    /// Validate a transition against the current state without copying it.
+    pub fn validate_transition(&self, event: &WorkerReviewEvent) -> Result<(), String> {
         if self.abandoned {
             return Err("worker is permanently abandoned for this run".into());
         }
@@ -481,15 +478,19 @@ impl WorkerReviewState {
             return Err("worker review is sealed".into());
         }
         match event {
-            WorkerReviewEvent::ImageCapability { supported } => {
-                self.image_capability = Some(*supported)
-            }
             WorkerReviewEvent::Fatal { error } => return Err(error.clone()),
+            WorkerReviewEvent::Interrupted { generation } => {
+                if self.active.as_ref().map(|input| input.generation) != Some(*generation) {
+                    return Err("settlement belongs to an inactive input generation".into());
+                }
+                if self.evidence.descriptor != self.descriptor {
+                    return Err("foreign worker evidence".into());
+                }
+            }
             WorkerReviewEvent::CancelRequested { generation } => {
                 if self.cancellable_generation() != Some(*generation) {
                     return Err("cancellation belongs to an inactive input generation".into());
                 }
-                self.cancel_requested = Some(*generation);
             }
             WorkerReviewEvent::InputAccepted { input } => {
                 if input.generation != self.accepted_generation.saturating_add(1)
@@ -508,23 +509,13 @@ impl WorkerReviewState {
                 {
                     return Err("invalid worker input generation or prompt".into());
                 }
-                self.accepted_generation = input.generation;
-                self.pending.push_back(input.clone());
-                self.invalidate_confirmation();
             }
-            WorkerReviewEvent::Dispatched {
-                generation,
-                attempt,
-            } => {
+            WorkerReviewEvent::Dispatched { generation, .. } => {
                 if self.active.is_some()
                     || self.pending.front().map(|input| input.generation) != Some(*generation)
                 {
                     return Err("worker prompt is overlapping or out of order".into());
                 }
-                self.active = self.pending.pop_front();
-                self.attempt = *attempt;
-                self.candidate = None;
-                self.diagnostic = None;
             }
             WorkerReviewEvent::Recovering {
                 generation,
@@ -537,12 +528,104 @@ impl WorkerReviewState {
                         "recovery belongs to an inactive generation or stale attempt".into(),
                     );
                 }
+            }
+            WorkerReviewEvent::Published {
+                generation,
+                replay: false,
+                ..
+            } => {
+                if self.active.as_ref().map(|input| input.generation) != Some(*generation) {
+                    return Err("publication belongs to an inactive input generation".into());
+                }
+            }
+            WorkerReviewEvent::Settled {
+                generation,
+                evidence,
+                ..
+            } => {
+                if self.active.as_ref().map(|input| input.generation) != Some(*generation) {
+                    return Err("settlement belongs to an inactive input generation".into());
+                }
+                if evidence.descriptor != self.descriptor {
+                    return Err("foreign worker evidence".into());
+                }
+            }
+            WorkerReviewEvent::Decisions {
+                decision,
+                unavailable,
+            } => {
+                if self.active.is_none() || decision.is_some() == unavailable.is_some() {
+                    return Err("accepted worker decision requires an active interaction and exactly one representation".into());
+                }
+            }
+            WorkerReviewEvent::Confirmed { receipt } => {
+                self.validate_receipt(receipt)?;
+                if self.confirmation.is_some() {
+                    return Err("worker is already confirmed".into());
+                }
+            }
+            WorkerReviewEvent::BaselineMarked { receipt } => {
+                self.validate_receipt(receipt)?;
+                if self.baseline.is_some() {
+                    return Err("worker is already the baseline".into());
+                }
+            }
+            WorkerReviewEvent::BaselineCleared { request_id } => {
+                if !request_id.validate() || self.baseline.is_none() {
+                    return Err("worker is not the baseline or request identity is invalid".into());
+                }
+            }
+            WorkerReviewEvent::Withdrawn { .. } => {
+                if self.confirmation.is_none() {
+                    return Err("worker is not confirmed".into());
+                }
+            }
+            WorkerReviewEvent::Abandoned { request_id } => {
+                if request_id.0.trim().is_empty() || request_id.0.len() > 128 {
+                    return Err("invalid abandonment request identity".into());
+                }
+            }
+            WorkerReviewEvent::Sealed => {
+                if self.confirmed_plan().is_none() {
+                    return Err("cannot seal an unconfirmed worker".into());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Commit a transition validated against this unchanged state.
+    #[doc(hidden)]
+    pub fn apply_validated_transition(&mut self, event: &WorkerReviewEvent) {
+        match event {
+            WorkerReviewEvent::ImageCapability { supported } => {
+                self.image_capability = Some(*supported)
+            }
+            WorkerReviewEvent::Fatal { .. } => {
+                unreachable!("fatal transitions cannot be validated")
+            }
+            WorkerReviewEvent::CancelRequested { generation } => {
+                self.cancel_requested = Some(*generation);
+            }
+            WorkerReviewEvent::InputAccepted { input } => {
+                self.accepted_generation = input.generation;
+                self.pending.push_back(input.clone());
+                self.invalidate_confirmation();
+            }
+            WorkerReviewEvent::Dispatched { attempt, .. } => {
+                self.active = self.pending.pop_front();
+                self.attempt = *attempt;
+                self.candidate = None;
+                self.diagnostic = None;
+            }
+            WorkerReviewEvent::Recovering { attempt, .. } => {
                 self.attempt = *attempt;
                 self.connected = false;
                 self.image_capability = None;
             }
             WorkerReviewEvent::Interrupted { generation } => {
-                return self.reduce(&WorkerReviewEvent::Settled {
+                self.apply_validated_transition(&WorkerReviewEvent::Settled {
                     generation: *generation, connected: false, evidence: Box::new(self.evidence.clone()),
                     failure: Some("process stopped during this interaction; delivery is ambiguous, so its text was not resent".into()),
                 });
@@ -553,10 +636,7 @@ impl WorkerReviewState {
                 replay,
             } => {
                 if *replay {
-                    return Ok(());
-                }
-                if self.active.as_ref().map(|input| input.generation) != Some(*generation) {
-                    return Err("publication belongs to an inactive input generation".into());
+                    return;
                 }
                 if let Some(markdown) = plan
                     .markdown
@@ -600,12 +680,6 @@ impl WorkerReviewState {
                 connected,
                 evidence,
             } => {
-                if self.active.as_ref().map(|input| input.generation) != Some(*generation) {
-                    return Err("settlement belongs to an inactive input generation".into());
-                }
-                if evidence.descriptor != self.descriptor {
-                    return Err("foreign worker evidence".into());
-                }
                 let mut retained = self.evidence.clone();
                 crate::ensemble::merge_decision_evidence(
                     &mut retained.user_decisions,
@@ -677,9 +751,6 @@ impl WorkerReviewState {
                 decision,
                 unavailable,
             } => {
-                if self.active.is_none() || decision.is_some() == unavailable.is_some() {
-                    return Err("accepted worker decision requires an active interaction and exactly one representation".into());
-                }
                 crate::ensemble::merge_decision_evidence(
                     &mut self.evidence.user_decisions,
                     &mut self.evidence.decision_ids,
@@ -708,38 +779,21 @@ impl WorkerReviewState {
                 }
             }
             WorkerReviewEvent::Confirmed { receipt } => {
-                self.validate_receipt(receipt)?;
-                if self.confirmation.is_some() {
-                    return Err("worker is already confirmed".into());
-                }
                 self.confirmation = Some(receipt.clone());
             }
             WorkerReviewEvent::BaselineMarked { receipt } => {
-                self.validate_receipt(receipt)?;
-                if self.baseline.is_some() {
-                    return Err("worker is already the baseline".into());
-                }
                 if self.confirmation.is_none() {
                     self.confirmation = Some(receipt.clone());
                 }
                 self.baseline = Some(receipt.clone());
             }
-            WorkerReviewEvent::BaselineCleared { request_id } => {
-                if !request_id.validate() || self.baseline.is_none() {
-                    return Err("worker is not the baseline or request identity is invalid".into());
-                }
+            WorkerReviewEvent::BaselineCleared { .. } => {
                 self.baseline = None;
             }
             WorkerReviewEvent::Withdrawn { .. } => {
-                if self.confirmation.is_none() {
-                    return Err("worker is not confirmed".into());
-                }
                 self.invalidate_confirmation();
             }
-            WorkerReviewEvent::Abandoned { request_id } => {
-                if request_id.0.trim().is_empty() || request_id.0.len() > 128 {
-                    return Err("invalid abandonment request identity".into());
-                }
+            WorkerReviewEvent::Abandoned { .. } => {
                 self.abandoned = true;
                 self.invalidate_confirmation();
                 self.active = None;
@@ -754,14 +808,10 @@ impl WorkerReviewState {
                 self.diagnostic = Some(crate::ensemble::WORKER_ABANDONMENT_REASON.into());
             }
             WorkerReviewEvent::Sealed => {
-                if self.confirmed_plan().is_none() {
-                    return Err("cannot seal an unconfirmed worker".into());
-                }
                 self.sealed = true;
                 self.connected = false;
             }
         }
-        Ok(())
     }
 }
 

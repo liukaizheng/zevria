@@ -90,7 +90,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
             transcript::TranscriptWriter::create_with_id(&directory, "resume-location").unwrap();
         let profile = zevria_foundation::ModelProfileRef::new("test", "test-model");
         writer
-            .append(&TranscriptItem::SessionModels(
+            .append(&TranscriptItem::SessionModels(Box::new(
                 zevria_model::models::SessionModels::new(
                     zevria_model::models::ModelSelection::new(
                         profile.clone(),
@@ -102,7 +102,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
                     ),
                 )
                 .unwrap(),
-            ))
+            )))
             .unwrap();
         writer
             .append(&TranscriptItem::Message(rig_core::message::Message::user(
@@ -121,8 +121,9 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
             )
             .await
             .unwrap();
-            let mut events = running.take_event_receiver().unwrap();
+            let mut events = running.running.take_event_receiver().unwrap();
             running
+                .running
                 .command_sender()
                 .send(SessionCommand::Turn(
                     zevria_session_api::TurnCommand::Submit {
@@ -154,7 +155,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
             })
             .await
             .unwrap();
-            running.shutdown().await.unwrap();
+            running.running.shutdown().await.unwrap();
             let snapshots = std::fs::read_dir(directory.join(".cache-diagnostics"))
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()

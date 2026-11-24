@@ -66,11 +66,23 @@ impl RawDiagnosticSink {
                     },
                     LineDirection::Stderr => AgentRunEvent::Stderr { text: line },
                 };
-                let encoded_bytes = serde_json::to_vec(&AgentRunTranscriptRecord::Event {
-                    event: event.clone(),
-                })
-                .map_or(RAW_DIAGNOSTIC_MAX_RUN_BYTES, |record| record.len());
-                if retained_bytes.saturating_add(encoded_bytes) > RAW_DIAGNOSTIC_MAX_RUN_BYTES {
+                #[derive(serde::Serialize)]
+                struct EventRecord<'a> {
+                    record: &'static str,
+                    event: &'a AgentRunEvent,
+                }
+                let mut count = zevria_foundation::BoundedCountingWriter::new(
+                    RAW_DIAGNOSTIC_MAX_RUN_BYTES - retained_bytes,
+                );
+                if serde_json::to_writer(
+                    &mut count,
+                    &EventRecord {
+                        record: "event",
+                        event: &event,
+                    },
+                )
+                .is_err()
+                {
                     record_debug_truncation(
                         &task_log,
                         format!(
@@ -85,7 +97,7 @@ impl RawDiagnosticSink {
                     task_log.set_failure(error.to_string());
                     break;
                 }
-                retained_bytes = retained_bytes.saturating_add(encoded_bytes);
+                retained_bytes += count.written();
             }
             let dropped = task_drops.swap(0, AtomicOrdering::AcqRel);
             if !truncated && dropped > 0 {

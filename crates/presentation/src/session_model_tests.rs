@@ -136,8 +136,8 @@ fn job_notice_rows_restore_copy_full_text_and_do_not_enter_recall_or_prompt_ordi
     let continuation = job_notice(Continuation);
     model.restore_transcript(vec![
         TranscriptItem::Message(Message::user("first")),
-        TranscriptItem::CommandJobNotice(continuation.clone()),
-        TranscriptItem::CommandJobNotice(job_notice(Update)),
+        TranscriptItem::CommandJobNotice(Box::new(continuation.clone())),
+        TranscriptItem::CommandJobNotice(Box::new(job_notice(Update))),
         TranscriptItem::Message(Message::user("second")),
     ]);
     let rows = model.conversation.history();

@@ -577,7 +577,7 @@ async fn retained_screenshots_404_counting_resume_and_same_mode_followup_use_rea
         writer
             .rewrite(&[
                 zevria_transcript::transcript::TranscriptItem::SessionMode(SessionMode::Build),
-                zevria_transcript::transcript::TranscriptItem::Compaction(
+                zevria_transcript::transcript::TranscriptItem::Compaction(Box::new(
                     CompactionCheckpoint::new(
                         CompactionTrigger::AutomaticPreTurn,
                         CompactionBackend::LocalSummary,
@@ -585,7 +585,7 @@ async fn retained_screenshots_404_counting_resume_and_same_mode_followup_use_rea
                         vec![],
                     )
                     .unwrap(),
-                ),
+                )),
             ])
             .unwrap();
         let mut engine = SessionEngine::new(

@@ -130,25 +130,27 @@ fn ensemble_root_abandonment_requires_an_exact_accepted_control_and_never_seals_
         detail: "last worker abandoned; ensemble cancelled".into(),
     };
     let prefix = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
             run_id: start.run_id.clone(),
             version: ENSEMBLE_REVIEW_VERSION,
-        }),
+        })),
     ];
     for accepted in [None, Some(false), Some(true)] {
         let mut items = prefix.clone();
-        items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-            run_id: start.run_id.clone(),
-            worker_id: state.descriptor.id.clone(),
-            event: Box::new(event.clone()),
-            result: accepted.map(|accepted| WorkerControlResult {
-                accepted,
-                ..result.clone()
-            }),
-        }));
+        items.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::WorkerReview {
+                run_id: start.run_id.clone(),
+                worker_id: state.descriptor.id.clone(),
+                event: Box::new(event.clone()),
+                result: accepted.map(|accepted| WorkerControlResult {
+                    accepted,
+                    ..result.clone()
+                }),
+            },
+        )));
         assert_eq!(
             crate::validate_ensemble_review_history(&items).is_ok(),
             accepted == Some(true)
@@ -166,7 +168,7 @@ fn ensemble_root_abandonment_requires_an_exact_accepted_control_and_never_seals_
         record
     );
     let mut items = prefix;
-    items.push(TranscriptItem::Ensemble(record));
+    items.push(TranscriptItem::Ensemble(Box::new(record)));
     assert!(crate::validate_ensemble_review_history(&items).is_err());
 }
 

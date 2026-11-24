@@ -680,7 +680,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         // checkpoint/default/header/route sequence after persistence begins.
         let checkpoint_installed = checkpoint.is_some();
         if let Some(checkpoint) = checkpoint {
-            self.commit(TranscriptItem::Compaction(checkpoint))?;
+            self.commit(TranscriptItem::Compaction(Box::new(checkpoint)))?;
             self.reset_after_history_replacement()?;
         }
         let revision = match scope {

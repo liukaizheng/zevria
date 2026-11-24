@@ -1,7 +1,7 @@
 //! Request lifecycle validation, independent of the skill ledger and launch evidence.
 use crate::TranscriptItem;
 use rig_core::message::{AssistantContent, Message};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 use zevria_foundation::{RequestBehavior, RequestMetadata};
 use zevria_instructions::{RequestDirective, RequestDirectiveKind};
 
@@ -12,19 +12,19 @@ pub(crate) struct RequestReplayState {
     current: Option<RequestMetadata>,
     corrected: bool,
     final_response: bool,
-    seen: BTreeSet<String>,
+    seen: Arc<BTreeSet<String>>,
 }
 
 pub(crate) fn is_request_owner(item: &TranscriptItem) -> bool {
     crate::is_prompt_item(item)
         || matches!(item, TranscriptItem::CommandJobNotice(notice) if notice.kind() == zevria_foundation::CommandJobNoticeKind::Continuation)
         || matches!(
-            item,
-            TranscriptItem::Plan(zevria_workflow::PlanRecord::Handoff { .. })
+            item.plan_record(),
+            Some(zevria_workflow::PlanRecord::Handoff { .. })
         )
         || matches!(
-            item,
-            TranscriptItem::Ensemble(zevria_workflow::EnsembleRecord::ReportsReady { .. })
+            item.ensemble_record(),
+            Some(zevria_workflow::EnsembleRecord::ReportsReady { .. })
         )
 }
 
@@ -45,6 +45,7 @@ impl RequestReplayState {
         &mut self,
         item: &TranscriptItem,
         pending_empty: bool,
+        decoded: bool,
     ) -> anyhow::Result<()> {
         if matches!(item, TranscriptItem::ToolDeclarations(_)) {
             return Ok(());
@@ -60,7 +61,9 @@ impl RequestReplayState {
         }
         match item {
             TranscriptItem::RequestDirective(directive) => {
-                directive.validate()?;
+                if !decoded {
+                    directive.validate()?;
+                }
                 anyhow::ensure!(
                     pending_empty,
                     "a request directive cannot split a tool call/result batch"
@@ -83,7 +86,7 @@ impl RequestReplayState {
                             );
                         }
                         anyhow::ensure!(
-                            self.seen.insert(directive.request.id.clone()),
+                            Arc::make_mut(&mut self.seen).insert(directive.request.id.clone()),
                             "duplicate request identity"
                         );
                         self.current = Some(directive.request.clone());
@@ -110,8 +113,10 @@ impl RequestReplayState {
                     self.current = None;
                     self.corrected = false;
                     if let TranscriptItem::RequestPrompt { message, request } = item {
-                        zevria_content::UserPrompt::from_message(message)?;
-                        request.validate()?;
+                        if !decoded {
+                            zevria_content::UserPrompt::from_message(message)?;
+                            request.validate()?;
+                        }
                         self.expected = Some(request.clone());
                     }
                 }
@@ -139,7 +144,7 @@ pub(crate) fn effective_request_directives<'a>(
             if directive.kind == RequestDirectiveKind::Boundary {
                 directives.clear();
             }
-            directives.push(directive);
+            directives.push(directive.as_ref());
         }
     }
     directives

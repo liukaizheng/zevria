@@ -312,10 +312,10 @@ fn unfinished_review_fixture() -> (EnsembleStart, Vec<TranscriptItem>) {
         "recover review",
     );
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("durable review evidence"),
             agents: vec![AgentRunSummary {
@@ -329,7 +329,7 @@ fn unfinished_review_fixture() -> (EnsembleStart, Vec<TranscriptItem>) {
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("already durable review synthesis")),
     ];
     (start, items)
@@ -641,8 +641,8 @@ async fn unfinished_ensemble_recovery_precedes_queued_frontend_work() {
     assert!(recovery < recovered && recovered < frontend);
     assert_eq!(launcher.launches.load(Ordering::SeqCst), 0);
     let persisted = conversation_records(&zevria_transcript::transcript::load(&path).unwrap());
-    assert!(matches!(&persisted[persisted.len() - 2],
-        TranscriptItem::Ensemble(EnsembleRecord::Completed { run_id }) if run_id == &start.run_id
+    assert!(matches!(persisted[persisted.len() - 2].ensemble_record(),
+        Some(EnsembleRecord::Completed { run_id }) if run_id == &start.run_id
     ));
     assert_eq!(
         persisted.last(),
@@ -1297,10 +1297,7 @@ async fn fatal_active_replay_bypasses_control_backpressure_and_discards_queued_w
     let lines = bytes
         .lines()
         .filter(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .unwrap()
-                .get("zevria_tool_declarations")
-                .is_none()
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["type"] != "tool_declarations"
         })
         .collect::<Vec<_>>();
     assert_eq!(

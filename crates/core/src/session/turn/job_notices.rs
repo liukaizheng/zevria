@@ -150,8 +150,9 @@ impl<P: ModelProvider> SessionEngine<P> {
             &completions,
             jobs.running_model_jobs(),
         );
-        let persistence =
-            recoverable(self.record_completed(TranscriptItem::CommandJobNotice(notice.clone())))?;
+        let persistence = recoverable(
+            self.record_completed(TranscriptItem::CommandJobNotice(Box::new(notice.clone()))),
+        )?;
         // push_completed keeps completed evidence in memory on degraded writes.
         self.context.invalidate_prepared_count();
         jobs.acknowledge_completions(&ack);
@@ -266,7 +267,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             &completions,
             jobs.running_model_jobs(),
         );
-        let mut records = vec![TranscriptItem::CommandJobNotice(notice.clone())];
+        let mut records = vec![TranscriptItem::CommandJobNotice(Box::new(notice.clone()))];
         let policy = self.policies.policy(mode);
         let boundary = self.standard_request_boundary(policy);
         let request = boundary.as_ref().and_then(|record| match record {

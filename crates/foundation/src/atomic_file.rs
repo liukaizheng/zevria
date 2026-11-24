@@ -38,12 +38,12 @@ pub fn replace(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
+pub fn sync_directory(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
+pub fn sync_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

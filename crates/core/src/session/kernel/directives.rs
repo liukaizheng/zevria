@@ -30,11 +30,13 @@ impl<P: ModelProvider> SessionEngine<P> {
         policy: &TurnPolicy,
     ) -> Option<TranscriptItem> {
         self.request_boundaries_enabled(policy).then(|| {
-            TranscriptItem::RequestDirective(RequestDirective::boundary_with_file_mutation_scope(
-                zevria_foundation::RequestMetadata::new(
-                    zevria_foundation::RequestBehavior::Standard,
+            TranscriptItem::RequestDirective(Box::new(
+                RequestDirective::boundary_with_file_mutation_scope(
+                    zevria_foundation::RequestMetadata::new(
+                        zevria_foundation::RequestBehavior::Standard,
+                    ),
+                    policy.file_mutation_scope,
                 ),
-                policy.file_mutation_scope,
             ))
         })
     }
@@ -87,7 +89,10 @@ impl RequestPlan {
         required.snapshot().validate()?;
         Ok(PreparedInstructionUpdates {
             instruction_tokens: instruction_state_tokens(&required),
-            records: updates.into_iter().map(TranscriptItem::Directive).collect(),
+            records: updates
+                .into_iter()
+                .map(|record| TranscriptItem::Directive(Box::new(record)))
+                .collect(),
             state: required,
         })
     }

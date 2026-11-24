@@ -9,13 +9,23 @@ use zevria_foundation::{
     McpToolAccess,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpSyncSummary {
+    pub revision: String,
+    pub connected: usize,
+    pub total: usize,
+    pub tool_count: usize,
+}
+
 pub trait McpSessionService: Send + Sync {
     fn tool_allowed(&self, access: McpToolAccess, name: &str) -> bool;
     fn active_instructions(&self, access: McpToolAccess) -> Vec<McpServerInstruction>;
     fn prompt_catalog(&self) -> Vec<(McpServerName, McpPromptInfo)>;
     fn query_view(&self, request: &McpManagementRequest) -> McpManagementResult;
     fn changes(&self) -> watch::Receiver<u64>;
-    fn sync_pending_updates(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
+    fn sync_pending_updates(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Option<McpSyncSummary>> + Send + '_>>;
     fn manage(
         &self,
         request: McpManagementRequest,

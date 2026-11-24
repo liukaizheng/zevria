@@ -240,14 +240,14 @@ async fn replay_message_drives_tools_events_history_and_persistence() {
         .expect("transcript should be readable")
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL"))
-        .filter(|record| record.get("zevria_tool_declarations").is_none())
+        .filter(|record| record["type"] != "tool_declarations")
         .collect::<Vec<_>>();
     for index in [1, 3] {
         let record = lines[index]
             .as_object()
             .expect("provider record should be an object");
-        assert_eq!(record.len(), 1);
-        assert!(record.contains_key("zevria_provider_replay"));
+        assert_eq!(record.len(), 2);
+        assert!(record.contains_key("replay"));
         assert!(!record.contains_key("role"));
     }
     let restored = conversation_records(

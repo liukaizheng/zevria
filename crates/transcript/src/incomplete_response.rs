@@ -127,10 +127,17 @@ impl IncompleteResponse {
                 "pre-execution rejection evidence must be failed and contain no upstream output"
             );
         }
-        let attempt = self.to_attempt();
-        attempt.validate()?;
+        ResponseAttempt::validate_parts(
+            &self.attempt_id,
+            &self.profile,
+            self.response_id.as_deref(),
+            &self.hosted_activity,
+            &self.presentation,
+        )?;
         anyhow::ensure!(
-            attempt.has_display(),
+            self.input_rejection.is_some()
+                || !self.presentation.is_empty()
+                || !self.hosted_activity.is_empty(),
             "incomplete response must have readable output or hosted activity"
         );
         anyhow::ensure!(

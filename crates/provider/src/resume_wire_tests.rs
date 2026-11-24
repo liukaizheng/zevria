@@ -126,7 +126,7 @@ pub(super) async fn flow() -> Vec<String> {
         TranscriptWriter::create_with_id(directory.path(), "fixed-resume-session").unwrap();
     let path = writer.path().to_path_buf();
     writer
-        .append(&TranscriptItem::SessionModels(
+        .append(&TranscriptItem::SessionModels(Box::new(
             zevria_model::models::SessionModels::new(
                 zevria_model::models::ModelSelection::new(
                     test_profile_ref(),
@@ -138,7 +138,7 @@ pub(super) async fn flow() -> Vec<String> {
                 ),
             )
             .unwrap(),
-        ))
+        )))
         .unwrap();
     // A fixed, content-free synthetic scale matching the reported item counts.
     for i in 0..37 {

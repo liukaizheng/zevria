@@ -70,7 +70,7 @@ fn records(engine: &SessionEngine<ScriptedProvider>) -> Vec<&ToolDeclarationReco
         .items()
         .iter()
         .filter_map(|item| match item {
-            TranscriptItem::ToolDeclarations(record) => Some(record),
+            TranscriptItem::ToolDeclarations(record) => Some(record.as_ref()),
             _ => None,
         })
         .collect()
@@ -660,10 +660,22 @@ impl zevria_session_api::mcp::McpSessionService for McpFixture {
 
     fn sync_pending_updates(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<zevria_session_api::mcp::McpSyncSummary>>
+                + Send
+                + '_,
+        >,
+    > {
         Box::pin(async {
             self.changed
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
+                .then(|| zevria_session_api::mcp::McpSyncSummary {
+                    revision: "fixture".into(),
+                    connected: 1,
+                    total: 1,
+                    tool_count: 1,
+                })
         })
     }
 

@@ -27,10 +27,12 @@ fn pinned_invocation() -> Vec<TranscriptItem> {
     assert!(restored.origin().is_none());
     assert!(restored.snapshot().provenance().is_none());
     assert_eq!(definition.digest(), restored.digest());
-    vec![TranscriptItem::SkillInvocation(SkillInvocation::new(
-        definition.name().clone(),
-        "inspect",
-        SkillApplication::Activate(snapshot),
+    vec![TranscriptItem::SkillInvocation(Box::new(
+        SkillInvocation::new(
+            definition.name().clone(),
+            "inspect",
+            SkillApplication::Activate(snapshot),
+        ),
     ))]
 }
 
@@ -59,17 +61,19 @@ fn current_snapshots_and_checkpoints_restore_full_historical_pins() {
                 SkillSource::Programmatic("test".into()),
             )
             .unwrap();
-            items.push(TranscriptItem::SkillInvocation(SkillInvocation::new(
-                definition.name().clone(),
-                "",
-                SkillApplication::Activate(definition.snapshot()),
+            items.push(TranscriptItem::SkillInvocation(Box::new(
+                SkillInvocation::new(
+                    definition.name().clone(),
+                    "",
+                    SkillApplication::Activate(definition.snapshot()),
+                ),
             )));
         }
         let active = replay_active_skills(&items).unwrap();
         let checkpoint = checkpoint(&items);
         assert_eq!(checkpoint.version, 1);
         assert_eq!(active.len(), count);
-        items.push(TranscriptItem::Compaction(checkpoint));
+        items.push(TranscriptItem::Compaction(Box::new(checkpoint)));
         let directory = tempfile::tempdir().unwrap();
         let mut writer = TranscriptWriter::create(directory.path()).unwrap();
         writer.rewrite(&items).unwrap();
@@ -94,36 +98,39 @@ fn unsupported_records_fail_every_position_without_partial_projection_or_backups
     ];
     for field in ["metadata", "digest"] {
         let mut value = invocation.clone();
-        value[SKILL_INVOCATION_KEY]["application"]["activate"]
+        value["invocation"]["application"]["activate"]
             .as_object_mut()
             .unwrap()
             .remove(field);
         rejected.push(value);
     }
     let mut old = invocation.clone();
-    old[SKILL_INVOCATION_KEY]["version"] = json!(3);
+    old["invocation"]["version"] = json!(3);
     rejected.push(old);
     let mut value = invocation;
-    value[SKILL_INVOCATION_KEY] = json!({"name":"review", "args":"inspect"});
+    value["invocation"] = json!({"name":"review", "args":"inspect"});
     rejected.push(value);
     for metadata in [false, true] {
         let mut value = serde_json::to_value(Message::user("ordinary delivery")).unwrap();
-        value[SUBTASK_RESULTS_KEY] = json!([]);
+        value["zevria_subtask_results"] = json!([]);
         if metadata {
-            value[TOOL_RESULT_METADATA_KEY] = json!([]);
+            value["metadata"] = json!([]);
         }
         rejected.push(value);
     }
     for version in [0, 2, 3, 4, 5, 6, 7, 99] {
-        let mut value = serde_json::to_value(TranscriptItem::Compaction(checkpoint(&[]))).unwrap();
-        value[COMPACTION_RECORD_KEY]["version"] = json!(version);
+        let mut value =
+            serde_json::to_value(TranscriptItem::Compaction(Box::new(checkpoint(&[])))).unwrap();
+        value["checkpoint"]["version"] = json!(version);
         rejected.push(value);
     }
-    let mut value = serde_json::to_value(TranscriptItem::Compaction(checkpoint(&pair))).unwrap();
-    value[COMPACTION_RECORD_KEY]["active_skill_identities"] = json!([]);
+    let mut value =
+        serde_json::to_value(TranscriptItem::Compaction(Box::new(checkpoint(&pair)))).unwrap();
+    value["checkpoint"]["active_skill_identities"] = json!([]);
     rejected.push(value);
-    let mut value = serde_json::to_value(TranscriptItem::Compaction(checkpoint(&pair))).unwrap();
-    value[COMPACTION_RECORD_KEY]["instruction_snapshot"] = json!({"text":"PRIVATE INSTRUCTIONS"});
+    let mut value =
+        serde_json::to_value(TranscriptItem::Compaction(Box::new(checkpoint(&pair)))).unwrap();
+    value["checkpoint"]["instruction_snapshot"] = json!({"text":"PRIVATE INSTRUCTIONS"});
     rejected.push(value);
     let directive = crate::DirectiveContent::skill(
         &crate::SkillSnapshot::new("review".parse().unwrap(), "Review", "PRIVATE INSTRUCTIONS")
@@ -135,8 +142,8 @@ fn unsupported_records_fail_every_position_without_partial_projection_or_backups
         json!([{"type":"message", "message":{"role":"system", "content":"PRIVATE INSTRUCTIONS"}}]),
     ] {
         let mut value =
-            serde_json::to_value(TranscriptItem::Compaction(checkpoint(&pair))).unwrap();
-        value[COMPACTION_RECORD_KEY]["replacement_history"] = history;
+            serde_json::to_value(TranscriptItem::Compaction(Box::new(checkpoint(&pair)))).unwrap();
+        value["checkpoint"]["replacement_history"] = history;
         rejected.push(value);
     }
     for value in rejected {
@@ -153,8 +160,12 @@ fn unsupported_records_fail_every_position_without_partial_projection_or_backups
             "{truncated}"
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), truncated);
-        for prefix in ["", "{\"error\":\"before\"}\n"] {
-            for suffix in ["", "\n{\"error\":\"after\"}\n", "\n{\"partial\":"] {
+        for prefix in ["", "{\"type\":\"error\",\"error\":\"before\"}\n"] {
+            for suffix in [
+                "",
+                "\n{\"type\":\"error\",\"error\":\"after\"}\n",
+                "\n{\"partial\":",
+            ] {
                 let directory = tempfile::tempdir().unwrap();
                 let path = directory.path().join("unsupported.jsonl");
                 let original = format!("{prefix}{value}{suffix}");
@@ -192,12 +203,10 @@ fn truncated_reserved_boundaries_are_not_crash_debris() {
         r#"{"zevria_instruction_prefix":{"text":"PRIVATE INSTRUCTIONS"#,
         r#"{"zevria_directive":{"text":"PRIVATE INSTRUCTIONS"#,
         r#"{"role":"user","content":"ordinary","zevria_directive":"#,
-        r#"{"zevria_instruction_pref"#,
-        r#"{"zevria_direct"#,
         r#"{"zevria_compaction":{"version":6,"replacement_history":["#,
         r#"{"zevria_compaction":{"version":7,"instruction_snapshot":{"text":"PRIVATE INSTRUCTIONS"#,
     ] {
-        let original = format!("{{\"error\":\"before\"}}\n{tail}");
+        let original = format!("{{\"type\":\"error\",\"error\":\"before\"}}\n{tail}");
         std::fs::write(&path, &original).unwrap();
         assert!(load_report(&path).is_err(), "{tail}");
         assert!(TranscriptWriter::append_to(path.clone()).is_err(), "{tail}");
@@ -211,7 +220,7 @@ fn truncated_reserved_boundaries_are_not_crash_debris() {
     let original = serde_json::to_string(&ordinary).unwrap();
     std::fs::write(
         &path,
-        format!("{original}\n{{\"role\":\"user\",\"content\":["),
+        format!("{original}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":["),
     )
     .unwrap();
     assert_eq!(load(&path).unwrap(), vec![ordinary.clone()]);
@@ -269,14 +278,13 @@ fn marker_shaped_tool_arguments_are_data_but_checkpoint_sidecars_are_not() {
     );
     let mut checkpoint = checkpoint(&[]);
     checkpoint.replacement_history = vec![OwnedModelRequestItem::message(message)];
-    let item = TranscriptItem::Compaction(checkpoint);
+    let item = TranscriptItem::Compaction(Box::new(checkpoint));
     let mut value = serde_json::to_value(&item).unwrap();
     assert_eq!(
         serde_json::from_value::<TranscriptItem>(value.clone()).unwrap(),
         item
     );
-    value[COMPACTION_RECORD_KEY]["replacement_history"][0]["message"][SUBTASK_RESULTS_KEY] =
-        json!([]);
+    value["checkpoint"]["replacement_history"][0]["message"]["zevria_subtask_results"] = json!([]);
     assert!(serde_json::from_value::<TranscriptItem>(value).is_err());
 }
 
@@ -301,21 +309,21 @@ fn review_and_worker_contracts_emit_v1_and_reject_other_versions_without_repair(
     let root_path = directory.path().join("root.jsonl");
     let worker_path = directory.path().join("worker.jsonl");
     let header = worker_header();
-    let start = TranscriptItem::Ensemble(crate::EnsembleRecord::Started {
+    let start = TranscriptItem::Ensemble(Box::new(crate::EnsembleRecord::Started {
         start: crate::EnsembleStart {
             run_id: header.ensemble_run_id.clone(),
             workflow: EnsembleWorkflow::Plan,
             prompt: header.prompt.clone(),
             agents: vec![header.descriptor.clone()],
         },
-    });
-    let review = TranscriptItem::Ensemble(crate::EnsembleRecord::ReviewStarted {
+    }));
+    let review = TranscriptItem::Ensemble(Box::new(crate::EnsembleRecord::ReviewStarted {
         run_id: header.ensemble_run_id.clone(),
         version: zevria_workflow::ENSEMBLE_REVIEW_VERSION,
-    });
+    }));
     let review_json = serde_json::to_value(&review).unwrap();
     let worker_json = serde_json::to_value(AgentRunTranscriptRecord::Header { header }).unwrap();
-    assert_eq!(review_json["zevria_ensemble"]["version"], 1);
+    assert_eq!(review_json["ensemble"]["version"], 1);
     assert_eq!(worker_json["header"]["version"], 1);
     let start = serde_json::to_string(&start).unwrap();
     std::fs::write(&root_path, format!("{start}\n{review_json}\n")).unwrap();
@@ -324,15 +332,12 @@ fn review_and_worker_contracts_emit_v1_and_reject_other_versions_without_repair(
     assert_eq!(crate::load_agent_run(&worker_path).unwrap().len(), 1);
     for version in [0, 2, 3, 99] {
         let mut review = review_json.clone();
-        review["zevria_ensemble"]["version"] = json!(version);
+        review["ensemble"]["version"] = json!(version);
         let review = review.to_string();
         for tail in [
             format!("{review}\n"),
             review.clone(),
             review[..review.len() - 1].to_owned(),
-            format!(
-                r#"{{"zevria_ensemble":{{"version":{version},"state":"review_started","run_id":"#
-            ),
         ] {
             // Even a valid surviving review lifecycle cannot make an invalid
             // final version disposable crash debris.
@@ -373,13 +378,13 @@ fn duplicate_owned_versions_cannot_hide_unsupported_records_or_tails() {
         &crate::SkillSnapshot::new("review".parse().unwrap(), "Review", "Body").unwrap(),
     );
     for item in [
-        TranscriptItem::Compaction(checkpoint(&[])),
+        TranscriptItem::Compaction(Box::new(checkpoint(&[]))),
         TranscriptItem::provider_message(replay).unwrap(),
-        TranscriptItem::Directive(directive),
-        TranscriptItem::Ensemble(crate::EnsembleRecord::ReviewStarted {
+        TranscriptItem::Directive(Box::new(directive)),
+        TranscriptItem::Ensemble(Box::new(crate::EnsembleRecord::ReviewStarted {
             run_id: EnsembleRunId::new(),
             version: 1,
-        }),
+        })),
     ] {
         let value = serde_json::to_value(item).unwrap();
         let (key, payload) = value.as_object().unwrap().iter().next().unwrap();

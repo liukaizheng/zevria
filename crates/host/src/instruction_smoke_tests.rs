@@ -152,8 +152,9 @@ async fn interactive_root_publishes_engine_idle_after_prompt_completion() {
     )
     .await
     .unwrap();
-    let mut events = running.take_event_receiver().unwrap();
+    let mut events = running.running.take_event_receiver().unwrap();
     running
+        .running
         .command_sender()
         .send(SessionCommand::Turn(TurnCommand::Submit {
             text: "one prompt".into(),
@@ -162,8 +163,8 @@ async fn interactive_root_publishes_engine_idle_after_prompt_completion() {
         }))
         .unwrap();
     completed(&mut events).await; // Asserts TurnCompleted precedes EngineIdle.
-    select_mode(&running, &mut events, SessionMode::Plan).await;
-    running.shutdown().await.unwrap();
+    select_mode(&running.running, &mut events, SessionMode::Plan).await;
+    running.running.shutdown().await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .unwrap()
@@ -243,8 +244,8 @@ async fn responses_instruction_modules_survive_modes_skill_activation_and_resume
     )
     .await
     .unwrap();
-    let path = running.restoration.transcript_path.clone();
-    let mut events = running.take_event_receiver().unwrap();
+    let path = running.restored.transcript_path.clone();
+    let mut events = running.running.take_event_receiver().unwrap();
     for (index, mode) in [
         SessionMode::Build,
         SessionMode::Plan,
@@ -255,9 +256,10 @@ async fn responses_instruction_modules_survive_modes_skill_activation_and_resume
     .enumerate()
     {
         if index == 1 || index == 2 {
-            select_mode(&running, &mut events, mode).await;
+            select_mode(&running.running, &mut events, mode).await;
         }
         running
+            .running
             .command_sender()
             .send(SessionCommand::Turn(TurnCommand::Submit {
                 behavior: zevria_foundation::RequestBehavior::Standard,
@@ -267,13 +269,14 @@ async fn responses_instruction_modules_survive_modes_skill_activation_and_resume
             .unwrap();
         completed(&mut events).await;
     }
-    running.shutdown().await.unwrap();
+    running.running.shutdown().await.unwrap();
     let mut resumed = start_session(&config, &workspace, SessionStart::Resume(path.clone()))
         .await
         .unwrap();
-    assert_eq!(resumed.restoration.selected_mode, SessionMode::Build);
-    let mut events = resumed.take_event_receiver().unwrap();
+    assert_eq!(resumed.restored.selected_mode, SessionMode::Build);
+    let mut events = resumed.running.take_event_receiver().unwrap();
     resumed
+        .running
         .command_sender()
         .send(SessionCommand::Turn(TurnCommand::Submit {
             behavior: zevria_foundation::RequestBehavior::Standard,
@@ -282,7 +285,7 @@ async fn responses_instruction_modules_survive_modes_skill_activation_and_resume
         }))
         .unwrap();
     completed(&mut events).await;
-    resumed.shutdown().await.unwrap();
+    resumed.running.shutdown().await.unwrap();
     let requests = tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .unwrap()

@@ -9,30 +9,34 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
     let snapshot =
         zevria_instructions::SkillSnapshot::new(name, "Review", "Pinned body".repeat(1024))
             .unwrap();
-    let items = vec![TranscriptItem::SkillInvocation(
+    let items = vec![TranscriptItem::SkillInvocation(Box::new(
         zevria_instructions::SkillInvocation::new(
             snapshot.name().clone(),
             "root",
             zevria_instructions::SkillApplication::Activate(snapshot),
         ),
-    )];
+    ))];
     let active_skills = zevria_transcript::replay_active_skills(&items).unwrap();
     let pin_allocation = active_skills.snapshots().next().unwrap().body().as_ptr();
-    let mut running = RunningSession {
+    let running = RunningSession {
         mcp: None,
         command_jobs: None,
         cleanup_abandoned_history: true,
-        restored_taken: false,
-        restored_subtasks: vec![RestoredSubtask {
-            id: zevria_foundation::SubtaskId::new("child"),
-            launch: None,
-            items: vec![TranscriptItem::Message(rig_core::message::Message::user(
-                "child",
-            ))],
-        }],
-        restored_agent_runs: Vec::new(),
+        identity: SessionIdentity {
+            session_id: "payload".into(),
+            transcript_path: path.clone(),
+        },
         _lease: None,
-        restoration: SessionRestoration {
+        command_tx: None,
+        event_tx: None,
+        event_rx: None,
+        exit_rx: None,
+        engine_task: None,
+        supervisor: None,
+    };
+    let started = StartedSession {
+        running,
+        restored: RestoredSession {
             mcp_prompts: vec![],
             model_contexts: crate::config::test_config().routing().context_policies(),
             reasoning_levels: [zevria_foundation::ReasoningLevel::Medium; ModelRole::COUNT],
@@ -48,15 +52,17 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
             startup_notices: vec!["startup notice".into()],
             plan_state: PlanWorkflowState::Idle,
             selected_mode: SessionMode::Plan,
+            subtasks: vec![RestoredSubtask {
+                id: zevria_foundation::SubtaskId::new("child"),
+                launch: None,
+                items: vec![TranscriptItem::Message(rig_core::message::Message::user(
+                    "child",
+                ))],
+            }],
+            agent_runs: Vec::new(),
         },
-        command_tx: None,
-        event_tx: None,
-        event_rx: None,
-        exit_rx: None,
-        engine_task: None,
-        supervisor: None,
     };
-    let restored = running.take_restored();
+    let StartedSession { running, restored } = started;
     assert_eq!(restored.transcript_items.len(), 1);
     assert_eq!(
         restored
@@ -68,16 +74,11 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
             .as_ptr(),
         pin_allocation
     );
-    assert!(running.restoration().active_skills.is_empty());
     assert_eq!(restored.subtasks.len(), 1);
     assert_eq!(restored.subtasks[0].items.len(), 1);
     assert_eq!(restored.startup_notices, ["startup notice"]);
     assert_eq!(restored.selected_mode, SessionMode::Plan);
-    assert!(running.restoration().transcript_items.is_empty());
-    assert_eq!(running.restoration().transcript_path, path);
-    assert_eq!(running.restoration().session_id, "payload");
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| running.take_restored())).is_err()
-    );
+    assert_eq!(running.identity().transcript_path, path);
+    assert_eq!(running.identity().session_id, "payload");
     running.shutdown().await.unwrap();
 }

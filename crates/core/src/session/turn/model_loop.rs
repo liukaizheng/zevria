@@ -317,7 +317,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     && let Some(record) =
                         zevria_transcript::IncompleteResponse::from_attempt(attempt)?
                 {
-                    retained.push(TranscriptItem::IncompleteResponse(record));
+                    retained.push(TranscriptItem::IncompleteResponse(Box::new(record)));
                 }
             }
         }
@@ -342,7 +342,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             } else {
                 attempts.push(display);
             }
-            retained.push(TranscriptItem::IncompleteResponse(record));
+            retained.push(TranscriptItem::IncompleteResponse(Box::new(record)));
         }
         let recovery_failure = recoverable(self.record_completed(retained))?;
         let persistence_failure = checkpoint_failure
@@ -497,7 +497,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .drafts
                 .iter()
                 .cloned()
-                .map(|draft| TranscriptItem::Plan(PlanRecord::DraftSaved { draft })),
+                .map(|draft| TranscriptItem::Plan(Box::new(PlanRecord::DraftSaved { draft }))),
         );
         if !batch.skill_applications.is_empty() {
             let staged = self.instruction_replay()?.clone().apply_suffix(&records)?;
@@ -866,23 +866,25 @@ impl<P: ModelProvider> SessionEngine<P> {
         } = completion;
         if let Some((record, _)) = &ready {
             if !defer_publication {
-                if let Err(error) = self.commit(TranscriptItem::Plan(record.clone())) {
+                if let Err(error) = self.commit(TranscriptItem::Plan(Box::new(record.clone()))) {
                     self.persistence_failed(&error, events).await?;
                     return Err(error
                         .context("failed to persist the completed Plan artifact")
                         .into());
                 }
             } else {
-                retained.push(TranscriptItem::Plan(record.clone()));
+                retained.push(TranscriptItem::Plan(Box::new(record.clone())));
             }
         }
         if let AcceptedKind::Ensemble {
             run_id, workflow, ..
         } = &accepted.kind
         {
-            retained.push(TranscriptItem::Ensemble(EnsembleRecord::Completed {
-                run_id: run_id.clone(),
-            }));
+            retained.push(TranscriptItem::Ensemble(Box::new(
+                EnsembleRecord::Completed {
+                    run_id: run_id.clone(),
+                },
+            )));
             let result = recoverable(self.record_completed(retained))?;
             if let Some(usage) = usage {
                 let policy = self.ensemble_policy(*workflow);

@@ -322,13 +322,19 @@ impl DirectiveState {
     }
     pub fn apply(&mut self, directive: &DirectiveContent) -> anyhow::Result<()> {
         directive.validate()?;
+        self.apply_validated(directive);
+        Ok(())
+    }
+
+    /// Install content whose local fields were already checked while decoding.
+    #[doc(hidden)]
+    pub fn apply_validated(&mut self, directive: &DirectiveContent) {
         let key = directive.payload.key();
         if directive.payload.is_revocation() {
             self.0.remove(&key);
         } else {
             self.0.insert(key, directive.clone());
         }
-        Ok(())
     }
 
     pub fn reconcile(

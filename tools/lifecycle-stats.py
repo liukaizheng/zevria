@@ -328,17 +328,30 @@ def transcript_paths(directory):
     return sorted(paths)
 
 
+TRANSCRIPT_ITEM_TYPES = {
+    "session_models", "session_mode", "message", "request_prompt", "provider_message",
+    "tool_results", "skill_invocation", "directive", "request_directive", "tool_declarations",
+    "command_job_notice", "plan", "ensemble", "compaction", "incomplete_response", "error",
+}
+
+
+def tagged_record(record):
+    return isinstance(record, dict) and next(iter(record), None) == "type" and isinstance(record["type"], str)
+
+
 def flatten(record):
-    if not isinstance(record, dict):
-        raise ValueError("record is not an object")
-    if "zevria_batch" not in record:
+    if not tagged_record(record):
+        raise ValueError("record must start with type")
+    if record["type"] != "batch":
+        if record["type"] not in TRANSCRIPT_ITEM_TYPES:
+            raise ValueError("unsupported record type")
         return [record]
-    batch = record["zevria_batch"]
-    if not isinstance(batch, dict) or batch.get("version") != 1:
+    if set(record) != {"type", "version", "records"} or record["version"] != 2:
         raise ValueError("unsupported batch")
-    items = batch.get("records")
-    forbidden = {"zevria_batch", "zevria_session_models", "zevria_session_mode"}
-    if not isinstance(items, list) or not items or any(not isinstance(item, dict) or forbidden.intersection(item) for item in items):
+    items = record["records"]
+    if not isinstance(items, list) or not items or any(
+        not tagged_record(item) or item["type"] not in TRANSCRIPT_ITEM_TYPES for item in items
+    ):
         raise ValueError("invalid batch children")
     return items
 
@@ -363,13 +376,13 @@ def analyze_transcripts(directory):
                     items = flatten(record)
                     if final_without_newline:
                         warnings["missing_final_newline"] += 1
-                    if "zevria_batch" in record:
+                    if record["type"] == "batch":
                         totals["batch_envelopes"] += 1
                     totals["logical_records"] += len(items)
                     for item in items:
-                        replay = item.get("zevria_provider_replay")
-                        if replay is None:
+                        if item["type"] != "provider_message":
                             continue
+                        replay = item.get("replay")
                         if not isinstance(replay, dict) or replay.get("version") != 1 or not isinstance(replay.get("items"), list):
                             warnings["unsupported_replay"] += 1
                             continue

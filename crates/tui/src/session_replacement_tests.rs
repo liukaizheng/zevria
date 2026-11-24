@@ -31,7 +31,7 @@ fn views() -> SessionViews {
     let mut root = App::new();
     root.restore_session(RestorationInput {
         items: vec![
-            TranscriptItem::SessionModels(models.clone()),
+            TranscriptItem::SessionModels(Box::new(models.clone())),
             TranscriptItem::SessionMode(SessionMode::Plan),
         ],
         workflow: zevria_workflow::PlanWorkflowState::Idle,

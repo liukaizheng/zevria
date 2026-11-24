@@ -16,7 +16,7 @@ pub fn project_worker_reviews(
         let TranscriptItem::Ensemble(record) = item else {
             continue;
         };
-        match record {
+        match record.as_ref() {
             EnsembleRecord::Started { start } if start.workflow == EnsembleWorkflow::Plan => {
                 runs.insert(
                     start.run_id.clone(),
@@ -95,10 +95,8 @@ pub fn validate_ensemble_review_history(items: &[TranscriptItem]) -> Result<(), 
 impl EnsembleReviewReplay {
     pub(crate) fn apply_suffix(mut self, items: &[TranscriptItem]) -> Result<Self, String> {
         if !items.iter().any(|item| {
-            matches!(
-                item,
-                TranscriptItem::Ensemble(_) | TranscriptItem::Plan(PlanRecord::Published { .. })
-            )
+            matches!(item, TranscriptItem::Ensemble(_))
+                || matches!(item.plan_record(), Some(PlanRecord::Published { .. }))
         }) {
             return Ok(self);
         }
@@ -108,10 +106,10 @@ impl EnsembleReviewReplay {
         } = &mut self;
         let runs = Arc::make_mut(runs);
         for item in items {
-            if let TranscriptItem::Plan(PlanRecord::Published {
+            if let Some(PlanRecord::Published {
                 artifact,
                 provenance,
-            }) = item
+            }) = item.plan_record()
             {
                 let run_id = synthesis_run
                     .as_ref()
@@ -174,7 +172,7 @@ impl EnsembleReviewReplay {
             let TranscriptItem::Ensemble(record) = item else {
                 continue;
             };
-            if let EnsembleRecord::Started { start } = record {
+            if let EnsembleRecord::Started { start } = record.as_ref() {
                 if runs.contains_key(&start.run_id) || start.agents.is_empty() {
                     return Err("duplicate or empty ensemble start".into());
                 }
@@ -209,7 +207,7 @@ impl EnsembleReviewReplay {
             if run.terminal {
                 return Err("ensemble record follows terminal boundary".into());
             }
-            match record {
+            match record.as_ref() {
                 EnsembleRecord::ReviewStarted { version, .. } => {
                     if run.versioned
                         || *version != ENSEMBLE_REVIEW_VERSION

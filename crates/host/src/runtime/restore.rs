@@ -90,7 +90,7 @@ pub(super) async fn preflight(
         })
         .collect::<Vec<_>>();
     for item in items {
-        if let TranscriptItem::Ensemble(zevria_workflow::EnsembleRecord::Started { start }) = item {
+        if let Some(zevria_workflow::EnsembleRecord::Started { start }) = item.ensemble_record() {
             for descriptor in &start.agents {
                 loads.push(Load::Agent {
                     path: agent_run_path(agents, &start.run_id, &descriptor.id),
@@ -123,21 +123,41 @@ where
     T: Send + 'static,
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
-    // Spawn the entire batch before awaiting any handle. Awaiting in input
-    // order does not serialize execution, and stabilizes error precedence.
-    let jobs = loads
-        .into_iter()
-        .map(tokio::task::spawn_blocking)
-        .collect::<Vec<_>>();
-    let mut results = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        results.push(job.await);
+    let limit = std::thread::available_parallelism()
+        .map_or(2, usize::from)
+        .clamp(2, 8);
+    let mut pending = loads.into_iter().enumerate();
+    let mut active = tokio::task::JoinSet::new();
+    // Use ordered handles paired with their input index. A JoinError must
+    // retain the same precedence as an ordinary load failure.
+    let mut slots = std::collections::HashMap::new();
+    let mut results = (0..pending.len()).map(|_| None).collect::<Vec<_>>();
+    loop {
+        while active.len() < limit {
+            let Some((index, load)) = pending.next() else {
+                break;
+            };
+            slots.insert(active.spawn_blocking(load).id(), index);
+        }
+        let Some(result) = active.join_next_with_id().await else {
+            break;
+        };
+        let id = match &result {
+            Ok((id, _)) => *id,
+            Err(error) => error.id(),
+        };
+        results[slots.remove(&id).expect("registered restoration task")] =
+            Some(result.map(|(_, value)| value));
     }
     // Only inspect errors after every read-only job has finished. Writable
     // repair and engine/service spawning happen after the caller gets success.
     results
         .into_iter()
-        .map(|result| result.context("session restoration loader failed")?)
+        .map(|result| {
+            result
+                .expect("settled restoration task")
+                .context("session restoration loader failed")?
+        })
         .collect()
 }
 
@@ -222,7 +242,7 @@ mod tests {
             rig_core::message::Message::user("saved"),
         ))
         .unwrap();
-        bytes.extend_from_slice(b"\n{\"partial\":");
+        bytes.extend_from_slice(b"\n{\"type\":\"message\",\"message\":");
         std::fs::write(&recoverable, &bytes).unwrap();
         assert_eq!(
             transcript::load_report(&recoverable)

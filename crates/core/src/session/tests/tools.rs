@@ -365,7 +365,7 @@ async fn ensemble_plan_gate_denies_out_of_order_calls_and_keeps_progress_recover
     )
     .unwrap()
     .with_fixture(vec![
-        TranscriptItem::Plan(PlanRecord::Started { id: plan_id }),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id: plan_id })),
         saved_plan_record(
             plan_id,
             &valid_plan_markdown("Ordered gate plan", "Respect every durable gate stage."),
@@ -506,7 +506,7 @@ async fn ensemble_plan_question_gate_rejects_same_batch_and_malformed_attempts()
     )
     .unwrap()
     .with_fixture(vec![
-        TranscriptItem::Plan(PlanRecord::Started { id: plan_id }),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id: plan_id })),
         saved_plan_record(
             plan_id,
             &valid_plan_markdown("Ordered gate plan", "Respect every durable gate stage."),
@@ -602,7 +602,7 @@ fn post_reports_tail_reconstructs_reconciliation_and_terminal_question() {
     let run_id = EnsembleRunId::new();
     let reconciliation = root_question_reconciliation();
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: run_id.clone(),
             synthesis_input: Message::user("evidence"),
             agents: vec![AgentRunSummary {
@@ -616,7 +616,7 @@ fn post_reports_tail_reconstructs_reconciliation_and_terminal_question() {
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
         TranscriptItem::Message(command_call(
             "tail-inspection",
             "rtk rg -n insert crates/tui/src",

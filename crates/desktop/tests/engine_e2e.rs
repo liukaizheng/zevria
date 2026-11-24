@@ -95,10 +95,10 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     )
     .await
     .unwrap();
-    let mut model = WorkspaceModel::restore(running.take_restored()).unwrap();
+    let mut model = WorkspaceModel::restore(running.restored).unwrap();
     let path = model.transcript_path.clone();
-    let mut events = running.take_event_receiver().unwrap();
-    let sender = running.command_sender();
+    let mut events = running.running.take_event_receiver().unwrap();
+    let sender = running.running.command_sender();
     let InputRoute::Command(command) = model.route_input("desktop smoke", false) else {
         panic!()
     };
@@ -146,11 +146,11 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     assert_eq!(std::fs::read(&settings_path).unwrap(), settings_before);
     drop(events);
     drop(sender);
-    running.shutdown().await.unwrap();
+    running.running.shutdown().await.unwrap();
     let mut running = start_session(&config, &workspace, SessionStart::Resume(path.clone()))
         .await
         .unwrap();
-    let mut model = WorkspaceModel::restore(running.take_restored()).unwrap();
+    let mut model = WorkspaceModel::restore(running.restored).unwrap();
     assert_eq!(model.root.conversation.history().len(), 2);
     assert_eq!(model.transcript_path, path);
     assert_eq!(
@@ -169,8 +169,8 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
             .reasoning_for_mode(SessionMode::Plan),
         Level::Medium
     );
-    let mut events = running.take_event_receiver().unwrap();
-    let sender = running.command_sender();
+    let mut events = running.running.take_event_receiver().unwrap();
+    let sender = running.running.command_sender();
     let InputRoute::Command(command) = model.route_input("resumed smoke", false) else {
         panic!()
     };
@@ -180,8 +180,8 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     let inherited_models = model.root.session_models().unwrap();
     drop(events);
     drop(sender);
-    running.shutdown().await.unwrap();
-    let mut fresh = start_session(
+    running.running.shutdown().await.unwrap();
+    let fresh = start_session(
         &config,
         &workspace,
         SessionStart::New {
@@ -190,7 +190,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     )
     .await
     .unwrap();
-    let restored = WorkspaceModel::restore(fresh.take_restored()).unwrap();
+    let restored = WorkspaceModel::restore(fresh.restored).unwrap();
     assert_eq!(
         restored
             .root
@@ -207,7 +207,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
             .reasoning_for_mode(SessionMode::Plan),
         Level::Medium
     );
-    fresh.shutdown().await.unwrap();
+    fresh.running.shutdown().await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .unwrap()

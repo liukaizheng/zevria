@@ -134,7 +134,7 @@ fn created_and_reopened_handles_roll_back_partial_appends_and_keep_appending() {
             || {
                 let mut file = file;
                 file.seek(SeekFrom::End(0))?;
-                file.write_all(b"{\"error\":\"partial")?;
+                file.write_all(b"{\"type\":\"error\",\"error\":\"partial")?;
                 Err(std::io::Error::other("injected append failure"))
             },
             || file.set_len(original_len).and_then(|()| file.sync_data()),

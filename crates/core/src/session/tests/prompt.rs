@@ -224,7 +224,7 @@ async fn ready_message_revision_commits_before_feedback_and_runs_only_in_plan_mo
             .unwrap();
         let tail = &engine.conversation.items()[items.len()..];
         assert!(
-            matches!(&tail[0], TranscriptItem::Plan(PlanRecord::RevisionRequested { artifact: revised }) if revised == &artifact)
+            matches!(tail[0].plan_record(), Some(PlanRecord::RevisionRequested { artifact: revised }) if revised == &artifact)
         );
         let prompt_index = tail.iter().position(|item| matches!(item,
             TranscriptItem::RequestPrompt { message, request }
@@ -245,8 +245,8 @@ async fn ready_message_revision_commits_before_feedback_and_runs_only_in_plan_mo
         );
         assert_eq!(engine.selected_mode(), SessionMode::Plan);
         assert!(!tail.iter().any(|item| matches!(
-            item,
-            TranscriptItem::Plan(PlanRecord::Resolved { .. } | PlanRecord::Handoff { .. })
+            item.plan_record(),
+            Some(PlanRecord::Resolved { .. } | PlanRecord::Handoff { .. })
         )));
         let requests = engine.provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
@@ -618,13 +618,13 @@ async fn finalized_provider_work_is_retained_when_failure_races_cancellation() {
     let start = ensemble_start_fixture("retained", EnsembleWorkflow::Plan, "plan");
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                 run_id: start.run_id.clone(),
                 version: ENSEMBLE_REVIEW_VERSION,
-            }),
+            })),
         ])
         .unwrap();
     let accepted = AcceptedTurn::new(AcceptedKind::Ensemble {
@@ -663,7 +663,7 @@ async fn finalized_provider_work_is_retained_when_failure_races_cancellation() {
     let items = engine.conversation.items();
     assert_eq!(items[2], final_item);
     assert!(
-        matches!(&items[3], TranscriptItem::Ensemble(EnsembleRecord::Failed { run_id, .. }) if run_id == &start.run_id)
+        matches!(items[3].ensemble_record(), Some(EnsembleRecord::Failed { run_id, .. }) if run_id == &start.run_id)
     );
     assert!(matches!(&items[4], TranscriptItem::Error { error } if error.contains("inspection")));
     assert!(

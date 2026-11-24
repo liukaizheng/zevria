@@ -41,9 +41,10 @@ async fn background_completion_cache_fixture(automatic: bool) {
     )
     .await
     .unwrap();
-    let path = running.restoration.transcript_path.clone();
-    let mut events = running.take_event_receiver().unwrap();
+    let path = running.restored.transcript_path.clone();
+    let mut events = running.running.take_event_receiver().unwrap();
     running
+        .running
         .command_sender()
         .send(SessionCommand::Turn(TurnCommand::Submit {
             text: "start a background job".into(),
@@ -71,6 +72,7 @@ async fn background_completion_cache_fixture(automatic: bool) {
     .unwrap();
     if automatic {
         running
+            .running
             .command_sender()
             .send(SessionCommand::Turn(TurnCommand::ContinueAfterJobs {
                 mode: SessionMode::Build,
@@ -79,6 +81,7 @@ async fn background_completion_cache_fixture(automatic: bool) {
         completed(&mut events).await;
     }
     running
+        .running
         .command_sender()
         .send(SessionCommand::Turn(TurnCommand::Submit {
             text: "inspect files".into(),
@@ -87,7 +90,7 @@ async fn background_completion_cache_fixture(automatic: bool) {
         }))
         .unwrap();
     completed(&mut events).await;
-    running.shutdown().await.unwrap();
+    running.running.shutdown().await.unwrap();
     let saved = transcript::load(&path)
         .unwrap()
         .into_iter()
@@ -107,8 +110,9 @@ async fn background_completion_cache_fixture(automatic: bool) {
     let mut resumed = start_session(&config, &workspace, SessionStart::Resume(path.clone()))
         .await
         .unwrap();
-    let mut events = resumed.take_event_receiver().unwrap();
+    let mut events = resumed.running.take_event_receiver().unwrap();
     resumed
+        .running
         .command_sender()
         .send(SessionCommand::Turn(TurnCommand::Submit {
             text: "list jobs after resume".into(),
@@ -117,7 +121,7 @@ async fn background_completion_cache_fixture(automatic: bool) {
         }))
         .unwrap();
     completed(&mut events).await;
-    resumed.shutdown().await.unwrap();
+    resumed.running.shutdown().await.unwrap();
     let requests = tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .unwrap()
@@ -255,8 +259,9 @@ async fn command_error_envelope_and_unix_signal_reach_provider_unchanged() {
     )
     .await
     .unwrap();
-    let mut events = running.take_event_receiver().unwrap();
+    let mut events = running.running.take_event_receiver().unwrap();
     running
+        .running
         .command_sender()
         .send(SessionCommand::Turn(TurnCommand::Submit {
             text: "check interrupted and signalled commands".into(),
@@ -265,7 +270,7 @@ async fn command_error_envelope_and_unix_signal_reach_provider_unchanged() {
         }))
         .unwrap();
     completed(&mut events).await;
-    running.shutdown().await.unwrap();
+    running.running.shutdown().await.unwrap();
     let requests = tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .unwrap()

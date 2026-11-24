@@ -207,8 +207,15 @@ async fn list<T: Serialize>(
             all.len() + items.len() <= 4096,
             "{method} catalog exceeds 4096 entries"
         );
-        bytes = bytes.saturating_add(serde_json::to_vec(&items)?.len());
-        anyhow::ensure!(bytes <= 4 * 1024 * 1024, "{method} catalog exceeds 4 MiB");
+        const LIMIT: usize = 4 * 1024 * 1024;
+        let mut count = zevria_foundation::BoundedCountingWriter::new(LIMIT - bytes);
+        let encoded = serde_json::to_writer(&mut count, &items);
+        anyhow::ensure!(
+            count.written() <= LIMIT - bytes,
+            "{method} catalog exceeds 4 MiB"
+        );
+        encoded?;
+        bytes += count.written();
         all.extend(items);
         match next {
             None => return Ok(all),

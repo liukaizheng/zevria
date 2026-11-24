@@ -34,7 +34,9 @@ fn request(text: &str) -> Vec<TranscriptItem> {
             message: Message::user(text),
             request: request.clone(),
         },
-        TranscriptItem::RequestDirective(zevria_instructions::RequestDirective::boundary(request)),
+        TranscriptItem::RequestDirective(Box::new(
+            zevria_instructions::RequestDirective::boundary(request),
+        )),
     ]
 }
 
@@ -163,11 +165,11 @@ fn first_commit_saves_current_headers_all_notices_and_ordered_directives_once() 
 #[test]
 fn direct_skill_plan_handoff_ensemble_start_and_response_evidence_materialize() {
     let pin = SkillSnapshot::new("review".parse().unwrap(), "Review", "exact skill body").unwrap();
-    let invocation = TranscriptItem::SkillInvocation(SkillInvocation::new(
+    let invocation = TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
         pin.name().clone(),
         "review this",
         SkillApplication::Activate(pin.clone()),
-    ));
+    )));
     let handoff = crate::PlanHandoff::new(
         crate::PlanArtifact {
             version: crate::PlanVersion {
@@ -189,30 +191,34 @@ fn direct_skill_plan_handoff_ensemble_start_and_response_evidence_materialize() 
         action: None,
     });
     attempt.close(crate::ResponseAttemptOutcome::Interrupted);
-    let evidence = TranscriptItem::IncompleteResponse(
+    let evidence = TranscriptItem::IncompleteResponse(Box::new(
         crate::IncompleteResponse::from_attempt(&attempt)
             .unwrap()
             .unwrap(),
-    );
+    ));
     for records in [
         vec![
             invocation,
-            TranscriptItem::Directive(DirectiveContent::skill(&pin)),
+            TranscriptItem::Directive(Box::new(DirectiveContent::skill(&pin))),
         ],
-        vec![TranscriptItem::Plan(PlanRecord::Handoff { handoff })],
-        vec![TranscriptItem::Ensemble(EnsembleRecord::Started {
-            start: crate::EnsembleStart {
-                run_id: EnsembleRunId::new(),
-                workflow: crate::EnsembleWorkflow::Review,
-                prompt: "review".into(),
-                agents: vec![crate::AgentRunDescriptor {
-                    id: crate::AgentRunId::new(),
-                    agent: "worker".into(),
-                    label: "Worker".into(),
-                    safe_mode: "read-only".into(),
-                }],
+        vec![TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
+            handoff,
+        }))],
+        vec![TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::Started {
+                start: crate::EnsembleStart {
+                    run_id: EnsembleRunId::new(),
+                    workflow: crate::EnsembleWorkflow::Review,
+                    prompt: "review".into(),
+                    agents: vec![crate::AgentRunDescriptor {
+                        id: crate::AgentRunId::new(),
+                        agent: "worker".into(),
+                        label: "Worker".into(),
+                        safe_mode: "read-only".into(),
+                    }],
+                },
             },
-        })],
+        ))],
         vec![evidence],
     ] {
         let directory = tempfile::tempdir().unwrap();
@@ -221,9 +227,9 @@ fn direct_skill_plan_handoff_ensemble_start_and_response_evidence_materialize() 
         conversation.commit_anchored(None, records, None).unwrap();
         assert_eq!(load(conversation.path()).unwrap(), conversation.items());
     }
-    assert!(!is_conversation_item(&TranscriptItem::Directive(
+    assert!(!is_conversation_item(&TranscriptItem::Directive(Box::new(
         DirectiveContent::skill(&pin)
-    )));
+    ))));
     assert!(!is_conversation_item(&request("owner")[1]));
 }
 
@@ -233,13 +239,14 @@ fn invalid_pending_proposals_never_install_or_create_a_file() {
     let mut conversation = pending(directory.path());
     let original = conversation.items().to_vec();
     for records in [
-        vec![TranscriptItem::SessionMode(SessionMode::Plan)],
         vec![request("missing boundary").remove(0)],
         vec![request("missing owner").remove(1)],
-        vec![TranscriptItem::SkillInvocation(SkillInvocation::new(
-            "missing".parse().unwrap(),
-            "",
-            SkillApplication::Reapply("missing".parse().unwrap()),
+        vec![TranscriptItem::SkillInvocation(Box::new(
+            SkillInvocation::new(
+                "missing".parse().unwrap(),
+                "",
+                SkillApplication::Reapply("missing".parse().unwrap()),
+            ),
         ))],
     ] {
         assert!(
@@ -410,7 +417,8 @@ fn pending_anchored_acceptance_validates_exactly_once() {
     });
     result.unwrap();
     assert_eq!(counts.proposals, 1);
-    assert_eq!(counts.validations, 1);
-    assert_eq!(counts.full_replays, 1);
+    assert_eq!(counts.validations, 0);
+    assert_eq!(counts.full_replays, 0);
+    assert_eq!(counts.suffix_applications, 1);
     assert_eq!(counts.header_scans, 0);
 }

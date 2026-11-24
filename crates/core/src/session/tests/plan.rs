@@ -28,7 +28,7 @@ async fn restoration_rejects_malformed_plan_records_in_tail_or_prefix() {
         ];
         items.insert(
             usize::from(!prefix),
-            TranscriptItem::Plan(malformed_ready.clone()),
+            TranscriptItem::Plan(Box::new(malformed_ready.clone())),
         );
         persist_fixture(&mut transcript, &items);
         let path = transcript.path().to_path_buf();
@@ -74,11 +74,11 @@ async fn plan_recovery_materializes_an_accepted_candidate_after_a_durable_final_
     let plan_id = PlanId::new();
     let final_message = Message::assistant("The plan was submitted successfully.");
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::Started { id: plan_id }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id: plan_id })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("durable untrusted plan evidence"),
             agents: vec![AgentRunSummary {
@@ -92,7 +92,7 @@ async fn plan_recovery_materializes_an_accepted_candidate_after_a_durable_final_
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
         TranscriptItem::Message(command_call(
             "recovery-inspection",
             "rtk rg -n ensemble_policy crates/core/src/session.rs",
@@ -131,11 +131,9 @@ async fn plan_recovery_materializes_an_accepted_candidate_after_a_durable_final_
         TranscriptItem::Message(final_message.clone()),
     ];
     let items = with_explicit_fixture_confirmations(items);
-    let recovery = latest_ensemble_recovery(items.iter().filter_map(|item| match item {
-        TranscriptItem::Ensemble(record) => Some(record),
-        _ => None,
-    }))
-    .expect("unfinished plan synthesis");
+    let recovery =
+        latest_ensemble_recovery(items.iter().filter_map(TranscriptItem::ensemble_record))
+            .expect("unfinished plan synthesis");
     let provider = ScriptedProvider::new(std::iter::empty::<anyhow::Result<Message>>());
     let requests = provider.requests.clone();
     let (_directory, transcript) = test_transcript();
@@ -172,7 +170,7 @@ async fn plan_recovery_materializes_an_accepted_candidate_after_a_durable_final_
             .conversation()
             .items()
             .iter()
-            .filter(|item| matches!(item, TranscriptItem::Plan(PlanRecord::Published { .. })))
+            .filter(|item| matches!(item.plan_record(), Some(PlanRecord::Published { .. })))
             .count(),
         1
     );
@@ -217,11 +215,11 @@ async fn plan_recovery_with_a_published_artifact_only_adds_the_completion_marker
         source_turn_id: TurnId::new(407),
     };
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::Started { id: plan_id }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id: plan_id })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("durable untrusted plan evidence"),
             agents: vec![AgentRunSummary {
@@ -235,7 +233,7 @@ async fn plan_recovery_with_a_published_artifact_only_adds_the_completion_marker
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
         TranscriptItem::Message(command_call(
             "recovery-inspection",
             "rtk rg -n ensemble_policy crates/core/src/session.rs",
@@ -272,17 +270,15 @@ async fn plan_recovery_with_a_published_artifact_only_adds_the_completion_marker
         },
         // Even without the optional final prose, the Published artifact is
         // authoritative and must never trigger another provider synthesis.
-        TranscriptItem::Plan(PlanRecord::Published {
+        TranscriptItem::Plan(Box::new(PlanRecord::Published {
             artifact: artifact.clone(),
             provenance: PlanPublicationProvenance::Synthesized,
-        }),
+        })),
     ];
     let items = with_explicit_fixture_confirmations(items);
-    let recovery = latest_ensemble_recovery(items.iter().filter_map(|item| match item {
-        TranscriptItem::Ensemble(record) => Some(record),
-        _ => None,
-    }))
-    .expect("unfinished ready-plan synthesis");
+    let recovery =
+        latest_ensemble_recovery(items.iter().filter_map(TranscriptItem::ensemble_record))
+            .expect("unfinished ready-plan synthesis");
     let provider = ScriptedProvider::new(std::iter::empty::<anyhow::Result<Message>>());
     let requests = provider.requests.clone();
     let (_directory, transcript) = test_transcript();
@@ -318,7 +314,7 @@ async fn plan_recovery_with_a_published_artifact_only_adds_the_completion_marker
             .conversation()
             .items()
             .iter()
-            .filter(|item| matches!(item, TranscriptItem::Plan(PlanRecord::Published { .. })))
+            .filter(|item| matches!(item.plan_record(), Some(PlanRecord::Published { .. })))
             .count(),
         1
     );
@@ -328,8 +324,8 @@ async fn plan_recovery_with_a_published_artifact_only_adds_the_completion_marker
             .items()
             .iter()
             .filter(|item| matches!(
-                item,
-                TranscriptItem::Ensemble(EnsembleRecord::Completed { run_id })
+                item.ensemble_record(),
+                Some(EnsembleRecord::Completed { run_id })
                     if run_id == &start.run_id
             ))
             .count(),
@@ -1055,14 +1051,11 @@ async fn cancellation_after_submit_plan_acceptance_never_commits_ready() {
     assert!(
         items
             .iter()
-            .all(|item| { !matches!(item, TranscriptItem::Plan(PlanRecord::Ready { .. })) })
+            .all(|item| { !matches!(item.plan_record(), Some(PlanRecord::Ready { .. })) })
     );
     assert!(matches!(
-        replay_plan_state(items.iter().filter_map(|item| match item {
-            TranscriptItem::Plan(record) => Some(record),
-            _ => None,
-        }))
-        .expect("workflow should replay"),
+        replay_plan_state(items.iter().filter_map(TranscriptItem::plan_record))
+            .expect("workflow should replay"),
         PlanWorkflowState::Planning { .. }
     ));
 }
@@ -1275,8 +1268,8 @@ async fn current_resolution_persists_semantic_handoff_then_runs_build() {
         &handoff.expect("semantic handoff event").prompt
     );
     assert!(engine.conversation.items().iter().any(|item| matches!(
-        item,
-        TranscriptItem::Plan(PlanRecord::Handoff { handoff })
+        item.plan_record(),
+        Some(PlanRecord::Handoff { handoff })
             if handoff.artifact == artifact
     )));
 }
@@ -1460,8 +1453,8 @@ async fn fresh_session_starts_only_from_a_canonical_typed_handoff() {
     assert_eq!(request.prompt, handoff.prompt);
     assert!(has_external_mutation_notice(&request.input));
     assert!(matches!(
-        engine.conversation.items().iter().find(|item| !zevria_transcript::transcript::is_leading_metadata(item)),
-        Some(TranscriptItem::Plan(PlanRecord::Handoff { handoff: stored }))
+        engine.conversation.items().iter().find(|item| !zevria_transcript::transcript::is_leading_metadata(item)).and_then(TranscriptItem::plan_record),
+        Some(PlanRecord::Handoff { handoff: stored })
             if stored.artifact == artifact
     ));
     assert!(collect_events(&mut receiver).await.iter().any(|event| {
@@ -1498,7 +1491,7 @@ async fn fresh_session_starts_only_from_a_canonical_typed_handoff() {
             .conversation
             .items()
             .iter()
-            .all(|item| { !matches!(item, TranscriptItem::Plan(PlanRecord::Handoff { .. })) })
+            .all(|item| { !matches!(item.plan_record(), Some(PlanRecord::Handoff { .. })) })
     );
 }
 
@@ -1724,9 +1717,11 @@ async fn atomic_revision_feedback_edits_retain_the_planning_prefix() {
             .handle_command(SessionCommand::Turn(revision), &events)
             .await
             .unwrap();
-        assert!(matches!(&engine.conversation.items()[items.len()],
-            TranscriptItem::Plan(PlanRecord::RevisionRequested { artifact: previous }) if previous == &artifact
-        ));
+        assert!(
+            matches!(engine.conversation.items()[items.len()].plan_record(),
+                Some(PlanRecord::RevisionRequested { artifact: previous }) if previous == &artifact
+            )
+        );
         collect_events(&mut receiver).await;
         let replacement = if is_skill {
             TranscriptEditReplacement::Skill {

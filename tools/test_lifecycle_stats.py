@@ -88,15 +88,15 @@ class LifecycleStatsTests(unittest.TestCase):
 
     def test_native_replays_flatten_once_and_never_scan_tool_arguments(self):
         def replay(protocol, items):
-            return {"zevria_provider_replay": {"version": 1, "provider": protocol,
+            return {"type": "provider_message", "replay": {"version": 1, "provider": protocol,
                     "source_profile": {"provider": "synthetic", "model": "fixed"}, "items": items}}
         records = [
             replay("openai.responses", [{"type": "message"}]),
-            {"zevria_batch": {"version": 1, "records": [
+            {"type": "batch", "version": 2, "records": [
                 replay("openai.responses", [{"type": "function_call", "arguments": {"type": "function_call"}}, {"type": "function_call"}]),
                 replay("anthropic.messages", [{"type": "tool_use"}]),
-            ]}},
-            {"zevria_compaction": {"replacement": replay("openai.responses", [{"type": "function_call"}])}},
+            ]},
+            {"type": "compaction", "checkpoint": {"replacement": replay("openai.responses", [{"type": "function_call"}])}},
         ]
         text = "".join(json.dumps(record) + "\n" for record in records)
         with tempfile.TemporaryDirectory() as directory:
@@ -113,10 +113,10 @@ class LifecycleStatsTests(unittest.TestCase):
             self.assertEqual(path.read_text(), text)
 
     def test_torn_and_nested_batches_contribute_no_children(self):
-        nested = {"zevria_batch": {"version": 1, "records": [{}, {"zevria_batch": {"version": 1, "records": [{}]}}]}}
+        nested = {"type": "batch", "version": 2, "records": [{"type": "error", "error": "x"}, {"type": "batch", "version": 2, "records": []}]}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.jsonl"
-            text = json.dumps(nested) + '\n{"zevria_batch":{"version":1,"records":[{}'
+            text = json.dumps(nested) + '\n{"type":"batch","version":2,"records":[{"type":"error","error":"x"}'
             path.write_text(text)
             result = stats.analyze_transcripts(Path(directory))
             self.assertEqual(result["totals"].get("logical_records", 0), 0)
@@ -126,17 +126,18 @@ class LifecycleStatsTests(unittest.TestCase):
     def test_valid_final_record_without_newline_is_counted(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.jsonl"
-            path.write_text('{}')
+            path.write_text('{"type":"error","error":"test"}')
             result = stats.analyze_transcripts(Path(directory))
             self.assertEqual(result["totals"]["logical_records"], 1)
             self.assertEqual(result["warnings"], {"missing_final_newline": 1})
 
-    def test_batch_rejects_headers_and_unknown_versions(self):
-        for batch in ({"version": 2, "records": [{}]},
-                      {"version": 1, "records": [{"zevria_session_mode": {}}]},
-                      {"version": 1, "records": []}):
+    def test_batch_allows_metadata_and_rejects_unknown_versions_or_children(self):
+        mode = {"type": "session_mode", "selected": "plan"}
+        edit = {"type": "batch", "version": 2, "records": [mode]}
+        self.assertEqual(stats.flatten(edit), [mode])
+        for updates in ({"version": 1}, {"records": []}, {"records": [{"type": "future"}]}):
             with self.assertRaises(ValueError):
-                stats.flatten({"zevria_batch": batch})
+                stats.flatten(edit | updates)
 
     def test_root_and_child_discovery_excludes_other_state(self):
         with tempfile.TemporaryDirectory() as directory:

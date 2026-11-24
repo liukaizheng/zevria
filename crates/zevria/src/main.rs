@@ -336,7 +336,10 @@ async fn run_session(
         },
     )?;
 
-    let mut running = {
+    let runtime::StartedSession {
+        mut running,
+        restored: restoration,
+    } = {
         let starting = runtime::start_session(app_config, workspace, start);
         tokio::pin!(starting);
         tokio::select! {
@@ -348,7 +351,6 @@ async fn run_session(
             started = &mut starting => started?,
         }
     };
-    let restoration = running.take_restored();
     let model_profiles = zevria_foundation::ModelRole::ALL.into_iter().map(|role| {
         (
             role,

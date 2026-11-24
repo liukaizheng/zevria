@@ -778,11 +778,11 @@ mod tests {
         );
         let restored = crate::replay::replay_transcript(
             &[
-                zevria_transcript::transcript::TranscriptItem::IncompleteResponse(
+                zevria_transcript::transcript::TranscriptItem::IncompleteResponse(Box::new(
                     zevria_transcript::IncompleteResponse::from_attempt(&attempt)
                         .unwrap()
                         .unwrap(),
-                ),
+                )),
             ],
             Path::new("/tmp"),
         );

@@ -323,8 +323,8 @@ impl SessionViews {
             }
         }
         for item in items {
-            match item {
-                TranscriptItem::Ensemble(zevria_workflow::EnsembleRecord::Started { start }) => {
+            match item.ensemble_record() {
+                Some(zevria_workflow::EnsembleRecord::Started { start }) => {
                     if let Some(worker_id) = self.root.ensemble_baseline(&start.run_id) {
                         self.baseline_workers
                             .insert(start.run_id.clone(), worker_id.clone());
@@ -337,7 +337,7 @@ impl SessionViews {
                         }
                     }
                 }
-                TranscriptItem::Ensemble(zevria_workflow::EnsembleRecord::WorkerReview {
+                Some(zevria_workflow::EnsembleRecord::WorkerReview {
                     run_id,
                     worker_id,
                     event,
@@ -350,7 +350,7 @@ impl SessionViews {
                             .insert((run_id.clone(), worker_id.clone()), request_id.clone());
                     }
                 }
-                TranscriptItem::Ensemble(zevria_workflow::EnsembleRecord::WorkersConfirmed {
+                Some(zevria_workflow::EnsembleRecord::WorkersConfirmed {
                     run_id,
                     final_confirmation,
                     ..
@@ -368,32 +368,18 @@ impl SessionViews {
                         );
                     }
                 }
-                TranscriptItem::ToolResults { metadata, .. } => {
-                    for entry in metadata.iter().flat_map(|metadata| metadata.subtasks()) {
-                        if let Some(subtask) = &entry.launch {
-                            self.seed_subtask_ordinal(&subtask.id);
-                            self.install_subtask_metadata(subtask, entry.status);
-                            let index = self.ensure_child(&subtask.id);
-                            self.children[index].historical = true;
-                            self.children[index].refresh_pane_metadata();
-                        }
+                _ => {}
+            }
+            if let TranscriptItem::ToolResults { metadata, .. } = item {
+                for entry in metadata.iter().flat_map(|metadata| metadata.subtasks()) {
+                    if let Some(subtask) = &entry.launch {
+                        self.seed_subtask_ordinal(&subtask.id);
+                        self.install_subtask_metadata(subtask, entry.status);
+                        let index = self.ensure_child(&subtask.id);
+                        self.children[index].historical = true;
+                        self.children[index].refresh_pane_metadata();
                     }
                 }
-                TranscriptItem::SessionModels(_)
-                | TranscriptItem::SessionMode(_)
-                | TranscriptItem::Directive(_)
-                | TranscriptItem::RequestDirective(_)
-                | TranscriptItem::ToolDeclarations(_)
-                | TranscriptItem::RequestPrompt { .. }
-                | TranscriptItem::Message(_)
-                | TranscriptItem::ProviderMessage(_)
-                | TranscriptItem::SkillInvocation(_)
-                | TranscriptItem::CommandJobNotice(_)
-                | TranscriptItem::Plan(_)
-                | TranscriptItem::Ensemble(_)
-                | TranscriptItem::Compaction(_)
-                | TranscriptItem::IncompleteResponse(_)
-                | TranscriptItem::Error { .. } => {}
             }
         }
         self.refresh_subtasks();

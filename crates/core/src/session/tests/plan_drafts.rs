@@ -76,7 +76,7 @@ async fn drafts_survive_turns_restart_and_submit_only_at_finalization() {
     let items = zevria_transcript::transcript::load(&transcript_path).unwrap();
     let saved = items
         .iter()
-        .position(|item| matches!(item, TranscriptItem::Plan(PlanRecord::DraftSaved { .. })))
+        .position(|item| matches!(item.plan_record(), Some(PlanRecord::DraftSaved { .. })))
         .unwrap();
     assert!(matches!(
         items[saved - 1],
@@ -130,10 +130,7 @@ async fn drafts_survive_turns_restart_and_submit_only_at_finalization() {
     assert_eq!(artifact.markdown, updated);
 
     let loaded = zevria_transcript::transcript::load(&transcript_path).unwrap();
-    let records = loaded.iter().filter_map(|item| match item {
-        TranscriptItem::Plan(record) => Some(record),
-        _ => None,
-    });
+    let records = loaded.iter().filter_map(TranscriptItem::plan_record);
     let before_submit = replay_plan_state(
         records
             .clone()
@@ -328,7 +325,7 @@ async fn compaction_appends_exact_plan_working_copy_after_summary() {
     let id = PlanId::new();
     let items = vec![
         TranscriptItem::Message(Message::user("plan")),
-        TranscriptItem::Plan(PlanRecord::Started { id }),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id })),
         saved_plan_record(id, &text),
     ];
     let provider = ScriptedProvider::new([Ok(Message::assistant("summary"))]);

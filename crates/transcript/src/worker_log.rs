@@ -1,10 +1,11 @@
 #[cfg(test)]
 use crate::QuestionRequestId;
+use crate::jsonl::with_record_buffer;
 use anyhow::Context as _;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     fs::File,
-    io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _},
+    io::{self, BufRead as _, BufReader, BufWriter, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -118,29 +119,23 @@ impl AgentRunTranscriptRecord {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct AgentRunValidation {
-    header: Option<AgentRunTranscriptHeader>,
+    header: Option<Arc<AgentRunTranscriptHeader>>,
     outcome_status: Option<AgentRunStatus>,
     review: Option<Arc<crate::WorkerReviewJournal>>,
+    collect_review: bool,
 }
 
 impl AgentRunValidation {
-    fn apply(&mut self, record: &AgentRunTranscriptRecord) -> anyhow::Result<()> {
+    fn prepare<'a>(
+        &self,
+        record: &'a AgentRunTranscriptRecord,
+    ) -> anyhow::Result<Option<crate::ensemble_review_journal::JournalChange<'a>>> {
         record.validate_format()?;
-        if let AgentRunTranscriptRecord::Header { header } = record {
+        if matches!(record, AgentRunTranscriptRecord::Header { .. }) {
             anyhow::ensure!(self.header.is_none(), "expected one first worker header");
-            self.header = Some(header.clone());
-            self.review = (header.workflow == EnsembleWorkflow::Plan)
-                .then(|| Arc::new(crate::WorkerReviewJournal::validator(header)));
-            return Ok(());
-        }
-        if crate::WorkerReviewJournal::observes(record)
-            && let Some(review) = &mut self.review
-        {
-            Arc::make_mut(review)
-                .apply(record)
-                .map_err(anyhow::Error::msg)?;
+            return Ok(None);
         }
         let header = self
             .header
@@ -178,11 +173,7 @@ impl AgentRunValidation {
                         "invalid abandoned worker disposition"
                     );
                 }
-                self.outcome_status = Some(outcome.status);
             }
-            AgentRunTranscriptRecord::Event {
-                event: AgentRunEvent::Prompt { .. },
-            } => self.outcome_status = None,
             AgentRunTranscriptRecord::Event {
                 event: AgentRunEvent::Status { status, .. },
             } if status.is_terminal() => {
@@ -191,32 +182,75 @@ impl AgentRunValidation {
                     "expected matching durable Outcome before terminal Status for this prompt/attempt"
                 );
             }
+            _ => {}
+        }
+        if crate::WorkerReviewJournal::observes(record)
+            && let Some(review) = &self.review
+        {
+            let change = review.prepare(record).map_err(anyhow::Error::msg)?;
+            if !matches!(change, crate::ensemble_review_journal::JournalChange::None) {
+                return Ok(Some(change));
+            }
+        }
+        Ok(None)
+    }
+
+    fn commit(
+        &mut self,
+        record: &AgentRunTranscriptRecord,
+        review: Option<crate::ensemble_review_journal::JournalChange<'_>>,
+    ) {
+        if let Some(change) = review {
+            Arc::make_mut(self.review.as_mut().expect("prepared worker review")).commit(change);
+        }
+        match record {
+            AgentRunTranscriptRecord::Header { header } => {
+                self.header = Some(Arc::new(header.clone()));
+                self.review = (header.workflow == EnsembleWorkflow::Plan).then(|| {
+                    Arc::new(if self.collect_review {
+                        crate::WorkerReviewJournal::new(header)
+                    } else {
+                        crate::WorkerReviewJournal::validator(header)
+                    })
+                });
+            }
+            AgentRunTranscriptRecord::Outcome { outcome } => {
+                self.outcome_status = Some(outcome.status)
+            }
             AgentRunTranscriptRecord::Event {
                 event:
-                    AgentRunEvent::Status {
+                    AgentRunEvent::Prompt { .. }
+                    | AgentRunEvent::Status {
                         status: AgentRunStatus::Starting,
                         ..
                     },
             } => self.outcome_status = None,
             _ => {}
         }
+    }
+
+    fn apply(&mut self, record: &AgentRunTranscriptRecord) -> anyhow::Result<()> {
+        let change = self.prepare(record)?;
+        self.commit(record, change);
         Ok(())
     }
 }
 
-/// Append-only, sync-on-write JSONL worker transcript.
+const WRITER_UNUSABLE: &str = "agent-run writer is unusable after an I/O failure; reopen the log";
+
+/// Append-only JSONL worker transcript. A write or sync error may leave a
+/// partial or committed suffix; reopen the log rather than retry on this writer.
 pub struct AgentRunTranscriptWriter {
     path: PathBuf,
-    file: std::fs::File,
+    file: Option<BufWriter<File>>,
     validation: AgentRunValidation,
+    line: Vec<u8>,
 }
 
 impl AgentRunTranscriptWriter {
     pub fn create(path: PathBuf, header: AgentRunTranscriptHeader) -> anyhow::Result<Self> {
-        AgentRunTranscriptRecord::Header {
-            header: header.clone(),
-        }
-        .validate_format()?;
+        let record = AgentRunTranscriptRecord::Header { header };
+        record.validate_format()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!(
@@ -232,51 +266,63 @@ impl AgentRunTranscriptWriter {
             .with_context(|| format!("failed to create agent-run log at {}", path.display()))?;
         let mut writer = Self {
             path,
-            file,
+            file: Some(BufWriter::new(file)),
             validation: AgentRunValidation::default(),
+            line: Vec::new(),
         };
-        writer.append(&AgentRunTranscriptRecord::Header { header })?;
+        writer.append(&record)?;
         Ok(writer)
     }
 
     pub fn append_to(path: PathBuf) -> anyhow::Result<Self> {
-        let mut reader = AgentRunTranscriptReader::open(&path)?;
+        let mut reader = AgentRunTranscriptReader::open_with(&path, true, false)?;
         for record in reader.by_ref() {
             record?;
         }
-        Self::append_validated(path, reader.validation)
+        Self::append_validated(reader)
     }
 
-    /// Validate and project one full scan, verify the root's expected identity
-    /// before any repair, and keep the exhausted reader's append validator.
-    /// The display projection is not a substitute for journal validation.
+    /// Validate and project from the same open handle before any repair.
     pub fn reopen(
         path: PathBuf,
         expected: &AgentRunTranscriptHeader,
     ) -> anyhow::Result<(Self, AgentRunProjection)> {
-        let mut reader = AgentRunTranscriptReader::open(&path)?;
-        let mut projection = AgentRunProjection::default();
-        for record in reader.by_ref() {
-            projection.apply(&record?);
-        }
+        let mut reader = AgentRunTranscriptReader::open_with(&path, true, true)?;
+        let projection = reader.project()?;
         anyhow::ensure!(
             projection.header.as_ref() == Some(expected),
             "worker transcript identity does not match the ensemble recovery record"
         );
-        let writer = Self::append_validated(path, reader.validation)?;
+        reader.validation.review = projection
+            .review
+            .as_deref()
+            .map(|review| Arc::new(review.resume_validator()));
+        let writer = Self::append_validated(reader)?;
         Ok((writer, projection))
     }
 
-    fn append_validated(path: PathBuf, validation: AgentRunValidation) -> anyhow::Result<Self> {
-        repair_agent_run_tail(&path)?;
-        let file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("failed to reopen agent-run log at {}", path.display()))?;
+    fn append_validated(reader: AgentRunTranscriptReader) -> anyhow::Result<Self> {
+        let mut file = reader.reader.into_inner();
+        if reader.recoverable_tail {
+            file.set_len(reader.verified_offset)?;
+        }
+        file.seek(SeekFrom::Start(reader.verified_offset))?;
+        if reader.needs_newline {
+            file.write_all(b"\n")?;
+        }
+        if reader.recoverable_tail || reader.needs_newline {
+            file.sync_data().with_context(|| {
+                format!(
+                    "failed to sync repaired agent-run log at {}",
+                    reader.path.display()
+                )
+            })?;
+        }
         Ok(Self {
-            path,
-            file,
-            validation,
+            path: reader.path,
+            file: Some(BufWriter::new(file)),
+            validation: reader.validation,
+            line: Vec::new(),
         })
     }
 
@@ -289,93 +335,47 @@ impl AgentRunTranscriptWriter {
     /// The ACP supervisor batches these writes on a blocking writer task and
     /// calls [`Self::sync`] before publishing their normalized events.
     pub fn append_buffered(&mut self, record: &AgentRunTranscriptRecord) -> anyhow::Result<usize> {
-        let mut validation = self.validation.clone();
-        validation.apply(record)?;
-        let mut line =
-            serde_json::to_vec(record).context("failed to serialize agent-run record")?;
-        anyhow::ensure!(
-            line.len() < MAX_AGENT_RUN_RECORD_BYTES,
-            "agent-run record exceeds the 64 MiB limit"
-        );
-        line.push(b'\n');
-        self.file.write_all(&line).with_context(|| {
+        let file = self.file.as_mut().context(WRITER_UNUSABLE)?;
+        let change = self.validation.prepare(record)?;
+        let (len, write) = with_record_buffer(&mut self.line, |line| -> anyhow::Result<_> {
+            serde_json::to_writer(&mut *line, record)
+                .context("failed to serialize agent-run record")?;
+            anyhow::ensure!(
+                line.len() < MAX_AGENT_RUN_RECORD_BYTES,
+                "agent-run record exceeds the 64 MiB limit"
+            );
+            line.push(b'\n');
+            Ok((line.len(), file.write_all(line)))
+        })?;
+        self.finish_io(write).with_context(|| {
             format!("failed to append agent-run log at {}", self.path.display())
         })?;
-        self.validation = validation;
-        Ok(line.len())
+        self.validation.commit(record, change);
+        Ok(len)
     }
 
     /// Flush every preceding buffered record to stable storage.
     pub fn sync(&mut self) -> anyhow::Result<()> {
-        self.file
-            .flush()
-            .and_then(|()| self.file.sync_data())
+        let file = self.file.as_mut().context(WRITER_UNUSABLE)?;
+        let result = file.flush().and_then(|()| file.get_ref().sync_data());
+        self.finish_io(result)
             .with_context(|| format!("failed to sync agent-run log at {}", self.path.display()))
+    }
+
+    fn finish_io(&mut self, result: io::Result<()>) -> io::Result<()> {
+        if result.is_err()
+            && let Some(file) = self.file.take()
+        {
+            // Dropping a BufWriter can retry a failed write. Discard any
+            // unflushed suffix instead and let reopen inspect the actual file.
+            let _ = file.into_parts();
+        }
+        result
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
-
-/// Repair only an incomplete final append, after complete format validation.
-/// A valid final record lacking its newline is preserved and terminated.
-fn repair_agent_run_tail(path: &Path) -> anyhow::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .with_context(|| format!("failed to inspect agent-run log at {}", path.display()))?;
-    let length = file.metadata()?.len();
-    if length == 0 {
-        return Ok(());
-    }
-
-    file.seek(SeekFrom::End(-1))?;
-    let mut last = [0u8; 1];
-    file.read_exact(&mut last)?;
-    if last[0] == b'\n' {
-        return Ok(());
-    }
-
-    let mut cursor = length;
-    let mut tail_start = 0u64;
-    let mut chunk = [0u8; 8 * 1024];
-    while cursor > 0 {
-        let start = cursor.saturating_sub(chunk.len() as u64);
-        let size = usize::try_from(cursor - start).expect("tail scan chunk fits usize");
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut chunk[..size])?;
-        if let Some(index) = chunk[..size].iter().rposition(|byte| *byte == b'\n') {
-            tail_start = start + index as u64 + 1;
-            break;
-        }
-        cursor = start;
-    }
-
-    let tail_length = length.saturating_sub(tail_start);
-    let valid_tail = if tail_length <= MAX_AGENT_RUN_RECORD_BYTES as u64 {
-        let mut tail = vec![0u8; tail_length as usize];
-        file.seek(SeekFrom::Start(tail_start))?;
-        file.read_exact(&mut tail)?;
-        serde_json::from_slice::<AgentRunTranscriptRecord>(&tail).is_ok()
-    } else {
-        false
-    };
-    if valid_tail {
-        file.seek(SeekFrom::End(0))?;
-        file.write_all(b"\n")?;
-    } else {
-        file.set_len(tail_start)?;
-    }
-    file.flush()
-        .and_then(|()| file.sync_data())
-        .with_context(|| {
-            format!(
-                "failed to sync repaired agent-run log at {}",
-                path.display()
-            )
-        })
 }
 
 pub fn agent_runs_dir(workspace: &Path, root_session_id: &str) -> PathBuf {
@@ -421,14 +421,24 @@ pub struct AgentRunTranscriptReader {
     line: usize,
     buffer: Vec<u8>,
     done: bool,
+    verified_offset: u64,
+    needs_newline: bool,
+    recoverable_tail: bool,
     validation: AgentRunValidation,
 }
 
 impl AgentRunTranscriptReader {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Self::open_with(path, false, false)
+    }
+
+    fn open_with(path: &Path, write: bool, collect_review: bool) -> anyhow::Result<Self> {
         #[cfg(feature = "test-support")]
         crate::replay_probe::record(|counts| counts.worker_loads += 1);
-        let file = File::open(path)
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(write)
+            .open(path)
             .with_context(|| format!("failed to read agent-run log at {}", path.display()))?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -436,8 +446,28 @@ impl AgentRunTranscriptReader {
             line: 0,
             buffer: Vec::new(),
             done: false,
-            validation: AgentRunValidation::default(),
+            verified_offset: 0,
+            needs_newline: false,
+            recoverable_tail: false,
+            validation: AgentRunValidation {
+                collect_review,
+                ..Default::default()
+            },
         })
+    }
+
+    fn project(&mut self) -> anyhow::Result<AgentRunProjection> {
+        let mut projection = AgentRunProjection::default();
+        for record in self.by_ref() {
+            projection.apply_display(&record?);
+        }
+        projection.review = self.validation.review.clone();
+        Ok(projection)
+    }
+
+    fn accept_line(&mut self) {
+        self.verified_offset += self.buffer.len() as u64;
+        self.needs_newline = !self.buffer.ends_with(b"\n");
     }
 
     fn read_line_bounded(&mut self) -> std::io::Result<Option<bool>> {
@@ -503,6 +533,7 @@ impl Iterator for AgentRunTranscriptReader {
                 .into()));
             }
             if self.buffer.iter().all(u8::is_ascii_whitespace) {
+                self.accept_line();
                 continue;
             }
             // Decode the wire representation first, then validate separately.
@@ -518,6 +549,7 @@ impl Iterator for AgentRunTranscriptReader {
                             .is_err_and(|error| error.is_eof())
                         && !unsupported_worker_tail(&self.buffer, &self.validation)
                     {
+                        self.recoverable_tail = true;
                         return None;
                     }
                     return Some(Err(crate::transcript::UnsupportedHistory::decoding(
@@ -552,20 +584,20 @@ impl Iterator for AgentRunTranscriptReader {
             }
             #[cfg(feature = "test-support")]
             crate::replay_probe::record(|counts| counts.worker_records += 1);
+            self.accept_line();
             return Some(Ok(record));
         }
     }
 }
 
 fn unsupported_worker_tail(line: &[u8], validation: &AgentRunValidation) -> bool {
-    use crate::transcript::{partial_json_field, top_level_keys};
     // A complete payload with only the outer delimiter missing is not crash
     // debris if it is invalid. Probe the original bytes so duplicate map keys
     // cannot disappear through the partial-field Value inspection below.
     let mut closed = line.to_vec();
     closed.push(b'}');
     match serde_json::from_slice::<AgentRunRecord>(&closed) {
-        Ok(record) => return validation.clone().apply(&record.into_record()).is_err(),
+        Ok(record) => return validation.prepare(&record.into_record()).is_err(),
         Err(error) if error.is_data() => return true,
         Err(_) => {}
     }
@@ -626,14 +658,92 @@ fn unsupported_worker_tail(line: &[u8], validation: &AgentRunValidation) -> bool
             let record = serde_json::from_value::<AgentRunTranscriptRecord>(
                 serde_json::json!({"record":kind, (kind):value}),
             );
-            if record.is_err()
-                || record.is_ok_and(|record| validation.clone().apply(&record).is_err())
-            {
+            if record.is_err() || record.is_ok_and(|record| validation.prepare(&record).is_err()) {
                 return true;
             }
         }
     }
     false
+}
+
+/// Read one structural field even when a later value is interrupted. Paths do
+/// not traverse arrays or strings, so quoted marker text cannot become metadata.
+fn partial_json_field(line: &[u8], path: &[&str]) -> Option<serde_json::Value> {
+    probe_json_field(line, path).1
+}
+
+fn probe_json_field(line: &[u8], path: &[&str]) -> (bool, Option<serde_json::Value>) {
+    struct Probe<'a, 'b> {
+        path: &'a [&'a str],
+        found: &'b mut Option<serde_json::Value>,
+        seen: &'b mut bool,
+    }
+    impl<'de> serde::de::DeserializeSeed<'de> for Probe<'_, '_> {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+            if self.path.is_empty() {
+                *self.seen = true;
+                *self.found = Some(serde_json::Value::deserialize(deserializer)?);
+                Ok(())
+            } else {
+                deserializer.deserialize_map(self)
+            }
+        }
+    }
+    impl<'de> serde::de::Visitor<'de> for Probe<'_, '_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a record object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                if key == self.path[0] {
+                    map.next_value_seed(Probe {
+                        path: &self.path[1..],
+                        found: self.found,
+                        seen: self.seen,
+                    })?;
+                } else {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut found = None;
+    let mut seen = false;
+    let _ = serde::de::DeserializeSeed::deserialize(
+        Probe {
+            path,
+            found: &mut found,
+            seen: &mut seen,
+        },
+        &mut serde_json::Deserializer::from_slice(line),
+    );
+    (seen, found)
+}
+
+fn top_level_keys(line: &[u8]) -> Vec<String> {
+    struct Probe<'a>(&'a mut Vec<String>);
+    impl<'de> serde::de::Visitor<'de> for Probe<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a transcript object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                self.0.push(key);
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+            Ok(())
+        }
+    }
+    let mut found = Vec::new();
+    let _ = serde::Deserializer::deserialize_map(
+        &mut serde_json::Deserializer::from_slice(line),
+        Probe(&mut found),
+    );
+    found
 }
 
 /// Load every current worker record. Callers that only need a projection or can
@@ -644,11 +754,7 @@ pub fn load_agent_run(path: &Path) -> anyhow::Result<Vec<AgentRunTranscriptRecor
 
 /// Reduce a durable worker log without materializing its complete record list.
 pub fn load_agent_run_projection(path: &Path) -> anyhow::Result<AgentRunProjection> {
-    let mut projection = AgentRunProjection::default();
-    for record in AgentRunTranscriptReader::open(path)? {
-        projection.apply(&record?);
-    }
-    Ok(projection)
+    AgentRunTranscriptReader::open_with(path, false, true)?.project()
 }
 
 /// Report/session projection reduced solely from a durable worker log.
@@ -666,7 +772,7 @@ pub struct AgentRunProjection {
     pub decision_ids: Vec<AgentUserDecisionId>,
     pub unavailable_decisions: Vec<AgentUnavailableDecision>,
     pub repair: Option<AgentRunRepair>,
-    pub review: Option<crate::WorkerReviewJournal>,
+    pub review: Option<Arc<crate::WorkerReviewJournal>>,
     /// Non-fallible in-memory projections retain errors; file readers reject them.
     pub review_error: Option<String>,
     last_message_id: Option<String>,
@@ -720,13 +826,18 @@ impl AgentRunProjection {
     pub fn apply(&mut self, record: &AgentRunTranscriptRecord) {
         if let AgentRunTranscriptRecord::Header { header } = record {
             self.review = (header.workflow == EnsembleWorkflow::Plan)
-                .then(|| crate::WorkerReviewJournal::new(header));
+                .then(|| Arc::new(crate::WorkerReviewJournal::new(header)));
         }
-        if let Some(review) = &mut self.review
-            && let Err(error) = review.apply(record)
+        if crate::WorkerReviewJournal::observes(record)
+            && let Some(review) = &mut self.review
+            && let Err(error) = Arc::make_mut(review).apply(record)
         {
             self.review_error = Some(error);
         }
+        self.apply_display(record);
+    }
+
+    fn apply_display(&mut self, record: &AgentRunTranscriptRecord) {
         match record {
             AgentRunTranscriptRecord::Header { header } => self.header = Some(header.clone()),
             AgentRunTranscriptRecord::Outcome { outcome } => {
@@ -1829,6 +1940,41 @@ mod tests {
         assert_eq!(loaded[0], AgentRunTranscriptRecord::Header { header });
         let raw = std::fs::read_to_string(path).expect("raw transcript");
         assert!(!raw.contains("NO_BROWSER"));
+    }
+
+    #[test]
+    fn flush_failure_requires_reopening_before_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.jsonl");
+        let header = AgentRunTranscriptHeader {
+            version: AGENT_RUN_TRANSCRIPT_VERSION,
+            ensemble_run_id: EnsembleRunId::new(),
+            workflow: EnsembleWorkflow::Review,
+            descriptor: descriptor("Codex"),
+            prompt: "review".into(),
+        };
+        let mut writer = AgentRunTranscriptWriter::create(path.clone(), header.clone()).unwrap();
+        let record = AgentRunTranscriptRecord::Event {
+            event: AgentRunEvent::Stderr {
+                text: "diagnostic".into(),
+            },
+        };
+        // A short record fits the buffer; only flushing discovers the bad handle.
+        writer.file = Some(BufWriter::new(File::open(&path).unwrap()));
+        writer.append_buffered(&record).unwrap();
+        assert!(writer.sync().is_err());
+        assert_eq!(
+            writer.append(&record).unwrap_err().to_string(),
+            WRITER_UNUSABLE
+        );
+        assert_eq!(
+            load_agent_run(&path).unwrap(),
+            [AgentRunTranscriptRecord::Header { header }]
+        );
+
+        let mut reopened = AgentRunTranscriptWriter::append_to(path.clone()).unwrap();
+        reopened.append(&record).unwrap();
+        assert_eq!(load_agent_run(&path).unwrap().last(), Some(&record));
     }
 
     #[test]

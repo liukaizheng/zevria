@@ -373,7 +373,7 @@ fn engine_with_access(
 ) -> (tempfile::TempDir, SessionEngine<ProviderRouter>) {
     history.insert(
         0,
-        TranscriptItem::SessionModels(
+        TranscriptItem::SessionModels(Box::new(
             zevria_model::models::SessionModels::new(
                 zevria_model::models::ModelSelection::new(
                     a.profile.clone(),
@@ -385,7 +385,7 @@ fn engine_with_access(
                 ),
             )
             .unwrap(),
-        ),
+        )),
     );
     let directory = tempfile::tempdir().unwrap();
     let mut writer = TranscriptWriter::create_with_id(directory.path(), "model-test").unwrap();
@@ -525,7 +525,7 @@ async fn idle_selection_is_no_inference_only_chosen_route_and_unknown_noop_are_s
         }
     ));
     assert_eq!(engine.provider().initialized_profile_count(), 0);
-    assert_eq!(engine.conversation().items().len(), 1);
+    assert_eq!(engine.conversation().items().len(), 2);
     assert_eq!(
         engine
             .conversation()
@@ -623,7 +623,10 @@ async fn session_only_switches_are_role_local_noops_do_not_write_and_global_can_
                     matches!(manage(&mut engine, Request::List { scope: Scope::SessionOnly, mode: other }).await, Result::Catalog { scope: Scope::SessionOnly, current, revision, .. } if current.profile == *expected && revision.is_empty())
                 );
             }
-            assert_eq!(&engine.conversation().items()[1..], history);
+            assert_eq!(
+                &engine.conversation().items()[1..1 + history.len()],
+                history
+            );
         }
         assert_eq!(settings.save_calls.load(Ordering::Relaxed), 0);
         assert!(settings.revision.lock().unwrap().is_empty());
@@ -693,7 +696,7 @@ async fn session_only_header_failure_without_conversion_preserves_selections_and
 fn opaque_history(a: &ResolvedModelProfile) -> Vec<TranscriptItem> {
     vec![
         TranscriptItem::Message(Message::user("keep the original instruction")),
-        TranscriptItem::Compaction(
+        TranscriptItem::Compaction(Box::new(
             CompactionCheckpoint::new(
                 CompactionTrigger::Manual,
                 CompactionBackend::OpenaiResponsesCompact,
@@ -707,7 +710,7 @@ fn opaque_history(a: &ResolvedModelProfile) -> Vec<TranscriptItem> {
                 vec!["keep the original instruction".into()],
             )
             .unwrap(),
-        ),
+        )),
     ]
 }
 
@@ -757,26 +760,26 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
         parameters: json!({"type":"object"}),
     }])
     .unwrap();
-    original.push(TranscriptItem::ToolDeclarations(
+    original.push(TranscriptItem::ToolDeclarations(Box::new(
         zevria_transcript::ToolDeclarationRecord::new(
             zevria_transcript::ToolDeclarationPlacement::Initial,
             initial.clone(),
         )
         .unwrap(),
-    ));
+    )));
     original.push(TranscriptItem::Message(Message::user("latest task")));
-    original.push(TranscriptItem::RequestDirective(
+    original.push(TranscriptItem::RequestDirective(Box::new(
         zevria_instructions::RequestDirective::boundary(zevria_foundation::RequestMetadata::new(
             zevria_foundation::RequestBehavior::Standard,
         )),
-    ));
-    original.push(TranscriptItem::ToolDeclarations(
+    )));
+    original.push(TranscriptItem::ToolDeclarations(Box::new(
         zevria_transcript::ToolDeclarationRecord::new(
             zevria_transcript::ToolDeclarationPlacement::Additional,
             additional,
         )
         .unwrap(),
-    ));
+    )));
     let policy = TurnPolicy::new("Build", Some(vec![]), ModelRole::Build, false);
     let instructions = zevria_instructions::InstructionSet {
         application: "preamble".into(),

@@ -293,12 +293,9 @@ async fn pending_plan_handoff_and_ensemble_start_publish_before_acceptance_effec
                 }));
                 assert!(!engine.conversation.has_real_user_prompt());
                 assert!(engine.conversation.items().iter().any(|item| if ensemble {
-                    matches!(
-                        item,
-                        TranscriptItem::Ensemble(EnsembleRecord::Started { .. })
-                    )
+                    matches!(item.ensemble_record(), Some(EnsembleRecord::Started { .. }))
                 } else {
-                    matches!(item, TranscriptItem::Plan(PlanRecord::Handoff { .. }))
+                    matches!(item.plan_record(), Some(PlanRecord::Handoff { .. }))
                 }));
             }
         }

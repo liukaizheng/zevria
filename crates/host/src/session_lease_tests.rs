@@ -135,7 +135,7 @@ fn release_closes_the_lock_handle_before_attempting_deletion() {
             if event == Event::BeforeRemove {
                 // This callback runs inside the remover's coordinator section.
                 // A separate open must already be able to acquire the OS lock.
-                let file = open_regular(&probe_path, false).unwrap();
+                let file = open_lock_file(&probe_path, false).unwrap();
                 // A transient OS lock must not look like a leaked parent
                 // handle. This hook blocks the remover, so moving its close
                 // after this callback would still time out and fail.

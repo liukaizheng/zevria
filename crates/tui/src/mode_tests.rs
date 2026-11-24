@@ -53,7 +53,9 @@ fn orchestration_completion_retains_draft_and_recall_preserves_explicit_behavior
             message: Message::user("implement independent parts"),
             request: request.clone(),
         },
-        TranscriptItem::RequestDirective(zevria_instructions::RequestDirective::boundary(request)),
+        TranscriptItem::RequestDirective(Box::new(
+            zevria_instructions::RequestDirective::boundary(request),
+        )),
     ]);
     app.select_for_test(cursor(0, 0));
     ctrl_e(&mut app);
@@ -81,8 +83,8 @@ fn literal_recall_and_removed_orchestration_prefix_are_standard_requests() {
                 message: Message::user(literal),
                 request: request.clone(),
             },
-            TranscriptItem::RequestDirective(zevria_instructions::RequestDirective::boundary(
-                request,
+            TranscriptItem::RequestDirective(Box::new(
+                zevria_instructions::RequestDirective::boundary(request),
             )),
         ]);
         app.select_for_test(cursor(0, 0));
@@ -99,7 +101,9 @@ fn literal_recall_and_removed_orchestration_prefix_are_standard_requests() {
             message: Message::user("independent work"),
             request: request.clone(),
         },
-        TranscriptItem::RequestDirective(zevria_instructions::RequestDirective::boundary(request)),
+        TranscriptItem::RequestDirective(Box::new(
+            zevria_instructions::RequestDirective::boundary(request),
+        )),
     ]);
     app.select_for_test(cursor(0, 0));
     ctrl_e(&mut app);
@@ -597,7 +601,7 @@ fn session_mode_and_other_private_metadata_do_not_change_rendered_rows_or_recall
     for mode in SessionMode::ALL {
         let mut app = App::new();
         app.restore(vec![
-            TranscriptItem::SessionModels(
+            TranscriptItem::SessionModels(Box::new(
                 zevria_model::models::SessionModels::new(
                     zevria_model::models::ModelSelection::new(
                         ModelProfileRef::new("hidden-provider", "hidden-build"),
@@ -609,16 +613,16 @@ fn session_mode_and_other_private_metadata_do_not_change_rendered_rows_or_recall
                     ),
                 )
                 .unwrap(),
-            ),
+            )),
             TranscriptItem::SessionMode(mode),
-            TranscriptItem::Directive(zevria_instructions::DirectiveContent::skill(
+            TranscriptItem::Directive(Box::new(zevria_instructions::DirectiveContent::skill(
                 &SkillSnapshot::new(
                     SkillName::parse("hidden-skill").unwrap(),
                     "Hidden skill description",
                     "HIDDEN_SKILL_BODY",
                 )
                 .unwrap(),
-            )),
+            ))),
             prompt.clone(),
         ]);
         assert_eq!(app.history().len(), 1);

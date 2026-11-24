@@ -1,13 +1,11 @@
 //! Transcript conversation responsibilities.
 use super::header::is_leading_metadata;
-use super::header::session_mode;
-use super::header::validate_header;
 use super::item::TranscriptItem;
 use super::load::TranscriptLoadOutcome;
 use super::projection::is_compaction_prompt_item;
 use super::projection::is_conversation_item;
 use super::projection::is_prompt_item;
-use super::projection::model_input;
+use super::projection::model_input_at;
 use super::projection::retained_user_candidates;
 use super::writer::TranscriptWriter;
 use crate::ModelRequestItem;
@@ -40,6 +38,9 @@ pub struct Conversation {
     input_identity: Option<zevria_model::ModelInputIdentity>,
     has_images: bool,
     has_compaction_prompt: bool,
+    latest_compaction_index: Option<usize>,
+    has_real_user_prompt: bool,
+    has_conversation_item: bool,
 }
 
 /// Disjoint writer borrow used while a provider holds immutable model input.
@@ -60,7 +61,9 @@ impl AttemptCheckpointWriter<'_> {
             ))
         } else {
             self.writer
-                .append_record(&TranscriptItem::IncompleteResponse(record.clone()))
+                .append_record(&TranscriptItem::IncompleteResponse(Box::new(
+                    record.clone(),
+                )))
         };
         self.records.push(record);
         if let Err(error) = &result {
@@ -79,7 +82,7 @@ impl AttemptCheckpointWriter<'_> {
 struct PreparedChange {
     items: Vec<TranscriptItem>,
     replay: crate::ValidatedSessionReplay,
-    single_append: bool,
+    suffix: usize,
 }
 
 impl Conversation {
@@ -93,6 +96,9 @@ impl Conversation {
             input_identity: Some(zevria_model::ModelInputIdentity::default()),
             has_images: false,
             has_compaction_prompt: false,
+            latest_compaction_index: None,
+            has_real_user_prompt: false,
+            has_conversation_item: false,
         }
     }
 
@@ -148,6 +154,15 @@ impl Conversation {
     }
 
     fn rebuild_input_identity(&mut self) {
+        self.latest_compaction_index = None;
+        self.has_compaction_prompt = false;
+        self.has_real_user_prompt = false;
+        self.has_conversation_item = false;
+        self.update_item_facts(0);
+        self.rebuild_model_identity();
+    }
+
+    fn rebuild_model_identity(&mut self) {
         let input = self.model_input();
         let has_images = input
             .iter()
@@ -156,26 +171,38 @@ impl Conversation {
         let identity = zevria_model::ModelInputIdentity::from_items(&input).ok();
         self.input_identity = identity;
         self.has_images = has_images;
-        self.has_compaction_prompt = self.items.iter().any(is_compaction_prompt_item);
     }
 
     pub fn has_images(&self) -> bool {
         self.has_images
     }
 
+    fn update_item_facts(&mut self, start: usize) {
+        for (index, item) in self.items.iter().enumerate().skip(start) {
+            if matches!(item, TranscriptItem::Compaction(_)) {
+                self.latest_compaction_index = Some(index);
+            }
+            self.has_compaction_prompt |= is_compaction_prompt_item(item);
+            self.has_real_user_prompt |= is_prompt_item(item);
+            self.has_conversation_item |= is_conversation_item(item);
+        }
+    }
+
     fn input_appended(&mut self, start: usize) {
+        self.update_item_facts(start);
+        if self
+            .latest_compaction_index
+            .is_some_and(|index| index >= start)
+        {
+            self.rebuild_model_identity();
+            return;
+        }
         self.has_images |= self.items[start..]
             .iter()
             .filter_map(TranscriptItem::model_request_item)
             .filter_map(ModelRequestItem::message_ref)
             .any(zevria_content::prompt::message_contains_images);
-        self.has_compaction_prompt |= self.items[start..].iter().any(is_compaction_prompt_item);
-        if self.items[start..]
-            .iter()
-            .any(|item| matches!(item, TranscriptItem::Compaction(_)))
-        {
-            self.rebuild_input_identity();
-        } else if let Some(identity) = &mut self.input_identity
+        if let Some(identity) = &mut self.input_identity
             && identity
                 .extend(
                     self.items[start..]
@@ -203,51 +230,58 @@ impl Conversation {
     }
 
     pub fn session_models(&self) -> Option<&SessionModels> {
-        match self.items.first() {
-            Some(TranscriptItem::SessionModels(models)) => Some(models),
-            _ => None,
-        }
+        self.replay.as_ref().ok()?.instructions.session_models()
     }
 
-    /// Install a canonical snapshot before changing an active route. Pending
-    /// new sessions retain it in memory; saved logs commit it durably.
-    /// Equal selections do not rewrite history. Missing metadata on a saved
-    /// root is unsupported and must never trigger implicit model inference.
+    /// Change the active route with one durable, model-inert record.
     pub fn replace_session_models(&mut self, models: SessionModels) -> anyhow::Result<()> {
-        self.ensure_durable()?;
-        if self.session_models() == Some(&models) {
-            return Ok(());
+        self.ensure_metadata_writable()?;
+        if self.session_models() != Some(&models) {
+            self.append_metadata(TranscriptItem::SessionModels(Box::new(models)))?;
         }
-        let mut replacement = self.items.clone();
-        if self.session_models().is_some() {
-            replacement[0] = TranscriptItem::SessionModels(models);
-        } else {
-            anyhow::ensure!(
-                self.items.iter().all(is_leading_metadata),
-                "unsupported history: session model metadata is missing; start a fresh session"
-            );
-            replacement.insert(0, TranscriptItem::SessionModels(models));
-        }
-        self.writer.persist_unprepared(&replacement, false)?;
-        self.items = replacement;
-        self.replay = crate::validate_session_replay(&self.items);
-        self.rebuild_input_identity();
         Ok(())
     }
 
-    /// Atomically select a mode without creating model-visible conversation input.
-    /// Rejected proposals and failed writes leave both memory and disk unchanged.
     pub fn replace_session_mode(&mut self, mode: crate::SessionMode) -> anyhow::Result<bool> {
+        self.ensure_metadata_writable()?;
+        if self.replay()?.instructions.persisted_mode() == Some(mode) {
+            return Ok(false);
+        }
+        self.append_metadata(TranscriptItem::SessionMode(mode))?;
+        Ok(true)
+    }
+
+    fn ensure_metadata_writable(&self) -> anyhow::Result<()> {
         self.writer.ensure_writable()?;
         anyhow::ensure!(
             self.persistence_error.is_none(),
             "session transcript persistence is degraded"
         );
-        if session_mode(&self.items)? == Some(mode) {
-            return Ok(false);
+        Ok(())
+    }
+
+    fn append_metadata(&mut self, item: TranscriptItem) -> anyhow::Result<()> {
+        self.replay()?.instructions.ensure_metadata_boundary()?;
+        if self.writer.is_pending() {
+            self.writer.validate_record(&item)?;
+        } else if let Err(error) = self
+            .writer
+            .append_records(std::slice::from_ref(&item), true)
+        {
+            // A rollback or pre-write failure leaves the selected value and
+            // durable prefix unchanged. Only an ambiguous append requires repair.
+            if error.is::<super::writer::IndeterminateAppend>() {
+                self.persistence_error = Some(format!("{error:#}"));
+            }
+            return Err(error);
         }
-        self.commit_anchored(None, Vec::new(), Some(mode))?;
-        Ok(true)
+        self.replay
+            .as_mut()
+            .expect("validated replay")
+            .instructions
+            .append_metadata(&item);
+        self.items.push(item);
+        Ok(())
     }
 
     /// Assemble, validate, and persist one authoritative anchored proposal.
@@ -257,7 +291,7 @@ impl Conversation {
     pub fn commit_anchored(
         &mut self,
         index: Option<usize>,
-        records: Vec<TranscriptItem>,
+        mut records: Vec<TranscriptItem>,
         mode: Option<crate::SessionMode>,
     ) -> anyhow::Result<()> {
         #[cfg(feature = "test-support")]
@@ -269,25 +303,28 @@ impl Conversation {
             end <= self.items.len(),
             "replacement index is outside the transcript"
         );
-        let append_only = index.is_none()
-            && mode.is_none_or(|mode| {
-                self.replay
-                    .as_ref()
-                    .ok()
-                    .and_then(|replay| replay.instructions.persisted_mode())
-                    == Some(mode)
-            });
-        if append_only {
-            // Required work is validated before persistence, so retain exactly
-            // one prospective copy until the durable commit succeeds.
+        if mode.is_some() {
+            self.ensure_metadata_writable()?;
+        }
+        if index.is_none() {
+            let prefix = self.replay()?;
+            if let Some(mode) =
+                mode.filter(|mode| Some(*mode) != prefix.instructions.persisted_mode())
+            {
+                if records.is_empty() {
+                    return self.append_metadata(TranscriptItem::SessionMode(mode));
+                }
+                records.insert(0, TranscriptItem::SessionMode(mode));
+            }
+            if records.is_empty() {
+                return Ok(());
+            }
             #[cfg(feature = "test-support")]
             crate::replay_probe::record(|counts| counts.prospective_copies += 1);
-            let prefix = self.replay()?.clone();
-            let replay = match prefix.apply_suffix(&records) {
+            let replay = match prefix.clone().apply_suffix(&records) {
                 Ok(replay) => replay,
                 Err(_) => {
-                    // Rejected proposals are uncommon; preserve independent
-                    // full-replay error classification without cloning history.
+                    // Preserve independent full-replay error classification on rejection.
                     let start = self.items.len();
                     self.items.extend(records.iter().cloned());
                     let result = crate::validate_session_replay(&self.items);
@@ -295,78 +332,46 @@ impl Conversation {
                     result?
                 }
             };
-            if mode.is_some() {
-                anyhow::ensure!(
-                    self.persistence_error.is_none(),
-                    "session transcript persistence is degraded"
-                );
-            }
             let batch = records.len() > 1 || mode.is_some();
             self.push_required_batch_impl(records, false, batch)?;
             self.replay = Ok(replay);
             return Ok(());
         }
-        let single_append = false;
+
         let mut items = self.items[..end].to_vec();
-        if let Some(mode) = mode {
-            // Only canonical header positions can be replaced. Final replay
-            // rejects duplicate/misplaced metadata, including any in records.
-            // Do this before adding the suffix so it cannot hide an invalid header.
-            let position = usize::from(matches!(
-                items.first(),
-                Some(TranscriptItem::SessionModels(_))
-            ));
-            if matches!(items.get(position), Some(TranscriptItem::SessionMode(_))) {
-                items[position] = TranscriptItem::SessionMode(mode);
-            } else {
-                items.insert(position, TranscriptItem::SessionMode(mode));
-            }
+        let retained_models = items.iter().rev().find_map(|item| match item {
+            TranscriptItem::SessionModels(models) => Some(models.as_ref()),
+            _ => None,
+        });
+        if let Some(models) = self
+            .session_models()
+            .filter(|models| Some(*models) != retained_models)
+        {
+            items.push(TranscriptItem::SessionModels(Box::new(models.clone())));
+        }
+        let retained_mode = items.iter().rev().find_map(|item| match item {
+            TranscriptItem::SessionMode(mode) => Some(*mode),
+            _ => None,
+        });
+        if let Some(mode) = mode
+            .or(self.replay()?.instructions.persisted_mode())
+            .filter(|mode| Some(*mode) != retained_mode)
+        {
+            items.push(TranscriptItem::SessionMode(mode));
         }
         items.extend(records);
         let replay = crate::validate_session_replay(&items)?;
-        let change = PreparedChange {
+        self.persist_prepared_change(PreparedChange {
             items,
             replay,
-            single_append,
-        };
-        self.persist_prepared_change(change, mode.is_some())
+            suffix: end,
+        })
     }
 
-    fn persist_prepared_change(
-        &mut self,
-        change: PreparedChange,
-        selects_mode: bool,
-    ) -> anyhow::Result<()> {
-        self.writer.ensure_writable()?;
-        if selects_mode {
-            anyhow::ensure!(
-                self.persistence_error.is_none(),
-                "session transcript persistence is degraded"
-            );
-        } else if !change.single_append
-            || (self.writer.is_pending() && self.persistence_error.is_some())
-        {
-            self.ensure_durable()?;
-        }
-        if change.items != self.items {
-            let pending = self.writer.is_pending();
-            if let Err(error) = self
-                .writer
-                .persist_records(&change.items, change.single_append)
-            {
-                if !pending && change.single_append {
-                    let error = error.context("the session transcript is degraded");
-                    self.persistence_error = Some(format!("{error:#}"));
-                    return Err(error);
-                }
-                // Initial publication is atomic and has no partial canonical
-                // tail to repair. Rejected input remains retryable, not degraded.
-                return Err(error);
-            }
-            self.items = change.items;
-            self.rebuild_input_identity();
-        }
-        self.replay = Ok(change.replay);
+    fn persist_prepared_change(&mut self, change: PreparedChange) -> anyhow::Result<()> {
+        self.ensure_durable()?;
+        self.writer.persist_edit(&change.items, change.suffix)?;
+        self.adopt_validated(change.items, change.replay);
         Ok(())
     }
 
@@ -379,7 +384,7 @@ impl Conversation {
         AttemptCheckpointWriter<'_>,
     ) {
         (
-            model_input(&self.items),
+            model_input_at(&self.items, self.latest_compaction_index),
             self.input_identity.as_ref(),
             AttemptCheckpointWriter {
                 writer: &mut self.writer,
@@ -391,14 +396,17 @@ impl Conversation {
 
     pub fn install_attempt_checkpoints(&mut self, records: Vec<crate::IncompleteResponse>) {
         let start = self.items.len();
-        self.items
-            .extend(records.into_iter().map(TranscriptItem::IncompleteResponse));
+        self.items.extend(
+            records
+                .into_iter()
+                .map(|record| TranscriptItem::IncompleteResponse(Box::new(record))),
+        );
         self.replay_appended(start);
     }
 
     /// The exact ordered active model projection.
     pub fn model_input(&self) -> Vec<ModelRequestItem<'_>> {
-        model_input(&self.items)
+        model_input_at(&self.items, self.latest_compaction_index)
     }
 
     /// Message-bearing compatibility view of the active model projection.
@@ -412,14 +420,11 @@ impl Conversation {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn latest_compaction(&self) -> Option<(usize, &CompactionCheckpoint)> {
-        self.items
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, item)| match item {
-                TranscriptItem::Compaction(checkpoint) => Some((index, checkpoint)),
-                _ => None,
-            })
+        let index = self.latest_compaction_index?;
+        let TranscriptItem::Compaction(checkpoint) = &self.items[index] else {
+            unreachable!()
+        };
+        Some((index, checkpoint))
     }
 
     /// User/direct-skill prompts and typed Plan handoff instructions eligible
@@ -429,7 +434,7 @@ impl Conversation {
     }
 
     pub fn has_real_user_prompt(&self) -> bool {
-        self.items.iter().any(is_prompt_item)
+        self.has_real_user_prompt
     }
 
     pub fn has_compaction_prompt(&self) -> bool {
@@ -470,17 +475,16 @@ impl Conversation {
         self.items.extend(new_items);
         let result = if pending {
             if replay {
-                self.writer.persist_unprepared(&self.items, false)
+                self.writer.persist_unprepared(&self.items)
             } else {
-                self.writer.persist_records(&self.items, false)
+                self.writer.persist_records(&self.items)
             }
         } else {
-            self.validate_appended_header(start)
-                .and_then(|_| self.writer.append_records(&self.items[start..], batch))
+            self.writer.append_records(&self.items[start..], batch)
         };
         if let Err(error) = result {
             self.items.truncate(start);
-            if !pending {
+            if !pending && (replay || error.is::<super::writer::IndeterminateAppend>()) {
                 self.persistence_error = Some(format!("{error:#}"));
             }
             return Err(error);
@@ -489,18 +493,6 @@ impl Conversation {
             self.replay_appended(start);
         } else {
             self.input_appended(start);
-        }
-        Ok(())
-    }
-
-    fn validate_appended_header(&self, start: usize) -> anyhow::Result<()> {
-        if self.items[start..].iter().any(|item| {
-            matches!(
-                item,
-                TranscriptItem::SessionModels(_) | TranscriptItem::SessionMode(_)
-            )
-        }) {
-            validate_header(self.items.iter())?;
         }
         Ok(())
     }
@@ -541,7 +533,7 @@ impl Conversation {
                 return Err(error.into());
             }
             if !self.items.iter().any(is_conversation_item) {
-                if let Err(error) = self.writer.persist_records(&self.items, false) {
+                if let Err(error) = self.writer.persist_records(&self.items) {
                     self.items.truncate(start);
                     return Err(error);
                 }
@@ -551,10 +543,9 @@ impl Conversation {
         }
         let result = durable.and_then(|_| {
             if pending {
-                self.writer.persist_records(&self.items, false)
+                self.writer.persist_records(&self.items)
             } else {
-                self.validate_appended_header(start)
-                    .and_then(|_| self.writer.append_records(&self.items[start..], batch))
+                self.writer.append_records(&self.items[start..], batch)
             }
         });
         self.replay_appended(start);
@@ -572,14 +563,14 @@ impl Conversation {
     /// of the complete live conversation. Returns `true` after a successful repair.
     pub fn ensure_durable(&mut self) -> anyhow::Result<bool> {
         self.writer.ensure_writable()?;
-        if self.writer.is_pending() && !self.items.iter().any(is_conversation_item) {
+        if self.writer.is_pending() && !self.has_conversation_item {
             // Shutdown/repair must never flush intentional metadata-only state.
             return Ok(false);
         }
         if self.persistence_error.is_none() && !self.writer.is_pending() {
             return Ok(false);
         }
-        if let Err(error) = self.writer.persist_unprepared(&self.items, false) {
+        if let Err(error) = self.writer.persist_unprepared(&self.items) {
             let error = error.context("failed to repair the degraded session transcript");
             self.persistence_error = Some(format!("{error:#}"));
             return Err(error);
@@ -621,8 +612,8 @@ impl Conversation {
     pub fn ensemble_start_position(&self, run_id: &EnsembleRunId) -> Option<usize> {
         self.items.iter().position(|item| {
             matches!(
-                item,
-                TranscriptItem::Ensemble(EnsembleRecord::Started { start })
+                item.ensemble_record(),
+                Some(EnsembleRecord::Started { start })
                     if &start.run_id == run_id
             )
         })
@@ -636,8 +627,7 @@ impl Conversation {
     pub fn truncate(&mut self, index: usize) -> anyhow::Result<()> {
         self.ensure_durable()?;
         let index = index.max(self.leading_metadata_len());
-        self.writer
-            .persist_unprepared(&self.items[..index], false)?;
+        self.writer.persist_unprepared(&self.items[..index])?;
         self.items.truncate(index);
         self.replay = crate::validate_session_replay(&self.items);
         self.rebuild_input_identity();
@@ -667,7 +657,7 @@ impl Conversation {
         let index = index.max(self.leading_metadata_len());
         let mut replacement = self.items[..index].to_vec();
         replacement.extend(new_items);
-        self.writer.persist_unprepared(&replacement, false)?;
+        self.writer.persist_unprepared(&replacement)?;
         self.items = replacement;
         self.replay = crate::validate_session_replay(&self.items);
         self.rebuild_input_identity();

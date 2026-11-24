@@ -20,16 +20,16 @@ fn engine() -> (tempfile::TempDir, SessionEngine<ScriptedProvider>) {
 }
 
 fn invalid_skill() -> TranscriptItem {
-    TranscriptItem::SkillInvocation(SkillInvocation::new(
+    TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
         "commit".parse().unwrap(),
         "",
         SkillApplication::Reapply("commit".parse().unwrap()),
-    ))
+    )))
 }
 
 fn invalid_plan() -> TranscriptItem {
     let (artifact, _) = revising_plan_fixture();
-    TranscriptItem::Plan(PlanRecord::Ready { artifact })
+    TranscriptItem::Plan(Box::new(PlanRecord::Ready { artifact }))
 }
 
 #[test]
@@ -82,12 +82,9 @@ fn early_instruction_failure_does_not_hide_later_skill_or_plan_errors() {
         let skill_error = replay_active_skills(&items)
             .err()
             .map(|error| format!("{error:#}"));
-        let plan_error = replay_plan_state(items.iter().filter_map(|item| match item {
-            TranscriptItem::Plan(record) => Some(record),
-            _ => None,
-        }))
-        .err()
-        .map(|error| format!("{error:#}"));
+        let plan_error = replay_plan_state(items.iter().filter_map(TranscriptItem::plan_record))
+            .err()
+            .map(|error| format!("{error:#}"));
         match (skill_error, plan_error) {
             (Some(skills), Some(plan)) => {
                 assert_eq!(actual, SessionReplayError::Both { skills, plan })
@@ -611,10 +608,12 @@ async fn control_transitions_preserve_management_but_never_restore_confirmation(
             matches!(&engine.phase, EnginePhase::Turn { skill_queries, .. } if Arc::ptr_eq(skill_queries, &queries))
         );
         engine
-            .commit(vec![TranscriptItem::SkillInvocation(SkillInvocation::new(
-                SkillName::parse("commit").unwrap(),
-                "test",
-                SkillApplication::Activate(test_skills().get("commit").unwrap().snapshot()),
+            .commit(vec![TranscriptItem::SkillInvocation(Box::new(
+                SkillInvocation::new(
+                    SkillName::parse("commit").unwrap(),
+                    "test",
+                    SkillApplication::Activate(test_skills().get("commit").unwrap().snapshot()),
+                ),
             ))])
             .unwrap();
         assert_eq!(queries.lock().unwrap().pins.len(), 1);

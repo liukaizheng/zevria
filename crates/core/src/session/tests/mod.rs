@@ -1101,14 +1101,14 @@ fn plan_submission_policies() -> SessionPolicies {
 }
 
 fn saved_plan_record(id: PlanId, markdown: &str) -> TranscriptItem {
-    TranscriptItem::Plan(PlanRecord::DraftSaved {
+    TranscriptItem::Plan(Box::new(PlanRecord::DraftSaved {
         draft: PlanDraft {
             target: PlanVersion { id, revision: 1 },
             sequence: 1,
             markdown: markdown.into(),
             source_turn_id: TurnId::new(1),
         },
-    })
+    }))
 }
 
 fn valid_plan_markdown(title: &str, goal: &str) -> String {
@@ -1303,10 +1303,10 @@ fn ready_plan_fixture() -> (PlanArtifact, Vec<TranscriptItem>) {
         source_turn_id: TurnId::new(9),
     };
     let items = vec![
-        TranscriptItem::Plan(PlanRecord::Started { id }),
-        TranscriptItem::Plan(PlanRecord::Ready {
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Ready {
             artifact: artifact.clone(),
-        }),
+        })),
     ];
     (artifact, items)
 }
@@ -1314,9 +1314,9 @@ fn ready_plan_fixture() -> (PlanArtifact, Vec<TranscriptItem>) {
 fn revising_plan_fixture() -> (PlanArtifact, Vec<TranscriptItem>) {
     let (artifact, mut items) = ready_plan_fixture();
     items.extend([
-        TranscriptItem::Plan(PlanRecord::RevisionRequested {
+        TranscriptItem::Plan(Box::new(PlanRecord::RevisionRequested {
             artifact: artifact.clone(),
-        }),
+        })),
         TranscriptItem::Message(Message::user("Consider another edge case.")),
         TranscriptItem::Message(Message::assistant(
             "I am still working through that revision.",

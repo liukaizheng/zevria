@@ -84,12 +84,14 @@ fn fixture(seal: bool) -> (EnsembleStart, Vec<TranscriptItem>) {
             },
         ] {
             surviving.apply(&event).unwrap();
-            middle.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-                run_id: start.run_id.clone(),
-                worker_id: survivor.id.clone(),
-                event: Box::new(event),
-                result: None,
-            }));
+            middle.push(TranscriptItem::Ensemble(Box::new(
+                EnsembleRecord::WorkerReview {
+                    run_id: start.run_id.clone(),
+                    worker_id: survivor.id.clone(),
+                    event: Box::new(event),
+                    result: None,
+                },
+            )));
         }
         let receipt = zevria_workflow::WorkerConfirmationReceipt {
             request_id: WorkerControlId::new(),
@@ -104,22 +106,24 @@ fn fixture(seal: bool) -> (EnsembleStart, Vec<TranscriptItem>) {
             receipt: receipt.clone(),
         };
         surviving.apply(&confirmation).unwrap();
-        middle.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-            run_id: start.run_id.clone(),
-            worker_id: survivor.id,
-            event: Box::new(confirmation),
-            result: Some(WorkerControlResult {
-                control: WorkerControl {
-                    request_id: receipt.request_id,
-                    target: receipt.target,
-                    action: WorkerControlAction::Confirm {
-                        expected_revision: receipt.revision,
+        middle.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::WorkerReview {
+                run_id: start.run_id.clone(),
+                worker_id: survivor.id,
+                event: Box::new(confirmation),
+                result: Some(WorkerControlResult {
+                    control: WorkerControl {
+                        request_id: receipt.request_id,
+                        target: receipt.target,
+                        action: WorkerControlAction::Confirm {
+                            expected_revision: receipt.revision,
+                        },
                     },
-                },
-                accepted: true,
-                detail: "confirmed".into(),
-            }),
-        }));
+                    accepted: true,
+                    detail: "confirmed".into(),
+                }),
+            },
+        )));
         let mut state = WorkerReviewState::new(descriptor);
         state.apply(&event).unwrap();
         EnsembleRecord::WorkersConfirmed {
@@ -136,16 +140,16 @@ fn fixture(seal: bool) -> (EnsembleStart, Vec<TranscriptItem>) {
         }
     };
     let mut items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
             run_id: start.run_id.clone(),
             version: zevria_workflow::ENSEMBLE_REVIEW_VERSION,
-        }),
+        })),
     ];
     items.extend(middle);
-    items.push(TranscriptItem::Ensemble(record));
+    items.push(TranscriptItem::Ensemble(Box::new(record)));
     zevria_transcript::validate_ensemble_review_history(&items).unwrap();
     (start, items)
 }

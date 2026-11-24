@@ -363,9 +363,9 @@ async fn mode_selection_cannot_implicitly_change_plan_workflow() {
         let mut engine = job_engine(provider, transcript, &jobs, 3);
         if planning {
             engine
-                .commit(TranscriptItem::Plan(PlanRecord::Started {
+                .commit(TranscriptItem::Plan(Box::new(PlanRecord::Started {
                     id: PlanId::new(),
-                }))
+                })))
                 .unwrap();
         }
         let mode = if planning {

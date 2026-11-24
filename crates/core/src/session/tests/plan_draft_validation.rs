@@ -85,7 +85,7 @@ async fn reducer_rejection_replaces_the_false_save_acknowledgement_and_denies_su
             .conversation()
             .items()
             .iter()
-            .any(|item| matches!(item, TranscriptItem::Plan(PlanRecord::DraftSaved { .. })))
+            .any(|item| matches!(item.plan_record(), Some(PlanRecord::DraftSaved { .. })))
     );
     assert!(
         !format!("{:?}", requests.lock().unwrap().last().unwrap())
@@ -151,9 +151,9 @@ async fn ensemble_drafting_is_allowed_before_inspection_without_changing_gate_or
     )
     .unwrap();
     engine
-        .commit(TranscriptItem::Plan(PlanRecord::Started {
+        .commit(TranscriptItem::Plan(Box::new(PlanRecord::Started {
             id: PlanId::new(),
-        }))
+        })))
         .unwrap();
     let gate = PlanSubmissionGate::ensemble(ReportReconciliationCatalog::default());
     let policy = engine.ensemble_policy(EnsembleWorkflow::Plan);
@@ -203,16 +203,16 @@ fn recovery_distinguishes_unchanged_resubmission_from_legacy_one_shot_arguments(
         .into_artifact(PlanVersion { id, revision: 1 }, TurnId::new(1));
     let run_id = EnsembleRunId::new();
     let prefix = vec![
-        TranscriptItem::Plan(PlanRecord::Started { id }),
-        TranscriptItem::Plan(PlanRecord::Ready {
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Ready {
             artifact: artifact.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::RevisionRequested { artifact }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::RevisionRequested { artifact })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: run_id.clone(),
             synthesis_input: Message::user("reports"),
             agents: Vec::new(),
-        }),
+        })),
         TranscriptItem::Message(command_call("inspect", "source inspection")),
         successful_tool_result("inspect", "command", "done"),
         TranscriptItem::Message(reconciliation_call(

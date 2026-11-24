@@ -34,12 +34,12 @@ async fn failed_confirmation_keeps_a_durable_draft_that_can_be_resubmitted_witho
     assert!(
         durable
             .iter()
-            .any(|item| matches!(item, TranscriptItem::Plan(PlanRecord::DraftSaved { .. })))
+            .any(|item| matches!(item.plan_record(), Some(PlanRecord::DraftSaved { .. })))
     );
     assert!(
         !durable
             .iter()
-            .any(|item| matches!(item, TranscriptItem::Plan(PlanRecord::Ready { .. })))
+            .any(|item| matches!(item.plan_record(), Some(PlanRecord::Ready { .. })))
     );
     assert!(
         collect_events(&mut receiver)
@@ -57,7 +57,7 @@ async fn failed_confirmation_keeps_a_durable_draft_that_can_be_resubmitted_witho
             .conversation()
             .items()
             .iter()
-            .filter(|item| matches!(item, TranscriptItem::Plan(PlanRecord::DraftSaved { .. })))
+            .filter(|item| matches!(item.plan_record(), Some(PlanRecord::DraftSaved { .. })))
             .count(),
         1
     );
@@ -127,8 +127,8 @@ async fn revision_edits_restart_sequence_and_unchanged_resubmission_is_allowed()
                 .conversation()
                 .items()
                 .iter()
-                .filter_map(|item| match item {
-                    TranscriptItem::Plan(PlanRecord::DraftSaved { draft }) => Some(draft),
+                .filter_map(|item| match item.plan_record() {
+                    Some(PlanRecord::DraftSaved { draft }) => Some(draft),
                     _ => None,
                 })
                 .last()
@@ -243,17 +243,17 @@ async fn edited_prefix_compaction_preserves_its_working_copy_not_the_discarded_t
     let id = PlanId::new();
     let items = vec![
         TranscriptItem::Message(Message::user("first")),
-        TranscriptItem::Plan(PlanRecord::Started { id }),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id })),
         saved_plan_record(id, &first),
         TranscriptItem::Message(Message::user("editable later prompt")),
-        TranscriptItem::Plan(PlanRecord::DraftSaved {
+        TranscriptItem::Plan(Box::new(PlanRecord::DraftSaved {
             draft: PlanDraft {
                 target: PlanVersion { id, revision: 1 },
                 sequence: 2,
                 markdown: second,
                 source_turn_id: TurnId::new(2),
             },
-        }),
+        })),
     ];
     let provider = ScriptedProvider::new([Ok(Message::assistant("prefix summary"))]);
     let (_directory, writer) = test_transcript();
@@ -273,12 +273,11 @@ async fn edited_prefix_compaction_preserves_its_working_copy_not_the_discarded_t
         .iter()
         .position(|item| item.message() == Some(&Message::user("editable later prompt")))
         .unwrap();
-    let expected = replay_plan_state(engine.conversation().items()[..index].iter().filter_map(
-        |item| match item {
-            TranscriptItem::Plan(record) => Some(record),
-            _ => None,
-        },
-    ))
+    let expected = replay_plan_state(
+        engine.conversation().items()[..index]
+            .iter()
+            .filter_map(TranscriptItem::plan_record),
+    )
     .unwrap()
     .checkpoint_context()
     .unwrap();
@@ -333,16 +332,16 @@ async fn checkpoints_preserve_ready_and_published_but_not_idle_or_resolved_plans
         if phase == "published" {
             items.extend(super::super::mode::published_history(&artifact));
         } else if phase != "idle" {
-            items.push(TranscriptItem::Plan(PlanRecord::Started { id }));
-            items.push(TranscriptItem::Plan(PlanRecord::Ready {
+            items.push(TranscriptItem::Plan(Box::new(PlanRecord::Started { id })));
+            items.push(TranscriptItem::Plan(Box::new(PlanRecord::Ready {
                 artifact: artifact.clone(),
-            }));
+            })));
             if phase == "resolved" {
-                items.push(TranscriptItem::Plan(PlanRecord::Resolved {
+                items.push(TranscriptItem::Plan(Box::new(PlanRecord::Resolved {
                     id,
                     artifact: Some(artifact),
                     resolution: PlanResolution::ImplementedCurrent,
-                }));
+                })));
             }
         }
         let provider = ScriptedProvider::new([Ok(Message::assistant("summary"))]);
@@ -454,11 +453,12 @@ mod failed_persistence {
         assert!(!plans.exists());
         let mut blocker = blocker.lock().unwrap().take().unwrap();
         let durable = zevria_transcript::transcript::load(blocker.backup_path()).unwrap();
-        assert!(!durable.iter().any(|item| matches!(
-            item,
-            TranscriptItem::ToolResults { .. }
-                | TranscriptItem::Plan(PlanRecord::DraftSaved { .. })
-        )));
+        assert!(
+            !durable
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::ToolResults { .. })
+                    || matches!(item.plan_record(), Some(PlanRecord::DraftSaved { .. })))
+        );
         assert!(
             !collect_events(&mut receiver)
                 .await

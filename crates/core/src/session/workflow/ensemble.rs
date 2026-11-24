@@ -115,8 +115,8 @@ pub(in crate::session) fn recovered_ensemble_synthesis(
     };
     let Some(reports_index) = items.iter().rposition(|item| {
         matches!(
-            item,
-            TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+            item.ensemble_record(),
+            Some(EnsembleRecord::ReportsReady {
                 run_id: candidate,
                 ..
             }) if candidate == run_id
@@ -126,8 +126,8 @@ pub(in crate::session) fn recovered_ensemble_synthesis(
     };
     let tail = &items[reports_index.saturating_add(1)..];
     if workflow == EnsembleWorkflow::Plan
-        && let Some(artifact) = tail.iter().rev().find_map(|item| match item {
-            TranscriptItem::Plan(PlanRecord::Published { artifact, .. }) => Some(artifact.clone()),
+        && let Some(artifact) = tail.iter().rev().find_map(|item| match item.plan_record() {
+            Some(PlanRecord::Published { artifact, .. }) => Some(artifact.clone()),
             _ => None,
         })
     {
@@ -153,8 +153,8 @@ pub(in crate::session) fn recovered_ensemble_synthesis(
     {
         return Ok(None);
     }
-    let ready = tail.iter().rev().find_map(|item| match item {
-        TranscriptItem::Plan(PlanRecord::Published { artifact, .. }) => Some(artifact.clone()),
+    let ready = tail.iter().rev().find_map(|item| match item.plan_record() {
+        Some(PlanRecord::Published { artifact, .. }) => Some(artifact.clone()),
         _ => None,
     });
     let candidate = gate.and_then(|gate| gate.candidate);
@@ -227,14 +227,16 @@ impl<P: ModelProvider> SessionEngine<P> {
         outcomes: &[AgentRunOutcome],
         turn: &TurnContext,
     ) -> anyhow::Result<()> {
-        let record = TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        let record = TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: message.clone(),
             agents: outcomes.iter().map(AgentRunOutcome::summary).collect(),
-        });
+        }));
         anyhow::ensure!(
-            serde_json::to_vec(&record)?.len()
-                < zevria_transcript::transcript::MAX_ROOT_RECORD_BYTES,
+            zevria_foundation::BoundedCountingWriter::json_fits(
+                &record,
+                zevria_transcript::transcript::MAX_ROOT_RECORD_BYTES - 1,
+            )?,
             "synthesis record exceeds the 64 MiB record limit; input was not accepted"
         );
         // Reports and images remain bounded durable evidence, but a direct
@@ -417,17 +419,21 @@ impl<P: ModelProvider> SessionEngine<P> {
             prompt,
             agents,
         };
-        let mut records = vec![TranscriptItem::Ensemble(EnsembleRecord::Started {
-            start: start.clone(),
-        })];
+        let mut records = vec![TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::Started {
+                start: start.clone(),
+            },
+        ))];
         if workflow == EnsembleWorkflow::Plan {
-            records.push(TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
-                run_id: start.run_id.clone(),
-                version: ENSEMBLE_REVIEW_VERSION,
-            }));
+            records.push(TranscriptItem::Ensemble(Box::new(
+                EnsembleRecord::ReviewStarted {
+                    run_id: start.run_id.clone(),
+                    version: ENSEMBLE_REVIEW_VERSION,
+                },
+            )));
         }
         if let Some(record) = plan {
-            records.push(TranscriptItem::Plan(record));
+            records.push(TranscriptItem::Plan(Box::new(record)));
         }
         if turn.is_cancelled() {
             return Err(Rejection::Cancelled);
@@ -639,11 +645,13 @@ impl<P: ModelProvider> SessionEngine<P> {
             .iter()
             .map(AgentRunOutcome::summary)
             .collect::<Vec<_>>();
-        let mut records = vec![TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
-            run_id: start.run_id.clone(),
-            synthesis_input: synthesis,
-            agents: summaries.clone(),
-        })];
+        let mut records = vec![TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::ReportsReady {
+                run_id: start.run_id.clone(),
+                synthesis_input: synthesis,
+                agents: summaries.clone(),
+            },
+        ))];
         records.extend(self.standard_request_boundary(&self.ensemble_policy(start.workflow)));
         if let Err(error) = self.commit(records) {
             self.persistence_failed(&error, events).await?;
@@ -681,8 +689,8 @@ impl<P: ModelProvider> SessionEngine<P> {
             );
         }
         let published = self.conversation.items().iter().any(|item| {
-            matches!(item,
-                TranscriptItem::Plan(PlanRecord::Published {
+            matches!(item.plan_record(),
+                Some(PlanRecord::Published {
                     provenance: PlanPublicationProvenance::ConfirmedWorker { run_id, .. }, ..
                 }) if run_id == &start.run_id
             )
@@ -702,11 +710,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .conversation
                 .items()
                 .iter()
-                .find_map(|item| match item {
-                    TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed {
-                        run_id,
-                        outcomes,
-                        ..
+                .find_map(|item| match item.ensemble_record() {
+                    Some(EnsembleRecord::WorkersConfirmed {
+                        run_id, outcomes, ..
                     }) if run_id == &start.run_id => Some(outcomes),
                     _ => None,
                 })

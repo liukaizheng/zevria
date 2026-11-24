@@ -19,7 +19,7 @@ use tokio::{
 use tokio_util::sync::{CancellationToken, DropGuard};
 use zevria_content::UserPrompt;
 use zevria_foundation::*;
-use zevria_session_api::mcp::McpSessionService;
+use zevria_session_api::mcp::{McpSessionService, McpSyncSummary};
 
 use crate::{
     catalog::{Catalog, read_only, wire_names},
@@ -31,6 +31,7 @@ use crate::{
 
 pub struct McpManager {
     state: RwLock<State>,
+    http: tokio::sync::OnceCell<reqwest::Client>,
     mutations: tokio::sync::Mutex<()>,
     changes: watch::Sender<u64>,
     tools: ToolServerHandle,
@@ -46,6 +47,8 @@ struct State {
     source: McpConfigSource,
     entries: BTreeMap<McpServerName, Entry>,
     managed: HashMap<String, ManagedToolToken>,
+    wire_index: HashMap<String, ToolPolicyFlags>,
+    resource_access: Vec<ToolPolicyFlags>,
     generation: u64,
     // SetEnabled can change the live catalog before reaching its final commit.
     sync_needed: bool,
@@ -73,7 +76,39 @@ struct Connection {
 
 impl Connection {
     fn live(&self) -> bool {
-        !self.stop.is_cancelled() && !self.closed.is_cancelled() && !self.peer.is_transport_closed()
+        connection_live(&self.stop, &self.closed, &self.peer)
+    }
+
+    fn policy_flags(&self, plan_allowed: bool) -> ToolPolicyFlags {
+        ToolPolicyFlags {
+            plan_allowed,
+            peer: self.peer.clone(),
+            stop: self.stop.clone(),
+            closed: self.closed.clone(),
+        }
+    }
+}
+
+fn connection_live(
+    stop: &CancellationToken,
+    closed: &CancellationToken,
+    peer: &Peer<RoleClient>,
+) -> bool {
+    !stop.is_cancelled() && !closed.is_cancelled() && !peer.is_transport_closed()
+}
+
+struct ToolPolicyFlags {
+    plan_allowed: bool,
+    peer: Peer<RoleClient>,
+    stop: CancellationToken,
+    closed: CancellationToken,
+}
+
+impl ToolPolicyFlags {
+    fn allows(&self, access: McpToolAccess) -> bool {
+        (access == McpToolAccess::AllEnabled
+            || (access == McpToolAccess::PlanScoped && self.plan_allowed))
+            && connection_live(&self.stop, &self.closed, &self.peer)
     }
 }
 
@@ -121,7 +156,7 @@ impl Entry {
         match &self.status {
             McpServerStatus::Failed { error, .. } => McpServerStatus::Failed {
                 error: error.clone(),
-                stderr_tail: self.stderr.text(&self.config),
+                stderr_tail: self.stderr.text(),
             },
             status => status.clone(),
         }
@@ -175,20 +210,6 @@ impl Entry {
         }
     }
 
-    fn tool_allowed(&self, access: McpToolAccess, original: &str) -> bool {
-        let Some(tool) = self.catalog.tools.get(original) else {
-            return false;
-        };
-        self.connection.as_ref().is_some_and(Connection::live)
-            && match access {
-                McpToolAccess::None => false,
-                McpToolAccess::PlanScoped => {
-                    self.config.plan_tool_allowed(original, read_only(tool))
-                }
-                McpToolAccess::AllEnabled => self.config.tool_enabled(original),
-            }
-    }
-
     fn set_catalog(&mut self, catalog: Catalog) {
         self.wire_names = wire_names(&self.server, &catalog, &self.wire_names);
         self.catalog = catalog;
@@ -196,11 +217,39 @@ impl Entry {
 }
 
 impl State {
+    /// Update authorization in the same write lock as the applied catalog.
+    /// This only copies policy metadata and connection handles, not schemas.
+    fn rebuild_access_index(&mut self) {
+        self.wire_index.clear();
+        self.resource_access.clear();
+        if !self.source.config.enabled {
+            return;
+        }
+        for entry in self.entries.values() {
+            let Some(conn) = entry.connection.as_ref().filter(|conn| conn.live()) else {
+                continue;
+            };
+            if entry.catalog.resource_capability {
+                self.resource_access
+                    .push(conn.policy_flags(entry.allows_read(McpToolAccess::PlanScoped)));
+            }
+            for (name, wire) in &entry.wire_names {
+                if entry.config.tool_enabled(name) {
+                    let plan_allowed = entry
+                        .config
+                        .plan_tool_allowed(name, read_only(&entry.catalog.tools[name]));
+                    self.wire_index
+                        .insert(wire.clone(), conn.policy_flags(plan_allowed));
+                }
+            }
+        }
+    }
+
     fn revision(&self) -> String {
         format!("{}:{}", self.source.revision, self.generation)
     }
 
-    fn changed(&self, unchanged: bool) -> McpManagementResult {
+    fn sync_summary(&self) -> McpSyncSummary {
         let mut connected = 0;
         let mut tool_count = 0;
         for entry in self
@@ -216,10 +265,25 @@ impl State {
                 .filter(|name| entry.config.tool_enabled(name))
                 .count();
         }
-        McpManagementResult::Changed {
+        McpSyncSummary {
             revision: self.revision(),
             connected,
             total: self.entries.len(),
+            tool_count,
+        }
+    }
+
+    fn changed(&self, unchanged: bool) -> McpManagementResult {
+        let McpSyncSummary {
+            revision,
+            connected,
+            total,
+            tool_count,
+        } = self.sync_summary();
+        McpManagementResult::Changed {
+            revision,
+            connected,
+            total,
             tool_count,
             unchanged,
         }
@@ -245,7 +309,7 @@ impl McpManager {
             );
         }
         source.config.validate()?;
-        let root = std::fs::canonicalize(&workspace)
+        let root = std::path::absolute(&workspace)
             .ok()
             .and_then(|path| url::Url::from_directory_path(path).ok())
             .map(|url| url.to_string());
@@ -255,9 +319,12 @@ impl McpManager {
                 source: source.clone(),
                 entries: BTreeMap::new(),
                 managed: HashMap::new(),
+                wire_index: HashMap::new(),
+                resource_access: Vec::new(),
                 generation: 0,
                 sync_needed: false,
             }),
+            http: tokio::sync::OnceCell::new(),
             mutations: tokio::sync::Mutex::new(()),
             changes,
             tools,
@@ -288,7 +355,7 @@ impl McpManager {
             let mut state = manager.state.write().unwrap();
             state.entries = entries;
             if required_failures.is_empty() {
-                manager.publish_registry(&mut state);
+                state.rebuild_access_index();
             }
         }
         if !required_failures.is_empty() {
@@ -298,6 +365,7 @@ impl McpManager {
                 required_failures.join(", ")
             );
         }
+        manager.publish_registry();
         Ok(manager)
     }
 
@@ -364,6 +432,9 @@ impl McpManager {
         if !global.enabled || !entry.config.enabled || self.stop.is_cancelled() {
             return entry;
         }
+        if entry.config.kind() == crate::config::McpTransportKind::Stdio {
+            entry.stderr = StderrTail::new(&entry.config);
+        }
         let (refresh, rx) = mpsc::channel(1);
         let start = Instant::now();
         let startup_timeout = entry.config.startup_timeout(global);
@@ -377,6 +448,7 @@ impl McpManager {
                 self.root.clone(),
                 refresh.clone(),
                 entry.stderr.clone(),
+                &self.http,
             )
             .await?;
             let catalog = Catalog::fetch(
@@ -428,40 +500,50 @@ impl McpManager {
         entry
     }
 
-    fn publish_registry(&self, state: &mut State) {
-        let global = &state.source.config;
-        let mut tools = Vec::<DynamicTool>::new();
-        if state
-            .entries
-            .values()
-            .any(|entry| entry.catalog.resource_capability && entry.target(global).is_some())
-        {
-            tools.extend(resource_tools::helpers(self.this.clone()));
-        }
-        for entry in state.entries.values() {
-            let Some(target) = entry.target(global) else {
-                continue;
-            };
-            for (name, wire) in &entry.wire_names {
-                if entry.config.tool_enabled(name) {
-                    tools.push(resource_tools::external_tool(
-                        target.clone(),
-                        &entry.catalog.tools[name],
-                        wire,
-                    ));
+    /// Called with mutation ownership. Build definitions under a read lock so
+    /// concurrent authorization and picker queries do not wait for schema work.
+    fn publish_registry(&self) {
+        let mut tools = {
+            let state = self.state.read().unwrap();
+            let mut tools = Vec::<DynamicTool>::new();
+            if !self.stop.is_cancelled() && state.source.config.enabled {
+                if state
+                    .resource_access
+                    .iter()
+                    .any(|flags| flags.allows(McpToolAccess::AllEnabled))
+                {
+                    // Keep the built-ins before wire tools to preserve the
+                    // advertised order and the cacheable prefix.
+                    tools.extend(resource_tools::helpers(self.this.clone()));
+                }
+                for entry in state.entries.values() {
+                    let Some(target) = entry.target(&state.source.config) else {
+                        continue;
+                    };
+                    for (name, wire) in &entry.wire_names {
+                        if entry.config.tool_enabled(name) {
+                            let tool = &entry.catalog.tools[name];
+                            tools.push(resource_tools::external_tool(target.clone(), tool, wire));
+                        }
+                    }
                 }
             }
+            tools
+        };
+        let mut state = self.state.write().unwrap();
+        if self.stop.is_cancelled() {
+            tools.clear();
         }
         state.managed = self
             .tools
             .reconcile_managed_tools(std::mem::take(&mut state.managed), tools);
     }
 
-    fn sync(&self) -> bool {
+    fn sync(&self) -> Option<McpSyncSummary> {
         let mut state = self.state.write().unwrap();
         if self.stop.is_cancelled() {
             // Leave connection handles for shutdown to await.
-            return false;
+            return None;
         }
         let mut changed = false;
         for entry in state.entries.values_mut() {
@@ -485,9 +567,15 @@ impl McpManager {
         }
         if changed {
             state.generation += 1;
-            self.publish_registry(&mut state);
+            state.rebuild_access_index();
         }
-        std::mem::take(&mut state.sync_needed) || changed
+        let summary =
+            (std::mem::take(&mut state.sync_needed) || changed).then(|| state.sync_summary());
+        drop(state);
+        if changed {
+            self.publish_registry();
+        }
+        summary
     }
 
     pub async fn shutdown(&self, grace: Duration) {
@@ -505,9 +593,11 @@ impl McpManager {
                 .values_mut()
                 .filter_map(|entry| entry.connection.take())
                 .collect::<Vec<_>>();
-            self.publish_registry(&mut state);
+            state.wire_index.clear();
+            state.resource_access.clear();
             conns
         };
+        self.publish_registry();
         close_connections(
             conns
                 .iter()
@@ -597,8 +687,11 @@ impl McpManager {
                 state.generation += 1;
                 // Changed already tells the engine to invalidate its plan.
                 state.sync_needed = false;
-                self.publish_registry(&mut state);
-                return state.changed(false);
+                state.rebuild_access_index();
+                let changed = state.changed(false);
+                drop(state);
+                self.publish_registry();
+                return changed;
             }
         }
         // Other servers may already have opened successfully while one was
@@ -785,7 +878,7 @@ impl McpManager {
                     entry.connect_ms = None;
                     entry.stderr = StderrTail::default();
                     entry.set_catalog(Catalog::default());
-                    self.publish_registry(&mut state);
+                    state.rebuild_access_index();
                     if conn.is_some() {
                         // A cancelled request won't return Changed. Keep the
                         // catalog invalidation pending for the next engine sync.
@@ -794,6 +887,7 @@ impl McpManager {
                     }
                     conn
                 };
+                self.publish_registry();
                 if let Some(conn) = retiring {
                     signal(&self.changes);
                     close_connections(
@@ -962,26 +1056,25 @@ async fn listen(peer: &Peer<RoleClient>, refresh: mpsc::Sender<()>) {
 
 impl McpSessionService for McpManager {
     fn tool_allowed(&self, access: McpToolAccess, name: &str) -> bool {
-        let state = self.state.read().unwrap();
-        if MCP_RESOURCE_TOOL_NAMES.contains(&name) {
-            return state.entries.values().any(|entry| {
-                entry.catalog.resource_capability
-                    && entry.allows_read(access)
-                    && entry.connection.as_ref().is_some_and(Connection::live)
-            });
+        if access == McpToolAccess::None {
+            return false;
         }
-        let Some((server, _)) = parse_mcp_tool_prefix(name) else {
+        let state = self.state.read().unwrap();
+        if self.stop.is_cancelled() {
             return false;
-        };
-        let Ok(server) = server.parse() else {
-            return false;
-        };
-        state.entries.get(&server).is_some_and(|entry| {
-            entry
-                .wire_names
+        }
+        if MCP_RESOURCE_TOOL_NAMES.contains(&name) {
+            // The declarations change at a turn boundary, but dispatch still
+            // requires at least one live, permitted resource server.
+            return state
+                .resource_access
                 .iter()
-                .any(|(original, wire)| wire == name && entry.tool_allowed(access, original))
-        })
+                .any(|flags| flags.allows(access));
+        }
+        state
+            .wire_index
+            .get(name)
+            .is_some_and(|flags| flags.allows(access))
     }
 
     fn active_instructions(&self, access: McpToolAccess) -> Vec<McpServerInstruction> {
@@ -1078,7 +1171,9 @@ impl McpSessionService for McpManager {
         self.changes.subscribe()
     }
 
-    fn sync_pending_updates(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+    fn sync_pending_updates(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Option<McpSyncSummary>> + Send + '_>> {
         Box::pin(async {
             let _operation = self.mutations.lock().await;
             self.sync()
@@ -1163,6 +1258,14 @@ impl McpSessionService for McpManager {
             let ServerResult::GetPromptResult(result) = response else {
                 anyhow::bail!("unexpected MCP prompts/get response");
             };
+            anyhow::ensure!(!cancellation.is_cancelled(), "MCP prompt cancelled");
+            if result
+                .messages
+                .iter()
+                .all(|message| matches!(message.content, ContentBlock::Text(_)))
+            {
+                return get_prompt_result_to_user_prompt(result, &server, &prompt, target.limit);
+            }
             let work = tokio::task::spawn_blocking(move || {
                 get_prompt_result_to_user_prompt(result, &server, &prompt, target.limit)
             });

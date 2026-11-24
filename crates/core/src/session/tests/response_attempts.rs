@@ -8,11 +8,11 @@ use zevria_content::ResponseAttemptOutcome as Outcome;
 mod recoverable_batches;
 
 fn recovery(attempt: &ResponseAttempt) -> TranscriptItem {
-    TranscriptItem::IncompleteResponse(
+    TranscriptItem::IncompleteResponse(Box::new(
         zevria_transcript::IncompleteResponse::from_attempt(attempt)
             .unwrap()
             .unwrap(),
-    )
+    ))
 }
 
 fn attempt() -> ResponseAttempt {
@@ -84,9 +84,9 @@ fn activity_round_trip_is_model_and_capacity_inert() {
         "completion unconfirmed"
     );
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["zevria_incomplete_response"]["version"], 1);
+    assert_eq!(value["attempt"]["version"], 1);
     for version in [2, 99] {
-        value["zevria_incomplete_response"]["version"] = json!(version);
+        value["attempt"]["version"] = json!(version);
         assert!(serde_json::from_value::<TranscriptItem>(value.clone()).is_err());
     }
 }
@@ -647,10 +647,10 @@ mod recovery_lifecycle {
         let (attempt, record) = completed_attempt();
         engine
             .commit(vec![
-                TranscriptItem::Ensemble(EnsembleRecord::Started {
+                TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                     start: start.clone(),
-                }),
-                TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+                })),
+                TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
                     run_id: start.run_id.clone(),
                     synthesis_input: Message::user("durable review evidence"),
                     agents: vec![AgentRunSummary {
@@ -664,15 +664,17 @@ mod recovery_lifecycle {
                         decision_ids: Vec::new(),
                         unavailable_decisions: Vec::new(),
                     }],
-                }),
+                })),
             ])
             .unwrap();
         let checkpoint_bytes = std::fs::read(&path).unwrap();
         let mut expected = engine.conversation.items().to_vec();
         expected.push(record.clone());
-        expected.push(TranscriptItem::Ensemble(EnsembleRecord::Completed {
-            run_id: start.run_id.clone(),
-        }));
+        expected.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::Completed {
+                run_id: start.run_id.clone(),
+            },
+        )));
 
         // Only transcript replacement is blocked; the append handle still works
         // and the full checkpoint must remain intact in the saved file.
@@ -781,7 +783,7 @@ mod recovery_lifecycle {
                     let expected = zevria_transcript::IncompleteResponse::from_attempt(&attempt)
                         .unwrap()
                         .unwrap();
-                    assert!(saved.iter().any(|item| matches!(item, TranscriptItem::IncompleteResponse(saved) if saved == &expected)));
+                    assert!(saved.iter().any(|item| matches!(item, TranscriptItem::IncompleteResponse(saved) if saved.as_ref() == &expected)));
                     assert!(
                         !saved
                             .iter()
@@ -1331,10 +1333,10 @@ async fn deferred_ensemble_final_publishes_attempt_before_turn_completed_without
     let start = ensemble_start_fixture("response-attempt", EnsembleWorkflow::Review, "review");
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
                 run_id: start.run_id.clone(),
                 synthesis_input: Message::user("evidence"),
                 agents: vec![AgentRunSummary {
@@ -1348,7 +1350,7 @@ async fn deferred_ensemble_final_publishes_attempt_before_turn_completed_without
                     decision_ids: Vec::new(),
                     unavailable_decisions: Vec::new(),
                 }],
-            }),
+            })),
         ])
         .unwrap();
     let accepted = AcceptedTurn::new(AcceptedKind::Ensemble {

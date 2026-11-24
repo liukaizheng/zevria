@@ -124,11 +124,11 @@ fn completed_append_repairs_degraded_writer_before_appending_recovery() {
         action: None,
     });
     attempt.close(crate::ResponseAttemptOutcome::Interrupted);
-    let recovery = TranscriptItem::IncompleteResponse(
+    let recovery = TranscriptItem::IncompleteResponse(Box::new(
         crate::IncompleteResponse::from_attempt(&attempt)
             .unwrap()
             .unwrap(),
-    );
+    ));
     conversation.push_completed(recovery).unwrap();
     assert!(conversation.persistence_error().is_none());
     assert_eq!(load(&path).unwrap(), conversation.items());
@@ -145,7 +145,9 @@ fn editing_before_a_checkpoint_drops_it_while_editing_after_preserves_it() {
             .push_required(TranscriptItem::Message(Message::user("before")))
             .expect("first prompt");
         conversation
-            .push_required(TranscriptItem::Compaction(local_checkpoint("summary")))
+            .push_required(TranscriptItem::Compaction(Box::new(local_checkpoint(
+                "summary",
+            ))))
             .expect("checkpoint");
         conversation
             .push_required(TranscriptItem::Message(Message::user("after")))
@@ -199,7 +201,7 @@ fn first_direct_invocation_prompt_ordinal_anchors_its_owned_pin() {
     conversation
         .push_required_batch(vec![
             TranscriptItem::Message(Message::user("first prompt")),
-            TranscriptItem::SkillInvocation(SkillInvocation::new(
+            TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
                 SkillName::parse("review").expect("name"),
                 "inspect",
                 SkillApplication::Activate(
@@ -210,7 +212,7 @@ fn first_direct_invocation_prompt_ordinal_anchors_its_owned_pin() {
                     )
                     .unwrap(),
                 ),
-            )),
+            ))),
         ])
         .expect("fixture");
 
@@ -221,7 +223,7 @@ fn first_direct_invocation_prompt_ordinal_anchors_its_owned_pin() {
 
 #[test]
 fn retained_prefix_replay_deactivates_only_when_activation_is_removed() {
-    let invocation = TranscriptItem::SkillInvocation(SkillInvocation::new(
+    let invocation = TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
         SkillName::parse("review").expect("name"),
         "inspect",
         SkillApplication::Activate(
@@ -232,7 +234,7 @@ fn retained_prefix_replay_deactivates_only_when_activation_is_removed() {
             )
             .unwrap(),
         ),
-    ));
+    )));
     let items = vec![
         TranscriptItem::Message(Message::user("before")),
         invocation,
@@ -268,28 +270,28 @@ fn ensemble_start_lookup_uses_run_ids_without_changing_prompt_numbering() {
     let second_run = EnsembleRunId::from_string("second-run");
     let items = vec![
         TranscriptItem::Message(Message::user("first prompt")),
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: crate::EnsembleStart {
                 run_id: first_run.clone(),
                 workflow: crate::EnsembleWorkflow::Review,
                 prompt: "first review".into(),
                 agents: Vec::new(),
             },
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: first_run.clone(),
             synthesis_input: Message::user("evidence"),
             agents: Vec::new(),
-        }),
+        })),
         TranscriptItem::Message(Message::user("second prompt")),
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: crate::EnsembleStart {
                 run_id: second_run.clone(),
                 workflow: crate::EnsembleWorkflow::Plan,
                 prompt: "second plan".into(),
                 agents: Vec::new(),
             },
-        }),
+        })),
     ];
     conversation
         .push_required_batch(items)

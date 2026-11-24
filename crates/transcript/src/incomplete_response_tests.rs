@@ -31,7 +31,7 @@ fn record() -> IncompleteResponse {
         .unwrap()
 }
 fn item() -> TranscriptItem {
-    TranscriptItem::IncompleteResponse(record())
+    TranscriptItem::IncompleteResponse(Box::new(record()))
 }
 fn replay() -> TranscriptItem {
     TranscriptItem::provider_message(ProviderReplay::openai_responses(ModelProfileRef::new("p", "m"), vec![
@@ -47,7 +47,7 @@ fn empty_pre_execution_rejection_is_durable_diagnostic_only_and_never_model_inpu
     let record = IncompleteResponse::token_window_rejection(&attempt).unwrap();
     assert!(record.input_rejection.is_some());
     assert!(record.presentation.is_empty());
-    let item = TranscriptItem::IncompleteResponse(record);
+    let item = TranscriptItem::IncompleteResponse(Box::new(record));
     let loaded: TranscriptItem =
         serde_json::from_slice(&serde_json::to_vec(&item).unwrap()).unwrap();
     assert_eq!(loaded, item);
@@ -117,7 +117,7 @@ fn incomplete_answer_sources_round_trip_without_entering_model_input() {
     });
     let record = IncompleteResponse::from_attempt(&attempt).unwrap().unwrap();
     record.validate().unwrap();
-    let item = TranscriptItem::IncompleteResponse(record);
+    let item = TranscriptItem::IncompleteResponse(Box::new(record));
     let bytes = serde_json::to_vec(&item).unwrap();
     let loaded: TranscriptItem = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(loaded, item);
@@ -127,7 +127,7 @@ fn incomplete_answer_sources_round_trip_without_entering_model_input() {
     );
     assert!(model_input(&[loaded]).is_empty());
     let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    invalid["zevria_incomplete_response"]["presentation"][1]["content"]["sources"][0]["url"] =
+    invalid["attempt"]["presentation"][1]["content"]["sources"][0]["url"] =
         json!("file:///tmp/not-a-source");
     assert!(serde_json::from_value::<TranscriptItem>(invalid).is_err());
 }
@@ -174,18 +174,18 @@ fn incomplete_records_reject_wrong_shape_version_outcome_and_native_bindings() {
         ("unknown", json!(true)),
     ] {
         let mut changed = value.clone();
-        changed["zevria_incomplete_response"][key] = field;
+        changed["attempt"][key] = field;
         invalid.push(changed);
     }
     let mut changed = value.clone();
     changed["role"] = json!("assistant");
     invalid.push(changed);
     let mut changed = value.clone();
-    changed["zevria_incomplete_response"]["presentation"] = json!([]);
-    changed["zevria_incomplete_response"]["hosted_activity"] = json!([]);
+    changed["attempt"]["presentation"] = json!([]);
+    changed["attempt"]["hosted_activity"] = json!([]);
     invalid.push(changed);
     let mut changed = value;
-    changed["zevria_incomplete_response"]["presentation"] = json!([{"source":{"output_index":0,"part":"tool","item_id":null},"content":{"type":"native_tool","call_id":"call"}}]);
+    changed["attempt"]["presentation"] = json!([{"source":{"output_index":0,"part":"tool","item_id":null},"content":{"type":"native_tool","call_id":"call"}}]);
     invalid.push(changed);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid.jsonl");
@@ -207,8 +207,8 @@ fn current_torn_tail_is_recoverable_but_duplicate_ids_and_retired_keys_are_not()
     let path = dir.path().join("session.jsonl");
     let prefix = format!("{}\n", serde_json::to_string(&item()).unwrap());
     for tail in [
-        r#"{"zevria_incomplete_response":{"version":1,"attempt_id":"next","presentation":["#,
-        r#"{"zevria_incomplete_response":"#,
+        r#"{"type":"incomplete_response","attempt":{"version":1,"attempt_id":"next","presentation":["#,
+        r#"{"type":"incomplete_response","attempt":"#,
     ] {
         std::fs::write(&path, format!("{prefix}{tail}")).unwrap();
         let report = load_report(&path).unwrap();
@@ -242,24 +242,27 @@ fn request_replay_is_inert_but_recovery_cannot_split_prompt_and_boundary() {
         message: Message::user("prompt"),
         request: request.clone(),
     };
-    let boundary = TranscriptItem::RequestDirective(RequestDirective::boundary(request.clone()));
+    let boundary =
+        TranscriptItem::RequestDirective(Box::new(RequestDirective::boundary(request.clone())));
     let mut state = RequestReplayState::default();
-    state.apply(&prompt, true).unwrap();
-    assert!(state.apply(&item(), true).is_err());
-    state.apply(&boundary, true).unwrap();
+    state.apply(&prompt, true, false).unwrap();
+    assert!(state.apply(&item(), true, false).is_err());
+    state.apply(&boundary, true, false).unwrap();
     state
         .apply(
             &TranscriptItem::Message(Message::assistant("premature final")),
             true,
+            false,
         )
         .unwrap();
     let before = state.clone();
-    state.apply(&item(), true).unwrap();
+    state.apply(&item(), true, false).unwrap();
     assert_eq!(state, before);
     state
         .apply(
-            &TranscriptItem::RequestDirective(RequestDirective::correction(request)),
+            &TranscriptItem::RequestDirective(Box::new(RequestDirective::correction(request))),
             true,
+            false,
         )
         .unwrap();
 }

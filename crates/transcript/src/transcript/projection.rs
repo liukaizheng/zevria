@@ -49,11 +49,9 @@ pub fn is_conversation_item(item: &TranscriptItem) -> bool {
             | TranscriptItem::IncompleteResponse(_)
             | TranscriptItem::CommandJobNotice(_)
             | TranscriptItem::SkillInvocation(_)
-            | TranscriptItem::Plan(PlanRecord::Handoff { .. })
-            | TranscriptItem::Ensemble(EnsembleRecord::Started { .. })
-            | TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. })
             | TranscriptItem::Compaction(_)
-    )
+    ) || is_workflow_prompt(item)
+        || matches!(item.ensemble_record(), Some(EnsembleRecord::Started { .. }))
 }
 
 /// Whether an item supplies user-role model input that can anchor context
@@ -61,11 +59,14 @@ pub fn is_conversation_item(item: &TranscriptItem) -> bool {
 /// becoming editable/numbered frontend prompt rows. Not every anchor supplies
 /// retained user instructions: ensemble evidence remains summary material.
 pub fn is_compaction_prompt_item(item: &TranscriptItem) -> bool {
-    is_prompt_item(item)
+    is_prompt_item(item) || is_workflow_prompt(item)
+}
+
+fn is_workflow_prompt(item: &TranscriptItem) -> bool {
+    matches!(item.plan_record(), Some(PlanRecord::Handoff { .. }))
         || matches!(
-            item,
-            TranscriptItem::Plan(PlanRecord::Handoff { .. })
-                | TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. })
+            item.ensemble_record(),
+            Some(EnsembleRecord::ReportsReady { .. })
         )
 }
 
@@ -84,6 +85,27 @@ pub fn model_history(items: &[TranscriptItem]) -> Vec<Message> {
 /// Exact checkpoint-aware model projection for a raw transcript slice.
 pub fn model_input(items: &[TranscriptItem]) -> Vec<ModelRequestItem<'_>> {
     model_input_from_records(items.iter())
+}
+
+pub(super) fn model_input_at(
+    items: &[TranscriptItem],
+    latest: Option<usize>,
+) -> Vec<ModelRequestItem<'_>> {
+    let (mut input, start) = latest.map_or((Vec::new(), 0), |index| {
+        let TranscriptItem::Compaction(checkpoint) = &items[index] else {
+            unreachable!()
+        };
+        (
+            model_input_with_checkpoint(items[..index].iter(), checkpoint),
+            index + 1,
+        )
+    });
+    input.extend(
+        items[start..]
+            .iter()
+            .filter_map(TranscriptItem::model_request_item),
+    );
+    input
 }
 
 /// Project a prospective request from borrowed history/checkpoint/suffix parts.
@@ -128,7 +150,7 @@ pub fn model_input_with_checkpoint<'a>(
     input.extend(
         zevria_instructions::directive::effective_directives(prefix.clone().filter_map(|item| {
             match item {
-                TranscriptItem::Directive(directive) => Some(directive),
+                TranscriptItem::Directive(directive) => Some(directive.as_ref()),
                 _ => None,
             }
         }))
@@ -291,7 +313,7 @@ pub fn retained_user_candidates(items: &[TranscriptItem]) -> Vec<String> {
 /// Retained instruction text is distinct from both editable prompt rows and
 /// compaction anchors; in particular, ensemble evidence is not reinjected here.
 fn prompt_text(item: &TranscriptItem) -> Option<String> {
-    if !is_prompt_item(item) && !matches!(item, TranscriptItem::Plan(PlanRecord::Handoff { .. })) {
+    if !is_prompt_item(item) && !matches!(item.plan_record(), Some(PlanRecord::Handoff { .. })) {
         return None;
     }
     let Message::User { content } = item.message()? else {

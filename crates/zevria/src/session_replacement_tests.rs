@@ -7,7 +7,7 @@ use zevria_session_api::{ManagementCommand, ModeSelectionResult, TurnCommand};
 use zevria_tui::{App, RestorationInput, UiOutcome};
 use zevria_workflow::{PlanDecision, PlanRecord, PlanWorkflowState};
 
-fn tui_models(restoration: &runtime::SessionRestoration) -> SessionModels {
+fn tui_models(restoration: &runtime::RestoredSession) -> SessionModels {
     let mut root = App::new();
     root.restore_session(RestorationInput {
         items: restoration.transcript_items.clone(),
@@ -30,13 +30,14 @@ fn tui_models(restoration: &runtime::SessionRestoration) -> SessionModels {
 }
 
 async fn select_complete(
-    running: &runtime::RunningSession,
+    running: &runtime::StartedSession,
     events: &mut SessionEventReceiver,
     mode: SessionMode,
     target: ModelSelection,
     revision: &str,
 ) {
     running
+        .running
         .command_sender()
         .send(SessionCommand::Manage(ManagementCommand::Models {
             request_id: "committed-selection".into(),
@@ -60,11 +61,12 @@ async fn select_complete(
 }
 
 async fn set_mode(
-    running: &runtime::RunningSession,
+    running: &runtime::StartedSession,
     events: &mut SessionEventReceiver,
     mode: SessionMode,
 ) {
     running
+        .running
         .command_sender()
         .send(SessionCommand::Manage(ManagementCommand::SetMode {
             request_id: "mode-round-trip".into(),
@@ -92,7 +94,7 @@ async fn set_mode(
 }
 
 fn assert_models(
-    restoration: &runtime::SessionRestoration,
+    restoration: &runtime::RestoredSession,
     expected: &SessionModels,
     config: &Config,
 ) {
@@ -143,16 +145,16 @@ fn assert_models(
 }
 
 async fn submit(
-    running: &runtime::RunningSession,
+    running: &runtime::StartedSession,
     events: &mut SessionEventReceiver,
     mode: SessionMode,
     expected: &SessionModels,
     server: &mut Server,
 ) -> Value {
     let selected = expected.for_mode(mode);
-    let context =
-        &running.restoration().model_contexts[zevria_model::models::mode_role(mode).index()];
+    let context = &running.restored.model_contexts[zevria_model::models::mode_role(mode).index()];
     running
+        .running
         .command_sender()
         .send(SessionCommand::Turn(TurnCommand::Submit {
             text: "new conversation only".into(),
@@ -192,10 +194,10 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
                 inherited_models: None,
             })
             .await;
-        let source_path = source.restoration().transcript_path.clone();
-        let source_id = source.restoration().session_id.clone();
-        let mut expected = tui_models(source.restoration());
-        let mut events = source.take_event_receiver().unwrap();
+        let source_path = source.restored.transcript_path.clone();
+        let source_id = source.restored.session_id.clone();
+        let mut expected = tui_models(&source.restored);
+        let mut events = source.running.take_event_receiver().unwrap();
         for (bit, mode, profile, level) in [
             (
                 1,
@@ -223,7 +225,7 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
                 expected = expected.with_selection(mode, target).unwrap();
             }
         }
-        source.shutdown().await.unwrap();
+        source.running.shutdown().await.unwrap();
         assert_eq!(std::fs::read(&fixture.path).unwrap(), original_config);
         assert_eq!(
             std::fs::read(&fixture.models_path).unwrap(),
@@ -241,7 +243,7 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
 
         // Explicitly seed historical source state to prove /new carries only choices.
         let mut items = vec![
-            TranscriptItem::SessionModels(expected.clone()),
+            TranscriptItem::SessionModels(Box::new(expected.clone())),
             TranscriptItem::SessionMode(SessionMode::Plan),
         ];
         items.push(TranscriptItem::Message(rig_core::message::Message::user(
@@ -253,17 +255,19 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
             "SOURCE_SKILL_BODY",
         )
         .unwrap();
-        items.push(TranscriptItem::SkillInvocation(
+        items.push(TranscriptItem::SkillInvocation(Box::new(
             zevria_instructions::SkillInvocation::new(
                 skill.name().clone(),
                 "",
                 zevria_instructions::SkillApplication::Activate(skill.clone()),
             ),
-        ));
-        items.push(TranscriptItem::Directive(DirectiveContent::skill(&skill)));
-        items.push(TranscriptItem::Plan(PlanRecord::Started {
+        )));
+        items.push(TranscriptItem::Directive(Box::new(
+            DirectiveContent::skill(&skill),
+        )));
+        items.push(TranscriptItem::Plan(Box::new(PlanRecord::Started {
             id: zevria_workflow::PlanId::new(),
-        }));
+        })));
         let mut writer =
             TranscriptWriter::create_with_id(source_path.parent().unwrap(), &source_id).unwrap();
         writer.rewrite(&items).unwrap();
@@ -312,15 +316,15 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
         let resumed = fixture
             .start(runtime::SessionStart::Resume(source_path.clone()))
             .await;
-        assert_models(resumed.restoration(), &expected, &current_config);
-        assert_eq!(resumed.restoration().selected_mode, SessionMode::Plan);
+        assert_models(&resumed.restored, &expected, &current_config);
+        assert_eq!(resumed.restored.selected_mode, SessionMode::Plan);
         assert!(matches!(
-            resumed.restoration().plan_state,
+            resumed.restored.plan_state,
             PlanWorkflowState::Planning { .. }
         ));
-        assert!(!resumed.restoration().active_skills.is_empty());
-        let mut inherited = tui_models(resumed.restoration());
-        resumed.shutdown().await.unwrap();
+        assert!(!resumed.restored.active_skills.is_empty());
+        let mut inherited = tui_models(&resumed.restored);
+        resumed.running.shutdown().await.unwrap();
         let mut previous_id = source_id;
         let mut previous_path = source_path.clone();
         let mut prefix = None;
@@ -330,26 +334,26 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
             let mut running = fixture
                 .start(crate::replacement_start(outcome).unwrap())
                 .await;
-            assert_models(running.restoration(), &expected, &current_config);
-            assert_ne!(running.restoration().session_id, previous_id);
-            assert_ne!(running.restoration().transcript_path, previous_path);
-            assert_eq!(running.restoration().selected_mode, SessionMode::Build);
-            assert_eq!(running.restoration().plan_state, PlanWorkflowState::Idle);
+            assert_models(&running.restored, &expected, &current_config);
+            assert_ne!(running.restored.session_id, previous_id);
+            assert_ne!(running.restored.transcript_path, previous_path);
+            assert_eq!(running.restored.selected_mode, SessionMode::Build);
+            assert_eq!(running.restored.plan_state, PlanWorkflowState::Idle);
             assert_eq!(
-                running.restoration().transcript_items,
+                running.restored.transcript_items,
                 vec![
-                    TranscriptItem::SessionModels(expected.clone()),
+                    TranscriptItem::SessionModels(Box::new(expected.clone())),
                     TranscriptItem::SessionMode(SessionMode::Build),
                 ]
             );
-            assert!(transcript::model_input(&running.restoration().transcript_items).is_empty());
-            assert!(running.restoration().active_skills.is_empty());
-            let path = running.restoration().transcript_path.clone();
+            assert!(transcript::model_input(&running.restored.transcript_items).is_empty());
+            assert!(running.restored.active_skills.is_empty());
+            let path = running.restored.transcript_path.clone();
             assert!(!path.exists());
-            let live_models = tui_models(running.restoration());
-            previous_id = running.restoration().session_id.clone();
+            let live_models = tui_models(&running.restored);
+            previous_id = running.restored.session_id.clone();
             previous_path = path.clone();
-            let mut events = running.take_event_receiver().unwrap();
+            let mut events = running.running.take_event_receiver().unwrap();
             assert!(events.try_recv().is_err());
             assert!(
                 server.requests.try_recv().is_err(),
@@ -392,7 +396,7 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
                 }
                 build_cache_key = Some(key);
             }
-            running.shutdown().await.unwrap();
+            running.running.shutdown().await.unwrap();
             if replacement == 0 {
                 assert!(!path.exists());
                 inherited = live_models;
@@ -406,9 +410,9 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
                     &expected
                 );
                 let restored = fixture.start(runtime::SessionStart::Resume(path)).await;
-                assert_models(restored.restoration(), &expected, &current_config);
-                inherited = tui_models(restored.restoration());
-                restored.shutdown().await.unwrap();
+                assert_models(&restored.restored, &expected, &current_config);
+                inherited = tui_models(&restored.restored);
+                restored.running.shutdown().await.unwrap();
             }
             assert_eq!(std::fs::read(&source_path).unwrap(), source_before);
             assert_config_unchanged();
@@ -419,12 +423,12 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
             })
             .await;
         assert_eq!(
-            independent.restoration().model_contexts,
+            independent.restored.model_contexts,
             current_config.routing().context_policies()
         );
-        let defaults = tui_models(independent.restoration());
+        let defaults = tui_models(&independent.restored);
         assert_ne!(defaults, expected);
-        let mut events = independent.take_event_receiver().unwrap();
+        let mut events = independent.running.take_event_receiver().unwrap();
         let request = submit(
             &independent,
             &mut events,
@@ -445,7 +449,7 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
             prefix.as_deref(),
             "selection inheritance never changes the cacheable instruction prefix"
         );
-        independent.shutdown().await.unwrap();
+        independent.running.shutdown().await.unwrap();
         assert_config_unchanged();
         assert!(server.requests.try_recv().is_err());
     }
@@ -469,15 +473,15 @@ async fn same_session_and_fresh_plan_implementation_use_the_saved_build_route() 
         let approved = plan_handoff("source-plan");
         writer
             .rewrite(&[
-                TranscriptItem::SessionModels(expected.clone()),
+                TranscriptItem::SessionModels(Box::new(expected.clone())),
                 TranscriptItem::SessionMode(SessionMode::Plan),
                 TranscriptItem::Message(rig_core::message::Message::user("prepare the Plan")),
-                TranscriptItem::Plan(PlanRecord::Started {
+                TranscriptItem::Plan(Box::new(PlanRecord::Started {
                     id: approved.artifact.version.id,
-                }),
-                TranscriptItem::Plan(PlanRecord::Ready {
+                })),
+                TranscriptItem::Plan(Box::new(PlanRecord::Ready {
                     artifact: approved.artifact.clone(),
-                }),
+                })),
             ])
             .unwrap();
         let source_path = writer.path().to_path_buf();
@@ -487,10 +491,11 @@ async fn same_session_and_fresh_plan_implementation_use_the_saved_build_route() 
         let mut source = fixture
             .start(runtime::SessionStart::Resume(source_path.clone()))
             .await;
-        let models = tui_models(source.restoration());
+        let models = tui_models(&source.restored);
         assert_eq!(models, expected);
-        let mut events = source.take_event_receiver().unwrap();
+        let mut events = source.running.take_event_receiver().unwrap();
         source
+            .running
             .command_sender()
             .send(SessionCommand::Turn(TurnCommand::ResolvePlan {
                 expected: approved.artifact.version,
@@ -515,26 +520,26 @@ async fn same_session_and_fresh_plan_implementation_use_the_saved_build_route() 
                 server.requests.try_recv().is_err(),
                 "source never performs fresh implementation"
             );
-            source.shutdown().await.unwrap();
+            source.running.shutdown().await.unwrap();
             source_before = Some(std::fs::read(&source_path).unwrap());
             running = fixture
                 .start(crate::replacement_start(UiOutcome::Fresh { handoff, models }).unwrap())
                 .await;
-            assert_ne!(running.restoration().session_id, "source-plan");
-            assert_ne!(running.restoration().transcript_path, source_path);
+            assert_ne!(running.restored.session_id, "source-plan");
+            assert_ne!(running.restored.transcript_path, source_path);
             assert_eq!(
-                running.restoration().transcript_items,
+                running.restored.transcript_items,
                 vec![
-                    TranscriptItem::SessionModels(expected.clone()),
+                    TranscriptItem::SessionModels(Box::new(expected.clone())),
                     TranscriptItem::SessionMode(SessionMode::Build)
                 ]
             );
-            events = running.take_event_receiver().unwrap();
+            events = running.running.take_event_receiver().unwrap();
         } else {
             source_before = None;
             running = source;
         }
-        assert_models(running.restoration(), &expected, &fixture.config);
+        assert_models(&running.restored, &expected, &fixture.config);
         completed(
             &mut events,
             &expected.for_mode(SessionMode::Build).profile,
@@ -554,7 +559,7 @@ async fn same_session_and_fresh_plan_implementation_use_the_saved_build_route() 
                 .to_string()
                 .contains("zevria_session_models")
         );
-        let destination = running.restoration().transcript_path.clone();
+        let destination = running.restored.transcript_path.clone();
         if decision == PlanDecision::ImplementFresh {
             assert_persisted_handoff(&destination, &approved, &expected);
         }
@@ -569,7 +574,7 @@ async fn same_session_and_fresh_plan_implementation_use_the_saved_build_route() 
         )
         .await;
         assert_eq!(plan_request["reasoning"]["effort"], "low");
-        running.shutdown().await.unwrap();
+        running.running.shutdown().await.unwrap();
         if let Some(source_before) = source_before {
             assert_eq!(std::fs::read(&source_path).unwrap(), source_before);
         } else {
@@ -578,8 +583,8 @@ async fn same_session_and_fresh_plan_implementation_use_the_saved_build_route() 
         let restored = fixture
             .start(runtime::SessionStart::Resume(destination))
             .await;
-        assert_models(restored.restoration(), &expected, &fixture.config);
-        restored.shutdown().await.unwrap();
+        assert_models(&restored.restored, &expected, &fixture.config);
+        restored.running.shutdown().await.unwrap();
         assert_eq!(std::fs::read(&fixture.path).unwrap(), config_before);
         assert_eq!(std::fs::read(&fixture.models_path).unwrap(), catalog_before);
         assert!(server.requests.try_recv().is_err());
@@ -608,7 +613,7 @@ async fn unavailable_inherited_catalog_entries_and_levels_fail_before_generation
             .unwrap();
             writer
                 .rewrite(&[
-                    TranscriptItem::SessionModels(expected.clone()),
+                    TranscriptItem::SessionModels(Box::new(expected.clone())),
                     TranscriptItem::SessionMode(SessionMode::Build),
                 ])
                 .unwrap();
@@ -658,7 +663,7 @@ async fn unavailable_inherited_catalog_entries_and_levels_fail_before_generation
                 .await
                 {
                     Ok(running) => {
-                        running.shutdown().await.unwrap();
+                        running.running.shutdown().await.unwrap();
                         panic!("unavailable inherited selection was substituted");
                     }
                     Err(error) => format!("{error:#}"),
@@ -699,10 +704,10 @@ async fn unavailable_inherited_catalog_entries_and_levels_fail_before_generation
                 })
                 .await;
             assert_eq!(
-                independent.restoration().model_contexts,
+                independent.restored.model_contexts,
                 load(&fixture.path).unwrap().routing().context_policies()
             );
-            independent.shutdown().await.unwrap();
+            independent.running.shutdown().await.unwrap();
             assert!(server.requests.try_recv().is_err());
         }
     }

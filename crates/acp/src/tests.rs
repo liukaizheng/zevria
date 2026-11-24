@@ -591,7 +591,7 @@ impl FakeFactory {
             mode_requests: None,
             persisted: Arc::new(vec![
                 TranscriptItem::SessionMode(SessionMode::Build),
-                TranscriptItem::SessionModels(
+                TranscriptItem::SessionModels(Box::new(
                     zevria_model::models::SessionModels::new(
                         zevria_model::models::ModelSelection::new(
                             zevria_foundation::ModelProfileRef::new("persisted", "build"),
@@ -603,7 +603,7 @@ impl FakeFactory {
                         ),
                     )
                     .unwrap(),
-                ),
+                )),
                 TranscriptItem::Message(Message::user("durable user")),
                 TranscriptItem::Message(Message::assistant("durable assistant")),
             ]),
@@ -639,8 +639,8 @@ impl SessionRuntimeFactory for FakeFactory {
             };
             let plan_state =
                 zevria_workflow::replay_plan_state(transcript_items.iter().filter_map(|item| {
-                    match item {
-                        TranscriptItem::Plan(record) => Some(record),
+                    match item.plan_record() {
+                        Some(record) => Some(record),
                         _ => None,
                     }
                 }))?;
@@ -1556,7 +1556,11 @@ async fn root_load_and_resume_seed_plan_mode_and_ready_content_without_startup_e
         } else {
             SessionMode::Build
         };
-        Arc::make_mut(&mut factory.persisted).extend(records.into_iter().map(TranscriptItem::Plan));
+        Arc::make_mut(&mut factory.persisted).extend(
+            records
+                .into_iter()
+                .map(|record| TranscriptItem::Plan(Box::new(record))),
+        );
         let commands = factory.commands.clone();
         let updates = Arc::new(Mutex::new(Vec::<SessionNotification>::new()));
         let log = updates.clone();

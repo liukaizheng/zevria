@@ -148,10 +148,10 @@ async fn acp_ignores_offers_and_projects_live_and_replayed_notices_as_thought_ch
             .any(|command| matches!(command, SessionCommand::Turn(_)))
     );
     let replay = crate::replay::replay_transcript(
-        &[TranscriptItem::CommandJobNotice(notice(
+        &[TranscriptItem::CommandJobNotice(Box::new(notice(
             "job-live",
             CommandJobNoticeKind::Update,
-        ))],
+        )))],
         workspace.path(),
     );
     assert_eq!(replay.len(), 1);

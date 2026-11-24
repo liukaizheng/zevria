@@ -191,7 +191,7 @@ fn actual_guidance_snapshots_isolate_acp_workspaces_workers_and_resume_clearing_
         .append(true)
         .open(&path)
         .unwrap()
-        .write_all(b"{\"role\":\"user\",\"cont")
+        .write_all(b"{\"type\":\"message\",\"message\":{\"role\":\"user\",\"cont")
         .unwrap();
     std::fs::write(
         &global,

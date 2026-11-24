@@ -441,7 +441,7 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
     controller.update(cx, |c, cx| {
         c.model.root.conversation.restore(vec![
             TranscriptItem::Message(Message::user("Trace the source")),
-            TranscriptItem::IncompleteResponse(saved),
+            TranscriptItem::IncompleteResponse(Box::new(saved)),
         ]);
         cx.notify();
     });

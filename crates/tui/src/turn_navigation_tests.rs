@@ -216,10 +216,10 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
                         message: Message::user("work"),
                         request: request.clone(),
                     },
-                    TranscriptItem::RequestDirective(
+                    TranscriptItem::RequestDirective(Box::new(
                         zevria_instructions::RequestDirective::boundary(request.clone()),
-                    ),
-                    TranscriptItem::SkillInvocation(skill.clone()),
+                    )),
+                    TranscriptItem::SkillInvocation(Box::new(skill.clone())),
                     TranscriptItem::Message(assistant_message(vec![tool_call(
                         "call",
                         None,
@@ -230,17 +230,17 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
                     TranscriptItem::Error {
                         error: "diagnostic".into(),
                     },
-                    TranscriptItem::Compaction(checkpoint()),
+                    TranscriptItem::Compaction(Box::new(checkpoint())),
                     TranscriptItem::SessionMode(SessionMode::Plan),
-                    TranscriptItem::Plan(PlanRecord::Ready {
+                    TranscriptItem::Plan(Box::new(PlanRecord::Ready {
                         artifact: test_plan_artifact(),
-                    }),
-                    TranscriptItem::Plan(PlanRecord::Handoff {
+                    })),
+                    TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
                         handoff: handoff.clone(),
-                    }),
-                    TranscriptItem::Ensemble(EnsembleRecord::Started {
+                    })),
+                    TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                         start: start.clone(),
-                    }),
+                    })),
                     TranscriptItem::Message(image_prompt),
                 ]);
             } else {
@@ -395,9 +395,9 @@ fn reflow_folding_and_streaming_preserve_a_turn_header_not_an_old_scroll_anchor(
     app.restore(vec![
         TranscriptItem::Message(Message::user("wide words ".repeat(100))),
         TranscriptItem::Message(Message::assistant(numbered_lines(40))),
-        TranscriptItem::Plan(PlanRecord::Handoff {
+        TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
             handoff: PlanHandoff::new(test_plan_artifact(), "source"),
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("answer")),
     ]);
     app.set_view_for_test(3, false);

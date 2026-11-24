@@ -1,9 +1,9 @@
 use crate::skill::*;
-use crate::transcript::{SessionHeader, TranscriptItem};
+use crate::transcript::{SessionMetadataState, TranscriptItem};
 use crate::{DirectivePayload, DirectiveState};
 use anyhow::Context as _;
 use rig_core::message::{AssistantContent, Message, UserContent};
-use std::{collections::BTreeSet, fmt};
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
 /// Pin-only validation. Deliberately independent of directive/header validity.
 pub fn replay_active_skills(items: &[TranscriptItem]) -> anyhow::Result<ActiveSkills> {
@@ -61,23 +61,27 @@ impl std::error::Error for SkillLifecycleLocation {}
 /// unresolved calls and exact metadata positions must survive the split too.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstructionReplayState {
-    skills: ActiveSkills,
-    directives: DirectiveState,
-    requests: crate::request_replay::RequestReplayState,
-    pending: BTreeSet<String>,
+    skills: Arc<ActiveSkills>,
+    directives: Arc<DirectiveState>,
+    requests: Arc<crate::request_replay::RequestReplayState>,
+    pending: Arc<BTreeSet<String>>,
     tool_initial: bool,
-    header: SessionHeader,
+    metadata: Arc<SessionMetadataState>,
     next_record_index: usize,
 }
 
 impl InstructionReplayState {
     pub fn replay(items: &[TranscriptItem]) -> anyhow::Result<Self> {
+        Self::replay_with(items, false)
+    }
+
+    pub(crate) fn replay_with(items: &[TranscriptItem], decoded: bool) -> anyhow::Result<Self> {
         #[cfg(feature = "test-support")]
         crate::replay_probe::record(|counts| {
             counts.full_replays += 1;
             counts.full_records += items.len();
         });
-        Self::default().apply_records(items)
+        Self::default().apply_records(items, decoded)
     }
 
     pub fn skills(&self) -> &ActiveSkills {
@@ -90,7 +94,26 @@ impl InstructionReplayState {
 
     /// Header facts from validated replay, without a second history scan.
     pub fn persisted_mode(&self) -> Option<crate::SessionMode> {
-        self.header.selected()
+        self.metadata.mode
+    }
+
+    pub fn session_models(&self) -> Option<&crate::models::SessionModels> {
+        self.metadata.models.as_ref()
+    }
+
+    pub(crate) fn ensure_metadata_boundary(&self) -> anyhow::Result<()> {
+        self.requests.validate_complete()?;
+        anyhow::ensure!(
+            self.pending.is_empty(),
+            "session metadata cannot split a tool call/result batch"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn append_metadata(&mut self, item: &TranscriptItem) {
+        debug_assert!(self.ensure_metadata_boundary().is_ok());
+        Arc::make_mut(&mut self.metadata).apply(item);
+        self.next_record_index += 1;
     }
 
     /// Historical capability, not just the currently active request contract.
@@ -106,26 +129,47 @@ impl InstructionReplayState {
             counts.suffix_applications += 1;
             counts.suffix_records += items.len();
         });
-        self.apply_records(items)
+        self.apply_records(items, false)
     }
 
-    fn apply_records(mut self, items: &[TranscriptItem]) -> anyhow::Result<Self> {
+    fn apply_records(mut self, items: &[TranscriptItem], decoded: bool) -> anyhow::Result<Self> {
         for item in items {
-            self.apply_record(item)?;
+            self.apply_record(item, decoded)?;
             self.next_record_index += 1;
         }
         self.requests.validate_complete()?;
-        self.directives.snapshot().validate()?;
         Ok(self)
     }
 
-    fn apply_record(&mut self, item: &TranscriptItem) -> anyhow::Result<()> {
-        self.header.apply(self.next_record_index, item)?;
-        self.requests.apply(item, self.pending.is_empty())?;
-        apply_skill_record(&mut self.skills, self.next_record_index, item)?;
+    fn apply_record(&mut self, item: &TranscriptItem, decoded: bool) -> anyhow::Result<()> {
+        if crate::is_leading_metadata(item) {
+            self.ensure_metadata_boundary()?;
+            Arc::make_mut(&mut self.metadata).apply(item);
+            return Ok(());
+        }
+        Arc::make_mut(&mut self.requests).apply(item, self.pending.is_empty(), decoded)?;
+        match item {
+            TranscriptItem::ToolResults {
+                skill_applications, ..
+            } if skill_applications.is_empty() => {
+                // Still check result/metadata correlation; there is no pin to mutate.
+                apply_skill_record(&mut ActiveSkills::default(), self.next_record_index, item)?;
+            }
+            TranscriptItem::SkillInvocation(_) | TranscriptItem::ToolResults { .. } => {
+                apply_skill_record(
+                    Arc::make_mut(&mut self.skills),
+                    self.next_record_index,
+                    item,
+                )?;
+            }
+            TranscriptItem::Compaction(checkpoint) if !decoded => checkpoint.validate()?,
+            _ => {}
+        }
         match item {
             TranscriptItem::ToolDeclarations(record) => {
-                record.validate()?;
+                if !decoded {
+                    record.validate()?;
+                }
                 anyhow::ensure!(
                     self.pending.is_empty(),
                     "tool declarations cannot split a tool call/result batch"
@@ -145,7 +189,6 @@ impl InstructionReplayState {
                 }
             }
             TranscriptItem::Directive(directive) => {
-                directive.validate()?;
                 anyhow::ensure!(
                     self.pending.is_empty(),
                     "a directive cannot split a tool call/result batch"
@@ -166,7 +209,12 @@ impl InstructionReplayState {
                     DirectivePayload::McpInstructions { .. }
                     | DirectivePayload::McpInstructionsRevocation { .. } => {}
                 }
-                self.directives.apply(directive)?;
+                let directives = Arc::make_mut(&mut self.directives);
+                if decoded {
+                    directives.apply_validated(directive);
+                } else {
+                    directives.apply(directive)?;
+                }
             }
             TranscriptItem::CommandJobNotice(_) => anyhow::ensure!(
                 self.pending.is_empty(),
@@ -190,7 +238,7 @@ impl InstructionReplayState {
                     for block in &assistant.content {
                         if let AssistantContent::ToolCall(call) = block {
                             anyhow::ensure!(
-                                self.pending.insert(call.id.to_string()),
+                                Arc::make_mut(&mut self.pending).insert(call.id.to_string()),
                                 "duplicate unresolved tool call id {}",
                                 call.id
                             );
@@ -200,7 +248,7 @@ impl InstructionReplayState {
                 Message::User { content } => {
                     for block in content {
                         if let UserContent::ToolResult(result) = block {
-                            self.pending.remove(result.call.wire().as_ref());
+                            Arc::make_mut(&mut self.pending).remove(result.call.wire().as_ref());
                         }
                     }
                 }
@@ -212,7 +260,9 @@ impl InstructionReplayState {
 
 /// Project directives from the same causally validated instruction reduction.
 pub fn replay_directives(items: &[TranscriptItem]) -> anyhow::Result<DirectiveState> {
-    Ok(InstructionReplayState::replay(items)?.directives)
+    Ok(Arc::unwrap_or_clone(
+        InstructionReplayState::replay(items)?.directives,
+    ))
 }
 
 /// Fold ordered skill directives identically for live and loaded histories,
@@ -220,7 +270,7 @@ pub fn replay_directives(items: &[TranscriptItem]) -> anyhow::Result<DirectiveSt
 pub fn effective_directives(items: &[TranscriptItem]) -> Vec<&crate::DirectiveContent> {
     zevria_instructions::directive::effective_directives(items.iter().filter_map(
         |item| match item {
-            TranscriptItem::Directive(directive) => Some(directive),
+            TranscriptItem::Directive(directive) => Some(directive.as_ref()),
             _ => None,
         },
     ))

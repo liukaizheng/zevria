@@ -528,9 +528,9 @@ async fn admission_rejects_unsupported_profiles_plan_pending_work_and_limit_one_
             }
             "planning" => {
                 engine = engine
-                    .with_fixture(vec![TranscriptItem::Plan(PlanRecord::Started {
+                    .with_fixture(vec![TranscriptItem::Plan(Box::new(PlanRecord::Started {
                         id: PlanId::new(),
-                    })])
+                    }))])
                     .unwrap();
             }
             _ => unreachable!(),

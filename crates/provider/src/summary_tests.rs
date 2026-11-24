@@ -601,7 +601,7 @@ fn summary_checkpoint_with_opaque_tail_roundtrips_and_stays_profile_bound() {
         .append(&TranscriptItem::Message(Message::user("original user")))
         .unwrap();
     writer
-        .append(&TranscriptItem::Compaction(checkpoint.clone()))
+        .append(&TranscriptItem::Compaction(Box::new(checkpoint.clone())))
         .unwrap();
     writer
         .append(&TranscriptItem::Message(Message::user(
@@ -609,7 +609,7 @@ fn summary_checkpoint_with_opaque_tail_roundtrips_and_stays_profile_bound() {
         )))
         .unwrap();
     let loaded = transcript::load(writer.path()).unwrap();
-    assert_eq!(loaded[1], TranscriptItem::Compaction(checkpoint));
+    assert_eq!(loaded[1], TranscriptItem::Compaction(Box::new(checkpoint)));
     let projection = transcript::model_input(&loaded);
     let owned = projection
         .iter()

@@ -220,21 +220,23 @@ fn recovery_fixture(
     writer.append(&record).unwrap();
     journal.apply(&record).unwrap();
     let mut root = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
             run_id: start.run_id.clone(),
             version: ENSEMBLE_REVIEW_VERSION,
-        }),
+        })),
     ];
     for event in std::iter::once(initial).chain(journal.events.clone()) {
-        root.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-            run_id: start.run_id.clone(),
-            worker_id: descriptor.id.clone(),
-            event: Box::new(event),
-            result: None,
-        }));
+        root.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::WorkerReview {
+                run_id: start.run_id.clone(),
+                worker_id: descriptor.id.clone(),
+                event: Box::new(event),
+                result: None,
+            },
+        )));
     }
     let input = WorkerInput {
         generation: 2,
@@ -245,26 +247,28 @@ fn recovery_fixture(
     let accepted = WorkerReviewEvent::InputAccepted {
         input: input.clone(),
     };
-    root.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-        run_id: start.run_id.clone(),
-        worker_id: descriptor.id.clone(),
-        event: Box::new(accepted.clone()),
-        result: Some(WorkerControlResult {
-            control: WorkerControl {
-                request_id: input.request_id.clone(),
-                target: WorkerControlTarget {
-                    turn_id: TurnId::new(1),
-                    run_id: start.run_id.clone(),
-                    worker_id: descriptor.id,
+    root.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkerReview {
+            run_id: start.run_id.clone(),
+            worker_id: descriptor.id.clone(),
+            event: Box::new(accepted.clone()),
+            result: Some(WorkerControlResult {
+                control: WorkerControl {
+                    request_id: input.request_id.clone(),
+                    target: WorkerControlTarget {
+                        turn_id: TurnId::new(1),
+                        run_id: start.run_id.clone(),
+                        worker_id: descriptor.id,
+                    },
+                    action: WorkerControlAction::SendFeedback {
+                        text: input.text.clone(),
+                    },
                 },
-                action: WorkerControlAction::SendFeedback {
-                    text: input.text.clone(),
-                },
-            },
-            accepted: true,
-            detail: "accepted".into(),
-        }),
-    }));
+                accepted: true,
+                detail: "accepted".into(),
+            }),
+        },
+    )));
     engine.commit(root).unwrap();
     if boundary >= 1 {
         writer
@@ -399,10 +403,8 @@ async fn recovered_feedback_is_queued_once_and_durable_dispatch_is_never_resent(
         let records = zevria_transcript::load_agent_run(&path).unwrap();
         assert_eq!(records.iter().filter(|record| matches!(record, AgentRunTranscriptRecord::Event { event: AgentRunEvent::Prompt { text, .. } } if text == "accepted feedback")).count(), 1);
         assert!(!engine.conversation.items().iter().any(|item| matches!(
-            item,
-            TranscriptItem::Ensemble(
-                EnsembleRecord::Failed { .. } | EnsembleRecord::WorkersConfirmed { .. }
-            )
+            item.ensemble_record(),
+            Some(EnsembleRecord::Failed { .. } | EnsembleRecord::WorkersConfirmed { .. })
         )));
     }
 }

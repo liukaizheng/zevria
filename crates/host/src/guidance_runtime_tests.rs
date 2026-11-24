@@ -87,7 +87,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     )
     .await
     .unwrap();
-    assert!(running.restoration.startup_notices.is_empty());
+    assert!(running.restored.startup_notices.is_empty());
     std::fs::write(
         workspace.path().join("AGENTS.md"),
         "LATE_CHANGE_MUST_NOT_APPEAR",
@@ -117,7 +117,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
             .to_string()
             .contains("FRESH_PROJECT_OPENING")
     );
-    let mut events = running.take_event_receiver().unwrap();
+    let mut events = running.running.take_event_receiver().unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Some(zevria_session_api::SessionUpdate::Lifecycle(
@@ -130,7 +130,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     })
     .await
     .unwrap();
-    let items = transcript::load(&running.restoration.transcript_path).unwrap();
+    let items = transcript::load(&running.restored.transcript_path).unwrap();
     assert_eq!(
         zevria_transcript::replay_directives(&items)
             .unwrap()
@@ -139,7 +139,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
             .len(),
         0
     );
-    let bytes = std::fs::read_to_string(&running.restoration.transcript_path).unwrap();
+    let bytes = std::fs::read_to_string(&running.restored.transcript_path).unwrap();
     for text in [
         "FRESH_GLOBAL_OPENING",
         "FRESH_PROJECT_OPENING",
@@ -149,5 +149,5 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     ] {
         assert!(!bytes.contains(text));
     }
-    running.shutdown().await.unwrap();
+    running.running.shutdown().await.unwrap();
 }

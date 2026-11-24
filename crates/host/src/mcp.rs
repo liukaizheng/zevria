@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Context as _;
+use serde::Deserialize as _;
 use sha2::{Digest as _, Sha256};
 use zevria_foundation::{
     McpManagementRequest, McpManagementResult, McpManagementView, McpServerName, McpServerOrigin,
@@ -15,14 +16,19 @@ use zevria_session_api::mcp::McpSessionService;
 
 pub use zevria_mcp::{McpConfig, McpConfigPersister, McpConfigSource};
 
+pub(crate) fn deserialize_config<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<McpConfig, D::Error> {
+    // Deserializer diagnostics can echo invalid URLs, header values and tokens.
+    McpConfig::deserialize(deserializer)
+        .map_err(|_| serde::de::Error::custom("invalid [mcp] structure, field name, or value type"))
+}
+
 pub fn parse_mcp_config(contents: &str) -> anyhow::Result<McpConfig> {
-    let document = crate::config::partial_document(contents)?;
-    let config: McpConfig = document
-        .get("mcp")
-        .cloned()
-        .map(toml::Value::try_into)
-        .transpose()
-        .map_err(|_| anyhow::anyhow!("invalid [mcp] structure, field name, or value type"))?
+    let config = crate::config::partial_document(contents)?
+        .remove("mcp")
+        .map(deserialize_config)
+        .transpose()?
         .unwrap_or_default();
     config.validate()?;
     Ok(config)
@@ -35,11 +41,17 @@ fn load_contents(contents: &str, path: &Path) -> anyhow::Result<McpConfigSource>
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new(".")),
     );
-    let revision = Sha256::digest(contents.as_bytes())
+    Ok(McpConfigSource {
+        config,
+        revision: config_revision(contents),
+    })
+}
+
+pub(crate) fn config_revision(contents: &str) -> String {
+    Sha256::digest(contents.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect();
-    Ok(McpConfigSource { config, revision })
+        .collect()
 }
 
 pub fn load_mcp_config(path: &Path) -> anyhow::Result<McpConfigSource> {

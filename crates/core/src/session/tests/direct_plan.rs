@@ -84,19 +84,15 @@ fn run_command(prompt: zevria_content::UserPrompt) -> SessionCommand {
 }
 
 fn recovery(items: &[TranscriptItem]) -> EnsembleRecovery {
-    latest_ensemble_recovery(items.iter().filter_map(|item| match item {
-        TranscriptItem::Ensemble(record) => Some(record),
-        _ => None,
-    }))
-    .unwrap()
+    latest_ensemble_recovery(items.iter().filter_map(TranscriptItem::ensemble_record)).unwrap()
 }
 
 fn assert_one_publication(items: &[TranscriptItem], markdown: &str) -> PlanArtifact {
     zevria_transcript::validate_session_replay(items).unwrap();
     let publications = items
         .iter()
-        .filter_map(|item| match item {
-            TranscriptItem::Plan(PlanRecord::Published {
+        .filter_map(|item| match item.plan_record() {
+            Some(PlanRecord::Published {
                 artifact,
                 provenance:
                     PlanPublicationProvenance::ConfirmedWorker {
@@ -114,8 +110,8 @@ fn assert_one_publication(items: &[TranscriptItem], markdown: &str) -> PlanArtif
     assert_eq!(artifact.version.revision, 1);
     let frozen = items
         .iter()
-        .find_map(|item| match item {
-            TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed {
+        .find_map(|item| match item.ensemble_record() {
+            Some(EnsembleRecord::WorkersConfirmed {
                 run_id: sealed,
                 outcomes,
                 ..
@@ -129,10 +125,11 @@ fn assert_one_publication(items: &[TranscriptItem], markdown: &str) -> PlanArtif
         &frozen.confirmation.as_ref().unwrap().snapshot.revision
     );
     assert!(!items.iter().any(|item| matches!(
+        item.plan_record(),
+        Some(PlanRecord::Ready { .. } | PlanRecord::Handoff { .. })
+    ) || matches!(
         item,
-        TranscriptItem::Plan(PlanRecord::Ready { .. } | PlanRecord::Handoff { .. })
-            | TranscriptItem::ProviderMessage(_)
-            | TranscriptItem::ToolResults { .. }
+        TranscriptItem::ProviderMessage(_) | TranscriptItem::ToolResults { .. }
     )));
     artifact.clone()
 }
@@ -215,8 +212,8 @@ async fn direct_plan_preserves_loose_markdown_projection_and_explicit_handoffs_w
                 );
                 let reports = items
                     .iter()
-                    .find_map(|item| match item {
-                        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+                    .find_map(|item| match item.ensemble_record() {
+                        Some(EnsembleRecord::ReportsReady {
                             synthesis_input,
                             agents,
                             ..
@@ -307,7 +304,7 @@ async fn direct_plan_preserves_loose_markdown_projection_and_explicit_handoffs_w
                         .await
                         .unwrap();
                     assert_eq!(requests.lock().unwrap()[0].prompt, handoff.prompt);
-                    assert!(fresh.conversation.items().iter().any(|item| matches!(item, TranscriptItem::Plan(PlanRecord::Handoff { handoff: saved }) if saved == handoff)));
+                    assert!(fresh.conversation.items().iter().any(|item| matches!(item.plan_record(), Some(PlanRecord::Handoff { handoff: saved }) if saved == handoff)));
                 }
             }
         }
@@ -339,17 +336,10 @@ async fn direct_plan_recovery_at_every_durable_boundary_uses_saved_selection_and
             .iter()
             .position(|item| {
                 matches!(
-                    (boundary, item),
-                    (
-                        "seal",
-                        TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { .. })
-                    ) | (
-                        "reports",
-                        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. })
-                    ) | (
-                        "published",
-                        TranscriptItem::Plan(PlanRecord::Published { .. })
-                    )
+                    (boundary, item.ensemble_record(), item.plan_record()),
+                    ("seal", Some(EnsembleRecord::WorkersConfirmed { .. }), _)
+                        | ("reports", Some(EnsembleRecord::ReportsReady { .. }), _)
+                        | ("published", _, Some(PlanRecord::Published { .. }))
                 )
             })
             .unwrap();
@@ -403,18 +393,15 @@ async fn direct_plan_recovery_at_every_durable_boundary_uses_saved_selection_and
             persisted
                 .iter()
                 .filter(|item| matches!(
-                    item,
-                    TranscriptItem::Ensemble(EnsembleRecord::Completed { .. })
+                    item.ensemble_record(),
+                    Some(EnsembleRecord::Completed { .. })
                 ))
                 .count(),
             1
         );
         assert!(
-            latest_ensemble_recovery(persisted.iter().filter_map(|item| match item {
-                TranscriptItem::Ensemble(record) => Some(record),
-                _ => None,
-            }))
-            .is_none()
+            latest_ensemble_recovery(persisted.iter().filter_map(TranscriptItem::ensemble_record))
+                .is_none()
         );
     }
 }
@@ -490,10 +477,11 @@ async fn direct_plan_oversize_is_review_error_before_sealing_and_feedback_stays_
     let engine = runner.await.unwrap();
     assert!(requests.lock().unwrap().is_empty());
     assert!(!engine.conversation.items().iter().any(|item| matches!(
-        item,
-        TranscriptItem::Ensemble(
-            EnsembleRecord::WorkersConfirmed { .. } | EnsembleRecord::ReportsReady { .. }
-        ) | TranscriptItem::Plan(PlanRecord::Published { .. })
+        item.ensemble_record(),
+        Some(EnsembleRecord::WorkersConfirmed { .. } | EnsembleRecord::ReportsReady { .. })
+    ) || matches!(
+        item.plan_record(),
+        Some(PlanRecord::Published { .. })
     )));
 }
 
@@ -565,7 +553,7 @@ async fn two_selected_workers_with_one_abandoned_still_use_all_root_synthesis_ga
     let engine = runner.await.unwrap();
     assert_eq!(requests.lock().unwrap().len(), 4);
     assert_eq!(calls.lock().unwrap().len(), 1);
-    assert!(engine.conversation.items().iter().any(|item| matches!(item, TranscriptItem::Plan(PlanRecord::Published { artifact, provenance: PlanPublicationProvenance::Synthesized }) if artifact.markdown == markdown)));
+    assert!(engine.conversation.items().iter().any(|item| matches!(item.plan_record(), Some(PlanRecord::Published { artifact, provenance: PlanPublicationProvenance::Synthesized }) if artifact.markdown == markdown)));
     zevria_transcript::validate_session_replay(engine.conversation.items()).unwrap();
 }
 
@@ -591,8 +579,8 @@ async fn direct_publication_projection_warning_and_retained_persistence_keep_the
         .iter()
         .position(|item| {
             matches!(
-                item,
-                TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. })
+                item.ensemble_record(),
+                Some(EnsembleRecord::ReportsReady { .. })
             )
         })
         .unwrap();
@@ -781,10 +769,11 @@ async fn direct_plan_requires_current_explicit_confirmation_not_publication_or_p
         let engine = runner.await.unwrap();
         assert!(requests.lock().unwrap().is_empty());
         assert!(!engine.conversation.items().iter().any(|item| matches!(
-            item,
-            TranscriptItem::Ensemble(
-                EnsembleRecord::WorkersConfirmed { .. } | EnsembleRecord::ReportsReady { .. }
-            ) | TranscriptItem::Plan(PlanRecord::Published { .. })
+            item.ensemble_record(),
+            Some(EnsembleRecord::WorkersConfirmed { .. } | EnsembleRecord::ReportsReady { .. })
+        ) || matches!(
+            item.plan_record(),
+            Some(PlanRecord::Published { .. })
         )));
     }
 }

@@ -143,7 +143,7 @@ async fn provider_failure_after_submit_plan_leaves_workflow_planning() {
             .conversation
             .items()
             .iter()
-            .all(|item| { !matches!(item, TranscriptItem::Plan(PlanRecord::Ready { .. })) })
+            .all(|item| { !matches!(item.plan_record(), Some(PlanRecord::Ready { .. })) })
     );
     assert_eq!(requests.lock().unwrap().len(), 2);
     let events = collect_events(&mut receiver).await;

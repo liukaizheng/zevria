@@ -8,7 +8,7 @@ use zevria_foundation::{
 };
 
 fn notice(kind: CommandJobNoticeKind) -> TranscriptItem {
-    TranscriptItem::CommandJobNotice(CommandJobNotice::new(
+    TranscriptItem::CommandJobNotice(Box::new(CommandJobNotice::new(
         kind,
         vec![CommandJobSnapshot {
             id: CommandJobId::new("job-test"),
@@ -27,7 +27,7 @@ fn notice(kind: CommandJobNoticeKind) -> TranscriptItem {
         }],
         vec![],
         "Command job update:  exact persisted bytes\r\n<stdout>\nraw é  \n</stdout>\n".into(),
-    ))
+    )))
 }
 
 #[test]
@@ -105,9 +105,9 @@ fn notice_envelope_rejects_nonstandalone_duplicate_and_invalid_fields() {
 #[test]
 fn continuation_owns_only_a_standard_boundary_and_updates_are_not_owners() {
     let boundary = |behavior| {
-        TranscriptItem::RequestDirective(zevria_instructions::RequestDirective::boundary(
+        TranscriptItem::RequestDirective(Box::new(zevria_instructions::RequestDirective::boundary(
             RequestMetadata::new(behavior),
-        ))
+        )))
     };
     assert!(
         InstructionReplayState::replay(&[
@@ -156,7 +156,7 @@ fn notices_cannot_split_batches_and_survive_checkpoint_suffix_projection() {
         metadata: vec![],
         skill_applications: vec![],
     };
-    let checkpoint = TranscriptItem::Compaction(
+    let checkpoint = TranscriptItem::Compaction(Box::new(
         CompactionCheckpoint::new(
             CompactionTrigger::AutomaticMidTurn,
             CompactionBackend::LocalSummary,
@@ -164,7 +164,7 @@ fn notices_cannot_split_batches_and_survive_checkpoint_suffix_projection() {
             vec![],
         )
         .unwrap(),
-    );
+    ));
     let update = notice(CommandJobNoticeKind::Update);
     let items = vec![call, result, checkpoint, update.clone()];
     assert!(InstructionReplayState::replay(&items).is_ok());

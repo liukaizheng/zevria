@@ -267,18 +267,34 @@ impl ResponseAttempt {
         }
     }
     pub fn validate(&self) -> anyhow::Result<()> {
-        validate_display_id(&self.id)?;
-        validate_display_id(&self.profile.provider)?;
-        validate_display_id(&self.profile.model)?;
-        if let Some(id) = &self.response_id {
+        Self::validate_parts(
+            &self.id,
+            &self.profile,
+            self.response_id.as_deref(),
+            &self.hosted_activity,
+            &self.presentation,
+        )
+    }
+
+    pub fn validate_parts(
+        id: &str,
+        profile: &crate::ModelProfileRef,
+        response_id: Option<&str>,
+        hosted_activity: &[HostedActivity],
+        presentation: &[AssistantPresentationPart],
+    ) -> anyhow::Result<()> {
+        validate_display_id(id)?;
+        validate_display_id(&profile.provider)?;
+        validate_display_id(&profile.model)?;
+        if let Some(id) = response_id {
             validate_display_id(id)?;
         }
         anyhow::ensure!(
-            self.hosted_activity.len() <= 4096 && self.presentation.len() <= 16384,
+            hosted_activity.len() <= 4096 && presentation.len() <= 16384,
             "response display has too many parts"
         );
         let mut actions = HashSet::new();
-        for action in &self.hosted_activity {
+        for action in hosted_activity {
             anyhow::ensure!(
                 action.output_index <= 1_000_000,
                 "invalid action output index"
@@ -288,7 +304,7 @@ impl ResponseAttempt {
             }
             if let Some(action) = &action.action {
                 anyhow::ensure!(
-                    serde_json::to_vec(action)?.len() <= 4 * 1024 * 1024,
+                    zevria_foundation::BoundedCountingWriter::json_fits(action, 4 * 1024 * 1024)?,
                     "action payload exceeds limit"
                 );
             }
@@ -298,7 +314,7 @@ impl ResponseAttempt {
             );
         }
         let mut parts = HashSet::new();
-        for part in &self.presentation {
+        for part in presentation {
             anyhow::ensure!(
                 part.source.output_index <= 1_000_000,
                 "invalid presentation output index"
@@ -638,7 +654,7 @@ impl ResponseDisplay {
             }
         }
         anyhow::ensure!(
-            serde_json::to_vec(self)?.len() <= 16 * 1024 * 1024,
+            zevria_foundation::BoundedCountingWriter::json_fits(self, 16 * 1024 * 1024)?,
             "response display payload exceeds limit"
         );
         Ok(())

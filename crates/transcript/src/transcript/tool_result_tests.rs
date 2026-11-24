@@ -80,14 +80,14 @@ fn mixed_details_round_trip_in_the_existing_sidecar_without_entering_model_input
     let wire = serde_json::to_string(&original).unwrap();
     assert_eq!(wire.lines().count(), 1);
     let json: serde_json::Value = serde_json::from_str(&wire).unwrap();
-    let metadata = json[TOOL_RESULT_METADATA_KEY].as_array().unwrap();
+    let metadata = json["metadata"].as_array().unwrap();
     assert_eq!(metadata.len(), 4);
     assert_eq!(metadata[1]["diagnostic"], "PRIVATE_DIAGNOSTIC_files");
     assert!(metadata[0].get("detail").is_none());
     assert_eq!(metadata[1]["detail"]["type"], "file_changes");
     assert_eq!(metadata[2]["detail"]["type"], "subtasks");
     assert_eq!(metadata[3]["detail"]["type"], "question_disposition");
-    assert!(json.get(SUBTASK_RESULTS_KEY).is_none());
+    assert!(json.get("zevria_subtask_results").is_none());
 
     let restored: TranscriptItem = serde_json::from_str(&wire).unwrap();
     assert_eq!(restored, original);
@@ -117,17 +117,15 @@ fn mixed_details_round_trip_in_the_existing_sidecar_without_entering_model_input
         restored.model_request_item(),
         Some(ModelRequestItem::message(plain))
     );
-    // A bare Rig reader still ignores the sidecar envelope, not its model text.
-    assert_eq!(serde_json::from_str::<Message>(&wire).unwrap(), *plain);
+    assert_eq!(
+        serde_json::from_value::<Message>(json["message"].clone()).unwrap(),
+        *plain
+    );
     let items = vec![restored];
     assert_eq!(model_history(&items), vec![plain.clone()]);
     assert_eq!(model_input(&items), vec![ModelRequestItem::message(plain)]);
     let model_wire = serde_json::to_string(&model_history(&items)).unwrap();
-    for hidden in [
-        "PRIVATE_",
-        "invalid_frontend_response",
-        TOOL_RESULT_METADATA_KEY,
-    ] {
+    for hidden in ["PRIVATE_", "invalid_frontend_response", "metadata"] {
         assert!(!model_wire.contains(hidden), "leaked {hidden}");
     }
 }
@@ -164,27 +162,21 @@ fn invalid_details_and_retired_fields_reject_the_sidecar_instead_of_falling_back
     let base = serde_json::to_value(mixed_results()).unwrap();
     for (key, value) in [
         ("detail", json!({"type": "future_variant", "data": {}})),
-        (
-            "fileChanges",
-            base[TOOL_RESULT_METADATA_KEY][1]["detail"]["data"].clone(),
-        ),
-        (
-            "subtask",
-            base[TOOL_RESULT_METADATA_KEY][2]["detail"]["data"].clone(),
-        ),
+        ("fileChanges", base["metadata"][1]["detail"]["data"].clone()),
+        ("subtask", base["metadata"][2]["detail"]["data"].clone()),
         ("questionDisposition", json!("dismissed")),
     ] {
         // Cover both obsolete-only records and obsolete fields mixed with a
         // new payload. Neither may silently lose restore metadata.
         for keep_detail in [false, true] {
             let mut wire = base.clone();
-            let entry = wire[TOOL_RESULT_METADATA_KEY][1].as_object_mut().unwrap();
+            let entry = wire["metadata"][1].as_object_mut().unwrap();
             if !keep_detail {
                 entry.remove("detail");
             }
             entry.insert(key.into(), value.clone());
             assert!(serde_json::from_value::<TranscriptItem>(wire.clone()).is_err());
-            assert!(serde_json::from_value::<Message>(wire).is_ok());
+            assert!(serde_json::from_value::<Message>(wire["message"].clone()).is_ok());
         }
     }
 }

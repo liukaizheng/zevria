@@ -50,7 +50,7 @@ fn torn_batch_line_restores_neither_half_and_repairs_before_appending() {
     let bytes = std::fs::read(&path).unwrap();
     // Exercise every torn position after the envelope's identity is complete,
     // including complete first children and interrupted strings/delimiters.
-    let start = prefix.len() + b"{\"zevria_batch\":".len();
+    let start = prefix.len() + b"{\"type\":\"batch\"".len();
     for end in start..bytes.len() - 2 {
         std::fs::write(&path, &bytes[..end]).unwrap();
         let loaded = load_report(&path).unwrap_or_else(|error| panic!("cut {end}: {error:#}"));
@@ -73,7 +73,7 @@ fn repairing_a_torn_tail_preserves_complete_batch_envelopes_and_prefix_bytes() {
     conversation.push_required_batch(messages()).unwrap();
     let original = std::fs::read(conversation.path()).unwrap();
     let mut damaged = original.clone();
-    damaged.extend_from_slice(b"{\"role\":\"user\",\"cont");
+    damaged.extend_from_slice(b"{\"type\":\"message\",\"message\":{\"role\":\"user\",\"cont");
     std::fs::write(conversation.path(), damaged).unwrap();
     let loaded = load_report(conversation.path()).unwrap();
     assert_eq!(loaded.recoverable_lines, 1);
@@ -94,11 +94,13 @@ fn batches_reject_unknown_versions_nested_envelopes_and_invalid_complete_childre
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("batch.jsonl");
     for line in [
-        r#"{"zevria_batch":{"version":2,"records":[{"error":"x"}]}}"#,
-        r#"{"zevria_batch":{"version":1,"records":[{"zevria_batch":{"version":1,"records":[]}}]}}"#,
-        r#"{"zevria_batch":{"version":1,"records":[{"zevria_future":{}},"#,
-        r#"{"zevria_batch":{"version":2,"records":["#,
-        r#"{"zevria_batch":{"version":1,"version":1,"records":[{"error":"x"}]}}"#,
+        r#"{"type":"batch","version":1,"records":[{"type":"error","error":"x"}]}"#,
+        r#"{"type":"batch","version":2,"records":[{"type":"batch","version":2,"records":[]}]}"#,
+        r#"{"type":"batch","version":2,"records":[{"type":"future","payload":["#,
+        r#"{"type":"batch","version":3,"records":["#,
+        r#"{"type":"batch","version":2,"version":2,"records":[{"type":"error","error":"x"}]}"#,
+        r#"{"version":2,"type":"batch","records":[]}"#,
+        r#"{"type":"batch","version":2,"records":[]}"#,
     ] {
         std::fs::write(&path, line).unwrap();
         assert!(load_report(&path).is_err(), "{line}");
@@ -113,7 +115,7 @@ fn partial_append_and_sync_failures_roll_back_or_explicitly_report_indeterminate
         for rollback_fails in [false, true] {
             let disk = RefCell::new(b"durable prefix\n".to_vec());
             let original_len = disk.borrow().len();
-            let line = b"{\"zevria_batch\":{\"version\":1,\"records\":[{\"error\":\"one\"},{\"error\":\"two\"}]}}\n";
+            let line = b"{\"type\":\"batch\",\"version\":2,\"records\":[{\"type\":\"error\",\"error\":\"one\"},{\"type\":\"error\",\"error\":\"two\"}]}\n";
             let error = append_or_rollback(
                 || {
                     let length = if partial { line.len() / 2 } else { line.len() };
@@ -185,7 +187,7 @@ fn conversation_projection_caches_follow_append_compaction_edit_and_reload() {
     )
     .unwrap();
     conversation
-        .push_required(TranscriptItem::Compaction(checkpoint))
+        .push_required(TranscriptItem::Compaction(Box::new(checkpoint)))
         .unwrap();
     check(&conversation);
     assert!(!conversation.has_images());
@@ -212,19 +214,21 @@ fn ensemble_load_error_is_not_attributed_to_an_unrelated_invalid_skill_line() {
     let directory = tempfile::tempdir().unwrap();
     let mut writer = TranscriptWriter::create(directory.path()).unwrap();
     writer
-        .append(&TranscriptItem::SkillInvocation(
+        .append(&TranscriptItem::SkillInvocation(Box::new(
             crate::skill::SkillInvocation::new(
                 "commit".parse().unwrap(),
                 "",
                 crate::skill::SkillApplication::Reapply("commit".parse().unwrap()),
             ),
-        ))
+        )))
         .unwrap();
     writer
-        .append(&TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
-            run_id: EnsembleRunId::new(),
-            version: crate::ENSEMBLE_REVIEW_VERSION,
-        }))
+        .append(&TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::ReviewStarted {
+                run_id: EnsembleRunId::new(),
+                version: crate::ENSEMBLE_REVIEW_VERSION,
+            },
+        )))
         .unwrap();
     let error = load_report(writer.path()).unwrap_err();
     assert!(matches!(

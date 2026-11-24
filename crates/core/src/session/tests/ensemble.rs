@@ -113,8 +113,8 @@ async fn new_ensemble_images_are_prepared_before_start_and_forwarded_unchanged()
             .unwrap();
         collect_events(&mut receiver).await;
         let loaded = zevria_transcript::transcript::load(&path).unwrap();
-        let start = loaded.iter().find_map(|item| match item {
-            TranscriptItem::Ensemble(EnsembleRecord::Started { start }) => Some(start),
+        let start = loaded.iter().find_map(|item| match item.ensemble_record() {
+            Some(EnsembleRecord::Started { start }) => Some(start),
             _ => None,
         });
         if fail {
@@ -197,9 +197,9 @@ async fn ensemble_to_ensemble_edit_atomically_replaces_the_tail_with_a_fresh_run
     let original = vec![
         TranscriptItem::Message(Message::user("retained question")),
         TranscriptItem::Message(Message::assistant("retained answer")),
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: old_start.clone(),
-        }),
+        })),
         TranscriptItem::Message(Message::user("discarded question")),
         TranscriptItem::Message(Message::assistant("discarded answer")),
     ];
@@ -239,8 +239,8 @@ async fn ensemble_to_ensemble_edit_atomically_replaces_the_tail_with_a_fresh_run
         .conversation()
         .items()
         .iter()
-        .filter_map(|item| match item {
-            TranscriptItem::Ensemble(EnsembleRecord::Started { start }) => Some(start),
+        .filter_map(|item| match item.ensemble_record() {
+            Some(EnsembleRecord::Started { start }) => Some(start),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -343,9 +343,9 @@ async fn prompt_edits_can_become_fresh_plan_or_review_ensembles() {
             TranscriptItem::Message(Message::assistant("retained answer")),
             TranscriptItem::Message(Message::user("recalled prompt")),
             TranscriptItem::Message(Message::assistant("discarded answer")),
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: old_start.clone(),
-            }),
+            })),
         ];
         persist_fixture(&mut transcript, &original);
         let transcript_path = transcript.path().to_path_buf();
@@ -388,8 +388,8 @@ async fn prompt_edits_can_become_fresh_plan_or_review_ensembles() {
             .conversation()
             .items()
             .iter()
-            .find_map(|item| match item {
-                TranscriptItem::Ensemble(EnsembleRecord::Started { start }) => Some(start),
+            .find_map(|item| match item.ensemble_record() {
+                Some(EnsembleRecord::Started { start }) => Some(start),
                 _ => None,
             })
             .expect("fresh ensemble start");
@@ -401,7 +401,7 @@ async fn prompt_edits_can_become_fresh_plan_or_review_ensembles() {
         assert_eq!(engine.conversation().prompt_position(1), None);
         assert!(engine.conversation().items().iter().all(|item| {
             !matches!(item, TranscriptItem::Message(message) if message == &Message::user("recalled prompt") || message == &Message::assistant("discarded answer"))
-                && !matches!(item, TranscriptItem::Ensemble(EnsembleRecord::Started { start }) if start.run_id == old_start.run_id)
+                && !matches!(item.ensemble_record(), Some(EnsembleRecord::Started { start }) if start.run_id == old_start.run_id)
         }));
         let persisted =
             zevria_transcript::transcript::load(&transcript_path).expect("durable transcript");
@@ -463,9 +463,9 @@ async fn ensemble_to_message_edit_runs_build_or_plan_from_the_retained_prefix() 
         let original = vec![
             TranscriptItem::Message(Message::user("retained question")),
             TranscriptItem::Message(Message::assistant("retained answer")),
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: old_start.clone(),
-            }),
+            })),
             TranscriptItem::Message(Message::assistant("discarded tail")),
         ];
         persist_fixture(&mut transcript, &original);
@@ -510,7 +510,7 @@ async fn ensemble_to_message_edit_runs_build_or_plan_from_the_retained_prefix() 
         assert_eq!(
             persisted
                 .iter()
-                .filter(|item| matches!(item, TranscriptItem::Plan(PlanRecord::Started { .. })))
+                .filter(|item| matches!(item.plan_record(), Some(PlanRecord::Started { .. })))
                 .count(),
             usize::from(mode == SessionMode::Plan)
         );
@@ -556,17 +556,17 @@ async fn prompt_ensemble_and_skill_targets_can_become_typed_skill_turns() {
                 TranscriptEditTarget::PromptOrdinal(1),
             ),
             "ensemble" => (
-                TranscriptItem::Ensemble(EnsembleRecord::Started {
+                TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                     start: old_start.clone(),
-                }),
+                })),
                 TranscriptEditTarget::EnsembleRun(old_start.run_id.clone()),
             ),
             "skill" => (
-                TranscriptItem::SkillInvocation(SkillInvocation::new(
+                TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
                     old_skill.name().clone(),
                     "inspect this",
                     SkillApplication::Activate(old_skill.snapshot()),
-                )),
+                ))),
                 TranscriptEditTarget::PromptOrdinal(1),
             ),
             _ => unreachable!("fixed cases"),
@@ -673,11 +673,11 @@ async fn ensemble_edit_workflow_gating_replays_only_the_retained_plan_prefix() {
     let old_start =
         ensemble_start_fixture("ready-tail-edit", EnsembleWorkflow::Review, "old review");
     let original = vec![
-        TranscriptItem::Plan(PlanRecord::Started { id: plan_id }),
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id: plan_id })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: old_start.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::Ready { artifact }),
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Ready { artifact })),
     ];
     persist_fixture(&mut transcript, &original);
     let mut engine = SessionEngine::new(
@@ -720,7 +720,7 @@ async fn ensemble_edit_workflow_gating_replays_only_the_retained_plan_prefix() {
             .conversation()
             .items()
             .iter()
-            .all(|item| { !matches!(item, TranscriptItem::Plan(PlanRecord::Ready { .. })) })
+            .all(|item| { !matches!(item.plan_record(), Some(PlanRecord::Ready { .. })) })
     );
     assert!(
         collect_events(&mut receiver)
@@ -735,9 +735,9 @@ async fn ensemble_edit_validation_failures_preserve_the_original_tail() {
     let old_start =
         ensemble_start_fixture("validation-old-run", EnsembleWorkflow::Review, "old review");
     let original = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: old_start.clone(),
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("old tail")),
     ];
 
@@ -906,9 +906,9 @@ async fn cancelled_or_failed_ensemble_edit_commit_does_not_truncate_or_launch() 
         "old review",
     );
     let original = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: old_start.clone(),
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("old tail")),
     ];
 
@@ -1103,10 +1103,7 @@ async fn ensemble_review_inspects_after_reports_ready_and_persists_boundaries() 
         .conversation()
         .items()
         .iter()
-        .filter_map(|item| match item {
-            TranscriptItem::Ensemble(record) => Some(record),
-            _ => None,
-        })
+        .filter_map(TranscriptItem::ensemble_record)
         .collect::<Vec<_>>();
     assert!(matches!(
         ensemble_records.as_slice(),
@@ -1123,7 +1120,7 @@ async fn ensemble_review_inspects_after_reports_ready_and_persists_boundaries() 
         [
             ..,
             TranscriptItem::Message(Message::Assistant { .. }),
-            TranscriptItem::Ensemble(EnsembleRecord::Completed { .. })
+            TranscriptItem::Ensemble(_)
         ]
     ));
     let lifecycle = collect_events(&mut receiver).await;
@@ -1210,13 +1207,16 @@ async fn one_proofless_plan_worker_blocks_reports_ready_and_every_root_model_cal
 
     assert!(requests.lock().expect("requests").is_empty());
     assert!(!engine.conversation().items().iter().any(|item| matches!(
-        item,
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { .. })
+        item.ensemble_record(),
+        Some(EnsembleRecord::ReportsReady { .. })
     )));
-    assert!(!engine.conversation().items().iter().any(|item| matches!(
-        item,
-        TranscriptItem::Ensemble(EnsembleRecord::Failed { .. })
-    )));
+    assert!(
+        !engine
+            .conversation()
+            .items()
+            .iter()
+            .any(|item| matches!(item.ensemble_record(), Some(EnsembleRecord::Failed { .. })))
+    );
     let lifecycle = collect_events(&mut receiver).await;
     assert_eq!(
         lifecycle
@@ -1368,9 +1368,10 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
             [
                 ..,
                 TranscriptItem::Message(Message::Assistant { .. }),
-                TranscriptItem::Plan(PlanRecord::Published { .. }),
-                TranscriptItem::Ensemble(EnsembleRecord::Completed { .. })
-            ]
+                TranscriptItem::Plan(plan),
+                TranscriptItem::Ensemble(ensemble)
+            ] if matches!(plan.as_ref(), PlanRecord::Published { .. })
+                && matches!(ensemble.as_ref(), EnsembleRecord::Completed { .. })
         ));
         let lifecycle = collect_events(&mut receiver).await;
         let worker_finishes = lifecycle
@@ -1433,8 +1434,8 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
         assert!(reconciliation_result < intermediate_tools[2].0);
         let marked = persisted
             .iter()
-            .find_map(|item| match item {
-                TranscriptItem::Ensemble(EnsembleRecord::ReportsReady { agents, .. }) => Some(
+            .find_map(|item| match item.ensemble_record() {
+                Some(EnsembleRecord::ReportsReady { agents, .. }) => Some(
                     agents
                         .iter()
                         .filter(|agent| agent.confirmation.as_ref().unwrap().baseline.is_some())
@@ -1445,8 +1446,8 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
             .unwrap();
         assert_eq!(marked, usize::from(selected_baseline));
         assert!(!persisted.iter().any(|item| matches!(
-            item,
-            TranscriptItem::Plan(PlanRecord::Ready { .. } | PlanRecord::Handoff { .. })
+            item.plan_record(),
+            Some(PlanRecord::Ready { .. } | PlanRecord::Handoff { .. })
         )));
         zevria_transcript::validate_ensemble_review_history(&persisted).unwrap();
     }
@@ -1752,12 +1753,12 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
         "the ensemble answer is tool traffic, not a user prompt"
     );
     assert!(persisted.iter().any(|item| matches!(
-        item,
-        TranscriptItem::Plan(PlanRecord::Published { artifact, .. }) if artifact.title == title
+        item.plan_record(),
+        Some(PlanRecord::Published { artifact, .. }) if artifact.title == title
     )));
     assert!(persisted.iter().any(|item| matches!(
-        item,
-        TranscriptItem::Ensemble(EnsembleRecord::Completed { .. })
+        item.ensemble_record(),
+        Some(EnsembleRecord::Completed { .. })
     )));
 
     let worker_finishes = lifecycle
@@ -1883,8 +1884,8 @@ async fn all_failed_ensemble_skips_the_root_model_call() {
     assert!(command_calls.lock().expect("command calls").is_empty());
     assert!(engine.conversation().items().iter().any(|item| {
         matches!(
-            item,
-            TranscriptItem::Ensemble(EnsembleRecord::Failed { error, .. })
+            item.ensemble_record(),
+            Some(EnsembleRecord::Failed { error, .. })
                 if error.contains("all ensemble workers failed")
         )
     }));
@@ -1928,10 +1929,10 @@ async fn legacy_plan_reports_ready_without_proof_metadata_fails_without_relaunch
         agents: vec![descriptor.clone()],
     };
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("immutable legacy evidence"),
             agents: vec![AgentRunSummary {
@@ -1945,7 +1946,7 @@ async fn legacy_plan_reports_ready_without_proof_metadata_fails_without_relaunch
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
     ];
     let (_directory, transcript) = test_transcript();
     let error = SessionEngine::new(
@@ -1993,10 +1994,10 @@ async fn durable_reports_recovery_reruns_only_root_synthesis() {
         agents: vec![descriptor.clone()],
     };
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("durable untrusted synthesis input"),
             agents: vec![AgentRunSummary {
@@ -2010,13 +2011,11 @@ async fn durable_reports_recovery_reruns_only_root_synthesis() {
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
     ];
-    let recovery = latest_ensemble_recovery(items.iter().filter_map(|item| match item {
-        TranscriptItem::Ensemble(record) => Some(record),
-        _ => None,
-    }))
-    .expect("unfinished synthesis recovery");
+    let recovery =
+        latest_ensemble_recovery(items.iter().filter_map(TranscriptItem::ensemble_record))
+            .expect("unfinished synthesis recovery");
     let (_directory, transcript) = test_transcript();
     let mut engine = SessionEngine::new(
         provider,
@@ -2117,11 +2116,11 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
     };
     let plan_id = PlanId::new();
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Plan(PlanRecord::Started { id: plan_id }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id: plan_id })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("durable untrusted plan evidence"),
             agents: vec![AgentRunSummary {
@@ -2135,7 +2134,7 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
         TranscriptItem::Message(command_call(
             "recovery-inspection",
             "rtk rg -n ensemble_policy crates/core/src/session.rs",
@@ -2174,11 +2173,8 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
         saved_plan_record(plan_id, &markdown),
     ];
     let items = with_explicit_fixture_confirmations(items);
-    let recovery = latest_ensemble_recovery(items.iter().filter_map(|item| match item {
-        TranscriptItem::Ensemble(record) => Some(record),
-        _ => None,
-    }))
-    .unwrap();
+    let recovery =
+        latest_ensemble_recovery(items.iter().filter_map(TranscriptItem::ensemble_record)).unwrap();
     // A resumed model commonly just acknowledges the already successful
     // tool call instead of submitting the same artifact again.
     let provider =
@@ -2235,8 +2231,8 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
             if artifact.title == title && artifact.markdown == markdown
     ));
     assert!(engine.conversation().items().iter().any(|item| matches!(
-        item,
-        TranscriptItem::Ensemble(EnsembleRecord::Completed { run_id })
+        item.ensemble_record(),
+        Some(EnsembleRecord::Completed { run_id })
             if run_id == &start.run_id
     )));
     assert!(

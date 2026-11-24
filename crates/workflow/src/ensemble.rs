@@ -1685,7 +1685,7 @@ fn bounded_review_synthesis_report(
     full.report.clone_from(&outcome.report);
     full.structured_plan = outcome.plan.clone();
     full.failure.clone_from(&outcome.failure);
-    if serialized_report_len(&full)? <= max_bytes {
+    if zevria_foundation::BoundedCountingWriter::json_fits(&full, max_bytes)? {
         return Ok(full);
     }
 
@@ -1741,21 +1741,25 @@ fn bounded_evidence_candidate<const N: usize>(
     let mut high = lengths.into_iter().fold(0usize, usize::saturating_add);
     while low < high {
         let midpoint = low + (high - low).div_ceil(2);
-        if serialized_report_len(&candidate(midpoint))? <= max_bytes {
+        if zevria_foundation::BoundedCountingWriter::json_fits(&candidate(midpoint), max_bytes)? {
             low = midpoint;
         } else {
             high = midpoint - 1;
         }
     }
     let bounded = candidate(low);
-    debug_assert!(serialized_report_len(&bounded)? <= max_bytes);
+    debug_assert!(zevria_foundation::BoundedCountingWriter::json_fits(
+        &bounded, max_bytes
+    )?);
     Ok(bounded)
 }
 
 fn serialized_report_len(report: &SynthesisReport) -> anyhow::Result<usize> {
-    serde_json::to_vec(report)
-        .map(|serialized| serialized.len())
-        .context("failed to size serialized worker synthesis evidence")
+    // Rejection diagnostics for required evidence report the exact byte count.
+    let mut writer = zevria_foundation::BoundedCountingWriter::new(usize::MAX);
+    serde_json::to_writer(&mut writer, report)
+        .context("failed to size serialized worker synthesis evidence")?;
+    Ok(writer.written())
 }
 
 /// Allocate a shared byte ceiling fairly across report text, a compact JSON

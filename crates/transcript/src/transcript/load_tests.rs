@@ -33,7 +33,7 @@ fn skill_recovery_preserves_malformed_interior_lines_for_inspection() {
     let path = dir.path().join("session.jsonl");
     std::fs::write(
         &path,
-        "{\"error\":\"first\"}\nnot json\n\n{\"error\":\"second\"}\n{\"role\":\"user\",\"cont",
+        "{\"type\":\"error\",\"error\":\"first\"}\nnot json\n\n{\"type\":\"error\",\"error\":\"second\"}\n{\"role\":\"user\",\"cont",
     )
     .expect("session file should write");
 
@@ -53,7 +53,7 @@ fn recognized_stale_provider_replay_is_a_hard_resume_error() {
     let directory = tempfile::tempdir().expect("temp directory");
     let path = directory.path().join("stale-replay.jsonl");
     let stale = json!({
-        (PROVIDER_REPLAY_KEY): {
+        "type":"provider_message", "replay": {
             "provider": OPENAI_RESPONSES_PROVIDER,
             "version": 2,
             "source_profile": {"provider":"p", "model":"m"},
@@ -71,7 +71,7 @@ fn recognized_stale_provider_replay_is_a_hard_resume_error() {
     let error = load(&path).expect_err("v2 replay must not be silently dropped");
     let detail = format!("{error:#}");
     assert!(detail.contains("unsupported history"));
-    assert!(detail.contains("provider replay v1"));
+    assert!(error.is::<UnsupportedHistory>());
     assert!(TranscriptWriter::append_to(path).is_err());
 }
 
@@ -80,7 +80,7 @@ fn current_replay_without_source_profile_is_a_hard_resume_error() {
     let directory = tempfile::tempdir().expect("temp directory");
     let path = directory.path().join("missing-source.jsonl");
     let missing_source = json!({
-        (PROVIDER_REPLAY_KEY): {
+        "type":"provider_message", "replay": {
             "provider": OPENAI_RESPONSES_PROVIDER,
             "version": PROVIDER_REPLAY_VERSION,
             "items": [{
@@ -96,7 +96,7 @@ fn current_replay_without_source_profile_is_a_hard_resume_error() {
 
     let error = load(&path).expect_err("source identity is required");
     let detail = format!("{error:#}");
-    assert!(detail.contains("nonblank source_profile"));
+    assert!(error.is::<UnsupportedHistory>());
     assert!(detail.contains("unsupported history"));
 }
 
@@ -107,7 +107,7 @@ fn reopening_recovers_only_an_incomplete_final_record() {
     std::fs::write(
         &path,
         format!(
-            "{}\n{{\"error\":\"first\"}}\n{{\"error\":\"second\"}}\n{{\"role\":\"user\",\"cont",
+            "{}\n{{\"type\":\"error\",\"error\":\"first\"}}\n{{\"type\":\"error\",\"error\":\"second\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"cont",
             mode_json()
         ),
     )
@@ -142,19 +142,20 @@ fn skill_recovery_unknown_reserved_records_and_tampering_are_never_removed() {
         "Exact body",
     )
     .expect("snapshot");
-    let invocation = TranscriptItem::SkillInvocation(SkillInvocation::new(
+    let invocation = TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
         SkillName::parse("review").expect("name"),
         "",
         SkillApplication::Activate(snapshot),
-    ));
+    )));
     let mut tampered = serde_json::to_value(&invocation).expect("value");
-    tampered[SKILL_INVOCATION_KEY]["application"]["activate"]["body"] = json!("Different body");
+    tampered["invocation"]["application"]["activate"]["body"] = json!("Different body");
     let mut unknown_invocation = serde_json::to_value(&invocation).expect("value");
-    unknown_invocation[SKILL_INVOCATION_KEY]["version"] = json!(999);
-    let mut checkpoint =
-        serde_json::to_value(TranscriptItem::Compaction(local_checkpoint("summary")))
-            .expect("checkpoint");
-    checkpoint[COMPACTION_RECORD_KEY]["version"] = json!(999);
+    unknown_invocation["invocation"]["version"] = json!(999);
+    let mut checkpoint = serde_json::to_value(TranscriptItem::Compaction(Box::new(
+        local_checkpoint("summary"),
+    )))
+    .expect("checkpoint");
+    checkpoint["checkpoint"]["version"] = json!(999);
     for value in [
         json!({"zevria_skill_activation_v999": {}}),
         json!({"role": "user", "content": [], "zevria_skill_activation_v999": {}}),
@@ -162,7 +163,8 @@ fn skill_recovery_unknown_reserved_records_and_tampering_are_never_removed() {
         tampered,
         checkpoint,
     ] {
-        let original = format!("{{\"error\":\"visible\"}}\n{value}\n{{\"partial\":");
+        let original =
+            format!("{{\"type\":\"error\",\"error\":\"visible\"}}\n{value}\n{{\"partial\":");
         std::fs::write(&path, original.as_bytes()).expect("write fixture");
         let error = load_report(&path).unwrap_err();
         assert_eq!(
@@ -181,7 +183,7 @@ fn current_writes_do_not_create_upgrade_backups() {
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("mixed.jsonl");
     let original = format!(
-        "{}\n{{ \"error\" : \"noncanonical formatting\" }}\n",
+        "{}\n{{ \"type\" : \"error\", \"error\" : \"noncanonical formatting\" }}\n",
         mode_json()
     );
     std::fs::write(&path, original).expect("fixture");
@@ -204,12 +206,12 @@ fn current_writes_do_not_create_upgrade_backups() {
     .expect("v1 checkpoint");
     let mut items = load(&path).expect("current prefix");
     items.extend([
-        TranscriptItem::SkillInvocation(SkillInvocation::new(
+        TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
             SkillName::parse("review").expect("name"),
             "",
             SkillApplication::Activate(snapshot),
-        )),
-        TranscriptItem::Compaction(checkpoint),
+        ))),
+        TranscriptItem::Compaction(Box::new(checkpoint)),
     ]);
     let mut writer = TranscriptWriter::append_to(path.clone()).expect("open");
     assert!(!path.with_extension("jsonl.pre-v3").exists());
@@ -233,7 +235,10 @@ fn saved_upgrade_backups_are_not_consulted_or_modified() {
     use crate::skill::{SkillDefinition, SkillMetadata, SkillSource};
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("blocked-upgrade.jsonl");
-    let original = format!("{}\n{{\"error\":\"unchanged\"}}\n", mode_json());
+    let original = format!(
+        "{}\n{{\"type\":\"error\",\"error\":\"unchanged\"}}\n",
+        mode_json()
+    );
     std::fs::write(&path, original).expect("fixture");
     let snapshot = SkillDefinition::new(
         SkillName::parse("review").expect("name"),
@@ -245,11 +250,11 @@ fn saved_upgrade_backups_are_not_consulted_or_modified() {
     .with_metadata(SkillMetadata::new("Review"), None)
     .expect("metadata")
     .snapshot();
-    let item = TranscriptItem::SkillInvocation(SkillInvocation::new(
+    let item = TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
         snapshot.name().clone(),
         "",
         SkillApplication::Activate(snapshot),
-    ));
+    )));
     std::fs::write(path.with_extension("jsonl.pre-v3"), "conflicting backup")
         .expect("block backup");
     let mut writer = TranscriptWriter::append_to(path.clone()).expect("writer");
@@ -264,7 +269,8 @@ fn saved_upgrade_backups_are_not_consulted_or_modified() {
 fn unsupported_history_cannot_be_opened_even_read_only() {
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("blocked.jsonl");
-    let original = b"{\"error\":\"inspect\"}\n{\"zevria_skill_activation_v999\":{}}\n";
+    let original =
+        b"{\"type\":\"error\",\"error\":\"inspect\"}\n{\"zevria_skill_activation_v999\":{}}\n";
     std::fs::write(&path, original).expect("fixture");
     assert!(load_report(&path).is_err());
     assert!(TranscriptWriter::read_only(path.clone()).is_err());
@@ -296,11 +302,14 @@ fn skill_recovery_plain_marker_text_is_not_a_reserved_record() {
 
 #[test]
 fn invocation_and_application_tails_are_never_recoverable_debris() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("tail.jsonl");
     for tail in [
-        format!("{{\"{SKILL_INVOCATION_KEY}\":{{\"name\":\"review\""),
-        format!("{{\"{SKILL_INVOCATION_KEY}\":{{\"version\":4,\"invocation\":"),
-        format!("{{\"{SKILL_APPLICATIONS_KEY}\":["),
+        "{\"type\":\"future_invocation\",\"invocation\":{\"name\":\"review\"".to_owned(),
+        "{\"type\":\"skill_invocation\",\"version\":4,\"invocation\":".to_owned(),
+        "{\"type\":\"future_application\",\"applications\":[".to_owned(),
     ] {
-        assert!(has_unsupported_reserved_tail(tail.as_bytes()));
+        std::fs::write(&path, &tail).unwrap();
+        assert!(load_report(&path).unwrap_err().is::<UnsupportedHistory>());
     }
 }

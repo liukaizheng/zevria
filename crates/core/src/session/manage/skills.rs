@@ -157,13 +157,13 @@ impl<P: ModelProvider> SessionEngine<P> {
                                 };
                                 (!self.skills.catalog.config().name_enabled(&name)).then(|| {
                                     TranscriptItem::Directive(
-                                        zevria_instructions::DirectiveContent::new(
+                                        Box::new(zevria_instructions::DirectiveContent::new(
                                             zevria_instructions::DirectivePayload::SkillRevocation {
                                                 name,
                                                 reason: "disabled by management".into(),
                                             },
                                         )
-                                        .expect("valid revocation"),
+                                        .expect("valid revocation")),
                                     )
                                 })
                             })

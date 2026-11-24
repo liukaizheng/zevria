@@ -108,6 +108,10 @@ fn header(value: &str) -> anyhow::Result<HeaderValue> {
 }
 
 impl McpCredentialSource {
+    pub(crate) fn is_command(&self) -> bool {
+        matches!(self.0, Source::Command(_))
+    }
+
     pub(crate) fn literal(value: String) -> Self {
         Self(Source::Literal(value))
     }

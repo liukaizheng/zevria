@@ -445,10 +445,10 @@ async fn durable_root_command_transcript_resumes_without_redispatch() {
         })],
     };
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("durable untrusted synthesis input"),
             agents: vec![AgentRunSummary {
@@ -462,7 +462,7 @@ async fn durable_root_command_transcript_resumes_without_redispatch() {
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
         TranscriptItem::Message(durable_command.clone()),
         TranscriptItem::ToolResults {
             skill_applications: Vec::new(),
@@ -477,11 +477,9 @@ async fn durable_root_command_transcript_resumes_without_redispatch() {
             }],
         },
     ];
-    let recovery = latest_ensemble_recovery(items.iter().filter_map(|item| match item {
-        TranscriptItem::Ensemble(record) => Some(record),
-        _ => None,
-    }))
-    .expect("unfinished synthesis recovery");
+    let recovery =
+        latest_ensemble_recovery(items.iter().filter_map(TranscriptItem::ensemble_record))
+            .expect("unfinished synthesis recovery");
     let provider = ScriptedProvider::new([Ok(Message::assistant("recovered synthesis"))]);
     let requests = provider.requests.clone();
     let command_calls = Arc::new(Mutex::new(Vec::new()));
@@ -556,10 +554,10 @@ async fn review_recovery_finishes_a_durable_final_response_without_another_model
     };
     let final_message = Message::assistant("already durable review synthesis");
     let items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: Message::user("durable untrusted evidence"),
             agents: vec![AgentRunSummary {
@@ -573,14 +571,12 @@ async fn review_recovery_finishes_a_durable_final_response_without_another_model
                 decision_ids: Vec::new(),
                 unavailable_decisions: Vec::new(),
             }],
-        }),
+        })),
         TranscriptItem::Message(final_message.clone()),
     ];
-    let recovery = latest_ensemble_recovery(items.iter().filter_map(|item| match item {
-        TranscriptItem::Ensemble(record) => Some(record),
-        _ => None,
-    }))
-    .expect("unfinished review synthesis");
+    let recovery =
+        latest_ensemble_recovery(items.iter().filter_map(TranscriptItem::ensemble_record))
+            .expect("unfinished review synthesis");
     let provider = ScriptedProvider::new(std::iter::empty::<anyhow::Result<Message>>());
     let requests = provider.requests.clone();
     let launcher = Arc::new(StubEnsembleLauncher::successful(["must not relaunch"]));
@@ -617,8 +613,8 @@ async fn review_recovery_finishes_a_durable_final_response_without_another_model
             .items()
             .iter()
             .filter(|item| matches!(
-                item,
-                TranscriptItem::Ensemble(EnsembleRecord::Completed { run_id })
+                item.ensemble_record(),
+                Some(EnsembleRecord::Completed { run_id })
                     if run_id == &start.run_id
             ))
             .count(),

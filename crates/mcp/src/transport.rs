@@ -38,15 +38,19 @@ use crate::{
 const STDERR_CAP: usize = 4096;
 
 #[derive(Clone, Default)]
-pub(crate) struct StderrTail(Arc<Mutex<VecDeque<u8>>>);
+pub(crate) struct StderrTail {
+    tail: Arc<Mutex<StderrBuffer>>,
+    secrets: Arc<Vec<String>>,
+}
+
+#[derive(Default)]
+struct StderrBuffer {
+    bytes: VecDeque<u8>,
+    redacted: Option<String>,
+}
 
 impl StderrTail {
-    pub(crate) fn text(&self, config: &McpServerConfig) -> Option<String> {
-        let bytes: Vec<u8> = self.0.lock().unwrap().iter().copied().collect();
-        if bytes.is_empty() {
-            return None;
-        }
-        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    pub(crate) fn new(config: &McpServerConfig) -> Self {
         let inherited = std::env::vars_os().filter_map(|(name, value)| {
             let name = name.to_string_lossy().to_ascii_uppercase();
             [
@@ -70,11 +74,27 @@ impl StderrTail {
             .chain(inherited)
             .filter(|s| !s.is_empty())
             .collect();
-        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-        for secret in secrets {
-            text = text.replace(&secret, "[redacted]");
+        secrets.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        secrets.dedup();
+        Self {
+            tail: Arc::default(),
+            secrets: Arc::new(secrets),
         }
-        Some(crate::convert::display_text(&text, STDERR_CAP))
+    }
+
+    pub(crate) fn text(&self) -> Option<String> {
+        let mut tail = self.tail.lock().unwrap();
+        if tail.bytes.is_empty() {
+            return None;
+        }
+        if tail.redacted.is_none() {
+            let mut text = String::from_utf8_lossy(tail.bytes.make_contiguous()).into_owned();
+            for secret in self.secrets.iter() {
+                text = text.replace(secret, "[redacted]");
+            }
+            tail.redacted = Some(crate::convert::display_text(&text, STDERR_CAP));
+        }
+        tail.redacted.clone()
     }
 
     async fn drain(&self, name: McpServerName, mut stderr: ChildStderr) {
@@ -85,10 +105,11 @@ impl StderrTail {
             }
             // Never write server-controlled bytes to a frontend's stdout or the application log.
             tracing::debug!(target: "zevria::mcp::stderr", server = %name, bytes = n, "captured server stderr");
-            let mut tail = self.0.lock().unwrap();
-            let discard = (tail.len() + n).saturating_sub(STDERR_CAP);
-            tail.drain(..discard);
-            tail.extend(&buf[..n]);
+            let mut tail = self.tail.lock().unwrap();
+            let discard = (tail.bytes.len() + n).saturating_sub(STDERR_CAP);
+            tail.bytes.drain(..discard);
+            tail.bytes.extend(&buf[..n]);
+            tail.redacted = None;
         }
     }
 }
@@ -153,6 +174,7 @@ pub(crate) async fn connect(
     root: Option<String>,
     refresh: mpsc::Sender<()>,
     stderr_tail: StderrTail,
+    http: &tokio::sync::OnceCell<reqwest::Client>,
 ) -> anyhow::Result<Service> {
     let handler = ZevriaClientHandler {
         server: name.clone(),
@@ -198,9 +220,14 @@ pub(crate) async fn connect(
                 .map_err(|_| anyhow::anyhow!("stdio MCP handshake failed"))
         }
         McpTransportKind::Http => {
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?;
+            let client = http
+                .get_or_try_init(|| async {
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                })
+                .await?
+                .clone();
             let stop = CancellationToken::new();
             let backend = AuthenticatingHttpClient::new(
                 client,
@@ -344,4 +371,26 @@ pub(crate) async fn request(
     )
     .await;
     Err(failure)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redaction_deduplicates_nonadjacent_equal_length_secrets() {
+        let tail = StderrTail::new(&McpServerConfig {
+            args: ["fixture-secret-b", "fixture-secret-a", "fixture-secret-b"]
+                .map(str::to_owned)
+                .into(),
+            ..Default::default()
+        });
+        let matching: Vec<_> = tail
+            .secrets
+            .iter()
+            .filter(|secret| ["fixture-secret-a", "fixture-secret-b"].contains(&secret.as_str()))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(matching, ["fixture-secret-a", "fixture-secret-b"]);
+    }
 }

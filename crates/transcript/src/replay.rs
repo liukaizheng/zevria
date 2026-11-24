@@ -1,5 +1,5 @@
 use crate::*;
-use std::fmt;
+use std::{fmt, sync::Arc};
 /// Invalid committed session replay. The engine cannot resume work after this error.
 /// Repair must happen outside the failed engine, preserving the original evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,7 @@ impl SessionReplayError {
 #[derive(Debug, Clone, Default)]
 pub struct ValidatedSessionReplay {
     pub instructions: InstructionReplayState,
-    pub plan: PlanWorkflowState,
+    pub plan: Arc<PlanWorkflowState>,
     ensemble: crate::ensemble_review_history::EnsembleReviewReplay,
 }
 
@@ -57,7 +57,10 @@ impl ValidatedSessionReplay {
         self.instructions = self.instructions.apply_suffix(items)?;
         for item in items {
             if let TranscriptItem::Plan(record) = item {
-                self.plan = zevria_workflow::plan::apply_plan_record(self.plan, record)?;
+                self.plan = Arc::new(zevria_workflow::plan::apply_plan_record(
+                    Arc::unwrap_or_clone(self.plan),
+                    record,
+                )?);
             }
         }
         Ok(self)
@@ -67,21 +70,27 @@ impl ValidatedSessionReplay {
 pub fn validate_session_replay(
     items: &[TranscriptItem],
 ) -> Result<ValidatedSessionReplay, SessionReplayError> {
+    validate_replay(items, false)
+}
+
+/// Typed decoding already checked local record fields. Reduce cross-record
+/// constraints without revalidating image prompts, rendered directives, etc.
+pub(crate) fn validate_replay(
+    items: &[TranscriptItem],
+    decoded: bool,
+) -> Result<ValidatedSessionReplay, SessionReplayError> {
     #[cfg(feature = "test-support")]
     crate::replay_probe::record(|counts| counts.validations += 1);
     let ensemble = crate::ensemble_review_history::EnsembleReviewReplay::default()
         .apply_suffix(items)
         .map_err(SessionReplayError::Ensemble)?;
-    let instructions = InstructionReplayState::replay(items);
-    let plan = replay_plan_state(items.iter().filter_map(|item| match item {
-        TranscriptItem::Plan(record) => Some(record),
-        _ => None,
-    }))
-    .map_err(|error| format!("{error:#}"));
+    let instructions = InstructionReplayState::replay_with(items, decoded);
+    let plan = replay_plan_state(items.iter().filter_map(TranscriptItem::plan_record))
+        .map_err(|error| format!("{error:#}"));
     match instructions {
         Ok(instructions) => Ok(ValidatedSessionReplay {
             instructions,
-            plan: plan.map_err(SessionReplayError::Plan)?,
+            plan: Arc::new(plan.map_err(SessionReplayError::Plan)?),
             ensemble,
         }),
         Err(error) => {

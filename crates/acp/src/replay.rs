@@ -85,8 +85,10 @@ pub(crate) fn replay_transcript(
                     &format!("{prefix}-skill"),
                 ));
             }
-            TranscriptItem::Plan(PlanRecord::Handoff { handoff }) => {
-                updates.extend(project_completed_message(&handoff.prompt, &prefix));
+            TranscriptItem::Plan(record) => {
+                if let PlanRecord::Handoff { handoff } = record.as_ref() {
+                    updates.extend(project_completed_message(&handoff.prompt, &prefix));
+                }
             }
             TranscriptItem::Error { error } => {
                 updates.push(diagnostic_update(
@@ -100,7 +102,6 @@ pub(crate) fn replay_transcript(
             | TranscriptItem::Directive(_)
             | TranscriptItem::RequestDirective(_)
             | TranscriptItem::ToolDeclarations(_)
-            | TranscriptItem::Plan(_)
             | TranscriptItem::Ensemble(_)
             | TranscriptItem::Compaction(_) => {}
         }
@@ -187,16 +188,16 @@ mod tests {
         .unwrap();
         let hidden = [
             TranscriptItem::SessionMode(zevria_foundation::SessionMode::Build),
-            TranscriptItem::SessionModels(models),
-            TranscriptItem::Directive(zevria_instructions::DirectiveContent::skill(
+            TranscriptItem::SessionModels(Box::new(models)),
+            TranscriptItem::Directive(Box::new(zevria_instructions::DirectiveContent::skill(
                 &zevria_instructions::SkillSnapshot::new(
                     "hidden".parse().unwrap(),
                     "Hidden",
                     "HIDDEN_SKILL_BODY",
                 )
                 .unwrap(),
-            )),
-            TranscriptItem::Directive(
+            ))),
+            TranscriptItem::Directive(Box::new(
                 zevria_instructions::DirectiveContent::new(
                     zevria_instructions::DirectivePayload::SkillRevocation {
                         name: "hidden".parse().unwrap(),
@@ -204,7 +205,7 @@ mod tests {
                     },
                 )
                 .unwrap(),
-            ),
+            )),
         ];
         assert!(replay_transcript(&hidden, Path::new(".")).is_empty());
         assert!(

@@ -39,23 +39,32 @@ impl SessionRuntimeFactory for AcpHostFactory {
     ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<StartedSession>> + Send + '_>>
     {
         Box::pin(async move {
-            let workspace = canonical_workspace(request.workspace)?;
-            let start = match request.start {
-                SessionStart::New => runtime::SessionStart::New {
-                    inherited_models: None,
-                },
-                SessionStart::Existing { session_id } => {
-                    let sessions_dir = runtime::sessions_dir(&workspace, self.profile);
-                    let summary = transcript::list_sessions(&sessions_dir)?
-                        .into_iter()
-                        .find(|summary| summary.id == session_id)
-                        .with_context(|| {
-                            format!("no persisted session matches ID {session_id:?}")
-                        })?;
-                    runtime::SessionStart::Resume(summary.path)
-                }
-            };
-            let mut running = runtime::start_session_with_mcp(
+            let profile = self.profile;
+            let (workspace, start) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let workspace = runtime::canonical_workspace(&request.workspace)?;
+                let start = match request.start {
+                    SessionStart::New => runtime::SessionStart::New {
+                        inherited_models: None,
+                    },
+                    SessionStart::Existing { session_id } => {
+                        let directory = runtime::sessions_dir(&workspace, profile);
+                        // Match picker visibility without reading any other root.
+                        let path = transcript::find_session_file(&directory, &session_id)?
+                            .filter(|path| !transcript::is_abandoned_root(path))
+                            .with_context(|| {
+                                format!("no persisted session matches ID {session_id:?}")
+                            })?;
+                        runtime::SessionStart::Resume(path)
+                    }
+                };
+                Ok((workspace, start))
+            })
+            .await
+            .context("ACP session lookup task failed")??;
+            let runtime::StartedSession {
+                mut running,
+                restored,
+            } = runtime::start_acp_session(
                 &self.config,
                 &workspace,
                 start,
@@ -66,11 +75,14 @@ impl SessionRuntimeFactory for AcpHostFactory {
             let commands = running.command_sender();
             let events = running.take_event_receiver()?;
             let mut exits = running.take_exit_receiver()?;
-            let session_id = running.restoration.session_id.clone();
-            let transcript_items = running.restoration.transcript_items.clone();
-            let plan_state = running.restoration.plan_state.clone();
-            let selected_mode = running.restoration.selected_mode;
-            let startup_notices = running.restoration.startup_notices.clone();
+            let runtime::RestoredSession {
+                session_id,
+                transcript_items,
+                plan_state,
+                selected_mode,
+                startup_notices,
+                ..
+            } = restored;
             let background_exit = Box::pin(async move {
                 match exits.recv().await {
                     Some(exit) => RuntimeExit {
@@ -107,9 +119,16 @@ impl SessionRuntimeFactory for AcpHostFactory {
         Box<dyn std::future::Future<Output = anyhow::Result<Vec<SessionDescriptor>>> + Send + '_>,
     > {
         Box::pin(async move {
-            let workspace = canonical_workspace(workspace)?;
-            let summaries =
-                transcript::list_sessions(&runtime::sessions_dir(&workspace, self.profile))?;
+            let profile = self.profile;
+            let (workspace, summaries) =
+                tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let workspace = runtime::canonical_workspace(&workspace)?;
+                    let summaries =
+                        transcript::list_sessions(&runtime::sessions_dir(&workspace, profile))?;
+                    Ok((workspace, summaries))
+                })
+                .await
+                .context("ACP session discovery task failed")??;
             Ok(summaries
                 .into_iter()
                 .map(|summary| SessionDescriptor {
@@ -139,23 +158,6 @@ impl SessionRuntimeLifecycle for AcpRuntimeLifecycle {
             }
         })
     }
-}
-
-fn canonical_workspace(workspace: PathBuf) -> anyhow::Result<PathBuf> {
-    #[cfg(windows)]
-    let canonical = zevria_foundation::windows_io::checked_directory_path(&workspace)
-        .context("unsupported protected Windows workspace")?;
-    #[cfg(not(windows))]
-    let canonical = std::fs::canonicalize(&workspace).with_context(|| {
-        format!(
-            "failed to resolve the absolute ACP workspace at {}",
-            workspace.display()
-        )
-    })?;
-    if !canonical.is_dir() {
-        anyhow::bail!("ACP workspace {} is not a directory", canonical.display());
-    }
-    Ok(canonical)
 }
 
 #[cfg(test)]
@@ -205,14 +207,14 @@ mod tests {
             let mut writer = TranscriptWriter::create_with_id(directory, id).unwrap();
             writer
                 .rewrite(&[
-                    TranscriptItem::SessionModels(models.clone()),
+                    TranscriptItem::SessionModels(Box::new(models.clone())),
                     TranscriptItem::Message(Message::user("persisted")),
-                    TranscriptItem::Plan(PlanRecord::Started {
+                    TranscriptItem::Plan(Box::new(PlanRecord::Started {
                         id: artifact.version.id,
-                    }),
-                    TranscriptItem::Plan(PlanRecord::Ready {
+                    })),
+                    TranscriptItem::Plan(Box::new(PlanRecord::Ready {
                         artifact: artifact.clone(),
-                    }),
+                    })),
                 ])
                 .unwrap();
         }
@@ -306,7 +308,7 @@ mod tests {
         };
         let mut writer = TranscriptWriter::create_with_id(&directory, "saved-plan").unwrap();
         let items = vec![
-            TranscriptItem::SessionModels(
+            TranscriptItem::SessionModels(Box::new(
                 zevria_model::models::SessionModels::new(
                     zevria_model::models::ModelSelection::new(
                         ModelProfileRef::new("test", "test-model"),
@@ -318,14 +320,14 @@ mod tests {
                     ),
                 )
                 .unwrap(),
-            ),
+            )),
             TranscriptItem::Message(Message::user("plan it")),
-            TranscriptItem::Plan(PlanRecord::Started {
+            TranscriptItem::Plan(Box::new(PlanRecord::Started {
                 id: artifact.version.id,
-            }),
-            TranscriptItem::Plan(PlanRecord::Ready {
+            })),
+            TranscriptItem::Plan(Box::new(PlanRecord::Ready {
                 artifact: artifact.clone(),
-            }),
+            })),
         ];
         writer.rewrite(&items).unwrap();
         let path = writer.path().to_path_buf();
@@ -399,7 +401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_session_ids_are_resolved_by_exact_listing_match() {
+    async fn existing_session_ids_must_be_exact_filename_components() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = sessions_dir(workspace.path());
         let mut writer =
@@ -426,6 +428,80 @@ mod tests {
             error
                 .to_string()
                 .contains("no persisted session matches ID")
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_abandoned_roots_are_not_resumable_by_id() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = sessions_dir(workspace.path());
+        let config = crate::config::test_config();
+        let models = zevria_model::models::SessionModels::new(
+            config.modes.build.selection(),
+            config.modes.plan.selection(),
+        )
+        .unwrap();
+        let factory = AcpHostFactory::new(Arc::new(config));
+        for (id, item) in [
+            ("empty", None),
+            (
+                "models-only",
+                Some(TranscriptItem::SessionModels(Box::new(models))),
+            ),
+        ] {
+            let mut writer = TranscriptWriter::create_with_id(&sessions, id).unwrap();
+            if let Some(item) = item {
+                writer.append(&item).unwrap();
+            }
+            let path = writer.path().to_owned();
+            drop(writer);
+            let before = std::fs::read(&path).unwrap();
+            let Err(error) = factory
+                .start(StartSessionRequest {
+                    workspace: workspace.path().to_owned(),
+                    start: SessionStart::Existing {
+                        session_id: id.into(),
+                    },
+                    mcp_servers: Vec::new(),
+                })
+                .await
+            else {
+                panic!("ACP resumed an abandoned root: {id}");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("no persisted session matches ID")
+            );
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert!(!sessions.join(".leases.lock").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_session_lookup_preserves_filesystem_errors() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = sessions_dir(workspace.path());
+        std::fs::create_dir_all(sessions.parent().unwrap()).unwrap();
+        std::fs::write(&sessions, "not a directory").unwrap();
+        let factory = AcpHostFactory::new(Arc::new(crate::config::test_config()));
+        let Err(error) = factory
+            .start(StartSessionRequest {
+                workspace: workspace.path().to_owned(),
+                start: SessionStart::Existing {
+                    session_id: "session".into(),
+                },
+                mcp_servers: Vec::new(),
+            })
+            .await
+        else {
+            panic!("ACP accepted an invalid sessions directory");
+        };
+        assert!(error.to_string().contains("failed to inspect session file"));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotADirectory,
         );
     }
 }

@@ -14,14 +14,14 @@ fn history(workers: usize, abandon_second: bool) -> Vec<TranscriptItem> {
     let id = PlanId::new();
     let markdown = "\r\n  # Go\r\n- Do this.  ";
     let mut items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
             run_id: start.run_id.clone(),
             version: ENSEMBLE_REVIEW_VERSION,
-        }),
-        TranscriptItem::Plan(PlanRecord::Started { id }),
+        })),
+        TranscriptItem::Plan(Box::new(PlanRecord::Started { id })),
     ];
     for state in &mut states {
         let events = [
@@ -49,12 +49,14 @@ fn history(workers: usize, abandon_second: bool) -> Vec<TranscriptItem> {
         ];
         for event in events {
             state.apply(&event).unwrap();
-            items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-                run_id: start.run_id.clone(),
-                worker_id: state.descriptor.id.clone(),
-                event: Box::new(event),
-                result: None,
-            }));
+            items.push(TranscriptItem::Ensemble(Box::new(
+                EnsembleRecord::WorkerReview {
+                    run_id: start.run_id.clone(),
+                    worker_id: state.descriptor.id.clone(),
+                    event: Box::new(event),
+                    result: None,
+                },
+            )));
         }
         let event = WorkerReviewEvent::Settled {
             generation: 1,
@@ -63,12 +65,14 @@ fn history(workers: usize, abandon_second: bool) -> Vec<TranscriptItem> {
             evidence: Box::new(state.evidence.clone()),
         };
         state.apply(&event).unwrap();
-        items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-            run_id: start.run_id.clone(),
-            worker_id: state.descriptor.id.clone(),
-            event: Box::new(event),
-            result: None,
-        }));
+        items.push(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::WorkerReview {
+                run_id: start.run_id.clone(),
+                worker_id: state.descriptor.id.clone(),
+                event: Box::new(event),
+                result: None,
+            },
+        )));
     }
     let mut last_result = None;
     for (index, state) in states.iter_mut().enumerate() {
@@ -97,37 +101,43 @@ fn history(workers: usize, abandon_second: bool) -> Vec<TranscriptItem> {
         if index + 1 == workers {
             last_result = Some(result);
         } else {
-            items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-                run_id: start.run_id.clone(),
-                worker_id: state.descriptor.id.clone(),
-                event: Box::new(event),
-                result: Some(result),
-            }));
+            items.push(TranscriptItem::Ensemble(Box::new(
+                EnsembleRecord::WorkerReview {
+                    run_id: start.run_id.clone(),
+                    worker_id: state.descriptor.id.clone(),
+                    event: Box::new(event),
+                    result: Some(result),
+                },
+            )));
         }
     }
     let outcomes = states
         .iter()
         .map(WorkerReviewState::outcome)
         .collect::<Vec<_>>();
-    items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed {
-        run_id: start.run_id.clone(),
-        final_confirmation: last_result.unwrap(),
-        outcomes: outcomes.clone(),
-    }));
-    items.push(TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
-        run_id: start.run_id.clone(),
-        synthesis_input: ensemble::build_synthesis_prompt_with_feedback(
-            start.workflow,
-            &start.prompt,
-            &outcomes,
-            &states,
-            usize::MAX,
-        )
-        .unwrap(),
-        agents: outcomes.iter().map(AgentRunOutcome::summary).collect(),
-    }));
+    items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkersConfirmed {
+            run_id: start.run_id.clone(),
+            final_confirmation: last_result.unwrap(),
+            outcomes: outcomes.clone(),
+        },
+    )));
+    items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::ReportsReady {
+            run_id: start.run_id.clone(),
+            synthesis_input: ensemble::build_synthesis_prompt_with_feedback(
+                start.workflow,
+                &start.prompt,
+                &outcomes,
+                &states,
+                usize::MAX,
+            )
+            .unwrap(),
+            agents: outcomes.iter().map(AgentRunOutcome::summary).collect(),
+        },
+    )));
     let confirmed = outcomes[0].confirmation.as_ref().unwrap();
-    items.push(TranscriptItem::Plan(PlanRecord::Published {
+    items.push(TranscriptItem::Plan(Box::new(PlanRecord::Published {
         artifact: DirectWorkerPlan::validate(markdown.into())
             .unwrap()
             .into_artifact(PlanVersion { id, revision: 1 }, TurnId::new(1)),
@@ -136,7 +146,7 @@ fn history(workers: usize, abandon_second: bool) -> Vec<TranscriptItem> {
             worker_id: outcomes[0].descriptor.id.clone(),
             revision: confirmed.snapshot.revision.clone(),
         },
-    }));
+    })));
     items
 }
 
@@ -148,13 +158,13 @@ fn direct_publication_replays_exact_frozen_markdown_as_published() {
     let restored: Vec<TranscriptItem> = serde_json::from_str(&serialized).unwrap();
     assert_eq!(restored, items);
     validate_session_replay(&restored).unwrap();
-    let run_id = match &items[0] {
-        TranscriptItem::Ensemble(EnsembleRecord::Started { start }) => start.run_id.clone(),
+    let run_id = match items[0].ensemble_record() {
+        Some(EnsembleRecord::Started { start }) => start.run_id.clone(),
         _ => unreachable!(),
     };
-    items.push(TranscriptItem::Ensemble(EnsembleRecord::Completed {
-        run_id,
-    }));
+    items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::Completed { run_id },
+    )));
     validate_session_replay(&items).unwrap();
 }
 
@@ -162,10 +172,13 @@ fn direct_publication_replays_exact_frozen_markdown_as_published() {
 fn direct_publication_rejects_forged_source_revision_content_and_metadata() {
     for mutation in 0..8 {
         let mut items = history(1, false);
-        let TranscriptItem::Plan(PlanRecord::Published {
+        let Some(TranscriptItem::Plan(record)) = items.last_mut() else {
+            unreachable!()
+        };
+        let PlanRecord::Published {
             artifact,
             provenance,
-        }) = items.last_mut().unwrap()
+        } = record.as_mut()
         else {
             unreachable!()
         };
@@ -211,8 +224,8 @@ fn direct_publication_requires_valid_seal_and_reports_in_order_once() {
             .iter()
             .position(|item| {
                 matches!(
-                    item,
-                    TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { .. })
+                    item.ensemble_record(),
+                    Some(EnsembleRecord::WorkersConfirmed { .. })
                 )
             })
             .unwrap();
@@ -231,11 +244,14 @@ fn direct_publication_requires_valid_seal_and_reports_in_order_once() {
                 items.push(items.last().unwrap().clone());
             }
             _ => {
-                let TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed {
+                let TranscriptItem::Ensemble(record) = &mut items[seal_index] else {
+                    unreachable!()
+                };
+                let EnsembleRecord::WorkersConfirmed {
                     outcomes,
                     final_confirmation,
                     ..
-                }) = &mut items[seal_index]
+                } = record.as_mut()
                 else {
                     unreachable!()
                 };

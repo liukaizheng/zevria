@@ -216,7 +216,7 @@ fn live_and_restored_user_jumps_include_both_ensemble_prompts_but_not_workers() 
             if restored {
                 app.restore(vec![
                     TranscriptItem::Message(first),
-                    TranscriptItem::Ensemble(EnsembleRecord::Started { start }),
+                    TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started { start })),
                     TranscriptItem::Message(answer),
                     TranscriptItem::Message(last),
                 ]);

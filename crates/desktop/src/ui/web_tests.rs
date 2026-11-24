@@ -527,7 +527,7 @@ fn answer_sources_update_independently_and_restore_with_working_chips(cx: &mut T
 
     attempt.close(ResponseAttemptOutcome::Interrupted);
     let record = IncompleteResponse::from_attempt(&attempt).unwrap().unwrap();
-    let saved = serde_json::to_vec(&TranscriptItem::IncompleteResponse(record)).unwrap();
+    let saved = serde_json::to_vec(&TranscriptItem::IncompleteResponse(Box::new(record))).unwrap();
     let restored: TranscriptItem = serde_json::from_slice(&saved).unwrap();
     controller.update(cx, |c, cx| {
         c.model.root.restore_transcript(vec![

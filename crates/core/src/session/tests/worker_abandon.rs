@@ -29,13 +29,13 @@ async fn ensemble_abandonment_seals_survivors_in_either_control_order() {
         };
         engine
             .commit(vec![
-                TranscriptItem::Ensemble(EnsembleRecord::Started {
+                TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                     start: start.clone(),
-                }),
-                TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+                })),
+                TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                     run_id: start.run_id.clone(),
                     version: ENSEMBLE_REVIEW_VERSION,
-                }),
+                })),
             ])
             .unwrap();
         let router = engine.capabilities.worker_controls.clone();
@@ -158,11 +158,14 @@ async fn ensemble_abandonment_seals_survivors_in_either_control_order() {
         let mut corrupt = engine.conversation.items().to_vec();
         let frozen = corrupt
             .iter_mut()
-            .find_map(|item| match item {
-                TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { outcomes, .. }) => {
-                    Some(outcomes)
+            .find_map(|item| {
+                let TranscriptItem::Ensemble(record) = item else {
+                    return None;
+                };
+                match record.as_mut() {
+                    EnsembleRecord::WorkersConfirmed { outcomes, .. } => Some(outcomes),
+                    _ => None,
                 }
-                _ => None,
             })
             .unwrap();
         frozen
@@ -215,13 +218,13 @@ async fn all_abandoned(worker_count: usize) {
     };
     engine
         .commit(vec![
-            TranscriptItem::Ensemble(EnsembleRecord::Started {
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                 start: start.clone(),
-            }),
-            TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+            })),
+            TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
                 run_id: start.run_id.clone(),
                 version: ENSEMBLE_REVIEW_VERSION,
-            }),
+            })),
         ])
         .unwrap();
     let router = engine.capabilities.worker_controls.clone();
@@ -258,10 +261,8 @@ async fn all_abandoned(worker_count: usize) {
     assert!(matches!(result, Err(Failure::Cancelled)));
     assert!(!retained_turn.is_cancelled());
     assert!(!engine.conversation.items().iter().any(|item| matches!(
-        item,
-        TranscriptItem::Ensemble(
-            EnsembleRecord::WorkersConfirmed { .. } | EnsembleRecord::ReportsReady { .. }
-        )
+        item.ensemble_record(),
+        Some(EnsembleRecord::WorkersConfirmed { .. } | EnsembleRecord::ReportsReady { .. })
     )));
     zevria_transcript::validate_ensemble_review_history(engine.conversation.items()).unwrap();
     let (events, _receiver) = session_event_channel(128);

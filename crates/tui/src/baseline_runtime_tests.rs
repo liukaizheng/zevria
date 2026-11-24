@@ -27,13 +27,13 @@ fn fixture() -> (EnsembleStart, Vec<TranscriptItem>, Vec<WorkerReviewState>) {
             .collect(),
     };
     let mut items = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
             run_id: start.run_id.clone(),
             version: 1,
-        }),
+        })),
     ];
     let mut states = Vec::new();
     for descriptor in &start.agents {
@@ -68,12 +68,14 @@ fn fixture() -> (EnsembleStart, Vec<TranscriptItem>, Vec<WorkerReviewState>) {
             },
         ] {
             state.apply(&event).unwrap();
-            items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-                run_id: start.run_id.clone(),
-                worker_id: descriptor.id.clone(),
-                event: Box::new(event),
-                result: None,
-            }));
+            items.push(TranscriptItem::Ensemble(Box::new(
+                EnsembleRecord::WorkerReview {
+                    run_id: start.run_id.clone(),
+                    worker_id: descriptor.id.clone(),
+                    event: Box::new(event),
+                    result: None,
+                },
+            )));
         }
         states.push(state);
     }
@@ -99,22 +101,24 @@ fn mark(
         receipt: receipt.clone(),
     };
     zevria_workflow::apply_worker_review_event(states, &receipt.target.worker_id, &event).unwrap();
-    items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-        run_id: start.run_id.clone(),
-        worker_id: receipt.target.worker_id.clone(),
-        event: Box::new(event),
-        result: Some(WorkerControlResult {
-            control: WorkerControl {
-                request_id: receipt.request_id.clone(),
-                target: receipt.target.clone(),
-                action: WorkerControlAction::Baseline {
-                    expected_revision: receipt.revision.clone(),
+    items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkerReview {
+            run_id: start.run_id.clone(),
+            worker_id: receipt.target.worker_id.clone(),
+            event: Box::new(event),
+            result: Some(WorkerControlResult {
+                control: WorkerControl {
+                    request_id: receipt.request_id.clone(),
+                    target: receipt.target.clone(),
+                    action: WorkerControlAction::Baseline {
+                        expected_revision: receipt.revision.clone(),
+                    },
                 },
-            },
-            accepted: true,
-            detail: "baseline".into(),
-        }),
-    }));
+                accepted: true,
+                detail: "baseline".into(),
+            }),
+        },
+    )));
     receipt
 }
 
@@ -146,12 +150,14 @@ fn late_outcomes_and_reports_cannot_revive_a_revoked_review_or_freeze_a_new_roun
         request_id: WorkerControlId::new(),
     };
     states[0].apply(&event).unwrap();
-    items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-        run_id: start.run_id.clone(),
-        worker_id: worker_id.clone(),
-        event: Box::new(event),
-        result: None,
-    }));
+    items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkerReview {
+            run_id: start.run_id.clone(),
+            worker_id: worker_id.clone(),
+            event: Box::new(event),
+            result: None,
+        },
+    )));
     publish(&mut views, &start, &states[0]);
     views.apply(SessionEvent::AgentRunFinished {
         turn_id: TurnId::new(1),
@@ -173,11 +179,13 @@ fn late_outcomes_and_reports_cannot_revive_a_revoked_review_or_freeze_a_new_roun
         "stale outcome cannot freeze a still-live review"
     );
     assert!(!views.agents[0].baseline);
-    items.push(TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
-        run_id: start.run_id.clone(),
-        synthesis_input: rig_core::message::Message::user("stale lower-authority summary"),
-        agents: vec![stale.summary()],
-    }));
+    items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::ReportsReady {
+            run_id: start.run_id.clone(),
+            synthesis_input: rig_core::message::Message::user("stale lower-authority summary"),
+            agents: vec![stale.summary()],
+        },
+    )));
     let mut restored = App::new();
     restored.restore(items);
     assert_eq!(restored.ensemble_baseline(&start.run_id), None);
@@ -193,14 +201,14 @@ fn reports_only_baseline_evidence_has_the_same_live_and_restored_fallback() {
     mark(&start, &mut states, &mut items, 0);
     let summary = states[0].outcome().summary();
     let records = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
             synthesis_input: rig_core::message::Message::user("reports"),
             agents: vec![summary.clone()],
-        }),
+        })),
     ];
     let mut live = App::new();
     live.reduce(SessionEvent::EnsembleStarted {
@@ -298,10 +306,13 @@ fn historical_badges_follow_root_transfer_clear_and_absence_not_sidecar_text() {
     let mut frozen = transferred.clone();
     let mut frozen_states = states.clone();
     mark(&start, &mut frozen_states, &mut frozen, 2);
-    let TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
+    let Some(TranscriptItem::Ensemble(record)) = frozen.pop() else {
+        unreachable!()
+    };
+    let EnsembleRecord::WorkerReview {
         result: Some(final_confirmation),
         ..
-    }) = frozen.pop().unwrap()
+    } = *record
     else {
         unreachable!()
     };
@@ -309,53 +320,59 @@ fn historical_badges_follow_root_transfer_clear_and_absence_not_sidecar_text() {
         .iter()
         .map(WorkerReviewState::outcome)
         .collect::<Vec<_>>();
-    frozen.push(TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed {
-        run_id: start.run_id.clone(),
-        final_confirmation,
-        outcomes: outcomes.clone(),
-    }));
+    frozen.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkersConfirmed {
+            run_id: start.run_id.clone(),
+            final_confirmation,
+            outcomes: outcomes.clone(),
+        },
+    )));
     let mut reports = frozen.clone();
-    reports.push(TranscriptItem::Ensemble(EnsembleRecord::ReportsReady {
-        run_id: start.run_id.clone(),
-        synthesis_input: zevria_workflow::ensemble::build_synthesis_prompt(
-            start.workflow,
-            &start.prompt,
-            &outcomes,
-            usize::MAX,
-        )
-        .unwrap(),
-        agents: outcomes
-            .iter()
-            .map(zevria_workflow::AgentRunOutcome::summary)
-            .collect(),
-    }));
+    reports.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::ReportsReady {
+            run_id: start.run_id.clone(),
+            synthesis_input: zevria_workflow::ensemble::build_synthesis_prompt(
+                start.workflow,
+                &start.prompt,
+                &outcomes,
+                usize::MAX,
+            )
+            .unwrap(),
+            agents: outcomes
+                .iter()
+                .map(zevria_workflow::AgentRunOutcome::summary)
+                .collect(),
+        },
+    )));
     let request_id = WorkerControlId::new();
-    items.push(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-        run_id: start.run_id.clone(),
-        worker_id: states[1].descriptor.id.clone(),
-        event: Box::new(WorkerReviewEvent::BaselineCleared {
-            request_id: request_id.clone(),
-        }),
-        result: Some(WorkerControlResult {
-            control: WorkerControl {
-                request_id,
-                target: selected.target.clone(),
-                action: WorkerControlAction::Unbaseline {
-                    expected_revision: selected.revision.clone(),
+    items.push(TranscriptItem::Ensemble(Box::new(
+        EnsembleRecord::WorkerReview {
+            run_id: start.run_id.clone(),
+            worker_id: states[1].descriptor.id.clone(),
+            event: Box::new(WorkerReviewEvent::BaselineCleared {
+                request_id: request_id.clone(),
+            }),
+            result: Some(WorkerControlResult {
+                control: WorkerControl {
+                    request_id,
+                    target: selected.target.clone(),
+                    action: WorkerControlAction::Unbaseline {
+                        expected_revision: selected.revision.clone(),
+                    },
                 },
-            },
-            accepted: true,
-            detail: "confirmation retained".into(),
-        }),
-    }));
+                accepted: true,
+                detail: "confirmation retained".into(),
+            }),
+        },
+    )));
     let root_absent = vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: start.clone(),
-        }),
-        TranscriptItem::Ensemble(EnsembleRecord::ReviewStarted {
+        })),
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::ReviewStarted {
             run_id: start.run_id.clone(),
             version: 1,
-        }),
+        })),
     ];
     for (history, selected_index) in [
         (marked_a, Some(0)),

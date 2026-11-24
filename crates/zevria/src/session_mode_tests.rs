@@ -50,7 +50,7 @@ async fn select_mode(
     }
 }
 
-fn assert_tui_restoration_uses_selected_mode(restoration: &runtime::SessionRestoration) {
+fn assert_tui_restoration_uses_selected_mode(restoration: &runtime::RestoredSession) {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use zevria_tui::{App, UiAction};
 
@@ -85,18 +85,18 @@ async fn fresh_root_headers_and_selected_only_restoration_are_frontend_authorita
             inherited_models: None,
         })
         .await;
-    assert_eq!(fresh.restoration().selected_mode, SessionMode::Build);
+    assert_eq!(fresh.restored.selected_mode, SessionMode::Build);
     assert!(matches!(
-        fresh.restoration().transcript_items.as_slice(),
+        fresh.restored.transcript_items.as_slice(),
         [
             TranscriptItem::SessionModels(_),
             TranscriptItem::SessionMode(SessionMode::Build)
         ]
     ));
-    let headers = fresh.restoration().transcript_items.clone();
-    let fresh_path = fresh.restoration().transcript_path.clone();
+    let headers = fresh.restored.transcript_items.clone();
+    let fresh_path = fresh.restored.transcript_path.clone();
     assert!(!fresh_path.exists());
-    fresh.shutdown().await.unwrap();
+    fresh.running.shutdown().await.unwrap();
     assert!(!fresh_path.exists());
 
     let factory = crate::acp_host::AcpHostFactory::new(Arc::new(load(&fixture.path).unwrap()));
@@ -120,11 +120,18 @@ async fn fresh_root_headers_and_selected_only_restoration_are_frontend_authorita
             let mut resumed = fixture
                 .start(runtime::SessionStart::Resume(path.clone()))
                 .await;
-            assert_eq!(resumed.restoration().selected_mode, selected_mode);
-            assert_eq!(resumed.restoration().plan_state, PlanWorkflowState::Idle);
-            assert_eq!(resumed.restoration().transcript_items, items);
-            assert!(resumed.take_event_receiver().unwrap().try_recv().is_err());
-            resumed.shutdown().await.unwrap();
+            assert_eq!(resumed.restored.selected_mode, selected_mode);
+            assert_eq!(resumed.restored.plan_state, PlanWorkflowState::Idle);
+            assert_eq!(resumed.restored.transcript_items, items);
+            assert!(
+                resumed
+                    .running
+                    .take_event_receiver()
+                    .unwrap()
+                    .try_recv()
+                    .is_err()
+            );
+            resumed.running.shutdown().await.unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), before);
         }
 
@@ -159,23 +166,29 @@ async fn pending_mode_selection_stays_unsaved_and_historical_modes_resume_across
                 inherited_models: None,
             })
             .await;
-        let id = tui.restoration().session_id.clone();
-        let path = tui.restoration().transcript_path.clone();
-        let mut expected = tui.restoration().transcript_items.clone();
+        let id = tui.restored.session_id.clone();
+        let path = tui.restored.transcript_path.clone();
+        let mut expected = tui.restored.transcript_items.clone();
         assert!(!path.exists());
-        let mut events = tui.take_event_receiver().unwrap();
+        let mut events = tui.running.take_event_receiver().unwrap();
         assert!(events.try_recv().is_err());
         select_mode(
-            &tui.command_sender(),
+            &tui.running.command_sender(),
             &mut events,
             SessionMode::Build,
             false,
         )
         .await;
         assert!(!path.exists());
-        select_mode(&tui.command_sender(), &mut events, SessionMode::Plan, true).await;
         select_mode(
-            &tui.command_sender(),
+            &tui.running.command_sender(),
+            &mut events,
+            SessionMode::Plan,
+            true,
+        )
+        .await;
+        select_mode(
+            &tui.running.command_sender(),
             &mut events,
             selected_mode,
             selected_mode != SessionMode::Plan,
@@ -183,7 +196,7 @@ async fn pending_mode_selection_stays_unsaved_and_historical_modes_resume_across
         .await;
         // Neither Build -> Plan nor Plan -> Build materializes a new session.
         assert!(!path.exists());
-        tui.shutdown().await.unwrap();
+        tui.running.shutdown().await.unwrap();
         assert!(events.try_recv().is_err());
         assert!(!path.exists());
         assert!(
@@ -241,30 +254,38 @@ async fn pending_mode_selection_stays_unsaved_and_historical_modes_resume_across
         select_mode(&acp.commands, &mut acp.events, selected_mode, true).await;
         acp.lifecycle.shutdown().await.unwrap();
         assert!(acp.events.try_recv().is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), selected_bytes);
+        let appended = std::fs::read(&path).unwrap();
+        assert!(appended.starts_with(&selected_bytes));
+        expected.extend([
+            TranscriptItem::SessionMode(intermediate),
+            TranscriptItem::SessionMode(selected_mode),
+        ]);
         assert!(!path.with_extension("jsonl.lock").exists());
         assert!(server.requests.try_recv().is_err());
 
         let mut resumed_tui = fixture
             .start(runtime::SessionStart::Resume(path.clone()))
             .await;
-        assert_eq!(resumed_tui.restoration().session_id, id);
-        assert_eq!(resumed_tui.restoration().selected_mode, selected_mode);
-        assert_eq!(
-            resumed_tui.restoration().plan_state,
-            PlanWorkflowState::Idle
-        );
-        assert_eq!(resumed_tui.restoration().transcript_items, expected);
+        assert_eq!(resumed_tui.restored.session_id, id);
+        assert_eq!(resumed_tui.restored.selected_mode, selected_mode);
+        assert_eq!(resumed_tui.restored.plan_state, PlanWorkflowState::Idle);
+        assert_eq!(resumed_tui.restored.transcript_items, expected);
         assert!(
             resumed_tui
+                .running
                 .take_event_receiver()
                 .unwrap()
                 .try_recv()
                 .is_err()
         );
-        assert_tui_restoration_uses_selected_mode(resumed_tui.restoration());
-        resumed_tui.shutdown().await.unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), selected_bytes);
+        assert_tui_restoration_uses_selected_mode(&resumed_tui.restored);
+        resumed_tui.running.shutdown().await.unwrap();
+        let appended = std::fs::read(&path).unwrap();
+        assert!(appended.starts_with(&selected_bytes));
+        expected.extend([
+            TranscriptItem::SessionMode(intermediate),
+            TranscriptItem::SessionMode(selected_mode),
+        ]);
         assert!(!path.with_extension("jsonl.lock").exists());
         assert_eq!(std::fs::read(&fixture.path).unwrap(), config_before);
         assert!(server.requests.try_recv().is_err());
@@ -280,17 +301,18 @@ async fn production_mode_selection_does_not_allocate_turns_or_call_the_provider(
             inherited_models: None,
         })
         .await;
-    let path = root.restoration().transcript_path.clone();
+    let path = root.restored.transcript_path.clone();
     assert!(!path.exists());
-    let mut events = root.take_event_receiver().unwrap();
+    let mut events = root.running.take_event_receiver().unwrap();
     for mode in [SessionMode::Plan, SessionMode::Build] {
-        select_mode(&root.command_sender(), &mut events, mode, true).await;
+        select_mode(&root.running.command_sender(), &mut events, mode, true).await;
         assert!(server.requests.try_recv().is_err());
     }
     assert!(!path.exists());
     // The first actual prompt must still own turn 1 in this same engine, not
     // merely in a new runtime that would reset an accidentally spent turn ID.
-    root.command_sender()
+    root.running
+        .command_sender()
         .send(SessionCommand::Turn(
             zevria_session_api::TurnCommand::Submit {
                 behavior: zevria_foundation::RequestBehavior::Standard,
@@ -321,7 +343,7 @@ async fn production_mode_selection_does_not_allocate_turns_or_call_the_provider(
     )
     .await;
     server.expect("p", "old").await;
-    root.shutdown().await.unwrap();
+    root.running.shutdown().await.unwrap();
     assert!(server.requests.try_recv().is_err());
 }
 
@@ -335,13 +357,13 @@ async fn roots_without_selected_mode_metadata_use_the_engine_plan_fallback() {
         })
         .await;
     let headers = fresh
-        .restoration()
+        .restored
         .transcript_items
         .iter()
         .filter(|item| !matches!(item, TranscriptItem::SessionMode(_)))
         .cloned()
         .collect::<Vec<_>>();
-    fresh.shutdown().await.unwrap();
+    fresh.running.shutdown().await.unwrap();
     let artifact = plan_handoff("source").artifact;
     for (id, records, state, selected_mode) in [
         (
@@ -382,7 +404,11 @@ async fn roots_without_selected_mode_metadata_use_the_engine_plan_fallback() {
         items.push(TranscriptItem::Message(rig_core::message::Message::user(
             "saved conversation",
         )));
-        items.extend(records.into_iter().map(TranscriptItem::Plan));
+        items.extend(
+            records
+                .into_iter()
+                .map(|record| TranscriptItem::Plan(Box::new(record))),
+        );
         let mut writer = TranscriptWriter::create_with_id(
             &transcript::sessions_dir(fixture.directory.path()),
             id,
@@ -395,17 +421,17 @@ async fn roots_without_selected_mode_metadata_use_the_engine_plan_fallback() {
         let restored = fixture
             .start(runtime::SessionStart::Resume(path.clone()))
             .await;
-        assert_eq!(restored.restoration().selected_mode, selected_mode);
-        assert_eq!(restored.restoration().plan_state, state);
-        assert_eq!(restored.restoration().transcript_items, items);
-        restored.shutdown().await.unwrap();
+        assert_eq!(restored.restored.selected_mode, selected_mode);
+        assert_eq!(restored.restored.plan_state, state);
+        assert_eq!(restored.restored.transcript_items, items);
+        restored.running.shutdown().await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     assert!(server.requests.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn worker_profile_rejects_persisted_orchestrate_without_provider_or_transcript_mutation() {
+async fn worker_profile_rejects_unknown_mode_without_provider_or_transcript_mutation() {
     let mut server = Server::new().await;
     let fixture = Fixture::new(&server.url);
     let fresh = fixture
@@ -413,9 +439,9 @@ async fn worker_profile_rejects_persisted_orchestrate_without_provider_or_transc
             inherited_models: None,
         })
         .await;
-    let mut items = fresh.restoration().transcript_items.clone();
+    let mut items = fresh.restored.transcript_items.clone();
     items[1] = TranscriptItem::SessionMode(SessionMode::Build);
-    fresh.shutdown().await.unwrap();
+    fresh.running.shutdown().await.unwrap();
     let workspace = std::fs::canonicalize(fixture.directory.path()).unwrap();
     let directory = runtime::sessions_dir(&workspace, ExecutionProfile::EnsembleWorker);
     let mut writer = TranscriptWriter::create_with_id(&directory, "invalid-worker").unwrap();
@@ -444,10 +470,7 @@ async fn worker_profile_rejects_persisted_orchestrate_without_provider_or_transc
         Ok(_) => panic!("worker profile must reject Orchestrate"),
         Err(error) => format!("{error:#}"),
     };
-    assert!(
-        error.contains("legacy Orchestrate mode is no longer supported"),
-        "{error}"
-    );
+    assert!(error.contains("unsupported history"), "{error}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(zevria_host::test_support::RootSessionLease::acquire(&path).is_ok());
     assert!(server.requests.try_recv().is_err());

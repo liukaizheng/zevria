@@ -99,10 +99,12 @@ impl AdmissionFixture {
         if activated {
             fixture
                 .engine
-                .commit(TranscriptItem::SkillInvocation(SkillInvocation::new(
-                    snapshot.name().clone(),
-                    "first activation",
-                    SkillApplication::Activate(snapshot),
+                .commit(TranscriptItem::SkillInvocation(Box::new(
+                    SkillInvocation::new(
+                        snapshot.name().clone(),
+                        "first activation",
+                        SkillApplication::Activate(snapshot),
+                    ),
                 )))
                 .unwrap();
             fixture.engine.reconcile_before_dispatch(&policy).unwrap();

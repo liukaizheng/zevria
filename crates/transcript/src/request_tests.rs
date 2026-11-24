@@ -10,7 +10,7 @@ fn request(behavior: RequestBehavior) -> Vec<TranscriptItem> {
             message: Message::user("ordered prompt"),
             request: request.clone(),
         },
-        TranscriptItem::RequestDirective(RequestDirective::boundary(request)),
+        TranscriptItem::RequestDirective(Box::new(RequestDirective::boundary(request))),
     ]
 }
 
@@ -48,7 +48,7 @@ fn request_ownership_placement_and_single_correction_are_validated() {
         unreachable!()
     };
     let correction =
-        TranscriptItem::RequestDirective(RequestDirective::correction(request.clone()));
+        TranscriptItem::RequestDirective(Box::new(RequestDirective::correction(request.clone())));
     assert!(InstructionReplayState::replay(&valid[..1]).is_err());
     assert!(InstructionReplayState::replay(&valid[1..]).is_err());
     let mut wrong = valid.clone();
@@ -107,9 +107,11 @@ fn scope_survives_resume_without_updating_legacy_request_bytes() {
             message: Message::user("edit a sibling file"),
             request: request.clone(),
         },
-        TranscriptItem::RequestDirective(RequestDirective::boundary_with_file_mutation_scope(
-            request,
-            FileMutationScope::ProcessFilesystem,
+        TranscriptItem::RequestDirective(Box::new(
+            RequestDirective::boundary_with_file_mutation_scope(
+                request,
+                FileMutationScope::ProcessFilesystem,
+            ),
         )),
     ];
     let mut writer = TranscriptWriter::append_to(path.clone()).unwrap();
@@ -136,16 +138,17 @@ fn compaction_reprojects_typed_contract_not_summary_claims_or_skills() {
         unreachable!()
     };
     let request = request.clone();
-    items[1] =
-        TranscriptItem::RequestDirective(RequestDirective::boundary_with_file_mutation_scope(
+    items[1] = TranscriptItem::RequestDirective(Box::new(
+        RequestDirective::boundary_with_file_mutation_scope(
             request.clone(),
             FileMutationScope::ProcessFilesystem,
-        ));
-    items.push(TranscriptItem::Message(Message::assistant("premature")));
-    items.push(TranscriptItem::RequestDirective(
-        RequestDirective::correction(request),
+        ),
     ));
-    items.push(TranscriptItem::Compaction(
+    items.push(TranscriptItem::Message(Message::assistant("premature")));
+    items.push(TranscriptItem::RequestDirective(Box::new(
+        RequestDirective::correction(request),
+    )));
+    items.push(TranscriptItem::Compaction(Box::new(
         CompactionCheckpoint::new(
             CompactionTrigger::AutomaticMidTurn,
             CompactionBackend::LocalSummary,
@@ -155,7 +158,7 @@ fn compaction_reprojects_typed_contract_not_summary_claims_or_skills() {
             vec![],
         )
         .unwrap(),
-    ));
+    )));
     assert!(InstructionReplayState::replay(&items).is_ok());
     let input = model_input(&items);
     assert_eq!(
@@ -179,7 +182,7 @@ fn compaction_reprojects_typed_contract_not_summary_claims_or_skills() {
 }
 
 #[test]
-fn malformed_sidecars_and_legacy_orchestrate_are_explicitly_rejected_without_rewriting() {
+fn malformed_request_fields_and_unknown_mode_are_rejected_without_rewriting() {
     let items = request(RequestBehavior::Orchestrate);
     let encoded = serde_json::to_value(&items[0]).unwrap();
     for mutated in [
@@ -190,17 +193,17 @@ fn malformed_sidecars_and_legacy_orchestrate_are_explicitly_rejected_without_rew
         },
         {
             let mut v = encoded.clone();
-            v["zevria_request"]["version"] = 2.into();
+            v["request"]["version"] = 2.into();
             v
         },
         {
             let mut v = encoded.clone();
-            v["zevria_request"]["extra"] = true.into();
+            v["request"]["extra"] = true.into();
             v
         },
         {
             let mut v = encoded.clone();
-            v["zevria_request"]["id"] = "invalid".into();
+            v["request"]["id"] = "invalid".into();
             v
         },
         {
@@ -212,12 +215,13 @@ fn malformed_sidecars_and_legacy_orchestrate_are_explicitly_rejected_without_rew
         assert!(serde_json::from_value::<TranscriptItem>(mutated).is_err());
     }
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("legacy.jsonl");
-    let bytes = b"{\"zevria_session_mode\":{\"version\":1,\"selected\":\"orchestrate\"}}\n";
+    let path = directory.path().join("unknown-mode.jsonl");
+    let bytes = b"{\"type\":\"session_mode\",\"selected\":\"unknown\"}\n";
     std::fs::write(&path, bytes).unwrap();
     let error = load_report(&path).unwrap_err().to_string();
     assert!(
-        error.contains("legacy Orchestrate") && error.contains("/orchestrate <prompt>"),
+        error.contains("unsupported history")
+            && error.contains("unknown record, event, or enum variant"),
         "{error}"
     );
     assert_eq!(std::fs::read(path).unwrap(), bytes);

@@ -654,10 +654,12 @@ async fn resumed_disabled_and_skill_free_scopes_keep_full_pins_but_not_active_bo
         let (_directory, mut writer) = test_transcript();
         let pin = test_skills().get("review").unwrap().snapshot();
         writer
-            .append(&TranscriptItem::SkillInvocation(SkillInvocation::new(
-                pin.name().clone(),
-                "original",
-                SkillApplication::Activate(pin.clone()),
+            .append(&TranscriptItem::SkillInvocation(Box::new(
+                SkillInvocation::new(
+                    pin.name().clone(),
+                    "original",
+                    SkillApplication::Activate(pin.clone()),
+                ),
             )))
             .unwrap();
         let mut policies = test_policies();

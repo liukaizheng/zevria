@@ -2362,16 +2362,12 @@ impl ConversationState {
         // review transitions/seals may supersede outcome-only/ReportsReady data.
         let reviewed: std::collections::HashSet<_> = items
             .iter()
-            .flat_map(|item| match item {
-                TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-                    run_id,
-                    worker_id,
-                    ..
+            .flat_map(|item| match item.ensemble_record() {
+                Some(EnsembleRecord::WorkerReview {
+                    run_id, worker_id, ..
                 }) => vec![(run_id.clone(), worker_id.clone())],
-                TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed {
-                    run_id,
-                    outcomes,
-                    ..
+                Some(EnsembleRecord::WorkersConfirmed {
+                    run_id, outcomes, ..
                 }) => outcomes
                     .iter()
                     .map(|outcome| (run_id.clone(), outcome.descriptor.id.clone()))
@@ -2465,14 +2461,14 @@ impl ConversationState {
                         } else {
                             None
                         };
-                    self.push_job_notice(notice, header);
+                    self.push_job_notice(*notice, header);
                 }
                 TranscriptItem::SkillInvocation(invocation) => {
                     let turn = self.allocate_turn();
                     current_turn = Some(turn);
                     self.push_user_turn(invocation.display_message(), turn);
                 }
-                TranscriptItem::Plan(record) => match record {
+                TranscriptItem::Plan(record) => match *record {
                     PlanRecord::Ready { artifact } | PlanRecord::Published { artifact, .. } => {
                         self.push_plan_artifact(artifact)
                     }
@@ -2486,7 +2482,7 @@ impl ConversationState {
                     | PlanRecord::RevisionRequested { .. }
                     | PlanRecord::Resolved { .. } => {}
                 },
-                TranscriptItem::Ensemble(record) => match record {
+                TranscriptItem::Ensemble(record) => match *record {
                     EnsembleRecord::Started { start } => {
                         let turn = self
                             .ensemble_turn(&start.run_id)
@@ -2867,11 +2863,11 @@ mod tests {
                 .unwrap()
                 .contains("interrupted")
         );
-        conversation.restore(vec![TranscriptItem::IncompleteResponse(
+        conversation.restore(vec![TranscriptItem::IncompleteResponse(Box::new(
             zevria_transcript::IncompleteResponse::from_attempt(&attempt)
                 .unwrap()
                 .unwrap(),
-        )]);
+        ))]);
         assert_eq!(conversation.history().len(), 1);
         assert_eq!(sources_for(&conversation.history()[0]), live_sources);
         let replay = zevria_model::ProviderReplay::openai_responses(
@@ -2900,17 +2896,17 @@ mod tests {
         )
         .unwrap();
         let mut hidden = vec![
-            TranscriptItem::SessionModels(models),
+            TranscriptItem::SessionModels(Box::new(models)),
             TranscriptItem::SessionMode(zevria_foundation::SessionMode::Build),
-            TranscriptItem::Directive(zevria_instructions::DirectiveContent::skill(
+            TranscriptItem::Directive(Box::new(zevria_instructions::DirectiveContent::skill(
                 &zevria_instructions::SkillSnapshot::new(
                     "hidden".parse().unwrap(),
                     "Hidden",
                     "HIDDEN_SKILL_BODY",
                 )
                 .unwrap(),
-            )),
-            TranscriptItem::Directive(
+            ))),
+            TranscriptItem::Directive(Box::new(
                 zevria_instructions::DirectiveContent::new(
                     zevria_instructions::DirectivePayload::SkillRevocation {
                         name: "hidden".parse().unwrap(),
@@ -2918,7 +2914,7 @@ mod tests {
                     },
                 )
                 .unwrap(),
-            ),
+            )),
         ];
         let mut conversation = ConversationState::default();
         conversation.restore(hidden.clone());

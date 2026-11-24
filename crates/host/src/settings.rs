@@ -58,32 +58,8 @@ fn lock_configuration(path: &Path) -> anyhow::Result<ConfigurationLock> {
     let mut name = path.as_os_str().to_os_string();
     name.push(".skills.lock");
     let lock_path = PathBuf::from(name);
-    if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
-        anyhow::ensure!(
-            metadata.file_type().is_file(),
-            "configuration lock must be a regular file"
-        );
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(not(windows))]
-    let lock = options
-        .open(&lock_path)
-        .context("cannot open configuration lock")?;
-    #[cfg(windows)]
-    let lock = zevria_foundation::windows_io::open_lock(&lock_path, true)
+    let lock = zevria_foundation::open_lock_file(&lock_path, true)
         .context("cannot safely open configuration lock")?;
-    anyhow::ensure!(
-        lock.metadata()?.is_file(),
-        "configuration lock must be regular"
-    );
     lock.try_lock()
         .context("configuration is busy in another process; retry")?;
     Ok(ConfigurationLock { file: lock })
@@ -227,14 +203,10 @@ impl PreparedUpdate {
 }
 
 /// Directory sync failures after publication cannot be rolled back safely.
-#[cfg(unix)]
 pub(crate) fn sync_parent(path: &Path) {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
-        && let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all())
+        && let Err(error) = zevria_foundation::sync_directory(parent)
     {
         tracing::warn!(target: "zevria::settings", %error, path = %path.display(), "file committed but parent directory sync failed");
     }
 }
-
-#[cfg(not(unix))]
-pub(crate) fn sync_parent(_path: &Path) {}

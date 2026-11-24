@@ -331,7 +331,8 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
     )
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let writer = TranscriptWriter::create(directory.path()).unwrap();
+    // Initial selections are staged until the first conversational commit.
+    let writer = TranscriptWriter::allocate(directory.path()).unwrap();
     let path = writer.path().to_path_buf();
     let mut engine = SessionEngine::new(
         router,
@@ -341,7 +342,7 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
         Arc::new(SkillCatalog::default()),
     )
     .unwrap()
-    .with_transcript_items(vec![TranscriptItem::SessionModels(
+    .with_transcript_items(vec![TranscriptItem::SessionModels(Box::new(
         zevria_model::models::SessionModels::new(
             ModelSelection::new(
                 profile.profile.clone(),
@@ -353,7 +354,7 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
             ),
         )
         .unwrap(),
-    )])
+    ))])
     .unwrap()
     .with_compaction_policy(
         zevria_model::CompactionPolicy::new(
@@ -416,7 +417,10 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
         })
     ));
     assert!(receiver.try_recv().is_err());
-    assert_eq!(&engine.conversation().items()[1..], records);
+    assert_eq!(
+        &engine.conversation().items()[1..1 + records.len()],
+        records
+    );
     assert_eq!(engine.conversation().input_identity(), identity.as_ref());
     assert_eq!(engine.provider().initialized_profile_count(), 1);
     drop(engine);
@@ -439,7 +443,7 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
             .count(),
         2
     );
-    assert_eq!(&loaded[1..], records);
+    assert_eq!(&loaded[1..1 + records.len()], records);
     assert_eq!(
         zevria_transcript::transcript::load_report(&path)
             .unwrap()

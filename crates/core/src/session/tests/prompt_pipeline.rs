@@ -116,14 +116,18 @@ async fn acceptance_prepares_once_validates_once_and_reuses_the_exact_counted_re
                 assert_eq!(work.measurements, 1);
                 assert_eq!(work.replay_installations, 1);
                 assert_eq!(replay.proposals, 1);
-                assert_eq!(replay.validations, 1);
-                assert_eq!(replay.full_replays, 1 + usize::from(edit));
+                assert_eq!(replay.validations, usize::from(edit));
+                assert_eq!(replay.full_replays, 2 * usize::from(edit));
                 assert_eq!(
                     replay.full_records,
-                    engine.conversation.items().len() + if edit { end } else { 0 }
+                    if edit {
+                        engine.conversation.items().len() + end
+                    } else {
+                        0
+                    }
                 );
                 assert_eq!(replay.pin_replays, 0);
-                assert_eq!(replay.suffix_applications, 1);
+                assert_eq!(replay.suffix_applications, 1 + usize::from(!edit));
                 assert_eq!(replay.header_scans, 0);
                 assert!(!accepted.compaction_attempted_for_first_dispatch);
                 let counted = engine.provider.counted_requests.lock().unwrap()[0].clone();
@@ -172,7 +176,7 @@ async fn failed_required_write_never_installs_replay_or_publishes_acceptance() {
     .await;
     assert!(matches!(result, Err(Rejection::Rejected(_))));
     assert_eq!(replay.proposals, 1);
-    assert_eq!(replay.validations, 1);
+    assert_eq!(replay.validations, 0);
     assert_eq!(work.replay_installations, 0);
     assert!(engine.active_skills().unwrap().is_empty());
     assert_eq!(engine.conversation.items(), before);
@@ -281,15 +285,16 @@ async fn checkpoint_versions_reuse_preparation_and_identity_with_one_remeasureme
             let commits = usize::from(!edit) + usize::from(!rejected);
             assert_eq!(work.replay_installations, commits);
             assert_eq!(replay.proposals, commits);
-            // Appended checkpoints now reduce only their suffix. The accepted
-            // prompt still validates a full proposal when adding its mode
-            // header (or replacing the edited prefix).
-            assert_eq!(replay.validations, usize::from(!rejected));
+            // Mode selections and checkpoints append with suffix replay.
+            assert_eq!(replay.validations, usize::from(edit && !rejected));
             assert_eq!(
                 replay.full_replays,
-                usize::from(!rejected) + usize::from(edit)
+                usize::from(edit) + usize::from(edit && !rejected)
             );
-            assert_eq!(replay.suffix_applications, 1 + usize::from(!edit));
+            assert_eq!(
+                replay.suffix_applications,
+                1 + usize::from(!edit) + usize::from(!edit && !rejected)
+            );
             assert_eq!(replay.header_scans, 0);
             assert_eq!(engine.provider.input_count_calls.load(Ordering::SeqCst), 2);
             {
@@ -471,7 +476,7 @@ async fn image_detection_uses_the_active_projection_not_compacted_history() {
     )
     .unwrap();
     engine
-        .commit(TranscriptItem::Compaction(checkpoint))
+        .commit(TranscriptItem::Compaction(Box::new(checkpoint)))
         .unwrap();
     engine.reset_after_history_replacement().unwrap();
     let (events, _receiver) = session_event_channel(64);

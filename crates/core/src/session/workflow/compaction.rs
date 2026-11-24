@@ -140,11 +140,8 @@ impl<P: ModelProvider> SessionEngine<P> {
                 items,
             ),
             task_snapshot: latest_successful_task_snapshot(items),
-            plan_context: replay_plan_state(items.iter().filter_map(|item| match item {
-                TranscriptItem::Plan(record) => Some(record),
-                _ => None,
-            }))?
-            .checkpoint_context(),
+            plan_context: replay_plan_state(items.iter().filter_map(TranscriptItem::plan_record))?
+                .checkpoint_context(),
         })
     }
 
@@ -370,7 +367,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         let backend = checkpoint.backend;
         // Write first: a failed append leaves both the active projection and
         // in-memory transcript unchanged.
-        self.commit(TranscriptItem::Compaction(checkpoint))?;
+        self.commit(TranscriptItem::Compaction(Box::new(checkpoint)))?;
         self.reset_after_history_replacement()?;
         if trigger == CompactionTrigger::Manual && !turn.is_cancelled() {
             let progress = ProgressReporter::for_turn(

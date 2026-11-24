@@ -4,7 +4,7 @@ use rig_core::message::{
 };
 
 fn record(placement: ToolDeclarationPlacement, name: &str) -> TranscriptItem {
-    TranscriptItem::ToolDeclarations(
+    TranscriptItem::ToolDeclarations(Box::new(
         ToolDeclarationRecord::new(
             placement,
             ToolDeclarations::new(vec![ToolDeclaration {
@@ -16,10 +16,10 @@ fn record(placement: ToolDeclarationPlacement, name: &str) -> TranscriptItem {
             .unwrap(),
         )
         .unwrap(),
-    )
+    ))
 }
 fn checkpoint() -> TranscriptItem {
-    TranscriptItem::Compaction(
+    TranscriptItem::Compaction(Box::new(
         CompactionCheckpoint::new(
             CompactionTrigger::Manual,
             CompactionBackend::LocalSummary,
@@ -27,7 +27,7 @@ fn checkpoint() -> TranscriptItem {
             vec![],
         )
         .unwrap(),
-    )
+    ))
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn ordered_declarations_roundtrip_and_window_projection() {
     let value = serde_json::to_value(&initial).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({"zevria_tool_declarations":{"version":1,"placement":"initial","tools":[{"name":"a","description":"description","parameters":{"type":"object","properties":{"z":{},"a":{}}}}]}})
+        serde_json::json!({"type":"tool_declarations","declarations":{"version":1,"placement":"initial","tools":[{"name":"a","description":"description","parameters":{"type":"object","properties":{"z":{},"a":{}}}}]}})
     );
     let directory = tempfile::tempdir().unwrap();
     let mut conversation = Conversation::new(TranscriptWriter::create(directory.path()).unwrap());
@@ -87,15 +87,15 @@ fn ordered_declarations_roundtrip_and_window_projection() {
 }
 
 #[test]
-fn malformed_envelopes_and_torn_declarations_are_rejected() {
+fn malformed_envelopes_are_rejected_but_a_torn_current_declaration_is_recoverable() {
     let value = serde_json::to_value(record(ToolDeclarationPlacement::Initial, "a")).unwrap();
-    let envelope = &value["zevria_tool_declarations"];
+    let envelope = &value["declarations"];
     for json in [
         format!(
-            "{{\"zevria_tool_declarations\":{envelope},\"role\":\"user\",\"content\":\"mixed\"}}"
+            "{{\"type\":\"tool_declarations\",\"declarations\":{envelope},\"role\":\"user\",\"content\":\"mixed\"}}"
         ),
         format!(
-            "{{\"zevria_tool_declarations\":{envelope},\"zevria_tool_declarations\":{envelope}}}"
+            "{{\"type\":\"tool_declarations\",\"declarations\":{envelope},\"declarations\":{envelope}}}"
         ),
         value.to_string().replace("\"version\":1", "\"version\":2"),
         value
@@ -114,10 +114,12 @@ fn malformed_envelopes_and_torn_declarations_are_rejected() {
     let path = directory.path().join("torn.jsonl");
     std::fs::write(
         &path,
-        "{\"zevria_tool_declarations\":{\"version\":1,\"placement\":",
+        "{\"type\":\"tool_declarations\",\"declarations\":{\"version\":1,\"placement\":",
     )
     .unwrap();
-    assert!(load(&path).is_err());
+    let outcome = crate::transcript::load_report(&path).unwrap();
+    assert!(outcome.items().is_empty());
+    assert_eq!(outcome.recoverable_lines, 1);
 }
 
 #[test]
@@ -204,10 +206,10 @@ fn validates_window_sequences_pending_batches_and_checkpoint_contents() {
             request,
         },
         initial,
-        TranscriptItem::RequestDirective(boundary),
+        TranscriptItem::RequestDirective(Box::new(boundary)),
         TranscriptItem::Message(Message::assistant("done")),
         additional,
-        TranscriptItem::RequestDirective(correction),
+        TranscriptItem::RequestDirective(Box::new(correction)),
     ];
     InstructionReplayState::replay(&sequence).unwrap();
 }

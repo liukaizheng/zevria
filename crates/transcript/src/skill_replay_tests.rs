@@ -226,7 +226,7 @@ fn skill_replay_reapplication_requires_pin_and_checkpoints_preserve_all_history(
         .is_err()
     );
     let mut items = batch(vec![SkillApplication::Activate(original.clone())]);
-    items.push(TranscriptItem::Compaction(
+    items.push(TranscriptItem::Compaction(Box::new(
         CompactionCheckpoint::new(
             CompactionTrigger::Manual,
             CompactionBackend::LocalSummary,
@@ -234,7 +234,7 @@ fn skill_replay_reapplication_requires_pin_and_checkpoints_preserve_all_history(
             vec![],
         )
         .unwrap(),
-    ));
+    )));
     assert_eq!(
         replay_active_skills(&items).unwrap().get(original.name()),
         Some(&original)
@@ -249,20 +249,20 @@ fn skill_replay_reapplication_requires_pin_and_checkpoints_preserve_all_history(
 #[test]
 fn skill_owning_records_reject_snapshot_and_invocation_tampering() {
     let snapshot = snapshot("Original");
-    let direct = TranscriptItem::SkillInvocation(SkillInvocation::new(
+    let direct = TranscriptItem::SkillInvocation(Box::new(SkillInvocation::new(
         snapshot.name().clone(),
         "inspect",
         SkillApplication::Activate(snapshot.clone()),
-    ));
+    )));
     let mut value = serde_json::to_value(&direct).unwrap();
-    value["zevria_skill_invocation"]["application"]["activate"]["body"] = json!("corrupt");
+    value["invocation"]["application"]["activate"]["body"] = json!("corrupt");
     assert!(serde_json::from_value::<TranscriptItem>(value).is_err());
     let mut value = serde_json::to_value(direct).unwrap();
-    value["zevria_skill_invocation"]["name"] = json!("other");
+    value["invocation"]["name"] = json!("other");
     assert!(serde_json::from_value::<TranscriptItem>(value).is_err());
     let mut value =
         serde_json::to_value(&batch(vec![SkillApplication::Activate(snapshot)])[1]).unwrap();
-    value["zevria_skill_applications"][0]["application"]["activate"]["metadata"]["description"] =
+    value["skill_applications"][0]["application"]["activate"]["metadata"]["description"] =
         json!("corrupt metadata");
     assert!(serde_json::from_value::<TranscriptItem>(value).is_err());
 }

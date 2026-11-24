@@ -84,7 +84,7 @@ impl ModelProvider for Provider {
 }
 fn root(settings: Arc<Settings>) -> (tempfile::TempDir, SessionEngine<Provider>) {
     let (directory, mut writer) = test_transcript();
-    let items = vec![TranscriptItem::SessionModels(
+    let items = vec![TranscriptItem::SessionModels(Box::new(
         SessionModels::new(
             zevria_model::models::ModelSelection::new(
                 test_profile(),
@@ -96,7 +96,7 @@ fn root(settings: Arc<Settings>) -> (tempfile::TempDir, SessionEngine<Provider>)
             ),
         )
         .unwrap(),
-    )];
+    ))];
     writer.rewrite(&items).unwrap();
     let provider = Provider {
         levels: [Level::Medium; ModelRole::COUNT],
@@ -234,7 +234,7 @@ async fn nonempty_over_limit_effort_updates_preserve_native_history_and_identity
             )
             .unwrap();
             engine
-                .commit(TranscriptItem::Compaction(checkpoint))
+                .commit(TranscriptItem::Compaction(Box::new(checkpoint)))
                 .unwrap();
             engine
                 .commit(TranscriptItem::Message(Message::user(
@@ -276,7 +276,7 @@ async fn nonempty_over_limit_effort_updates_preserve_native_history_and_identity
                     )],
                 }))
                 .unwrap();
-            let records = serde_json::to_value(&engine.conversation.items()[1..]).unwrap();
+            let before = std::fs::read(engine.conversation.path()).unwrap();
             let identity = engine.conversation.input_identity().cloned();
             let input = engine
                 .conversation
@@ -294,9 +294,10 @@ async fn nonempty_over_limit_effort_updates_preserve_native_history_and_identity
                     matches!(result, Result::Changed { snapshot: None, unchanged: same, .. } if same == unchanged),
                     "{result:?}"
                 );
-                assert_eq!(
-                    serde_json::to_value(&engine.conversation.items()[1..]).unwrap(),
-                    records
+                assert!(
+                    std::fs::read(engine.conversation.path())
+                        .unwrap()
+                        .starts_with(&before)
                 );
                 assert_eq!(engine.conversation.input_identity(), identity.as_ref());
                 assert_eq!(
@@ -313,7 +314,7 @@ async fn nonempty_over_limit_effort_updates_preserve_native_history_and_identity
                 engine.provider.forbid_history_inspection = true;
                 let loaded =
                     zevria_transcript::transcript::load_report(engine.conversation.path()).unwrap();
-                assert_eq!(serde_json::to_value(&loaded.items()[1..]).unwrap(), records);
+                assert_eq!(loaded.items(), engine.conversation.items());
                 let saved = loaded.session_models().unwrap().unwrap();
                 assert_eq!(saved.reasoning_for_mode(mode), Level::High);
                 assert_eq!(

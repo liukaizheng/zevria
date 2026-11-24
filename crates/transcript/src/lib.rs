@@ -3,8 +3,6 @@ use zevria_content::*;
 use zevria_foundation::*;
 use zevria_instructions::skill;
 use zevria_instructions::*;
-#[cfg(test)]
-use zevria_model::provider_replay;
 use zevria_model::*;
 use zevria_model::{compaction, models};
 use zevria_workflow::*;
@@ -17,6 +15,7 @@ pub use incomplete_response::*;
 mod ensemble_review_history;
 mod ensemble_review_journal;
 mod instruction_replay;
+mod jsonl;
 mod replay;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

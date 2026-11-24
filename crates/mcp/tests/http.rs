@@ -353,8 +353,13 @@ async fn http_discovery_calls_policy_notifications_and_cleanup() {
         .unwrap()
         .unwrap();
     assert!(!tools.snapshot().contains("mcp__fixture__added"));
-    assert!(manager.sync_pending_updates().await);
+    assert!(!manager.tool_allowed(McpToolAccess::AllEnabled, "mcp__fixture__added"));
+    assert!(manager.sync_pending_updates().await.is_some());
     assert!(tools.snapshot().contains("mcp__fixture__added"));
+    assert!(manager.tool_allowed(McpToolAccess::AllEnabled, "mcp__fixture__added"));
+    assert!(!manager.tool_allowed(McpToolAccess::PlanScoped, "mcp__fixture__added"));
+    assert!(manager.tool_allowed(McpToolAccess::PlanScoped, "mcp__fixture__read"));
+    assert!(manager.tool_allowed(McpToolAccess::PlanScoped, MCP_READ_RESOURCE_TOOL_NAME));
     manager.shutdown(Duration::from_secs(5)).await;
     assert!(!tools.snapshot().contains("mcp__fixture__read"));
     assert_eq!(fixture.deletes.load(Ordering::Relaxed), 1);

@@ -12,7 +12,8 @@ use rig_agent::tool::server::ToolServer;
 use rig_core::tool::ToolContext;
 use serde_json::{Value, json};
 use zevria_foundation::{
-    McpManagementRequest, McpManagementResult, McpManagementView, McpServerName, McpServerStatus,
+    MCP_LIST_RESOURCES_TOOL_NAME, MCP_READ_RESOURCE_TOOL_NAME, McpManagementRequest,
+    McpManagementResult, McpManagementView, McpServerName, McpServerStatus, McpToolAccess,
 };
 use zevria_mcp::{McpConfigPersister, McpConfigSource, McpManager};
 use zevria_session_api::mcp::McpSessionService;
@@ -46,14 +47,23 @@ fn serve() {
                     std::fs::write("handshake-marker", "initialize received").unwrap();
                     std::thread::sleep(Duration::from_secs(60));
                 }
-                json!({"protocolVersion":"2025-11-25","serverInfo":{"name":"stdio-fixture","version":"1"},"capabilities":{"tools":{}},"instructions":"Use fixture"})
+                let mut capabilities = json!({"tools":{}});
+                if std::env::args().any(|arg| arg == "--resources") {
+                    capabilities["resources"] = json!({});
+                }
+                json!({"protocolVersion":"2025-11-25","serverInfo":{"name":"stdio-fixture","version":"1"},"capabilities":capabilities,"instructions":"Use fixture"})
             }
             "tools/list" => {
                 json!({"tools":[{"name":"env","inputSchema":{"type":"object"},"description":"Return sample env"}]})
             }
             "tools/call" => {
+                if std::env::args().any(|arg| arg == "--exit-on-call") {
+                    return;
+                }
                 json!({"content":[{"type":"text","text":std::env::var("MCP_FIXTURE_VALUE").unwrap()}]})
             }
+            "resources/list" => json!({"resources":[]}),
+            "resources/templates/list" => json!({"resourceTemplates":[]}),
             _ => {
                 writeln!(output, "{}", json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"not implemented"}})).unwrap();
                 output.flush().unwrap();
@@ -152,10 +162,59 @@ async fn main() {
             .await
             .is_err()
     );
+    disconnected_resource_server_denies_dispatch_before_registry_sync().await;
     reload_preserves_unchanged_server().await;
     shutdown_interrupts_pending_handshake().await;
     shutdown_rejects_reload_and_enable_commits().await;
     aborted_disable_keeps_catalog_invalidation_pending().await;
+}
+
+async fn disconnected_resource_server_denies_dispatch_before_registry_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = ToolServer::new().run();
+    let source = McpConfigSource {
+        revision: "disconnect".into(),
+        config: serde_json::from_value(json!({
+            "servers": {
+                "fixture": {
+                    "command":std::env::current_exe().unwrap(),
+                    "args":["--serve","--resources","--exit-on-call"],
+                    "required":true
+                }
+            }
+        }))
+        .unwrap(),
+    };
+    let manager = McpManager::start(source, vec![], dir.path().into(), tools.clone(), None)
+        .await
+        .unwrap();
+    let mut changes = manager.changes();
+    for helper in [MCP_LIST_RESOURCES_TOOL_NAME, MCP_READ_RESOURCE_TOOL_NAME] {
+        assert!(manager.tool_allowed(McpToolAccess::PlanScoped, helper));
+    }
+    let wire = "mcp__fixture__env";
+    let tool = tools.snapshot().get(wire).unwrap().clone();
+    let result = tool.execute("{}".into(), &mut ToolContext::new()).await;
+    assert!(!result.is_success());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while manager.tool_allowed(McpToolAccess::AllEnabled, wire) {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    for helper in [MCP_LIST_RESOURCES_TOOL_NAME, MCP_READ_RESOURCE_TOOL_NAME] {
+        assert!(
+            tools.snapshot().contains(helper),
+            "declaration is still pinned this turn"
+        );
+        assert!(!manager.tool_allowed(McpToolAccess::PlanScoped, helper));
+        assert!(!manager.tool_allowed(McpToolAccess::AllEnabled, helper));
+    }
+    assert!(manager.sync_pending_updates().await.is_some());
+    assert!(!tools.snapshot().contains(MCP_LIST_RESOURCES_TOOL_NAME));
+    assert!(!tools.snapshot().contains(wire));
+    manager.shutdown(Duration::from_secs(1)).await;
 }
 
 struct Store(Mutex<McpConfigSource>);
@@ -414,11 +473,11 @@ async fn aborted_disable_keeps_catalog_invalidation_pending() {
     changes.borrow_and_update();
     assert_eq!(list_view(&manager).revision, "persisted:1");
     assert!(
-        manager.sync_pending_updates().await,
+        manager.sync_pending_updates().await.is_some(),
         "retirement still invalidates the request plan"
     );
     assert!(
-        !manager.sync_pending_updates().await,
+        manager.sync_pending_updates().await.is_none(),
         "invalidation is consumed once"
     );
     tokio::time::timeout(Duration::from_secs(5), changes.changed())

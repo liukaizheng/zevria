@@ -179,7 +179,7 @@ impl Fixture {
             config,
         }
     }
-    async fn start(&self, start: runtime::SessionStart) -> runtime::RunningSession {
+    async fn start(&self, start: runtime::SessionStart) -> runtime::StartedSession {
         runtime::start_session(&self.config, self.directory.path(), start)
             .await
             .unwrap()
@@ -237,16 +237,17 @@ fn assert_persisted_handoff(
         [
             TranscriptItem::SessionModels(models),
             TranscriptItem::SessionMode(SessionMode::Build),
-            TranscriptItem::Plan(zevria_workflow::PlanRecord::Handoff { handoff }),
+            TranscriptItem::Plan(record),
             ..
-        ] if handoff == expected && models == expected_models
+        ] if matches!(record.as_ref(), zevria_workflow::PlanRecord::Handoff { handoff } if handoff == expected)
+            && models.as_ref() == expected_models
     ));
     assert_eq!(
         items
             .iter()
             .filter(|item| matches!(
-                item,
-                TranscriptItem::Plan(zevria_workflow::PlanRecord::Handoff { .. })
+                item.plan_record(),
+                Some(zevria_workflow::PlanRecord::Handoff { .. })
             ))
             .count(),
         1,
@@ -380,8 +381,8 @@ async fn session_header_follows_persistent_identity_across_modes_resume_and_fres
                 }
             })
             .await;
-        let id = running.restoration().session_id.clone();
-        let path = running.restoration().transcript_path.clone();
+        let id = running.restored.session_id.clone();
+        let path = running.restored.transcript_path.clone();
         assert_eq!(path.file_stem().unwrap().to_str().unwrap(), id);
         if iteration == 0 {
             original_path = Some(path.clone());
@@ -394,13 +395,14 @@ async fn session_header_follows_persistent_identity_across_modes_resume_and_fres
                 "a fresh root needs an independent identity"
             );
         }
-        let mut events = running.take_event_receiver().unwrap();
+        let mut events = running.running.take_event_receiver().unwrap();
         let mut cache_keys = Vec::new();
         for (mode, model, limit) in [
             (SessionMode::Build, "old", 100000),
             (SessionMode::Plan, "new/with:separators", 40000),
         ] {
             running
+                .running
                 .command_sender()
                 .send(SessionCommand::Turn(
                     zevria_session_api::TurnCommand::Submit {
@@ -436,7 +438,7 @@ async fn session_header_follows_persistent_identity_across_modes_resume_and_fres
                 assert_ne!(cache_keys[1], original_cache_keys[1]);
             }
         }
-        running.shutdown().await.unwrap();
+        running.running.shutdown().await.unwrap();
         let transcript = std::fs::read_to_string(path).unwrap();
         assert!(!transcript.contains("session_id_header"));
         assert!(!transcript.contains("X-Root-Conversation"));
@@ -455,9 +457,10 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
             inherited_models: None,
         })
         .await;
-    let path = first.restoration().transcript_path.clone();
-    let mut events = first.take_event_receiver().unwrap();
+    let path = first.restored.transcript_path.clone();
+    let mut events = first.running.take_event_receiver().unwrap();
     first
+        .running
         .command_sender()
         .send(SessionCommand::Turn(
             zevria_session_api::TurnCommand::Submit {
@@ -469,7 +472,7 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
         .unwrap();
     completed(&mut events, &a, SessionMode::Build, 100000).await;
     server.expect("p", "old").await;
-    first.shutdown().await.unwrap();
+    first.running.shutdown().await.unwrap();
     let originals = transcript::load(&path).unwrap();
     let original_replay = originals
         .iter()
@@ -481,7 +484,7 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
         let mut running = fixture
             .start(runtime::SessionStart::Resume(path.clone()))
             .await;
-        let contexts = &running.restoration().model_contexts;
+        let contexts = &running.restored.model_contexts;
         assert_eq!(contexts[ModelRole::Build.index()].profile, a);
         assert_eq!(contexts[ModelRole::Plan.index()].profile, b);
         assert_eq!(
@@ -501,7 +504,7 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
             contexts[ModelRole::Build.index()].context_window_tokens,
             88000
         );
-        for snapshot in &running.restoration().model_snapshots {
+        for snapshot in &running.restored.model_snapshots {
             assert_eq!(
                 snapshot.profile,
                 contexts[snapshot.model_role.index()].profile
@@ -511,18 +514,19 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
                 contexts[snapshot.model_role.index()].input_token_limit
             );
         }
-        assert_eq!(running.restoration().model_snapshots.len(), 2);
+        assert_eq!(running.restored.model_snapshots.len(), 2);
         assert!(
             server.requests.try_recv().is_err(),
             "restoration must not call/count/convert"
         );
         if iteration == 0 {
-            let mut events = running.take_event_receiver().unwrap();
+            let mut events = running.running.take_event_receiver().unwrap();
             for (mode, profile, limit) in [
                 (SessionMode::Build, &a, 80000),
                 (SessionMode::Plan, &b, 40000),
             ] {
                 running
+                    .running
                     .command_sender()
                     .send(SessionCommand::Turn(
                         zevria_session_api::TurnCommand::Submit {
@@ -536,7 +540,7 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
                 server.expect(&profile.provider, &profile.model).await;
             }
         }
-        running.shutdown().await.unwrap();
+        running.running.shutdown().await.unwrap();
         assert_eq!(std::fs::read(&fixture.models_path).unwrap(), config_bytes);
         assert_eq!(
             transcript::load(&path)
@@ -553,22 +557,21 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
         })
         .await;
     assert_eq!(
-        fresh.restoration().model_contexts[ModelRole::Build.index()].profile,
+        fresh.restored.model_contexts[ModelRole::Build.index()].profile,
         b
     );
     assert_eq!(
-        fresh.restoration().model_contexts[ModelRole::Plan.index()].profile,
+        fresh.restored.model_contexts[ModelRole::Plan.index()].profile,
         a
     );
-    let fresh_path = fresh.restoration().transcript_path.clone();
+    let fresh_path = fresh.restored.transcript_path.clone();
     assert!(!fresh_path.exists());
-    assert_eq!(fresh.restoration().selected_mode, SessionMode::Build);
-    let TranscriptItem::SessionModels(expected_models) = &fresh.restoration().transcript_items[0]
-    else {
+    assert_eq!(fresh.restored.selected_mode, SessionMode::Build);
+    let TranscriptItem::SessionModels(expected_models) = &fresh.restored.transcript_items[0] else {
         panic!("in-memory model header");
     };
     let expected_models = expected_models.clone();
-    fresh.shutdown().await.unwrap();
+    fresh.running.shutdown().await.unwrap();
     assert!(!fresh_path.exists());
     // An independent FromPlan start with no source selections still uses defaults.
     let source_session_id = path.file_stem().unwrap().to_str().unwrap();
@@ -580,32 +583,32 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
             inherited_models: None,
         })
         .await;
-    let handoff_path = handoff.restoration().transcript_path.clone();
-    assert_ne!(handoff.restoration().session_id, source_session_id);
+    let handoff_path = handoff.restored.transcript_path.clone();
+    assert_ne!(handoff.restored.session_id, source_session_id);
     assert_ne!(handoff_path, path);
     assert_eq!(
         handoff_path.file_stem().unwrap().to_str().unwrap(),
-        handoff.restoration().session_id
+        handoff.restored.session_id
     );
     assert!(matches!(
-        handoff.restoration().transcript_items.as_slice(),
+        handoff.restored.transcript_items.as_slice(),
         [
             TranscriptItem::SessionModels(_),
             TranscriptItem::SessionMode(SessionMode::Build)
         ]
     ));
     assert_eq!(
-        handoff.restoration().model_contexts[ModelRole::Build.index()].profile,
+        handoff.restored.model_contexts[ModelRole::Build.index()].profile,
         b
     );
     assert_eq!(
-        handoff.restoration().model_contexts[ModelRole::Plan.index()].profile,
+        handoff.restored.model_contexts[ModelRole::Plan.index()].profile,
         a
     );
-    let mut events = handoff.take_event_receiver().unwrap();
+    let mut events = handoff.running.take_event_receiver().unwrap();
     completed(&mut events, &b, SessionMode::Build, 40000).await;
     server.expect("p", "new/with:separators").await;
-    handoff.shutdown().await.unwrap();
+    handoff.running.shutdown().await.unwrap();
     assert_persisted_handoff(&handoff_path, &opening_handoff, &expected_models);
     assert_eq!(std::fs::read(&path).unwrap(), source_before);
     assert_eq!(std::fs::read(&fixture.models_path).unwrap(), config_bytes);
@@ -621,9 +624,9 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
             inherited_models: None,
         })
         .await;
-    let path = running.restoration().transcript_path.clone();
-    let commands = running.command_sender();
-    let mut events = running.take_event_receiver().unwrap();
+    let path = running.restored.transcript_path.clone();
+    let commands = running.running.command_sender();
+    let mut events = running.running.take_event_receiver().unwrap();
     commands
         .send(SessionCommand::Turn(
             zevria_session_api::TurnCommand::Submit {
@@ -657,7 +660,7 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
         }
     ));
     // No assistant response after selection. Acknowledgement already means durable.
-    running.shutdown().await.unwrap();
+    running.running.shutdown().await.unwrap();
     assert_eq!(
         transcript::load_report(&path)
             .unwrap()
@@ -673,12 +676,12 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
         .start(runtime::SessionStart::Resume(path.clone()))
         .await;
     assert_eq!(
-        resumed.restoration().model_contexts[ModelRole::Build.index()].profile,
+        resumed.restored.model_contexts[ModelRole::Build.index()].profile,
         selected
     );
     let unchanged_bytes = std::fs::read(&path).unwrap();
-    let commands = resumed.command_sender();
-    let mut events = resumed.take_event_receiver().unwrap();
+    let commands = resumed.running.command_sender();
+    let mut events = resumed.running.take_event_receiver().unwrap();
     assert!(matches!(
         select(
             &commands,
@@ -779,18 +782,19 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
             ..
         }
     ));
-    resumed.shutdown().await.unwrap();
+    resumed.running.shutdown().await.unwrap();
     let mut retried = fixture.start(runtime::SessionStart::Resume(path)).await;
     assert_eq!(
-        retried.restoration().model_contexts[ModelRole::Build.index()].profile,
+        retried.restored.model_contexts[ModelRole::Build.index()].profile,
         selected
     );
     assert_eq!(
-        retried.restoration().model_contexts[ModelRole::Plan.index()].profile,
+        retried.restored.model_contexts[ModelRole::Plan.index()].profile,
         plan
     );
-    let mut events = retried.take_event_receiver().unwrap();
+    let mut events = retried.running.take_event_receiver().unwrap();
     retried
+        .running
         .command_sender()
         .send(SessionCommand::Turn(
             zevria_session_api::TurnCommand::Submit {
@@ -802,7 +806,7 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
         .unwrap();
     completed(&mut events, &plan, SessionMode::Plan, 40000).await;
     server.expect("q", "new/with:separators").await;
-    retried.shutdown().await.unwrap();
+    retried.running.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -848,9 +852,9 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
                     inherited_models: None,
                 })
                 .await;
-            let path = running.restoration().transcript_path.clone();
-            let commands = running.command_sender();
-            let mut events = running.take_event_receiver().unwrap();
+            let path = running.restored.transcript_path.clone();
+            let commands = running.running.command_sender();
+            let mut events = running.running.take_event_receiver().unwrap();
             commands
                 .send(SessionCommand::Turn(
                     zevria_session_api::TurnCommand::Submit {
@@ -902,10 +906,10 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
             );
             assert_config_unchanged();
             // Close immediately after acknowledgement: no new assistant turn.
-            running.shutdown().await.unwrap();
+            running.running.shutdown().await.unwrap();
             let durable = transcript::load_report(&path).unwrap();
             let inherited_models = durable.session_models().unwrap().unwrap().clone();
-            assert_eq!(&durable.items()[1..], &original_history[1..]);
+            assert!(durable.items().starts_with(&original_history));
             assert_eq!(
                 durable
                     .session_models()
@@ -918,7 +922,7 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
             let mut resumed = fixture
                 .start(runtime::SessionStart::Resume(path.clone()))
                 .await;
-            assert_eq!(resumed.restoration().selected_mode, mode);
+            assert_eq!(resumed.restored.selected_mode, mode);
             for role in [
                 ModelRole::Build,
                 ModelRole::Plan,
@@ -932,16 +936,16 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
                     &defaults[role.index()].profile
                 };
                 assert_eq!(
-                    &resumed.restoration().model_contexts[role.index()].profile,
+                    &resumed.restored.model_contexts[role.index()].profile,
                     expected
                 );
             }
             let before_noop = std::fs::read(&path).unwrap();
             let before_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-            let mut events = resumed.take_event_receiver().unwrap();
+            let mut events = resumed.running.take_event_receiver().unwrap();
             assert!(matches!(
                 select_scoped(
-                    &resumed.command_sender(),
+                    &resumed.running.command_sender(),
                     &mut events,
                     mode,
                     selected.clone(),
@@ -959,12 +963,13 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
                 std::fs::metadata(&path).unwrap().modified().unwrap(),
                 before_mtime
             );
-            resumed.shutdown().await.unwrap();
+            resumed.running.shutdown().await.unwrap();
             // A separately running root keeps both original routes.
-            let mut other_events = other.take_event_receiver().unwrap();
+            let mut other_events = other.running.take_event_receiver().unwrap();
             for other_mode in [SessionMode::Build, SessionMode::Plan] {
                 let context = &defaults[zevria_model::models::mode_role(other_mode).index()];
                 other
+                    .running
                     .command_sender()
                     .send(SessionCommand::Turn(
                         zevria_session_api::TurnCommand::Submit {
@@ -985,14 +990,14 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
                     .expect(&context.profile.provider, &context.profile.model)
                     .await;
             }
-            other.shutdown().await.unwrap();
+            other.running.shutdown().await.unwrap();
             let fresh = fixture
                 .start(runtime::SessionStart::New {
                     inherited_models: None,
                 })
                 .await;
-            assert_eq!(fresh.restoration().model_contexts, defaults);
-            fresh.shutdown().await.unwrap();
+            assert_eq!(fresh.restored.model_contexts, defaults);
+            fresh.running.shutdown().await.unwrap();
             // Production /implement-fresh transfers both committed selections,
             // without changing either the approved Plan or global defaults.
             let source_session_id = path.file_stem().unwrap().to_str().unwrap();
@@ -1007,15 +1012,15 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
                     .unwrap(),
                 )
                 .await;
-            let handoff_path = handoff.restoration().transcript_path.clone();
-            assert_ne!(handoff.restoration().session_id, source_session_id);
+            let handoff_path = handoff.restored.transcript_path.clone();
+            assert_ne!(handoff.restored.session_id, source_session_id);
             assert_ne!(handoff_path, path);
             assert_eq!(
                 handoff_path.file_stem().unwrap().to_str().unwrap(),
-                handoff.restoration().session_id
+                handoff.restored.session_id
             );
             assert!(matches!(
-                handoff.restoration().transcript_items.as_slice(),
+                handoff.restored.transcript_items.as_slice(),
                 [
                     TranscriptItem::SessionModels(_),
                     TranscriptItem::SessionMode(SessionMode::Build)
@@ -1024,19 +1029,19 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
             for current_mode in SessionMode::ALL {
                 let role = zevria_model::models::mode_role(current_mode);
                 assert_eq!(
-                    handoff.restoration().model_contexts[role.index()].profile,
+                    handoff.restored.model_contexts[role.index()].profile,
                     inherited_models.for_mode(current_mode).profile
                 );
                 assert_eq!(
-                    handoff.restoration().reasoning_levels[role.index()],
+                    handoff.restored.reasoning_levels[role.index()],
                     inherited_models.reasoning_for_mode(current_mode)
                 );
             }
             let build = &inherited_models.for_mode(SessionMode::Build).profile;
-            let mut events = handoff.take_event_receiver().unwrap();
+            let mut events = handoff.running.take_event_receiver().unwrap();
             completed(&mut events, build, SessionMode::Build, 100000).await;
             server.expect(&build.provider, &build.model).await;
-            handoff.shutdown().await.unwrap();
+            handoff.running.shutdown().await.unwrap();
             assert_persisted_handoff(&handoff_path, &opening_handoff, &inherited_models);
             assert_eq!(std::fs::read(&path).unwrap(), source_before);
             assert_config_unchanged();
@@ -1085,8 +1090,8 @@ async fn opaque_preflight_names_restored_roles_and_global_review_without_convers
     .unwrap();
     writer
         .rewrite(&[
-            TranscriptItem::SessionModels(selections),
-            TranscriptItem::Compaction(checkpoint),
+            TranscriptItem::SessionModels(Box::new(selections)),
+            TranscriptItem::Compaction(Box::new(checkpoint)),
         ])
         .unwrap();
     let path = writer.path().to_path_buf();
@@ -1098,26 +1103,26 @@ async fn opaque_preflight_names_restored_roles_and_global_review_without_convers
         .await;
     assert!(
         resumed
-            .restoration()
+            .restored
             .startup_notices
             .iter()
             .any(|notice| notice.contains("plan restored selection p/new/with:separators"))
     );
     assert!(
         resumed
-            .restoration()
+            .restored
             .startup_notices
             .iter()
             .any(|notice| notice.contains("review global default q/old"))
     );
     assert!(
         !resumed
-            .restoration()
+            .restored
             .startup_notices
             .iter()
             .any(|notice| notice.starts_with("build"))
     );
-    resumed.shutdown().await.unwrap();
+    resumed.running.shutdown().await.unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert!(server.requests.try_recv().is_err());
 }
@@ -1137,7 +1142,7 @@ async fn restoration_failures_reject_the_whole_session_without_model_calls() {
         ),
     )
     .unwrap();
-    let header = serde_json::to_string(&TranscriptItem::SessionModels(good)).unwrap();
+    let header = serde_json::to_string(&TranscriptItem::SessionModels(Box::new(good))).unwrap();
     let missing = header.replace("\"old\"", "\"Unavailable/Exact\"");
     let config_before = std::fs::read(&fixture.models_path).unwrap();
     for (index, original, expected) in [
@@ -1146,7 +1151,11 @@ async fn restoration_failures_reject_the_whole_session_without_model_calls() {
             "{\"error\":\"legacy\"}\n".into(),
             "resolve the reported history issue",
         ),
-        (1, format!("{missing}\n{{\"partial\":"), "Unavailable/Exact"),
+        (
+            1,
+            format!("{missing}\n{{\"type\":\"message\",\"message\":"),
+            "Unavailable/Exact",
+        ),
         (
             3,
             header.replace("new/with:separators", "Missing/Plan"),

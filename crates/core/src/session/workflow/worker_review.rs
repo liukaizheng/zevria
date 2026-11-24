@@ -123,7 +123,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             if record.run_id() != &start.run_id {
                 continue;
             }
-            match record {
+            match record.as_ref() {
                 EnsembleRecord::ReviewStarted { version, .. } => {
                     if *version != ENSEMBLE_REVIEW_VERSION {
                         return Err(anyhow::anyhow!(
@@ -461,7 +461,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                         for outcome in outcomes.iter().filter(|outcome| outcome.status != AgentRunStatus::Abandoned) { zevria_workflow::validate_worker_synthesis_payload(EnsembleWorkflow::Plan, outcome, launcher.max_synthesis_bytes_per_agent())?; }
                         // The final explicit receipt and the complete ordered frozen
                         // set have ONE durability boundary, never sampled booleans.
-                        self.commit(TranscriptItem::Ensemble(EnsembleRecord::WorkersConfirmed { run_id: start.run_id.clone(), final_confirmation: result.clone(), outcomes: outcomes.clone() }))?;
+                        self.commit(TranscriptItem::Ensemble(Box::new(EnsembleRecord::WorkersConfirmed { run_id: start.run_id.clone(), final_confirmation: result.clone(), outcomes: outcomes.clone() })))?;
                         *states = proposed;
                         for worker_id in affected.iter().filter(|id| *id != &control.target.worker_id) {
                             if let Some(actor) = execution.commands.get(worker_id) {
@@ -482,10 +482,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                         break outcomes;
                     }
                     if let Some(event) = transition {
-                        self.commit(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
+                        self.commit(TranscriptItem::Ensemble(Box::new(EnsembleRecord::WorkerReview {
                             run_id: start.run_id.clone(), worker_id: control.target.worker_id.clone(),
                             event: Box::new(event.clone()), result: Some(result.clone()),
-                        }))?;
+                        })))?;
                         *states = proposed;
                         for worker_id in &affected {
                             let mirror = if worker_id == &control.target.worker_id { event.clone() }
@@ -496,7 +496,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                             }
                         }
                     } else {
-                        self.commit(TranscriptItem::Ensemble(EnsembleRecord::ControlResult { run_id: start.run_id.clone(), result: result.clone() }))?;
+                        self.commit(TranscriptItem::Ensemble(Box::new(EnsembleRecord::ControlResult { run_id: start.run_id.clone(), result: result.clone() })))?;
                     }
                     results.insert(control.request_id.clone(), result.clone());
                     let _ = events.send(SessionEvent::WorkerControlResult { result }).await;
@@ -596,12 +596,14 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> Result<(), Failure> {
         let mut next = state.clone();
         next.apply(&event).map_err(anyhow::Error::msg)?;
-        self.commit(TranscriptItem::Ensemble(EnsembleRecord::WorkerReview {
-            run_id: start.run_id.clone(),
-            worker_id: state.descriptor.id.clone(),
-            event: Box::new(event),
-            result,
-        }))?;
+        self.commit(TranscriptItem::Ensemble(Box::new(
+            EnsembleRecord::WorkerReview {
+                run_id: start.run_id.clone(),
+                worker_id: state.descriptor.id.clone(),
+                event: Box::new(event),
+                result,
+            },
+        )))?;
         *state = next;
         Ok(())
     }

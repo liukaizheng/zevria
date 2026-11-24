@@ -982,11 +982,11 @@ fn ensemble_resume_reuses_turn_and_rebases_restarted_raw_calls() {
         let mut app = App::new();
         if restored {
             app.restore(vec![
-                TranscriptItem::Ensemble(EnsembleRecord::Started {
+                TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
                     start: ensemble.clone(),
-                }),
+                })),
                 TranscriptItem::Message(Message::assistant("saved response")),
-                TranscriptItem::Compaction(checkpoint()),
+                TranscriptItem::Compaction(Box::new(checkpoint())),
                 TranscriptItem::Error {
                     error: "interrupted".into(),
                 },
@@ -1058,21 +1058,21 @@ fn restore_counts_typed_anchors_and_canonical_responses_not_metadata_or_projecti
             rig_core::message::ToolName::new("command").expect("nonempty tool name"),
             "legacy result",
         )),
-        TranscriptItem::Compaction(checkpoint()),
+        TranscriptItem::Compaction(Box::new(checkpoint())),
         TranscriptItem::SessionMode(SessionMode::Plan),
         TranscriptItem::Error {
             error: "diagnostic".into(),
         },
-        TranscriptItem::Plan(PlanRecord::Published {
+        TranscriptItem::Plan(Box::new(PlanRecord::Published {
             artifact: test_plan_artifact(),
             provenance: zevria_workflow::PlanPublicationProvenance::Synthesized,
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("third response")),
-        TranscriptItem::SkillInvocation(skill),
+        TranscriptItem::SkillInvocation(Box::new(skill)),
         TranscriptItem::Message(Message::assistant("skill response")),
-        TranscriptItem::Plan(PlanRecord::Handoff {
+        TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
             handoff: handoff.clone(),
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("implemented")),
     ]);
     assert_eq!(
@@ -1108,9 +1108,9 @@ fn accepted_edit_truncates_numbering_but_pending_and_rejected_edits_do_not() {
         app.restore(vec![
             TranscriptItem::Message(Message::user("first")),
             TranscriptItem::Message(Message::assistant("first answer")),
-            TranscriptItem::Plan(PlanRecord::Handoff {
+            TranscriptItem::Plan(Box::new(PlanRecord::Handoff {
                 handoff: PlanHandoff::new(test_plan_artifact(), "source"),
-            }),
+            })),
             TranscriptItem::Message(Message::user("second editable prompt")),
             TranscriptItem::Message(Message::assistant("old branch")),
             TranscriptItem::Message(Message::user("removed tail")),
@@ -1169,9 +1169,9 @@ fn runtime_only_calls_survive_live_resume_but_are_not_invented_on_restore() {
     });
     let mut restored = App::new();
     restored.restore(vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: ensemble.clone(),
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("saved response")),
         TranscriptItem::Error {
             error: "unsaved dispatch".into(),
@@ -1193,9 +1193,9 @@ fn editing_away_a_resumed_ensemble_call_reconciles_the_retained_turns_call_ledge
     let ensemble = editable_ensemble_start("retained-ensemble", EnsembleWorkflow::Review, "review");
     let mut app = App::new();
     app.restore(vec![
-        TranscriptItem::Ensemble(EnsembleRecord::Started {
+        TranscriptItem::Ensemble(Box::new(EnsembleRecord::Started {
             start: ensemble.clone(),
-        }),
+        })),
         TranscriptItem::Message(Message::assistant("retained call")),
         TranscriptItem::Message(Message::user("editable prompt")),
         TranscriptItem::Message(Message::assistant("removed call")),
