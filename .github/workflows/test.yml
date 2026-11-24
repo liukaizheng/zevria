@@ -68,8 +68,6 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
     defaults:
       run:
         shell: bash
@@ -127,7 +125,7 @@ jobs:
           if (-not (Test-Path $bash)) { throw 'Git for Windows is required by native tests' }
           "ZEVRIA_GIT_BASH=$bash" >> $env:GITHUB_ENV
       - run: cargo fmt --all -- --check
-      - run: cargo check --locked --workspace --all-targets --exclude zevria-desktop
+      - run: cargo check --locked --release --workspace --all-targets --exclude zevria-desktop
       - name: Check and test Desktop (release profile)
         run: |
           cargo check --locked --release -p zevria-desktop --all-targets --features fixtures
@@ -142,18 +140,19 @@ jobs:
             exit 1
           fi
       - name: Build the real executable used by ACP process fixtures
-        run: cargo build --locked -p zevria
+        # Test the optimized CLI that ships, not an unoptimized debug executable.
+        run: cargo build --locked --release -p zevria
       - name: Test the locked workspace
         if: runner.os != 'Windows'
-        run: cargo test --locked --workspace --exclude zevria-desktop
+        run: cargo test --locked --release --workspace --exclude zevria-desktop
       - name: Test remaining workspace packages on Windows
         if: runner.os == 'Windows'
-        run: cargo test --locked --workspace --exclude zevria-ensemble --exclude zevria-desktop
+        run: cargo test --locked --release --workspace --exclude zevria-ensemble --exclude zevria-desktop
       - name: Test ensemble subprocess fixtures serially on Windows
         if: runner.os == 'Windows'
-        run: cargo test --locked -p zevria-ensemble -- --test-threads=1
+        run: cargo test --locked --release -p zevria-ensemble -- --test-threads=1
       - name: Provider continuation and cache-prefix feature regressions
-        run: cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics
+        run: cargo test --locked --release -p zevria-provider -p zevria-host --features cache-diagnostics
 
   windows-desktop-dev-zip:
     name: Windows x64 Desktop development ZIP (build only)

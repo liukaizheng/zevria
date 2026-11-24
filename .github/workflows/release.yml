@@ -19,9 +19,6 @@ defaults:
 
 env:
   CARGO_INCREMENTAL: '0'
-  # Keep native debug/test builds within hosted-runner disk budgets.
-  CARGO_PROFILE_DEV_DEBUG: '0'
-  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   prepare:
@@ -270,11 +267,11 @@ jobs:
                   'fn main() { println!("{}", env!("ZEVRIA_MSVC_LINKER_PROBE")); }\n', encoding='utf-8')
               # Separate clean outputs force host build-script linking in both Cargo modes.
               for mode, target_args, binary in (
-                  ('implicit-host', [], Path('debug', 'zevria-msvc-linker-probe.exe')),
-                  ('explicit-target', ['--target', target], Path(target, 'debug', 'zevria-msvc-linker-probe.exe')),
+                  ('implicit-host', [], Path('release', 'zevria-msvc-linker-probe.exe')),
+                  ('explicit-target', ['--target', target], Path(target, 'release', 'zevria-msvc-linker-probe.exe')),
               ):
                   output = root / mode
-                  run(['cargo', 'build', '--offline', '--verbose', '--color', 'never',
+                  run(['cargo', 'build', '--release', '--offline', '--verbose', '--color', 'never',
                        '--target-dir', str(output), *target_args], root, probe_env, 180)
                   run([str(output / binary)], root, probe_env, 15, 'ZEVRIA_MSVC_LINKER_OK\n')
                   print(f'MSVC linker preflight passed: {mode} build script and executable', flush=True)
@@ -315,11 +312,11 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Check the locked workspace
-        run: cargo check --locked --workspace --exclude zevria-desktop --all-targets --target "$TARGET"
+        run: cargo check --locked --release --workspace --exclude zevria-desktop --all-targets --target "$TARGET"
       - name: Build the real executable used by ACP process fixtures
-        run: cargo build --locked -p zevria --bin zevria --target "$TARGET"
+        run: cargo build --locked --release -p zevria --bin zevria --target "$TARGET"
       - name: Test the locked workspace with default features
-        run: cargo test --locked --workspace --exclude zevria-desktop --target "$TARGET"
+        run: cargo test --locked --release --workspace --exclude zevria-desktop --target "$TARGET"
       - name: Enforce the six default-feature provider-prefix release gates
         if: runner.os == 'Linux'
         run: |
@@ -336,7 +333,7 @@ jobs:
               ('zevria-core', 'resumed_session_reuses_the_pre_shutdown_prefix_after_tool_activation'),
           ]
           for package, name in gates:
-              args = ['cargo', 'test', '--locked', '-p', package, '--target', os.environ['TARGET'], name]
+              args = ['cargo', 'test', '--locked', '--release', '-p', package, '--target', os.environ['TARGET'], name]
               # Raw libtest output is needed to reject a silently empty filter.
               listing = subprocess.check_output([*args, '--', '--list', '--format', 'terse'], text=True)
               selected = [line for line in listing.splitlines() if line.endswith(': test')]
@@ -347,7 +344,7 @@ jobs:
           PY
       - name: Provider/host cache-diagnostics regressions (tests only)
         if: runner.os == 'Linux'
-        run: cargo test --locked -p zevria-provider -p zevria-host --features cache-diagnostics --target "$TARGET"
+        run: cargo test --locked --release -p zevria-provider -p zevria-host --features cache-diagnostics --target "$TARGET"
       - name: Build the production binary with default features
         # A separate invocation: never add cache-diagnostics or --all-features.
         run: cargo build --locked --release -p zevria --bin zevria --target "$TARGET"
