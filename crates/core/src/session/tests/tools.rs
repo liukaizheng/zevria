@@ -1,6 +1,86 @@
 use super::*;
 use zevria_session_api::{SubtaskEvent, TurnEvent};
 
+#[derive(Clone)]
+struct ParallelSearchProbe {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+    completed: Arc<std::sync::Mutex<Vec<u64>>>,
+}
+
+impl Tool for ParallelSearchProbe {
+    const NAME: &'static str = zevria_foundation::WEB_SEARCH_TOOL_NAME;
+    type Error = std::convert::Infallible;
+    type Args = serde_json::Value;
+    type Output = String;
+
+    fn description(&self) -> String {
+        "Parallel search probe".into()
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type":"object"})
+    }
+    async fn call(
+        &self,
+        ctx: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        use std::sync::atomic::Ordering::SeqCst;
+        assert!(
+            ctx.scope::<zevria_session_api::WebSearchProgress>()
+                .is_some()
+        );
+        let n = args["index"].as_u64().unwrap();
+        let active = self.active.fetch_add(1, SeqCst) + 1;
+        self.peak.fetch_max(active, SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis((8 - n) * 10)).await;
+        self.active.fetch_sub(1, SeqCst);
+        self.completed.lock().unwrap().push(n);
+        Ok(n.to_string())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn web_search_batch_bounds_concurrency_and_keeps_assistant_call_order() {
+    let probe = ParallelSearchProbe {
+        active: Default::default(),
+        peak: Default::default(),
+        completed: Default::default(),
+    };
+    let tools = ToolServer::new().tool(probe.clone()).run();
+    let (_directory, transcript) = test_transcript();
+    let engine = SessionEngine::new(
+        ScriptedProvider::new([]),
+        tools,
+        test_policies(),
+        transcript,
+        Arc::new(SkillCatalog::default()),
+    )
+    .unwrap();
+    let policy = engine.policies.policy(SessionMode::Build);
+    let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new());
+    let gate = PlanSubmissionGate::inert(None);
+    let (events, _rx) = session_event_channel(16);
+    let scope = ToolExecutionScope::new(&engine, SessionMode::Build, policy, &turn, &gate)
+        .with_events(&events);
+    let calls: Vec<_> = (0..8)
+        .map(
+            |i| match named_tool_call(&format!("search-{i}"), "web_search", json!({"index":i})) {
+                AssistantContent::ToolCall(call) => call,
+                _ => unreachable!(),
+            },
+        )
+        .collect();
+    let batch = execute_tool_calls(&scope, &calls, ActiveSkills::default(), &gate).await;
+    assert_eq!(probe.peak.load(std::sync::atomic::Ordering::SeqCst), 6);
+    assert_ne!(*probe.completed.lock().unwrap(), (0..8).collect::<Vec<_>>());
+    assert_eq!(batch.metadata.len(), calls.len());
+    for (slot, call) in batch.metadata.iter().zip(&calls) {
+        assert_eq!(slot.id, call.id.to_string());
+        assert!(slot.outcome.is_success());
+    }
+}
+
 fn image_result_content() -> Vec<ToolResultContent> {
     vec![
         ToolResultContent::text("image summary"),
@@ -24,6 +104,7 @@ async fn dispatch_rich_output(output: rig_core::tool::ToolOutput, id: &str) -> T
         None,
         None,
         zevria_foundation::McpToolAccess::None,
+        None,
     )
     .await
 }

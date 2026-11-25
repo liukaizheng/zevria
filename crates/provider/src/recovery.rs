@@ -243,55 +243,62 @@ pub(crate) trait RecoveryDriver: Send {
 /// Shared attempt budget, retry notification, and delay. Adapters own
 /// request encoding, transport state, and semantic repairs; this loop never
 /// modifies the prepared request or re-admits the model call.
-pub(crate) async fn run_recovery_loop<D: RecoveryDriver>(
+///
+/// Expose `Send` using the driver's bound so callers need not prove it again
+/// through the concrete transport futures.
+pub(crate) fn run_recovery_loop<D: RecoveryDriver>(
     policy: &RecoveryPolicy,
-    reporter: &ProgressReporter,
+    reporter: Option<&ProgressReporter>,
     provider: &str,
     driver: &mut D,
-) -> anyhow::Result<D::Output> {
-    let recovery = Recovery::new(policy);
-    while let Some(plan) = recovery.start_attempt() {
-        let last = match driver.attempt(plan, &recovery).await {
-            Ok(response) => return Ok(response),
-            Err(AttemptError::Terminal { error, .. }) => return Err(error),
-            Err(AttemptError::Retryable {
-                category,
-                error,
-                server_delay,
-                upstream_request_id,
-            }) => AttemptFailure {
-                category,
-                class: failure_class(category),
-                error,
-                server_delay,
-                upstream_request_id,
-            },
-        };
-        let decision = recovery.decide(&last);
-        recovery.log_failure(&last, decision);
-        match decision {
-            Decision::Exhausted(reason) => {
-                return Err(recovery.exhausted_error(reason, last, provider));
-            }
-            Decision::Retry {
-                next_attempt,
-                delay,
-                retrying_for,
-            } => {
-                driver.before_retry(&last)?;
-                reporter
-                    .retrying(
-                        next_attempt,
-                        delay,
-                        retrying_for,
-                        format!("{}: {:#}", last.category, last.error),
-                    )
-                    .await;
-                tokio::time::sleep(delay).await;
+) -> impl Future<Output = anyhow::Result<D::Output>> + Send {
+    async move {
+        let recovery = Recovery::new(policy);
+        while let Some(plan) = recovery.start_attempt() {
+            let last = match driver.attempt(plan, &recovery).await {
+                Ok(response) => return Ok(response),
+                Err(AttemptError::Terminal { error, .. }) => return Err(error),
+                Err(AttemptError::Retryable {
+                    category,
+                    error,
+                    server_delay,
+                    upstream_request_id,
+                }) => AttemptFailure {
+                    category,
+                    class: failure_class(category),
+                    error,
+                    server_delay,
+                    upstream_request_id,
+                },
+            };
+            let decision = recovery.decide(&last);
+            recovery.log_failure(&last, decision);
+            match decision {
+                Decision::Exhausted(reason) => {
+                    return Err(recovery.exhausted_error(reason, last, provider));
+                }
+                Decision::Retry {
+                    next_attempt,
+                    delay,
+                    retrying_for,
+                } => {
+                    driver.before_retry(&last)?;
+                    if let Some(reporter) = reporter {
+                        reporter
+                            .retrying(
+                                next_attempt,
+                                delay,
+                                retrying_for,
+                                format!("{}: {:#}", last.category, last.error),
+                            )
+                            .await;
+                    }
+                    tokio::time::sleep(delay).await;
+                }
             }
         }
+        anyhow::bail!("completion recovery requires a positive attempt cap")
     }
-    anyhow::bail!("completion recovery requires a positive attempt cap")
 }
 
 pub(crate) struct AttemptFailure {
@@ -387,7 +394,7 @@ impl<'a> Recovery<'a> {
         })
     }
 
-    fn mark_progress(&self, now: Instant) {
+    pub(crate) fn mark_progress(&self, now: Instant) {
         let mut state = self.state.lock().expect("recovery state");
         state.last_progress = Some(now);
         state.made_progress = true;

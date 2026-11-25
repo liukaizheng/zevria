@@ -12,80 +12,82 @@ Zevria does not implement Chat Completions and does not translate
 `/chat/completions`, `choices[].delta`, `reasoning_content`, or Chat tool-call
 chunks into Responses.
 
-## Provider-hosted web search
+## Isolated web search
 
-Search is **disabled by default**, per provider. Enable only on an endpoint/model
-supporting the stable Responses `web_search` tool:
+Search is **disabled by default**. Enable it in `config.toml`, not in the model
+catalog. Remove any legacy `providers.<name>.web_search` from `models.jsonc`;
+the catalog now rejects that field. Remove any `additional_params.tool_choice`
+that forces the hosted tool. Ordinary requests can select the local function
+by name instead.
 
-```jsonc
-{
-  "providers": {
-    "openai": {
-      "web_search": {
-        "enabled": true,
-        "external_web_access": true,
-        "search_context_size": "medium",
-        "return_token_budget": "default",
-        "filters": {
-          "allowed_domains": [
-            "openai.com"
-          ],
-          "blocked_domains": [
-            "example.org"
-          ]
-        },
-        "user_location": {
-          "country": "GB",
-          "city": "London",
-          "region": "London",
-          "timezone": "Europe/London"
-        }
-      }
-    }
-  }
-}
+```toml
+[web_search]
+enabled = true
+provider = "openai"
+model = "gpt-6-luna"
+reasoning_level = "low"
+external_web_access = true
+search_context_size = "medium"
+return_token_budget = "default"
+# max_tool_calls = 8
+# [web_search.filters]
+# allowed_domains = ["openai.com"]
+# blocked_domains = ["example.org"]
+# [web_search.user_location]
+# country = "GB"
+# city = "London"
+# region = "London"
+# timezone = "Europe/London"
 ```
 
-Omitting filters permits all domains. Allowed and blocked lists can coexist;
-subdomains are included upstream. Domain names use DNS/ASCII form (use punycode
-for internationalized names), not URLs, ports, IP addresses, or wildcards.
-Location uses the documented `approximate` discriminator on the wire; country is
-a two-letter uppercase ISO code and timezone is an IANA name. Unknown fields,
-invalid enums, blank locations, and malformed domains are configuration errors.
+The target must be an `openai.responses` profile in `models.jsonc`, with the
+specified reasoning level and support for the stable Responses hosted search
+tool. This is independent of the models assigned to Build, Plan, Review, Explore,
+and Builder. A native Anthropic session can call the same local `web_search`
+function, including in native ensemble workers. No workflow or workspace
+permissions change. The search request sees only the query and optional context
+supplied by the calling model: do not put secrets in those arguments.
 
-The [current stable-tool guide](https://developers.openai.com/api/docs/guides/tools-web-search?api-mode=responses)
-documents all these controls, including both filters and their 100-entry limits.
-Some SDK-generated tool types lag the guide for `blocked_domains` and
-`return_token_budget`; Zevria sends the documented stable controls, not a preview
-substitute. `unlimited` is for GPT-5+ reasoning web research and can increase cost
-and latency. Location is not supported by deep-research models. Opt-in does not
-guarantee that a gateway or every model in its catalog accepts each control.
-Rejections retain upstream details and identify the profile/configuration; Zevria
-never retries a request with search or its controls silently removed.
+| Depth | Search context | Built-in tool-call cap | Reasoning |
+| --- | --- | --- | --- |
+| `quick` (default) | `low` | `max_tool_calls` if set, capped at 3 | Lowest supported non-`none` level no higher than configured, when available |
+| `standard` | `search_context_size` (`medium` by default) | `max_tool_calls` if set | Configured level |
+| `deep` | `high` | `max_tool_calls` if set | Configured level |
 
-Search is allowed in Build (including request-local orchestration), Plan, Review, Explore,
-Builder, native ACP workers, and synthesis's configured task role. Empty task
-allow-lists disable it. Compaction, checkpoint conversion, and internal summaries
-retain the active policy's declarations and hosted-search gate to preserve the
-normal request prefix. Their trailing instruction forbids tools; returned calls
-are never executed and cause one retry with `tool_choice: "none"`. Ordinary task
-selection defaults to automatic; explicit `tool_choice` must reference declared
-function tools or an enabled, policy-permitted hosted capability.
+Quick asks the model to aim for one to three focused searches. This is soft
+guidance: Zevria omits `max_tool_calls` at every depth unless `[web_search]`
+sets it. Only set a positive cap on endpoints that accept this parameter.
+`return_token_budget` accepts `default` or `unlimited`; check whether your
+selected model and endpoint accept the latter. Domain lists accept up to 100
+DNS names each (no schemes, ports, paths, IPs, or wildcards; use ASCII/punycode).
+A call can only narrow the configured allowlist; blocked domains always apply.
+An empty effective allowlist fails the call instead of removing the filter.
+Approximate location is optional and not automatically discovered. See the [stable-tool guide](https://developers.openai.com/api/docs/guides/tools-web-search?api-mode=responses)
+for endpoint details.
 
-Search runs at the configured provider, never in a local executor or shell.
-HTTP/SSE, WebSocket, retries, stale-continuation recovery, HTTP fallback, and exact
-input-token counting share the same prepared definition. Count-endpoint fallback
-does not change the real completion's capabilities. Command confinement and
-workflow/inspection/confirmation gates are unchanged.
+The local tool runs a separate stateless HTTP/SSE Responses request, even if the
+root uses WebSocket. It inherits the resolved search profile's service tier and
+other endpoint parameters, except fields Zevria owns for search and continuation.
+Ordinary requests declare the search as a function, never as an inline hosted
+tool. Depth changes only the isolated request. Intermediate search and reasoning
+items never enter root native replay. Only a bounded cited answer and source URLs
+are model input. If the server marks a response incomplete, Zevria returns
+readable answer text from its output with an early-ending note. Without readable
+answer text, the search fails.
+Completed action/source details and isolated usage are kept separately for
+display. Search activity streams to the running tool row. Independent searches
+can run concurrently, with six active searches shared across a session and its
+subtasks. Actual cache reuse and provider usage are determined upstream, not
+guaranteed by isolation.
 
-For every non-silent Responses call, **received answer text streams progressively**,
-whether search is disabled, unused or used, including one long content part. Refusals,
-reasoning and search/open-page/find-in-page progress also remain live. Previews
-are provisional: completed native parts/items and the validated final output
-reconcile the same source-addressed answer in place. Delivery uses coalesced
-latest-state snapshots, not a frame or transcript record for every token. A relay
-that sends only final output still works, but Zevria cannot display deltas the
-relay has not delivered.
+### Responses streaming and historical hosted activity
+
+Received answer text for non-silent ordinary Responses calls still streams
+progressively, including one long content part. Refusals, reasoning, and hosted
+activity received from a gateway still display. Previews are provisional:
+completed native parts/items and the validated final output reconcile the same
+source-addressed answer in place. A relay that sends only final output works,
+but Zevria cannot display deltas the relay has not delivered.
 
 Source-title links appear next to claims as usable annotations arrive. Offsets
 address the original unsanitized text; ranges beyond a growing part wait for more
@@ -611,7 +613,7 @@ not authorize concurrent ordinary tool execution.
 `instructions` is a deterministic join of engine-owned modules in this order:
 engine protocol, optional Application guidance, optional File guidance (sorted by
 component key), Workflow policy (one-line JSON declaration then role text), Command
-conventions when permitted, Hosted search when permitted, Inspection and scratch
+conventions when permitted, Web search when permitted, Inspection and scratch
 policy when selected, and Eligible skills (selection module plus JSON, or an
 unavailable sentence). Stable protocol/application/file sections precede workflow
 changes to preserve the provider's cacheable prefix. `session.preamble` replaces
@@ -976,8 +978,8 @@ the window. Newly permitted tools or changed definitions append persisted
 `{"type":"additional_tools","role":"developer","tools":[...]}`. The role is
 always `developer`, independently of `developer_messages`. Host-only annotations
 are never transmitted. Tools that leave the permission list stay declared but
-local calls are denied by the engine. Hosted `web_search` remains top-level and
-policy-gated; it is not persisted.
+local calls are denied by the engine. When enabled, `web_search` is registered
+at startup and follows the same declaration and permission rules as other local tools.
 
 A window with an `Initial` stays incremental even after disabling the flag; a
 window without one follows the current policy per request and writes no records.

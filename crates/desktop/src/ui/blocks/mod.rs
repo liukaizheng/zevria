@@ -224,7 +224,14 @@ impl BlockView {
             BlockKind::ThoughtGroup(thought) if row.expanded => Some((thought.text(), false)),
             BlockKind::Step(Step::Tool(tool))
                 if row.expanded
-                    && matches!(tool.detail, ToolDetail::Standard { markdown: true, .. }) =>
+                    && matches!(
+                        tool.detail,
+                        ToolDetail::Standard { markdown: true, .. }
+                            | ToolDetail::WebSearch {
+                                completed: Some(_),
+                                ..
+                            }
+                    ) =>
             {
                 Some((tool.body.clone(), false))
             }
@@ -866,6 +873,26 @@ impl BlockView {
         if let ToolDetail::Image(Some(summary)) = &tool.detail {
             badges.push(style::step_badge(image_facts_label(summary), t.text.muted));
         }
+        if let ToolDetail::WebSearch {
+            running_label,
+            completed,
+            ..
+        } = &tool.detail
+        {
+            let label = running_label.clone().or_else(|| {
+                completed
+                    .as_ref()
+                    .map(|detail| zevria_presentation::blocks::web_search_counts(detail))
+            });
+            if let Some(label) = label.filter(|label| !label.is_empty()) {
+                badges.push(
+                    style::step_badge(label, t.text.muted)
+                        .min_w_0()
+                        .max_w(px(240.))
+                        .truncate(),
+                );
+            }
+        }
         if tool.added > 0 {
             badges.push(style::step_badge(
                 format!("+{}", tool.added),
@@ -996,6 +1023,42 @@ impl BlockView {
                         })
                 }));
             }
+            ToolDetail::WebSearch {
+                activity,
+                running_label,
+                completed,
+            } => {
+                if !activity.is_empty() {
+                    content = content.child(web::action_details(activity, cx));
+                } else if let Some(label) = running_label {
+                    content = content.child(style::step_badge(format!("{label}…"), t.text.muted));
+                }
+                if let Some(detail) = completed {
+                    if !tool.body.is_empty() {
+                        content = content.child(self.rich_text(true, cx));
+                    }
+                    let sources: Vec<_> = detail
+                        .sources
+                        .iter()
+                        .map(|source| zevria_content::CitedSource {
+                            url: source.url.clone(),
+                            title: (!source.title.is_empty()).then(|| source.title.clone()),
+                        })
+                        .collect();
+                    content =
+                        content.children(web::source_chips(&sources, self.show_all_sources, cx));
+                    let mut facts = vec![detail.depth.as_str().to_owned()];
+                    if let Some(total) = detail.total_tokens {
+                        facts.push(format!("{} tok", crate::ui::status::compact_number(total)));
+                    }
+                    facts.push(format!("{}/{}", detail.provider, detail.model));
+                    content = content.child(
+                        style::meta()
+                            .text_color(t.text.muted)
+                            .child(facts.join(" · ")),
+                    );
+                }
+            }
             ToolDetail::Standard {
                 markdown,
                 show_output,
@@ -1020,7 +1083,14 @@ impl BlockView {
             }
         }
         if !tool.body.is_empty()
-            && !matches!(tool.detail, ToolDetail::Standard { markdown: true, .. })
+            && !matches!(
+                tool.detail,
+                ToolDetail::Standard { markdown: true, .. }
+                    | ToolDetail::WebSearch {
+                        completed: Some(_),
+                        ..
+                    }
+            )
         {
             content = content.child(
                 style::SECONDARY

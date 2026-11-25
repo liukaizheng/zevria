@@ -1,7 +1,7 @@
 //! Real transport outages and cache-prefix invariants, using only loopback IO.
 use super::*;
 use crate::connection::HttpFallback;
-use std::{io, time::Duration};
+use std::time::Duration;
 use zevria_model::ModelInputTooLarge;
 use zevria_session_api::TurnEvent;
 use zevria_session_api::event::NetworkStatus;
@@ -343,21 +343,11 @@ async fn transient_websocket_errors_and_failed_responses_invalidate_continuation
 }
 
 #[tokio::test]
-async fn exhausted_connectivity_display_keeps_socket_cause_and_actionable_settings() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!(
-        "http://{}/responses?secret=not-for-errors",
-        listener.local_addr().unwrap()
-    );
-    drop(listener);
+async fn socket_reset_exhaustion_display_keeps_socket_cause_and_actionable_settings() {
+    let (address, server) = spawn_resetting_http_server(1).await;
+    let url = format!("http://{address}/responses?secret=not-for-errors");
     let mut provider = connect_http_test_provider(url).await;
-    provider.recovery = RecoveryPolicy {
-        // Exhaust after the first socket error, not a platform-dependent retry count.
-        recovery_window: Duration::ZERO,
-        // Windows can take over a second to report a refused loopback connection.
-        send_timeout: Duration::from_secs(10),
-        ..fast_recovery_policy(30)
-    };
+    provider.recovery.recovery_window = Duration::ZERO;
     let error = provider
         .complete(parts().request(), discard_updates())
         .await
@@ -373,14 +363,11 @@ async fn exhausted_connectivity_display_keeps_socket_cause_and_actionable_settin
     ] {
         assert!(display.contains(expected), "{display}");
     }
-    let socket_cause = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<io::Error>())
-        .expect("the original socket error must be preserved");
-    assert_eq!(socket_cause.kind(), io::ErrorKind::ConnectionRefused);
+    let socket_cause = expect_connection_reset(&error);
     assert!(display.contains(&socket_cause.to_string()), "{display}");
     assert!(!display.contains("not-for-errors"));
     assert!(error.chain().any(|cause| cause.is::<reqwest::Error>()));
+    server.await.unwrap();
 }
 
 #[tokio::test]

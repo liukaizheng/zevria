@@ -1128,6 +1128,7 @@ impl ConversationState {
             return;
         };
         state.status = ToolCallStatus::Finished;
+        state.web_search_activity.clear();
         state.result = Some(result.clone());
         state.metadata = metadata
             .filter(|metadata| metadata.tool_name == call.function.name)
@@ -1234,6 +1235,38 @@ impl ConversationState {
         headers
     }
 
+    pub fn update_web_search_activity(
+        &mut self,
+        call_id: &str,
+        activity: Vec<zevria_content::HostedActivity>,
+    ) {
+        let Some(location) = self
+            .executing_tool_calls
+            .get(call_id)
+            .and_then(|locations| locations.last())
+            .copied()
+        else {
+            return;
+        };
+        let index = location.history_index;
+        let Some(block_index) = self.block_index(index, location.block_id) else {
+            return;
+        };
+        let HistoryEntry::Conversation(entry) = &mut self.history[index] else {
+            return;
+        };
+        let block = &mut entry.blocks[block_index];
+        if let Some((call, state)) = block.native_tool_mut()
+            && call.function.name == zevria_foundation::WEB_SEARCH_TOOL_NAME
+            && state.status == ToolCallStatus::Executing
+            && state.web_search_activity != activity
+        {
+            state.web_search_activity = activity;
+            block.touch();
+            self.touch_entry(index);
+        }
+    }
+
     pub fn interrupt_executing_tool_calls(&mut self) {
         for locations in std::mem::take(&mut self.executing_tool_calls).into_values() {
             for location in locations {
@@ -1247,6 +1280,7 @@ impl ConversationState {
                 let block = &mut entry.blocks[block_index];
                 if let Some((_, state)) = block.native_tool_mut() {
                     state.status = ToolCallStatus::Interrupted;
+                    state.web_search_activity.clear();
                     block.touch();
                     self.touch_entry(index);
                 }
@@ -1554,6 +1588,56 @@ mod tests {
     use super::*;
     use zevria_workflow::AgentRunDescriptor;
     use zevria_workflow::EnsembleRunId;
+
+    #[test]
+    fn local_search_activity_only_lives_on_its_executing_call() {
+        use rig_core::message::{CallId, ToolFunction, ToolName};
+        use zevria_content::{HostedActivity, HostedActivityKind, HostedActivityStatus};
+        let mut conversation = ConversationState::default();
+        let name = ToolName::new(zevria_foundation::WEB_SEARCH_TOOL_NAME).unwrap();
+        for id in ["search-one", "search-two"] {
+            let call = ToolCall::from_wire(
+                id,
+                ToolFunction::new(name.clone(), serde_json::json!({"query":"version"})),
+            );
+            conversation.push_message(
+                Message::from(vec![AssistantContent::ToolCall(call)]),
+                ToolCallStatus::Executing,
+            );
+        }
+        let activity = vec![HostedActivity {
+            kind: HostedActivityKind::WebSearch,
+            item_id: None,
+            output_index: 0,
+            status: HostedActivityStatus::InProgress,
+            action: Some(serde_json::json!({"type":"open_page","url":"https://example.com/docs"})),
+        }];
+        let read = |state: &ConversationState, index| {
+            let Some(HistoryEntry::Conversation(entry)) = state.entry(index) else {
+                panic!("tool row absent")
+            };
+            let (_, state) = entry.blocks.iter().find_map(|b| b.native_tool()).unwrap();
+            (state.status, state.web_search_activity.clone())
+        };
+        conversation.update_web_search_activity("search-one", activity.clone());
+        assert_eq!(
+            read(&conversation, 0),
+            (ToolCallStatus::Executing, activity.clone())
+        );
+        assert_eq!(read(&conversation, 1), (ToolCallStatus::Executing, vec![]));
+        conversation.finish_tool_results(
+            &Message::tool_result(CallId::from_wire("search-one"), name, "version 2"),
+            &[],
+        );
+        conversation.update_web_search_activity("search-one", activity.clone());
+        assert_eq!(read(&conversation, 0), (ToolCallStatus::Finished, vec![]));
+        conversation.update_web_search_activity("search-two", activity);
+        conversation.interrupt_executing_tool_calls();
+        assert_eq!(
+            read(&conversation, 1),
+            (ToolCallStatus::Interrupted, vec![])
+        );
+    }
 
     #[test]
     fn late_command_result_does_not_replace_the_newer_job_location() {

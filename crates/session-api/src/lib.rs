@@ -26,6 +26,7 @@ pub mod provider;
 pub mod question;
 pub mod subtask;
 pub mod turn;
+pub mod web_search;
 pub mod worker;
 pub use command::*;
 pub use command_job::*;
@@ -35,6 +36,7 @@ pub use provider::*;
 pub use question::*;
 pub use subtask::*;
 pub use turn::TurnContext;
+pub use web_search::*;
 pub use worker::*;
 #[cfg(test)]
 mod event_tests;

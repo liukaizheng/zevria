@@ -60,6 +60,7 @@ async fn command_status_wait_registry_inherits_or_overrides_only_status_wait() {
             config,
             131_072,
             Some(zevria_session_api::CommandJobs::new(limits, None)),
+            None,
         )
         .unwrap()
         .snapshot()
@@ -124,6 +125,7 @@ async fn production_registry_pins_names_order_and_schemas() {
         CommandConfig::default(),
         131_072,
         Some(test_jobs()),
+        None,
     )
     .expect("tool server")
     .snapshot()
@@ -315,6 +317,7 @@ async fn empty_skill_registry_keeps_skill_capable_mode_tools_advertised() {
         CommandConfig::default(),
         131_072,
         Some(test_jobs()),
+        None,
     )
     .expect("tool server")
     .snapshot()
@@ -342,7 +345,7 @@ async fn explore_registry_is_command_only_and_uses_configured_limits() {
         capture_bytes: 42,
         ..CommandConfig::default()
     };
-    let definitions = build_explore_tools(workspace.path(), command_config)
+    let definitions = build_explore_tools(workspace.path(), command_config, None)
         .expect("tool server")
         .snapshot()
         .take_definitions();
@@ -529,6 +532,7 @@ async fn zero_background_cap_keeps_the_foreground_only_registry_and_policies() {
         config,
         131_072,
         None,
+        None,
     )
     .unwrap()
     .snapshot()
@@ -590,6 +594,7 @@ async fn skill_tool_definition_has_a_stable_bodyless_contract() {
         CommandConfig::default(),
         131_072,
         Some(test_jobs()),
+        None,
     )
     .expect("tool server")
     .snapshot()

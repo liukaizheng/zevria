@@ -7,7 +7,7 @@ use std::{ops::Range, sync::Arc, time::SystemTime};
 use zevria_content::{ImageReadSummary, readable::sanitize_readable};
 use zevria_foundation::{
     CommandJobId, CommandJobSnapshot, CommandJobStatus, FileChange, FileChangeOutput,
-    QuestionResponse, READ_IMAGE_TOOL_NAME,
+    QuestionResponse, READ_IMAGE_TOOL_NAME, WEB_SEARCH_TOOL_NAME, WebSearchResultDetail,
 };
 use zevria_presentation::{
     blocks::*,
@@ -77,6 +77,11 @@ pub enum ToolDetail {
     },
     Questions(Vec<QuestionDetail>),
     Image(Option<ImageReadSummary>),
+    WebSearch {
+        activity: Vec<WebActionPresentation>,
+        running_label: Option<String>,
+        completed: Option<Box<WebSearchResultDetail>>,
+    },
     Standard {
         markdown: bool,
         show_output: bool,
@@ -219,6 +224,34 @@ impl ToolPresentation {
                     body = output.map(plain_diagnostic).unwrap_or_default();
                 }
                 ToolDetail::Image(image_read_summary(state))
+            }
+            WEB_SEARCH_TOOL_NAME => {
+                let completed = state.web_search_detail();
+                if let Some(text) = output {
+                    body = completed.map_or_else(
+                        || plain_diagnostic(text),
+                        |detail| web_search_answer(text, detail),
+                    );
+                }
+                let activity = completed.map_or_else(
+                    || web_search_actions(&state.web_search_activity),
+                    |detail| {
+                        detail
+                            .actions
+                            .iter()
+                            .enumerate()
+                            .map(|(index, action)| {
+                                WebActionPresentation::from_summary(index as u64, action)
+                            })
+                            .collect()
+                    },
+                );
+                ToolDetail::WebSearch {
+                    activity,
+                    running_label: (status == StatusIcon::Running)
+                        .then(|| web_search_running_label(&state.web_search_activity)),
+                    completed: completed.cloned().map(Box::new),
+                }
             }
             "task" | "reconcile_reports" => {
                 if let Some(list) = native_list(call, state) {
@@ -599,6 +632,86 @@ fn question_details(state: &NativeToolState) -> Vec<QuestionDetail> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn web_search_native_projects_pending_and_restored_details() {
+        use rig_core::message::{CallId, ToolFunction, ToolName};
+        use zevria_foundation::{
+            ToolCallOutcome, ToolResultDetail, ToolResultMetadata, WebSearchActionSummary,
+            WebSearchDepth, WebSearchSourceSummary,
+        };
+
+        let args = json!({"query":"Find the version"});
+        let call = ToolCall::new(
+            CallId::from_wire("search"),
+            ToolFunction::new(ToolName::new(WEB_SEARCH_TOOL_NAME).unwrap(), args.clone()),
+        );
+        let mut state = NativeToolState::new(NativeToolCallStatus::Executing, &args);
+        let pending = ToolPresentation::native(&call, &state, None);
+        assert_eq!(pending.status, StatusIcon::Running);
+        assert_eq!(pending.summary, "Find the version");
+        assert!(matches!(pending.detail, ToolDetail::WebSearch {
+            activity, running_label: Some(label), completed: None,
+        } if activity.is_empty() && label == "Searching the web"));
+
+        state.status = NativeToolCallStatus::Finished;
+        state.metadata = Some(ToolResultMetadata {
+            id: "search".into(),
+            call_id: None,
+            tool_name: WEB_SEARCH_TOOL_NAME.into(),
+            outcome: ToolCallOutcome::Success,
+            diagnostic: None,
+            detail: Some(ToolResultDetail::WebSearch(WebSearchResultDetail {
+                provider: "test".into(),
+                model: "search-model".into(),
+                depth: WebSearchDepth::Quick,
+                actions: vec![
+                    WebSearchActionSummary {
+                        kind: "search".into(),
+                        queries: vec!["current version".into()],
+                        url: None,
+                        pattern: None,
+                    },
+                    WebSearchActionSummary {
+                        kind: "open_page".into(),
+                        queries: vec![],
+                        url: Some("https://example.com/changelog".into()),
+                        pattern: None,
+                    },
+                ],
+                sources: vec![WebSearchSourceSummary {
+                    title: "Changelog".into(),
+                    url: "https://example.com/changelog".into(),
+                }],
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+                total_tokens: None,
+            })),
+        });
+        let restored = ToolPresentation::native(
+            &call,
+            &state,
+            Some("Version 2.\n\nSources:\n- <https://example.com/changelog>"),
+        );
+        assert_eq!(restored.status, StatusIcon::Done);
+        assert_eq!(restored.body, "Version 2.");
+        let ToolDetail::WebSearch {
+            activity,
+            running_label: None,
+            completed: Some(_),
+        } = restored.detail
+        else {
+            panic!("expected persisted search details");
+        };
+        assert_eq!(activity.len(), 2);
+        assert_eq!(activity[0].queries, ["current version"]);
+        assert_eq!(activity[0].status, StatusIcon::Done);
+        assert_eq!(
+            activity[1].safe_url(),
+            Some("https://example.com/changelog")
+        );
+    }
 
     #[test]
     fn job_and_read_summaries_use_structured_targets() {

@@ -16,6 +16,11 @@ use zevria_transcript::AgentRunTranscriptRecord;
 use zevria_transcript::load_agent_run;
 use zevria_workflow::{AgentProtocolDirection, validate_worker_synthesis_payload};
 
+#[cfg(windows)]
+use super::handoff::{
+    claude_plan_artifact_directory, validate_claude_plan_artifact_path,
+    validate_workspace_claude_plan_artifact_directory, workspace_claude_plan_artifact_directory,
+};
 use super::*;
 
 const PYTHON_COMMAND: &str = if cfg!(windows) { "python" } else { "python3" };

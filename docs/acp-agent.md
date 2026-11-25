@@ -36,7 +36,7 @@ zevria --acp --ensemble-worker
 Worker-specific differences:
 
 - Available modes remain `plan` and `review`, never `build` or `orchestrate`. New sessions start in source-read-only Review; the supervisor selects Plan for planning. These route to `ModelRole::Plan` and `ModelRole::Review` using ordinary provider configuration and inherited `ZEVRIA_CONFIG`. Review uses core Build turn mechanics internally, not a new global mode or root Build/orchestration capabilities.
-- Plan exposes only the local tools `command`, `question`, `create_plan`, `update_plan`, `read_plan`, and no-argument `submit_plan`; Review exposes only `command` and `question`. Both can use provider-hosted `web_search` when enabled in provider configuration. Skills are disabled in policy and request materialization. No skill/model mutation services, structured mutation tools, delegation, nested ensembles, or peer-report reconciliation are installed. Skill extensions are not advertised and requests are rejected.
+- Plan exposes only the local tools `command`, `question`, `create_plan`, `update_plan`, `read_plan`, and no-argument `submit_plan`; Review exposes only `command` and `question`. Both also expose the local `web_search` tool when `[web_search]` is enabled in `config.toml`. Skills are disabled in policy and request materialization. No skill/model mutation services, structured mutation tools, delegation, nested ensembles, or peer-report reconciliation are installed. Skill extensions are not advertised and requests are rejected.
 - The composed [worker policy](instructions/ensemble-worker.md) uses the [shared inspection and scratch contract](instructions/inspection-policy.md): source-read-only with temporary investigative execution. Task-relevant reads outside the workspace (including `~/.zevria/logs/zevria.log`) are permitted under OS permissions. Downloads, preparation, scripts, builds/tests/formatters and package installation are conditional on all side effects remaining in the worker's newly created, unique, private OS-temp scratch directory. This is **not an OS sandbox**. The worker still does not issue ACP permission requests.
 - Worker Plan requires the client's `plan` capability (Plan operations), including for restored Planning/Ready sessions. Unsupported activation is rejected with runtime/lease cleanup. Canonical Ready Markdown is sent exactly as `plan_update` with `type = "markdown"` and a stable artifact-derived Plan ID, before the successful prompt response. A successful `submit_plan` result alone is not completion proof. Stored draft saves emit Planning snapshots but never Plan-channel proof, change prompt decision phases, or authorize implementation.
 - Plans are proposals for parent review: no implementation instructions or approval form is emitted. `/implement` and implementation choices are rejected in workers. Only an explicit parent worker-control receipt (`/confirm`, `/baseline`, or the existing confirm shortcut) confirms a proposal. Optional host `/baseline` selects one exact confirmed revision as synthesis foundation/preference authority; `/unbaseline` clears the selection but retains confirmation. These are parent controls, not ACP protocol extensions or provider commands; worker output cannot select itself. Transfers preserve previous confirmations and feedback/withdrawal clears both confirmation and selection. Explicit requirements, captured choices and factual correction outrank baseline preferences. Once all participating workers are confirmed, a run originally selecting multiple workers uses parent verification and synthesis. A Plan run originally selecting exactly one worker instead publishes that exact confirmed Markdown directly, without root inspection, rewriting, synthesis tools or root model calls. Abandoning workers from a multi-worker run does not enable this shortcut. Both paths publish without another approval or an automatic Build transition; implementation still requires a later explicit version-checked command. Questions about unresolved consequential preferences still use normal forms and dismissal/cancellation handling.
@@ -45,17 +45,17 @@ Worker-specific differences:
 
 Normalized parent evidence remains in `.zevria/agent-runs/...`. Native transcripts and parent logs can contain source material, diagnostics and accepted non-secret decisions; ignore guards are not confidentiality or retention controls. See [ensemble.md](ensemble.md) for default participation, opt-out, and recovery contracts.
 
-## Provider-hosted search and citations
+## Web search and citations
 
 Native Zevria ACP sessions and native ensemble workers use the ordinary
-[per-provider search configuration](responses-compatible.md#provider-hosted-web-search).
-External ACP agents manage their own capabilities; Zevria does not rewrite their
-provider transports. Hosted search has automatic tool selection unless a
-permitted provider override is configured, and remains unavailable to internal
-summaries/compaction and empty task allow-lists.
+[isolated search configuration](responses-compatible.md#isolated-web-search).
+The running local tool emits ACP updates on its own call ID, and its result
+carries display-only search details. External ACP agents manage their own
+capabilities; Zevria does not rewrite their provider transports.
 
-Live activity projects as ACP tool-call/update notifications with
-`hosted-search:<attempt-id>:<output-index>` IDs, separate from local functions.
+Historical or gateway-provided hosted activity continues to project as ACP
+tool-call/update notifications with `hosted-search:<attempt-id>:<output-index>`
+IDs, separate from local functions.
 Search and find-in-page use `ToolKind::Search`; open-page uses `ToolKind::Fetch`.
 Interruption is a failed status with an explanatory label; already completed
 activity retains completed status if its attempt later fails. Raw input retains

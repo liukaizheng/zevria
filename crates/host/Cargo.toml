@@ -40,4 +40,3 @@ tempfile = { workspace = true }
 [dev-dependencies]
 zevria-core = { workspace = true, features = ["test-support"] }
 rig-core = { workspace = true }
-zevria-responses = { workspace = true }

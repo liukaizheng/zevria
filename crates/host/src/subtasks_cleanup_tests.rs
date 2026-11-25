@@ -106,7 +106,7 @@ async fn cancellation_and_supervisor_abort_quiesce_commands_before_workspace_reu
             !process.status.success(),
             "old shell must be reaped before reuse"
         );
-        let tools = build_isolated_build_tools(&path, CommandConfig::default()).unwrap();
+        let tools = build_isolated_build_tools(&path, CommandConfig::default(), None).unwrap();
         assert!(
             execute(
                 &tools,

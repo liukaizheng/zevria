@@ -20,11 +20,11 @@ use zevria_foundation::tool_result::{
 };
 use zevria_foundation::{
     CREATE_PLAN_TOOL_NAME, READ_PLAN_TOOL_NAME, RECONCILE_REPORTS_TOOL_NAME, SKILL_TOOL_NAME,
-    SUBMIT_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+    SUBMIT_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME, WEB_SEARCH_TOOL_NAME,
 };
 use zevria_instructions::skill::{ActiveSkills, SkillRequest};
 use zevria_session_api::provider::ModelProvider;
-use zevria_session_api::turn::TurnContext;
+use zevria_session_api::{SessionEventSender, WebSearchProgress, turn::TurnContext};
 use zevria_workflow::ensemble::{ReportReconciliationCatalog, ValidatedReportReconciliation};
 use zevria_workflow::plan::{
     PlanCandidate, PlanDraft, PlanDraftScope, PlanRecord, PlanWorkflowState, apply_plan_record,
@@ -49,6 +49,7 @@ pub(in crate::session) enum EngineTool {
     ReconcileReports,
     Question,
     LaunchSubtasks,
+    WebSearch,
     Other,
 }
 impl EngineTool {
@@ -64,6 +65,7 @@ impl EngineTool {
             RECONCILE_REPORTS_TOOL_NAME => Self::ReconcileReports,
             QUESTION_TOOL_NAME => Self::Question,
             LAUNCH_SUBTASKS_TOOL_NAME => Self::LaunchSubtasks,
+            WEB_SEARCH_TOOL_NAME => Self::WebSearch,
             _ => Self::Other,
         }
     }
@@ -72,6 +74,9 @@ impl EngineTool {
     }
     pub(in crate::session) fn authors_draft(self) -> bool {
         matches!(self, Self::CreatePlan | Self::UpdatePlan)
+    }
+    fn can_run_concurrently(self) -> bool {
+        matches!(self, Self::LaunchSubtasks | Self::WebSearch)
     }
     fn is_plan(self) -> bool {
         self.authors_draft() || matches!(self, Self::ReadPlan | Self::SubmitPlan)
@@ -235,6 +240,7 @@ pub(in crate::session) async fn dispatch_tool_call(
     skill_context: Option<&zevria_instructions::skill::SkillContext>,
     plan_scope: Option<&PlanDraftScope>,
     mcp_access: zevria_foundation::McpToolAccess,
+    events: Option<&SessionEventSender>,
 ) -> ToolCallSlot {
     let arguments = tool_arguments_for_dispatch(&call.function);
     // Per-call context carries the assistant call id into the tool, so tools
@@ -245,6 +251,15 @@ pub(in crate::session) async fn dispatch_tool_call(
         .insert(ToolCallId(call.id.to_string()))
         .expect("call IDs are serializable");
     context.insert_scope(turn.clone());
+    if call.tool == EngineTool::WebSearch
+        && let Some(events) = events
+    {
+        context.insert_scope(WebSearchProgress::new(
+            turn.id,
+            call.id.to_string(),
+            events.clone(),
+        ));
+    }
     if !mcp_access.is_none() && zevria_foundation::is_mcp_tool_name(&call.function.name) {
         context.insert_scope(mcp_access);
     }
@@ -413,6 +428,7 @@ pub(in crate::session) struct ToolExecutionScope<'a> {
     pub(in crate::session) skill_activation_available: bool,
     pub(in crate::session) input_token_limit: u64,
     pub(in crate::session) turn: &'a TurnContext,
+    pub(in crate::session) events: Option<&'a SessionEventSender>,
     pub(in crate::session) reconciliation_catalog: Option<&'a ReportReconciliationCatalog>,
     pub(in crate::session) planning: Option<PlanWorkflowState>,
 }
@@ -457,6 +473,7 @@ pub(in crate::session) async fn execute_ordinary_tool_call(
             skill_context.as_ref(),
             plan_scope,
             scope.policy.mcp_access,
+            scope.events,
         )
         .await;
     }
@@ -554,7 +571,8 @@ impl<'a> BatchPlan<'a> {
         let skill = calls.iter().any(|call| call.tool == EngineTool::Skill);
         let policy = if skill && calls.iter().any(|call| call.tool != EngineTool::Skill) {
             BatchPolicy::MixedRejected
-        } else if gate.ensemble.is_some()
+        } else if (gate.ensemble.is_some()
+            && calls.iter().any(|call| !call.tool.can_run_concurrently()))
             || gate.candidate_accepted()
             || calls.iter().any(|call| call.tool.is_plan())
         {
@@ -621,8 +639,9 @@ fn ensemble_gate_decision(
 
 /// Execute one assistant call batch. Each `launch_subtasks` call internally
 /// enqueues all its entries before collecting reports, even under serialized
-/// dispatch. Multiple launch batches also run concurrently — with each other and with the
-/// ordinary tools, which keep executing sequentially in assistant order.
+/// dispatch. Launch batches and independent web searches run concurrently
+/// alongside ordinary tools, which keep executing sequentially in assistant order.
+/// Plan/skill lifecycle gates still take precedence over concurrent execution.
 /// Result slots keep the original assistant-call order for correlation and
 /// transcripts. Historical pins seed the batch: first valid calls pin, while
 /// same-batch and later duplicates reapply. Both produce typed applications and
@@ -657,7 +676,6 @@ pub(in crate::session) async fn execute_planned_tool_calls(
             }
         }).collect(), None);
     }
-    let is_launch = |call: &EngineCall<'_>| call.tool == EngineTool::LaunchSubtasks;
     if plan.policy == BatchPolicy::Serialized {
         let gate = submission_gate;
         let shape = &plan.shape;
@@ -743,28 +761,22 @@ pub(in crate::session) async fn execute_planned_tool_calls(
         return assemble_tool_result_batch(slots, candidate);
     }
 
-    let launches = futures_util::future::join_all(
-        calls
-            .iter()
-            .enumerate()
-            .filter(|(_, call)| is_launch(call))
+    let permits = &tokio::sync::Semaphore::new(6);
+    let concurrent = futures_util::future::join_all(
+        calls.iter().enumerate().filter(|(_, call)| call.tool.can_run_concurrently())
             .map(|(index, call)| async move {
-                let slot = if scope.turn.is_cancelled() {
-                    cancelled_slot(call)
-                } else if scope.policy.allows_tool(&call.function.name) {
-                    dispatch_tool_call(
-                        scope.tools,
-                        call,
-                        scope.turn,
-                        scope.reconciliation_catalog,
-                        None,
-                        None,
-                        zevria_foundation::McpToolAccess::None,
-                    )
-                    .await
-                } else {
-                    denied_slot(call, scope.mode)
-                };
+                if scope.turn.is_cancelled() { return (index, cancelled_slot(call)); }
+                if !scope.policy.allows_tool(&call.function.name) { return (index, denied_slot(call, scope.mode)); }
+                let _permit = if call.tool == EngineTool::WebSearch {
+                    tokio::select! {
+                        biased;
+                        _ = scope.turn.cancellation().cancelled() => return (index, cancelled_slot(call)),
+                        permit = permits.acquire() => Some(permit.expect("batch semaphore is never closed")),
+                    }
+                } else { None };
+                let slot = dispatch_tool_call(scope.tools, call, scope.turn,
+                    scope.reconciliation_catalog, None, None, zevria_foundation::McpToolAccess::None,
+                    scope.events).await;
                 (index, slot)
             }),
     );
@@ -772,7 +784,7 @@ pub(in crate::session) async fn execute_planned_tool_calls(
         let mut active = active_skills;
         let mut completed = Vec::new();
         for (index, call) in calls.iter().enumerate() {
-            if is_launch(call) {
+            if call.tool.can_run_concurrently() {
                 continue;
             }
             let slot = execute_ordinary_tool_call(scope, call, &mut active, None).await;
@@ -780,11 +792,11 @@ pub(in crate::session) async fn execute_planned_tool_calls(
         }
         completed
     };
-    let (launch_slots, ordinary_slots) = tokio::join!(launches, ordinary);
+    let (concurrent_slots, ordinary_slots) = tokio::join!(concurrent, ordinary);
 
     let mut slots: Vec<Option<ToolCallSlot>> =
         std::iter::repeat_with(|| None).take(calls.len()).collect();
-    for (index, slot) in launch_slots.into_iter().chain(ordinary_slots) {
+    for (index, slot) in concurrent_slots.into_iter().chain(ordinary_slots) {
         slots[index] = Some(slot);
     }
 
@@ -924,6 +936,11 @@ impl ToolCallSlot {
     }
 }
 impl<'a> ToolExecutionScope<'a> {
+    pub(in crate::session) fn with_events(mut self, events: &'a SessionEventSender) -> Self {
+        self.events = Some(events);
+        self
+    }
+
     pub(in crate::session) fn new<P: ModelProvider>(
         engine: &'a SessionEngine<P>,
         mode: SessionMode,
@@ -944,6 +961,7 @@ impl<'a> ToolExecutionScope<'a> {
             instructions: plan,
             input_token_limit: engine.context_policy(policy.model_role).input_token_limit,
             turn,
+            events: None,
             reconciliation_catalog: gate.reconciliation_catalog(),
             planning: match (mode, engine.plan_state()) {
                 (SessionMode::Plan, Ok(state @ PlanWorkflowState::Planning { .. })) => {

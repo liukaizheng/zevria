@@ -432,7 +432,6 @@ pub struct OpenAiProvider {
     pub(crate) reasoning_level: ReasoningLevel,
     pub(crate) reasoning_summary_level: ReasoningSummaryLevel,
     pub(crate) compatibility: ResponsesCompatibilityConfig,
-    pub(crate) web_search: crate::WebSearchConfig,
     pub(crate) additional_params: std::collections::BTreeMap<String, serde_json::Value>,
     pub(crate) prompt_cache_key: String,
     pub(crate) responses_transport: ResponsesTransport,
@@ -469,7 +468,6 @@ impl OpenAiProvider {
         );
         let endpoint = profile.responses_endpoint()?;
         endpoint.network.validate(&profile.profile.provider)?;
-        endpoint.web_search.validate(&profile.profile.provider)?;
         validate_prompt_cache_key(endpoint.compatibility.send_prompt_cache_key, cache_key)?;
         let session_headers = session_routing_headers(profile, session_id)?;
         let endpoints = OpenAiResponseEndpoints::parse(&endpoint.base_url)?;
@@ -599,7 +597,6 @@ impl OpenAiProvider {
                 _ => unreachable!("validated Responses profile"),
             },
             compatibility: endpoint.compatibility.clone(),
-            web_search: endpoint.web_search.clone(),
             additional_params: endpoint.additional_params.clone(),
             prompt_cache_key: cache_key.to_string(),
             responses_transport: ResponsesTransport::new(

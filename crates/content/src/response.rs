@@ -177,6 +177,26 @@ impl HostedActivity {
     }
 }
 
+/// Shared wording and current action while a local search tool is running.
+pub fn web_search_progress_step(
+    activity: &[HostedActivity],
+) -> (&'static str, Option<&HostedActivity>) {
+    let current = activity
+        .iter()
+        .filter(|item| !item.status.is_terminal())
+        .max_by_key(|item| item.output_index);
+    let label = match current {
+        Some(item) => match item.action_kind() {
+            Some("open_page") => "Opening a page",
+            Some("find_in_page") => "Finding in page",
+            _ => "Searching the web",
+        },
+        None if activity.is_empty() => "Searching the web",
+        None => "Summarizing sources",
+    };
+    (label, current)
+}
+
 /// A provider address, before any ordinary message projection flattens parts.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

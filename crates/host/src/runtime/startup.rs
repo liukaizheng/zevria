@@ -1,6 +1,7 @@
 //! Staged composition shared by interactive roots and restricted native workers.
 //! Read/validate every dependency before preparing a writable transcript. Root
 //! capabilities and dependent-task lifetime remain explicit profile choices.
+use super::tools::with_web_search_policy;
 use super::{
     MCP_SHUTDOWN_GRACE, RestoredAgentRun, RestoredSession, RestoredSubtask, RunningSession,
     SessionIdentity, SessionStart, StartedSession, SubtaskSupervisor, append_guidance_notices,
@@ -32,12 +33,12 @@ use zevria_foundation::{
 };
 use zevria_instructions::{SkillCatalog, SkillContext};
 use zevria_mcp::{McpConfigSource, McpManager};
-use zevria_provider::{ProviderRouter, ProviderRouterFactory};
+use zevria_provider::{OpenAiWebSearchExecutor, ProviderRouter, ProviderRouterFactory};
 use zevria_session_api::mcp::McpSessionService;
 use zevria_session_api::{
     CommandJobs, QuestionRequester, QuestionResponder, SessionCommand, SessionEventReceiver,
-    SessionEventSender, SubtaskLaunchRequest, SubtaskLauncher, question_channels,
-    session_event_channel, subtask_channels_with_capacity,
+    SessionEventSender, SubtaskLaunchRequest, SubtaskLauncher, WebSearchExecutor,
+    question_channels, session_event_channel, subtask_channels_with_capacity,
 };
 use zevria_transcript::{
     agent_runs_dir,
@@ -82,6 +83,7 @@ struct RootServices {
     keepalive: SubtaskLauncher,
     ensemble_questions: QuestionRequester,
     skill_service: Arc<LocalSkillService>,
+    web_search: Option<Arc<dyn WebSearchExecutor>>,
 }
 struct SessionServices {
     provider: ProviderRouter,
@@ -314,11 +316,19 @@ async fn build_services(
     let config = resolved.config;
     let (event_tx, event_rx) = session_event_channel(config.session.event_queue_capacity);
     let questions = question_channels(event_tx.clone());
+    let web_search = resolved
+        .model_config()
+        .web_search
+        .clone()
+        .map(|search| OpenAiWebSearchExecutor::new(search, &resolved.id))
+        .transpose()?
+        .map(|executor| Arc::new(executor) as Arc<dyn WebSearchExecutor>);
+    let search_enabled = web_search.is_some();
     if resolved.profile.is_worker() {
         // Restricted workers never discover/manage skills, mutate models,
         // launch subtasks/ensembles, or project Markdown Plans.
         let skill_catalog = Arc::new(SkillCatalog::default());
-        let tools = worker_tools(&resolved.workspace, questions.requester, config)?;
+        let tools = worker_tools(&resolved.workspace, questions.requester, config, web_search)?;
         let provider = ProviderRouter::root(
             &storage.models.routing,
             &resolved.model_config().session.preamble,
@@ -327,7 +337,7 @@ async fn build_services(
         return Ok(SessionServices {
             provider,
             tools,
-            policies: worker_policies(),
+            policies: with_web_search_policy(worker_policies(), search_enabled),
             skill_catalog,
             event_tx,
             event_rx,
@@ -371,7 +381,10 @@ async fn build_services(
                 .filter_map(|meta| meta.command_job().map(|job| job.id.clone())),
         );
     }
-    let mut policies = build_session_policies(config.session.plan, command_jobs.is_some());
+    let mut policies = with_web_search_policy(
+        build_session_policies(config.session.plan, command_jobs.is_some()),
+        search_enabled,
+    );
     let skill_service = Arc::new(LocalSkillService {
         roots: skill_catalog
             .roots
@@ -387,6 +400,7 @@ async fn build_services(
         config.command,
         config.session.plan.max_artifact_bytes,
         command_jobs.clone(),
+        web_search.clone(),
     )?;
     let provider = ProviderRouter::root(
         &storage.models.routing,
@@ -427,6 +441,7 @@ async fn build_services(
             keepalive,
             ensemble_questions,
             skill_service,
+            web_search,
         }),
     })
 }
@@ -565,6 +580,7 @@ async fn build_engine(
             root.requests,
             root.keepalive,
             root.skill_service,
+            root.web_search,
         ))
     } else {
         None
@@ -588,7 +604,7 @@ async fn build_engine(
     .await
     .context("workspace guidance loader failed")?;
     let (engine, root) = match root {
-        Some((ensemble, requests, keepalive, skill_service)) => {
+        Some((ensemble, requests, keepalive, skill_service, web_search)) => {
             let mut engine = engine
                 .with_incremental_tools(config.session.incremental_tools || mcp.is_some())
                 .with_mode_management()
@@ -620,10 +636,13 @@ async fn build_engine(
             }
             (
                 engine,
-                Some(RootTasks {
-                    requests,
-                    keepalive,
-                }),
+                Some((
+                    RootTasks {
+                        requests,
+                        keepalive,
+                    },
+                    web_search,
+                )),
             )
         }
         None => (
@@ -644,7 +663,7 @@ async fn build_engine(
         }
     }
     let root = root
-        .map(|root| -> anyhow::Result<_> {
+        .map(|(root, web_search)| -> anyhow::Result<_> {
             let config = SubtaskSupervisorConfig {
                 explore_factory: ProviderRouterFactory::new(
                     ModelRole::Explore,
@@ -674,7 +693,12 @@ async fn build_engine(
                         .reasoning_level,
                     &resolved.model_config().session.preamble,
                 ),
-                explore_tools: build_explore_tools(&resolved.workspace, config.command)?,
+                explore_tools: build_explore_tools(
+                    &resolved.workspace,
+                    config.command,
+                    web_search.clone(),
+                )?,
+                web_search,
                 startup_workspace: resolved.workspace.clone(),
                 empty_skills: Arc::new(SkillCatalog::default()),
                 command_config: config.command,

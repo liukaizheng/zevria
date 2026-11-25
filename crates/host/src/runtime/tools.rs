@@ -1,23 +1,29 @@
 //! Ordered tool registries and mode-specific access policies.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use zevria_foundation::{
     CREATE_PLAN_TOOL_NAME, FileMutationScope, LAUNCH_SUBTASKS_TOOL_NAME, ModelRole,
     QUESTION_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
-    SessionPolicies, TASK_TOOL_NAME, TurnPolicy, UPDATE_PLAN_TOOL_NAME, WorkspaceContract,
+    SessionMode, SessionPolicies, TASK_TOOL_NAME, TurnPolicy, UPDATE_PLAN_TOOL_NAME,
+    WEB_SEARCH_TOOL_NAME, WorkspaceContract,
 };
 use zevria_instructions::prompts::{
     BUILD_MODE_INSTRUCTIONS, ENSEMBLE_WORKER_PLAN_INSTRUCTIONS,
     ENSEMBLE_WORKER_REVIEW_INSTRUCTIONS, PLAN_MODE_INSTRUCTIONS,
 };
-use zevria_session_api::{CommandJobLimits, CommandJobs, QuestionRequester, SubtaskLauncher};
+use zevria_session_api::{
+    CommandJobLimits, CommandJobs, QuestionRequester, SubtaskLauncher, WebSearchExecutor,
+};
 use zevria_tools::{
     CommandLimits, CommandStatusTool, CommandTerminateTool, CommandTool, CreatePlanTool,
     DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool, ReadImageTool, ReadPlanTool,
     ReconcileReportsTool, SkillReadTool, SkillTool, SubmitPlanTool, TaskTool, UpdatePlanTool,
-    WriteTool,
+    WebSearchTool, WriteTool,
 };
 
 use crate::config::{CommandConfig, Config};
@@ -32,6 +38,7 @@ pub(crate) fn build_tools(
     command_config: CommandConfig,
     max_plan_artifact_bytes: usize,
     jobs: Option<CommandJobs>,
+    web_search: Option<Arc<dyn WebSearchExecutor>>,
 ) -> anyhow::Result<ToolServerHandle> {
     let workspace = workspace.to_path_buf();
     let server = if let Some(jobs) = jobs {
@@ -65,7 +72,7 @@ pub(crate) fn build_tools(
         )
         .tool(SkillTool)
         .tool(SkillReadTool);
-    Ok(server
+    let server = server
         .tool(ReconcileReportsTool)
         .tool(QuestionTool::new(questions))
         .tool(CreatePlanTool::new(max_plan_artifact_bytes))
@@ -73,22 +80,46 @@ pub(crate) fn build_tools(
         .tool(ReadPlanTool)
         .tool(SubmitPlanTool::new(max_plan_artifact_bytes))
         // Append new root declarations so existing cacheable bytes keep their order.
-        .tool(ReadImageTool::new(workspace))
-        .run())
+        .tool(ReadImageTool::new(workspace));
+    Ok(append_web_search(server, web_search).run())
 }
 
-/// Explore children register only the configured command tool. Structured
+fn append_web_search(
+    server: ToolServer,
+    executor: Option<Arc<dyn WebSearchExecutor>>,
+) -> ToolServer {
+    match executor {
+        Some(executor) => server.tool(WebSearchTool::new(executor)),
+        None => server,
+    }
+}
+
+/// Keep the workflow declaration consistent with the static search registry.
+pub(crate) fn with_web_search_policy(
+    mut policies: SessionPolicies,
+    enabled: bool,
+) -> SessionPolicies {
+    if !enabled {
+        for mode in [SessionMode::Build, SessionMode::Plan] {
+            if let Some(names) = &mut policies.policy_mut(mode).allowed_tool_names {
+                names.retain(|name| name != WEB_SEARCH_TOOL_NAME);
+            }
+        }
+    }
+    policies
+}
+
+/// Explore children register command and, when enabled, web search. Structured
 /// mutation, skills, planning completion, and nested delegation cannot be
 /// reached even if a policy check is bypassed; source-read-only investigation
 /// with scratch-contained execution is behavioral, not a command sandbox.
 pub(crate) fn build_explore_tools(
     workspace: &Path,
     command_config: CommandConfig,
+    web_search: Option<Arc<dyn WebSearchExecutor>>,
 ) -> anyhow::Result<ToolServerHandle> {
-    let workspace = workspace.to_path_buf();
-    Ok(ToolServer::new()
-        .tool(command_tool(workspace, command_config)?)
-        .run())
+    let server = ToolServer::new().tool(command_tool(workspace.to_path_buf(), command_config)?);
+    Ok(append_web_search(server, web_search).run())
 }
 
 /// Private Build-child registry. Both provider and engine receive this same
@@ -96,15 +127,16 @@ pub(crate) fn build_explore_tools(
 pub(crate) fn build_isolated_build_tools(
     child_workspace: &Path,
     command_config: CommandConfig,
+    web_search: Option<Arc<dyn WebSearchExecutor>>,
 ) -> anyhow::Result<ToolServerHandle> {
     let workspace = child_workspace.to_path_buf();
-    Ok(ToolServer::new()
+    let server = ToolServer::new()
         .tool(command_tool(workspace.clone(), command_config)?)
         .tool(TaskTool)
         .tool(EditTool::new(workspace.clone()))
         .tool(WriteTool::new(workspace.clone()))
-        .tool(DeleteTool::new(workspace))
-        .run())
+        .tool(DeleteTool::new(workspace));
+    Ok(append_web_search(server, web_search).run())
 }
 
 pub(crate) fn command_job_limits(config: CommandConfig) -> CommandJobLimits {
@@ -239,13 +271,14 @@ pub(super) fn worker_tools(
     workspace: &Path,
     questions: QuestionRequester,
     config: &Config,
+    web_search: Option<Arc<dyn WebSearchExecutor>>,
 ) -> anyhow::Result<ToolServerHandle> {
-    Ok(ToolServer::new()
+    let server = ToolServer::new()
         .tool(command_tool(workspace.to_path_buf(), config.command)?)
         .tool(QuestionTool::new(questions))
         .tool(CreatePlanTool::new(config.session.plan.max_artifact_bytes))
         .tool(UpdatePlanTool::new(config.session.plan.max_artifact_bytes))
         .tool(ReadPlanTool)
-        .tool(SubmitPlanTool::new(config.session.plan.max_artifact_bytes))
-        .run())
+        .tool(SubmitPlanTool::new(config.session.plan.max_artifact_bytes));
+    Ok(append_web_search(server, web_search).run())
 }

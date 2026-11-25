@@ -342,6 +342,11 @@ impl SessionModel {
                     self.conversation.finish_header(header, now);
                 }
             }
+            SessionEvent::Turn(TurnEvent::WebSearchProgress { turn_id, call_id, activity }) => {
+                if self.session.accepts_active(turn_id) {
+                    self.conversation.update_web_search_activity(&call_id, activity);
+                }
+            }
             SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id,
                 message,

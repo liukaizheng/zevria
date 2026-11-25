@@ -362,6 +362,23 @@ pub(crate) fn project_tool_calls(
         .collect()
 }
 
+pub(crate) fn web_search_progress(
+    call_id: String,
+    activity: &[zevria_content::HostedActivity],
+    known_tools: &KnownTools,
+) -> Option<AcpSessionUpdate> {
+    known_tools.get(&call_id)?;
+    let (phrase, _) = zevria_content::response::web_search_progress_step(activity);
+    Some(AcpSessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+        call_id,
+        ToolCallUpdateFields::new()
+            .status(ToolCallStatus::InProgress)
+            .content(vec![ToolCallContent::from(ContentBlock::Text(
+                TextContent::new(phrase),
+            ))]),
+    )))
+}
+
 pub(crate) fn project_tool_results(
     message: &Message,
     metadata: &[ToolResultMetadata],
@@ -826,6 +843,46 @@ fn bounded(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_search_progress_updates_the_local_call_until_the_result_arrives() {
+        use zevria_content::{HostedActivity, HostedActivityKind, HostedActivityStatus};
+        let known = KnownTools::from([(
+            "search".into(),
+            KnownTool {
+                arguments: json!({"query":"Find the version"}),
+                kind: ToolKind::Search,
+            },
+        )]);
+        assert!(web_search_progress("unknown".into(), &[], &known).is_none());
+        let opening = HostedActivity {
+            kind: HostedActivityKind::WebSearch,
+            item_id: None,
+            output_index: 0,
+            status: HostedActivityStatus::InProgress,
+            action: Some(json!({"type":"open_page","url":"https://example.com"})),
+        };
+        let completed = HostedActivity {
+            output_index: 1,
+            status: HostedActivityStatus::Completed,
+            ..opening.clone()
+        };
+        for (activity, expected) in [
+            (vec![], "Searching the web"),
+            (vec![opening, completed.clone()], "Opening a page"),
+            (vec![completed], "Summarizing sources"),
+        ] {
+            let Some(AcpSessionUpdate::ToolCallUpdate(update)) =
+                web_search_progress("search".into(), &activity, &known)
+            else {
+                panic!("expected progress for the local call");
+            };
+            assert_eq!(update.tool_call_id.to_string(), "search");
+            assert_eq!(update.fields.status, Some(ToolCallStatus::InProgress));
+            let content = serde_json::to_value(update.fields.content).unwrap();
+            assert_eq!(content[0]["content"]["text"], expected);
+        }
+    }
 
     #[test]
     fn hosted_ids_kinds_statuses_and_replay_are_independent() {

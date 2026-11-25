@@ -19,6 +19,7 @@ mod skill_read;
 mod submit_plan;
 mod task;
 mod update_plan;
+mod web_search;
 mod write;
 
 #[cfg(test)]
@@ -44,4 +45,5 @@ pub use skill_read::{SkillReadError, SkillReadTool};
 pub use submit_plan::{SubmitPlanArgs, SubmitPlanTool};
 pub use task::{TaskArgs, TaskItem, TaskStatus, TaskTool};
 pub use update_plan::{UpdatePlanArgs, UpdatePlanTool};
+pub use web_search::{WebSearchArgs, WebSearchError, WebSearchTool};
 pub use write::{WriteArgs, WriteTool};

@@ -57,6 +57,70 @@ fn environment_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn search_configuration_is_disabled_by_default_and_strict_when_enabled() {
+    assert!(parse("").unwrap().web_search.is_none());
+    assert!(
+        parse("[web_search]\nenabled = false")
+            .unwrap()
+            .web_search
+            .is_none()
+    );
+    let valid = "[web_search]\nenabled = true\nprovider = 'openai'\nmodel = 'gpt-5.6-sol'\nreasoning_level = 'low'\n";
+    let options = "external_web_access = false\nsearch_context_size = 'high'\nreturn_token_budget = 'unlimited'\nmax_tool_calls = 2\n[web_search.filters]\nallowed_domains = ['openai.com']\nblocked_domains = ['old.openai.com']\n[web_search.user_location]\ncountry = 'GB'\ncity = 'London'";
+    assert!(
+        parse(&format!("{valid}{options}"))
+            .unwrap()
+            .web_search
+            .is_some()
+    );
+    for (suffix, field) in [
+        ("max_tool_calls = 0", "web_search.max_tool_calls"),
+        ("unknown = true", "unknown field"),
+        ("search_context_size = 'extra'", "search_context_size"),
+        (
+            "[web_search.filters]\nallowed_domains = ['https://example.com']",
+            "allowed_domains[0]",
+        ),
+        ("[web_search.filters]\nunknown = []", "unknown field"),
+        (
+            "[web_search.user_location]\ncountry = 'gb'",
+            "web_search.user_location.country",
+        ),
+    ] {
+        let error = parse(&format!("{valid}{suffix}")).unwrap_err();
+        assert!(format!("{error:#}").contains(field), "{suffix}: {error:#}");
+    }
+    for (line, field) in [
+        ("provider = 'openai'\n", "provider"),
+        ("model = 'gpt-5.6-sol'\n", "model"),
+        ("reasoning_level = 'low'\n", "reasoning_level"),
+    ] {
+        let error = parse(&valid.replace(line, "")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!("web_search.{field} is required")),
+            "{error:#}"
+        );
+    }
+    assert!(
+        parse(&valid.replace("'gpt-5.6-sol'", "'missing'"))
+            .unwrap_err()
+            .to_string()
+            .contains("not defined")
+    );
+    assert!(
+        parse(&valid.replace("'low'", "'max'"))
+            .unwrap_err()
+            .to_string()
+            .contains("not configured")
+    );
+    let mut models = models_value();
+    models["providers"]["openai"]["web_search"] = serde_json::json!({"enabled":true});
+    assert!(
+        format!("{:#}", parse_value(&models).unwrap_err()).contains("unknown field `web_search`")
+    );
+}
+
+#[test]
 fn unix_shell_environment_defaults_to_captured_and_login_is_explicit() {
     use zevria_foundation::shell::ShellEnvironment;
     assert_eq!(
@@ -624,7 +688,9 @@ fn default_templates_use_requested_modes_models_and_search_setting() {
         );
     }
 
-    assert!(DEFAULT_MODELS.contains(r#""enabled": true, "external_web_access": true"#));
+    assert!(DEFAULT_CONFIG.contains("# [web_search]\n# enabled = true"));
+    assert!(DEFAULT_CONFIG.contains("# external_web_access = true"));
+    assert!(!DEFAULT_MODELS.contains("\"web_search\""));
     let reasoning_levels = r#""reasoning_levels": ["low", "medium", "high", "xhigh", "max"]"#;
     assert_eq!(DEFAULT_MODELS.matches(reasoning_levels).count(), 4);
     for model in ["gpt-6-luna", "gpt-6.2-sol", "gpt-6.2-astra"] {

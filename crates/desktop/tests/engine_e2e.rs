@@ -216,6 +216,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
 }
 #[tokio::test]
 async fn restored_plan_uses_skill_policy_and_mode_switches_refresh_completions() {
+    use zevria_content::UserPrompt;
     use zevria_foundation::{ModelRole, SessionMode};
     use zevria_model::models::SessionModels;
     use zevria_presentation::command::ClassifiedInput;
@@ -277,7 +278,10 @@ builder = { provider = "test", model = "test-model", reasoning_level = "medium" 
     let mut model = zevria_desktop::session::restore(started.restored);
     let has_skill = |model: &WorkspaceModel| {
         matches!(
-            model.controls.registry.classify("$desktop-mode-fixture"),
+            model
+                .controls
+                .registry
+                .classify_prompt(&UserPrompt::from_text("$desktop-mode-fixture")),
             Ok(ClassifiedInput::Skill { .. })
         )
     };

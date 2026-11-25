@@ -399,13 +399,25 @@ impl<P: ModelProvider> SessionEngine<P> {
                 usage,
             } => {
                 retained.extend(terminal);
+                let hosted_search =
+                    usage.is_some() && retained.iter().any(super::model_loop::has_hosted_search);
                 let persistence = recoverable(self.record_completed(retained))?;
                 if let Some(usage) = usage {
                     let policy = match &accepted.kind {
                         AcceptedKind::Ensemble { workflow, .. } => self.ensemble_policy(*workflow),
                         _ => self.policies.policy(accepted.mode()).clone(),
                     };
-                    self.report_provider_usage(&policy, usage.total_tokens)?;
+                    if !hosted_search {
+                        self.report_provider_usage(&policy, usage.total_tokens)?;
+                    }
+                    zevria_session_api::ProgressReporter::for_turn(
+                        events.clone(),
+                        turn.clone(),
+                        policy.model_role,
+                        self.context_policy(policy.model_role),
+                    )
+                    .usage_updated(usage)
+                    .await;
                 }
                 if let Some(error) = persistence {
                     self.persistence_failed(&error, events).await?;

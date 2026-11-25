@@ -9,8 +9,13 @@ fn search_item(id: &str, action: Value) -> Value {
 fn cited_item() -> Value {
     json!({"type":"message","id":"cited","role":"assistant","status":"completed","content":[{"type":"output_text","text":"🦀 Rust is fast.","annotations":[{"type":"url_citation","start_index":2,"end_index":15,"title":"Rust guide","url":"https://www.rust-lang.org/learn"},{"type":"future_annotation","opaque":"preserved"}]}]})
 }
-fn search_config() -> WebSearchConfig {
-    serde_json::from_value(json!({"enabled":true,"external_web_access":false,"search_context_size":"high","return_token_budget":"unlimited","filters":{"allowed_domains":["rust-lang.org"],"blocked_domains":["example.org"]},"user_location":{"country":"GB","city":"London"}})).unwrap()
+fn local_search_declaration() -> zevria_model::ToolDeclarations {
+    zevria_model::ToolDeclarations::new(vec![zevria_model::ToolDeclaration {
+        name: "web_search".into(),
+        description: "Search the external web".into(),
+        parameters: json!({"type":"object", "properties":{"query":{"type":"string"}}, "required":["query"], "additionalProperties":false}),
+        strict: None,
+    }]).unwrap()
 }
 fn parts() -> RequestParts {
     RequestParts {
@@ -58,10 +63,12 @@ pub(super) async fn held_answer_stream(websocket: bool, advertised: bool, search
             (None, Some(http), request)
         };
         // The HTTP branch retains its socket; the WS branch owns it instead.
+        let tools = request["tools"].as_array().into_iter().flatten();
+        assert!(!tools.clone().any(|tool| tool["type"] == "web_search"));
         assert_eq!(
-            request["tools"]
-                .as_array()
-                .is_some_and(|tools| tools.iter().any(|tool| tool["type"] == "web_search")),
+            tools
+                .clone()
+                .any(|tool| tool["type"] == "function" && tool["name"] == "web_search"),
             advertised
         );
         let output = u64::from(searched);
@@ -116,14 +123,15 @@ pub(super) async fn held_answer_stream(websocket: bool, advertised: bool, search
     } else {
         connect_http_test_provider(url).await
     };
+    let mut parts = parts();
     if advertised {
-        openai.web_search = search_config();
+        parts.tools = local_search_declaration();
     }
     openai.input_token_count_url = None;
     let (sender, mut receiver) = session_event_channel(32);
     let (checkpoints, mut checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
     let progress = ProgressReporter::new(sender).with_checkpoints(checkpoints);
-    let task = tokio::spawn(async move { openai.complete(parts().request(), progress).await });
+    let task = tokio::spawn(async move { openai.complete(parts.request(), progress).await });
     for expected in [first, expected_full.as_str()] {
         let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -177,7 +185,7 @@ async fn http_answers_stream_before_completion_with_search_disabled_unused_and_u
 }
 
 #[tokio::test]
-async fn hosted_request_controls_policy_choice_and_function_strictness() {
+async fn ordinary_requests_render_only_local_search_and_validate_forced_choice() {
     let mut openai = provider().await;
     let mut parts = parts();
     let prepare = crate::responses::prepare_turn_request;
@@ -189,64 +197,39 @@ async fn hosted_request_controls_policy_choice_and_function_strictness() {
             .get("tools")
             .is_none()
     );
-    openai.web_search = search_config();
+    parts.tools = local_search_declaration();
     for role in ModelRole::ALL {
         let prepared = prepare(&parts.request_with_role(role), &mut openai)
             .await
             .unwrap();
         let tools = prepared.request_properties["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(
-            tools[0],
-            serde_json::to_value(openai.web_search.tool().unwrap()).unwrap()
-        );
-        assert!(tools[0].get("strict").is_none());
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "web_search");
+        assert_eq!(tools[0]["strict"], true);
     }
     openai
         .additional_params
         .insert("tool_choice".into(), json!({"type":"web_search"}));
-    assert_eq!(
+    assert!(
         prepare(&parts.request(), &mut openai)
             .await
+            .err()
             .unwrap()
-            .request_properties["tool_choice"],
-        json!({"type":"web_search"})
-    );
-    parts.allowed_tool_names = Some(vec!["command".into()]);
-    let error = prepare(&parts.request(), &mut openai)
-        .await
-        .err()
-        .unwrap()
-        .to_string();
-    assert!(
-        error.contains("tool_choice")
-            && error.contains("web_search.enabled")
-            && error.contains("profile")
+            .to_string()
+            .contains("conflicts with declared tools")
     );
     parts.forbid_tool_calls = true;
     let fallback = prepare(&parts.compaction_request(), &mut openai)
         .await
         .unwrap();
-    assert!(fallback.request_properties.get("tools").is_none());
     assert_eq!(fallback.request_properties["tool_choice"], "none");
     parts.forbid_tool_calls = false;
-    parts.allowed_tool_names = None;
-    let registry = ToolServer::new()
-        .tool(CountTool {
-            executions: Arc::new(AtomicUsize::new(0)),
-        })
-        .run();
-    parts.tools =
-        zevria_model::ToolDeclarations::from_definitions(registry.snapshot().definitions(), |_| {
-            true
-        })
-        .unwrap();
-    openai.additional_params.insert("tool_choice".into(), json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search"},{"type":"function","name":"count_once"}]}));
-    let mixed = prepare(&parts.request(), &mut openai).await.unwrap();
-    let tools = mixed.request_properties["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0]["strict"], true);
-    assert!(tools[1].get("strict").is_none());
+    openai.additional_params.insert(
+        "tool_choice".into(),
+        json!({"type":"function", "name":"web_search"}),
+    );
+    assert!(prepare(&parts.request(), &mut openai).await.is_ok());
 }
 
 #[tokio::test]
@@ -326,7 +309,7 @@ async fn raw_activity_and_completed_blocks_reconcile_late_and_terminal_events() 
 }
 
 #[tokio::test]
-async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_dispatch() {
+async fn gateway_http_search_is_durable_model_inert_and_portable_without_local_dispatch() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/responses", listener.local_addr().unwrap());
     let output = vec![
@@ -337,7 +320,7 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = receive_http_json(&mut socket).await;
-        assert_eq!(request.body["tools"][0]["type"], "web_search");
+        assert!(request.body.get("tools").is_none());
         let events = [
             json!({"type":"response.web_search_call.searching","item_id":"ws","output_index":0}),
             output_text_delta_at("🦀 Rust is fast.", 2, 1, "cited"),
@@ -351,7 +334,6 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
     });
     let tools = ToolServer::new().run();
     let mut openai = connect_http_test_provider(url).await;
-    openai.web_search = search_config();
     openai.input_token_count_url = None;
     let directory = tempfile::tempdir().unwrap();
     let transcript = TranscriptWriter::create(directory.path()).unwrap();
@@ -487,7 +469,6 @@ async fn http_idle_retry_keeps_distinct_observed_attempts_and_identical_controls
         assert_eq!(requests[0], requests[1]);
     });
     let mut openai = connect_http_test_provider(url).await;
-    openai.web_search = search_config();
     let (checkpoints, mut checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
     let progress = discard_updates().with_checkpoints(checkpoints);
     let mut state = AttemptState::default();
@@ -540,7 +521,7 @@ async fn http_idle_retry_keeps_distinct_observed_attempts_and_identical_controls
 }
 
 #[tokio::test]
-async fn websocket_to_http_fallback_retains_activity_and_search_definition() {
+async fn websocket_to_http_fallback_retains_legacy_activity_without_injecting_hosted_tools() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/responses", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -594,7 +575,6 @@ async fn websocket_to_http_fallback_retains_activity_and_search_definition() {
     });
     let (socket, _) = connect_async(&url).await.unwrap();
     let mut openai = test_session_with_url(&url, socket, None);
-    openai.web_search = search_config();
     let progress = discard_updates();
     run_turn_request_with_recovery(
         parts().request(),
@@ -625,52 +605,6 @@ async fn websocket_to_http_fallback_retains_activity_and_search_definition() {
             .unwrap()
             .contains("abandoned websocket draft")
     );
-}
-
-#[tokio::test]
-async fn counting_fallback_does_not_remove_search_and_upstream_rejection_is_not_downgraded() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/responses", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        let (mut count, _) = listener.accept().await.unwrap();
-        let count_request = receive_http_json(&mut count).await;
-        assert!(count_request.headers.contains("/responses/input_tokens"));
-        send_http_response(&mut count, "404 Not Found", "application/json", "{}").await;
-        let (mut completion, _) = listener.accept().await.unwrap();
-        let completion_request = receive_http_json(&mut completion).await;
-        assert_eq!(
-            count_request.body["tools"],
-            completion_request.body["tools"]
-        );
-        assert_eq!(
-            count_request.body["input"],
-            completion_request.body["input"]
-        );
-        send_http_response(&mut completion,"400 Bad Request","application/json",json!({"error":{"message":"return_token_budget unsupported by this model","type":"invalid_request_error","param":"tools[0].return_token_budget"}}).to_string()).await;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
-                .await
-                .is_err(),
-            "no search-disabled retry"
-        );
-    });
-    let mut openai = connect_http_test_provider(url).await;
-    openai.web_search = search_config();
-    assert_eq!(
-        openai.count_input_tokens(parts().request()).await.unwrap(),
-        InputTokenCount::Unsupported
-    );
-    let error = openai
-        .complete(parts().request(), discard_updates())
-        .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("return_token_budget unsupported")
-    );
-    assert!(error.to_string().contains("web_search.enabled=true"));
-    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -711,7 +645,6 @@ async fn stale_continuation_keeps_native_search_replay_and_attempt_identity() {
     });
     let (socket, _) = connect_async(&url).await.unwrap();
     let mut openai = test_session_with_url(&url, socket, None);
-    openai.web_search = search_config();
     let progress = discard_updates();
     let mut state = AttemptState::default();
     run_turn("first question", &mut openai, &mut state, &progress)
@@ -779,7 +712,6 @@ async fn recovery_records_leave_prepared_full_input_and_wire_body_identical() {
         bodies
     });
     let mut openai = connect_http_test_provider(url).await;
-    openai.web_search = search_config();
     let ordinary = vec![
         TranscriptItem::Message(Message::user("earlier prompt")),
         TranscriptItem::provider_message(ProviderReplay::openai_responses(

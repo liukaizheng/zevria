@@ -28,6 +28,7 @@ use zevria_foundation::{
     CREATE_PLAN_TOOL_NAME, FileChange, LAUNCH_SUBTASKS_TOOL_NAME, QUESTION_TOOL_NAME,
     QuestionResponse, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, RECONCILE_REPORTS_TOOL_NAME,
     SKILL_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+    WEB_SEARCH_TOOL_NAME,
 };
 use zevria_workflow::{AgentRunStatus, EnsembleWorkflow, PlanArtifact, PlanHandoff};
 
@@ -1285,6 +1286,9 @@ fn render_tool_call(
         render_tool_diagnostic(state, lines);
         return Some(header);
     }
+    if call.function.name == WEB_SEARCH_TOOL_NAME {
+        return Some(render_web_search(call, state, lines, wrap_width));
+    }
     if call.function.name == READ_IMAGE_TOOL_NAME {
         let path = tool_argument(state, "file_path")
             .filter(|path| !path.is_empty())
@@ -1513,6 +1517,153 @@ fn render_tool_call(
         }
     }
     Some(header)
+}
+
+fn render_web_search(
+    call: &ToolCall,
+    state: &ToolCallState,
+    lines: &mut Vec<Line<'static>>,
+    wrap_width: u16,
+) -> FoldHeader {
+    use zevria_presentation::blocks::{
+        web_search_answer, web_search_counts, web_search_running_label,
+    };
+    let query = tool_argument(state, "query").unwrap_or_else(|| "<invalid arguments>".into());
+    let query = zevria_content::readable::sanitize_readable(&query).replace(['\n', '\t'], " ");
+    let status = native_header_status(call, state);
+    let muted = Style::default().fg(theme().text.muted);
+    let mut header = FoldHeader::single(format!("Search · {query}"), status);
+    if status == StatusIcon::Running {
+        let step = web_search_running_label(&state.web_search_activity);
+        header
+            .label
+            .spans
+            .push(Span::styled(format!(" · {step}"), muted));
+    }
+    if let Some(detail) = state.web_search_detail() {
+        let counts = web_search_counts(detail);
+        if !counts.is_empty() {
+            header
+                .label
+                .spans
+                .push(Span::styled(format!(" · {counts}"), muted));
+        }
+        lines.push(header.expanded());
+        if let Some(result) = &state.result {
+            let answer = web_search_answer(&tool_result_plain_text(result), detail);
+            lines.extend(crate::markdown::markdown_lines(
+                &answer,
+                Style::default(),
+                usize::from(wrap_width),
+            ));
+        }
+        let mut urls = detail
+            .sources
+            .iter()
+            .filter_map(|source| zevria_content::citations::safe_http_url(&source.url))
+            .peekable();
+        if urls.peek().is_some() {
+            lines.push(Line::styled("Sources", muted));
+            lines.extend(urls.map(|url| Line::styled(format!("  {url}"), muted)));
+        }
+        let mut usage = format!(
+            "{} · {}/{}",
+            detail.depth.as_str(),
+            detail.provider,
+            detail.model
+        );
+        if let Some(total) = detail.total_tokens {
+            usage.push_str(&format!(
+                " · {} search tok",
+                crate::status::format_token_count(total)
+            ));
+        }
+        lines.push(Line::styled(usage, muted));
+    } else {
+        lines.push(header.expanded());
+        render_tool_diagnostic(state, lines);
+    }
+    header
+}
+
+#[cfg(test)]
+mod web_search_tests {
+    use super::*;
+    use rig_core::message::{CallId, ToolFunction, ToolName, ToolResult, ToolResultContent};
+    use serde_json::json;
+    use zevria_foundation::{
+        ToolCallOutcome, ToolResultDetail, ToolResultMetadata, WebSearchDepth,
+        WebSearchResultDetail, WebSearchSourceSummary,
+    };
+
+    #[test]
+    fn render_web_search_uses_compact_usage_and_only_labels_safe_sources() {
+        let args = json!({"query":"Find the version"});
+        let call = ToolCall::new(
+            CallId::from_wire("search"),
+            ToolFunction::new(ToolName::new(WEB_SEARCH_TOOL_NAME).unwrap(), args.clone()),
+        );
+        let mut state = ToolCallState::new(ToolCallStatus::Executing, &args);
+        let mut lines = Vec::new();
+        render_web_search(&call, &state, &mut lines, 80);
+        assert!(lines[0].to_string().contains("Searching the web"));
+
+        state.status = ToolCallStatus::Finished;
+        state.result = Some(ToolResult {
+            call: CallId::from_wire("search"),
+            name: ToolName::new(WEB_SEARCH_TOOL_NAME).unwrap(),
+            content: vec![ToolResultContent::text("Version 2.")],
+            is_error: false,
+        });
+        let mut detail = WebSearchResultDetail {
+            provider: "test".into(),
+            model: "search-model".into(),
+            depth: WebSearchDepth::Quick,
+            actions: Vec::new(),
+            sources: vec![WebSearchSourceSummary {
+                title: "Invalid".into(),
+                url: "javascript:alert(1)".into(),
+            }],
+            input_tokens: Some(6100),
+            output_tokens: Some(100),
+            cached_tokens: None,
+            total_tokens: Some(6200),
+        };
+        let metadata = |detail| ToolResultMetadata {
+            id: "search".into(),
+            call_id: None,
+            tool_name: WEB_SEARCH_TOOL_NAME.into(),
+            outcome: ToolCallOutcome::Success,
+            diagnostic: None,
+            detail: Some(ToolResultDetail::WebSearch(detail)),
+        };
+        state.metadata = Some(metadata(detail.clone()));
+        lines.clear();
+        render_web_search(&call, &state, &mut lines, 80);
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Version 2."));
+        assert!(text.contains("6.2k search tok"));
+        assert!(!text.contains("Sources") && !text.contains("javascript:"));
+
+        detail.sources.push(WebSearchSourceSummary {
+            title: "Changelog".into(),
+            url: "https://example.com/changelog".into(),
+        });
+        state.metadata = Some(metadata(detail));
+        lines.clear();
+        render_web_search(&call, &state, &mut lines, 80);
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Sources\n  https://example.com/changelog"));
+        assert!(!text.contains("javascript:"));
+    }
 }
 
 fn render_native_list(

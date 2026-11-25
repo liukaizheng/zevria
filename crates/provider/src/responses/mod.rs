@@ -228,10 +228,7 @@ impl ModelProvider for OpenAiProvider {
             run_model_request_with_reconnect(&request, self, &mut state, &progress)
                 .await
                 .map_err(|error| {
-                    let context = format!(
-                        "profile {} (providers.{}.web_search.enabled={}): {error}",
-                        self.profile, self.profile.provider, self.web_search.enabled
-                    );
+                    let context = format!("profile {}: {error}", self.profile);
                     error.context(context)
                 })
         })

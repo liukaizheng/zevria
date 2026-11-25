@@ -24,8 +24,8 @@ pub type InputTokenCountFuture<'a> =
 /// `request.instructions` as the sole top-level instructions, project
 /// directives and additional tool declarations at their recorded input positions,
 /// and render `request.tools` verbatim in wire order (subject only to explicit
-/// schema compatibility options). The allow-list enforces engine calls and gates
-/// hosted capabilities; it never filters function declarations. `forbid_tool_calls`
+/// schema compatibility options). The allow-list enforces engine calls; it does
+/// not filter previously declared functions. `forbid_tool_calls`
 /// suppresses calls without removing declarations. Preserve this immutable shape
 /// across native retries and continuations.
 /// `reset` reports that local history has diverged from any provider-side

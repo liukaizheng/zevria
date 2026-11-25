@@ -274,6 +274,10 @@ fn list_item(action: &WebActionPresentation, ink: Hsla, cx: &App) -> impl IntoEl
 }
 
 pub(super) fn details(row: &WebRow, cx: &App) -> impl IntoElement {
+    action_details(&row.actions, cx)
+}
+
+pub(super) fn action_details(actions: &[WebActionPresentation], cx: &App) -> impl IntoElement {
     let ink = palette(cx).text.muted;
     div()
         .id("web-action-list")
@@ -281,7 +285,7 @@ pub(super) fn details(row: &WebRow, cx: &App) -> impl IntoElement {
         .flex()
         .flex_col()
         .gap(px(4.))
-        .children(row.actions.iter().map(|action| list_item(action, ink, cx)))
+        .children(actions.iter().map(|action| list_item(action, ink, cx)))
 }
 
 fn page_tooltip(page: &CitedSource) -> String {
@@ -351,16 +355,20 @@ pub(super) fn sources_footer(
     view: &BlockView,
     cx: &mut Context<BlockView>,
 ) -> Option<impl IntoElement> {
-    let domains = domains(&view.data.sources);
+    source_chips(&view.data.sources, view.show_all_sources, cx)
+}
+
+pub(super) fn source_chips(
+    sources: &[CitedSource],
+    show_all: bool,
+    cx: &mut Context<BlockView>,
+) -> Option<impl IntoElement> {
+    let domains = domains(sources);
     let count = domains.len();
     if count == 0 {
         return None;
     }
-    let shown = if view.show_all_sources {
-        count
-    } else {
-        VISIBLE_DOMAINS
-    };
+    let shown = if show_all { count } else { VISIBLE_DOMAINS };
     let footer = div()
         .id("answer-sources")
         .test_support()
@@ -380,7 +388,7 @@ pub(super) fn sources_footer(
                 .map(|domain| chip(domain, cx)),
         )
         .when(count > VISIBLE_DOMAINS, |footer| {
-            let label = if view.show_all_sources {
+            let label = if show_all {
                 "Show fewer sources".to_owned()
             } else {
                 format!("Show all {count} sources")

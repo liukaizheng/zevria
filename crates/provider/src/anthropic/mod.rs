@@ -375,7 +375,7 @@ impl AnthropicProvider {
         };
         run_recovery_loop(
             &self.recovery,
-            &progress,
+            Some(&progress),
             &self.profile.provider,
             &mut driver,
         )

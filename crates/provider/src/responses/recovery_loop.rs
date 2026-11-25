@@ -75,7 +75,7 @@ pub(super) async fn run_prepared_with_recovery(
         first_fallback_http: false,
         attempt_transport: OpenAiTransport::WebSocket,
     };
-    run_recovery_loop(policy, progress, &provider, &mut attempt).await
+    run_recovery_loop(policy, Some(progress), &provider, &mut attempt).await
 }
 
 struct ResponsesRecovery<'a> {

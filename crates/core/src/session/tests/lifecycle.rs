@@ -524,10 +524,7 @@ async fn durable_root_command_transcript_resumes_without_redispatch() {
         assert_eq!(requests[0].model_role, ModelRole::Review);
         assert_eq!(
             requests[0].allowed_tool_names,
-            Some(vec![
-                "command".to_string(),
-                zevria_foundation::WEB_SEARCH_TOOL_NAME.to_string()
-            ])
+            Some(vec!["command".to_string()])
         );
         assert_eq!(requests[0].prompt, durable_result);
         assert!(requests[0].history.contains(&durable_command));

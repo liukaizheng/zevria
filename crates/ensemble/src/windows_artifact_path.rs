@@ -78,6 +78,37 @@ impl Directory {
     fn same_location(&self, other: &Self) -> bool {
         self.identity == other.identity && self.missing == other.missing
     }
+
+    fn same_workspace_location(&mut self, other: &mut Self) -> io::Result<bool> {
+        if !self.in_workspace || !other.in_workspace {
+            return Ok(false);
+        }
+        // A queued grant can create .claude/plans between two protected walks.
+        // Resume the shallower walk from its pinned ancestor only as far as the
+        // other walk already reached, then compare identities and missing suffixes.
+        let missing = self.missing.components().count();
+        let other_missing = other.missing.components().count();
+        if missing > other_missing {
+            self.advance_missing(missing - other_missing)?;
+        } else if other_missing > missing {
+            other.advance_missing(other_missing - missing)?;
+        }
+        Ok(self.same_location(other))
+    }
+
+    fn advance_missing(&mut self, count: usize) -> io::Result<()> {
+        let mut missing = self.missing.components();
+        let first = missing.next().expect("nonempty missing suffix");
+        let mut directory =
+            windows_io::open_relative(&self.directory, first.as_os_str(), true, false)?;
+        for component in missing.by_ref().take(count - 1) {
+            directory = windows_io::open_relative(&directory, component.as_os_str(), true, false)?;
+        }
+        self.identity = windows_io::identity(&directory)?;
+        self.directory = directory;
+        self.missing = missing.as_path().to_path_buf();
+        Ok(())
+    }
 }
 
 fn workspace_directory(
@@ -85,9 +116,9 @@ fn workspace_directory(
     workspace_path: &Path,
     workspace: &Workspace,
 ) -> io::Result<Directory> {
-    let expected = Directory::open(&workspace_path.join(".claude").join("plans"), workspace)?;
-    let supplied = Directory::open(directory, workspace)?;
-    if !supplied.same_location(&expected) {
+    let mut expected = Directory::open(&workspace_path.join(".claude").join("plans"), workspace)?;
+    let mut supplied = Directory::open(directory, workspace)?;
+    if !supplied.same_workspace_location(&mut expected)? {
         return Err(io::Error::other(format!(
             "Claude workspace plan artifact directory {} is not <workspace>/.claude/plans",
             directory.display()
@@ -104,10 +135,10 @@ pub(super) fn validate_workspace_directory(directory: &Path, workspace: &Path) -
 
 pub(super) fn artifact_directory(requested: &Path, workspace: &Path) -> io::Result<PathBuf> {
     let boundary = Workspace::open(workspace)?;
-    let requested = Directory::open(requested, &boundary)?;
+    let mut requested = Directory::open(requested, &boundary)?;
     if requested.in_workspace {
-        let permitted = Directory::open(&workspace.join(".claude").join("plans"), &boundary)?;
-        if requested.same_location(&permitted) {
+        let mut permitted = Directory::open(&workspace.join(".claude").join("plans"), &boundary)?;
+        if requested.same_workspace_location(&mut permitted)? {
             return Ok(permitted.path);
         }
         return Err(io::Error::other(format!(
@@ -146,10 +177,11 @@ pub(super) fn validate_artifact_path(
         .parent()
         .ok_or_else(|| io::Error::other("Claude plan artifact path has no parent directory"))?;
     let boundary = Workspace::open(workspace)?;
-    let parent = Directory::open(parent, &boundary)?;
+    let mut parent = Directory::open(parent, &boundary)?;
     let permitted = if parent.in_workspace {
-        let permitted = workspace_directory(workspace_artifact_directory, workspace, &boundary)?;
-        if !parent.same_location(&permitted) {
+        let mut permitted =
+            workspace_directory(workspace_artifact_directory, workspace, &boundary)?;
+        if !parent.same_workspace_location(&mut permitted)? {
             return Err(io::Error::other(
                 "Claude plan artifact workspace path must be a direct child of .claude/plans",
             ));
@@ -175,4 +207,36 @@ pub(super) fn validate_artifact_path(
         }
     }
     Ok(permitted.path.join(file_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_location_matches_across_local_artifact_directory_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = windows_io::checked_directory_path(temp.path()).unwrap();
+        let boundary = Workspace::open(&workspace).unwrap();
+        let claude = workspace.join(".claude");
+        let plans = claude.join("plans");
+        let mut missing = Directory::open(&plans, &boundary).unwrap();
+        let mut missing_until_ready = Directory::open(&plans, &boundary).unwrap();
+
+        std::fs::create_dir(&claude).unwrap();
+        let mut partial = Directory::open(&plans, &boundary).unwrap();
+        assert!(missing.same_workspace_location(&mut partial).unwrap());
+        assert!(!missing.exists());
+
+        std::fs::create_dir(&plans).unwrap();
+        let mut ready = Directory::open(&plans, &boundary).unwrap();
+        assert!(
+            ready
+                .same_workspace_location(&mut missing_until_ready)
+                .unwrap()
+        );
+        assert!(missing_until_ready.exists());
+        assert!(partial.same_workspace_location(&mut ready).unwrap());
+        assert!(partial.exists());
+    }
 }

@@ -434,8 +434,8 @@ impl ModelInputIdentity {
 /// including provider-native replay-only values that have no message view.
 /// `model_role` and `allowed_tool_names` are the immutable
 /// policy snapshot for the whole user submission, including provider retries
-/// and tool continuations. The allow-list enforces engine calls and gates hosted
-/// tools only; it never filters function declarations. `tools` is rendered in
+/// and tool continuations. The allow-list enforces engine calls; it does not
+/// filter previously declared functions. `tools` is rendered in
 /// exactly the supplied order, with additions at their recorded input positions.
 /// Requests carry nothing ephemeral: instructions
 /// stay byte-stable within a workflow so providers keep a cacheable prefix, and

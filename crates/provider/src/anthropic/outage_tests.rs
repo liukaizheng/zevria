@@ -1,5 +1,6 @@
 use super::*;
-use std::{io, time::Duration};
+use crate::tests::{expect_connection_reset, spawn_resetting_http_server};
+use std::time::Duration;
 use zevria_session_api::TurnEvent;
 
 #[tokio::test]
@@ -64,13 +65,9 @@ async fn retry_hints_for_unavailable_and_overloaded_use_upcoming_attempts_and_id
 }
 
 #[tokio::test]
-async fn closed_port_exhaustion_has_the_shared_display_and_original_os_cause() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!(
-        "http://{}/v1/messages?secret=hidden",
-        listener.local_addr().unwrap()
-    );
-    drop(listener);
+async fn socket_reset_exhaustion_has_the_shared_display_and_socket_cause() {
+    let (address, server) = spawn_resetting_http_server(2).await;
+    let url = format!("http://{address}/v1/messages?secret=hidden");
     let mut provider = runtime(&profile(url));
     provider.recovery.max_attempts = 2;
     let (sender, mut events) = session_event_channel(64);
@@ -91,11 +88,7 @@ async fn closed_port_exhaustion_has_the_shared_display_and_original_os_cause() {
     ] {
         assert!(display.contains(expected), "{display}");
     }
-    let socket_cause = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<io::Error>())
-        .expect("the original socket error must be preserved");
-    assert_eq!(socket_cause.kind(), io::ErrorKind::ConnectionRefused);
+    let socket_cause = expect_connection_reset(&error);
     assert!(display.contains(&socket_cause.to_string()), "{display}");
     assert!(!display.contains("secret=hidden"));
     assert!(error.chain().any(|cause| cause.is::<reqwest::Error>()));
@@ -110,6 +103,7 @@ async fn closed_port_exhaustion_has_the_shared_display_and_original_os_cause() {
         })
         .unwrap();
     assert_eq!(retry.0, 2);
-    assert!(retry.1.starts_with("transport:"));
+    assert!(retry.1.starts_with("transport:"), "{}", retry.1);
     assert!(retry.1.contains(&socket_cause.to_string()), "{}", retry.1);
+    server.await.unwrap();
 }

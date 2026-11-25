@@ -63,8 +63,10 @@ builder = { provider = "anthropic", model = "claude-opus-5-5", reasoning_level =
 
 The provider key and exact model key are stable, case-sensitive replay identities.
 Omitting `protocol` means `openai.responses`, not auto-detection. Schemas are
-strict: Responses-only `supports_websockets`, `compaction`, `web_search`, and
-`reasoning_summary_level` are not accepted on Messages providers/models.
+strict: Responses-only `supports_websockets`, `compaction`, and
+`reasoning_summary_level` are not accepted on Messages providers/models. Messages
+sessions can still use the [isolated `web_search` tool](responses-compatible.md#isolated-web-search)
+when a Responses search profile is configured.
 
 `max_output_tokens` is required and positive. The default `input_token_limit` is
 `context_window_tokens - max_output_tokens`; an explicit limit cannot exceed that

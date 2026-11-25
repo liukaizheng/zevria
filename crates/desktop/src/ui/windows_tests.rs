@@ -38,14 +38,14 @@ fn ctrl_enter_confirms_only_a_visible_unblocked_decision(cx: &mut TestAppContext
     event(
         &controller,
         E::Plan(PlanEvent::StateChanged {
-            state: PlanWorkflowState::Ready {
+            state: Box::new(PlanWorkflowState::Ready {
                 artifact: PlanArtifact {
                     version,
                     title: "Plan".into(),
                     markdown: "Review the change".into(),
                     source_turn_id: TurnId::new(1),
                 },
-            },
+            }),
         }),
         cx,
     );

@@ -68,11 +68,11 @@ In addition to ordinary model requests, Zevria can make these requests:
   `compaction.url`, Zevria can also send context to that endpoint. No separate
   remote-compaction URL is configured by default; ordinary model-based
   summarization can still occur without one.
-- **Provider-hosted web search:** disabled by default. When enabled through
-  `web_search.enabled` and available to the task, the provider performs search.
-  Search terms, requested URLs, and any configured approximate location may be
-  processed by the provider and its search services. Zevria does not
-  automatically discover your location for this setting.
+- **Isolated web search:** disabled by default. When enabled in `config.toml`,
+  the local `web_search` tool sends the query, optional model-supplied context,
+  and any configured approximate location to the configured search provider.
+  It does not send the root conversation history. The provider and its search
+  services may process that input. Zevria does not discover a location for you.
 
 Your configured API key is sent for authentication to the model, token-counting,
 and remote-compaction endpoints that are used. Separately configured supporting
@@ -208,9 +208,10 @@ processes separately.
   meet your needs before submitting sensitive information.
 - Review prompts, screenshots, guidance, skills, and tool-accessible material.
   Keep credentials and private history out of version control and shared logs.
-- Disable optional provider-hosted search, exact token counting, or remote
-  compaction as appropriate in your provider configuration. Disabling supporting
-  features does not make ordinary model requests local or offline.
+- Leave `[web_search]` disabled in `config.toml` to avoid sending search queries
+  and model-supplied context to a separate search profile. Exact token counting
+  and remote compaction can be disabled in the provider configuration. None of
+  these choices makes ordinary model requests local or offline.
 - Use HTTPS/WSS endpoints for encrypted transport. Zevria also accepts HTTP/WS
   endpoints, so encrypted transport is not enforced for every configuration.
 - Use an appropriately restricted OS account, container, VM, or sandbox when

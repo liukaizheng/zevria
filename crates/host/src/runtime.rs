@@ -24,7 +24,7 @@ pub(crate) use tools::command_tool;
 use tools::worker_tools;
 pub(crate) use tools::{
     build_explore_tools, build_isolated_build_tools, build_session_policies, build_tools,
-    command_job_limits, worker_policies,
+    command_job_limits, with_web_search_policy, worker_policies,
 };
 
 #[cfg(test)]
@@ -326,6 +326,7 @@ mod tests {
             workspace.path(),
             questions.requester,
             &crate::config::test_config(),
+            None,
         )
         .unwrap();
         let definitions = tools.snapshot().take_definitions();

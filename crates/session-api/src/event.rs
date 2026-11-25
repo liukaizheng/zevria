@@ -87,6 +87,12 @@ pub enum TurnEvent {
         message: Message,
         metadata: Vec<ToolResultMetadata>,
     },
+    /// Display-only activity for one running local web search. Never persisted.
+    WebSearchProgress {
+        turn_id: TurnId,
+        call_id: String,
+        activity: Vec<HostedActivity>,
+    },
     /// One model/tool-loop dispatch is beginning. `call` is 1-based and
     /// restarts for each turn's loop, counting invocations of the provider's
     /// `complete` method, not individual tools or network requests. Provider

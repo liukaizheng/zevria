@@ -278,7 +278,9 @@ impl ModelProvider for SearchBeforeToolProvider {
             Ok(ModelResponse::from_replay(ProviderReplay::openai_responses(test_profile(), vec![
                 json!({"type":"web_search_call","id":"search","status":"completed","action":{"type":"search","query":"Rust"}}),
                 json!({"type":"function_call","id":"local","call_id":"local","status":"completed","name":"verify_search_durable","arguments":"{}"}),
-            ])).unwrap().with_attempt_id(Some(attempt.id)).unwrap())
+            ])).unwrap().with_attempt_id(Some(attempt.id)).unwrap().with_usage(Some(TokenUsage {
+                input_tokens: 99_990, cached_tokens: 2048, output_tokens: 10, total_tokens: 100_000,
+            })))
         })
     }
     fn reset(&mut self) {}
@@ -343,7 +345,10 @@ async fn observed_activity_is_on_disk_before_a_local_tool_can_execute() {
         Arc::new(SkillCatalog::default()),
     )
     .unwrap();
-    let (events, _receiver) = session_event_channel(256);
+    let policy = engine.policies.policy(SessionMode::Build).clone();
+    let profile = engine.context_policy(policy.model_role).profile.clone();
+    engine.report_provider_usage(&policy, 128).unwrap();
+    let (events, mut receiver) = session_event_channel(256);
     engine
         .handle_command(
             SessionCommand::Turn(TurnCommand::Submit {
@@ -356,6 +361,13 @@ async fn observed_activity_is_on_disk_before_a_local_tool_can_execute() {
         .await
         .unwrap();
     assert!(executed.load(Ordering::SeqCst));
+    assert_eq!(
+        engine.context.usage[&profile].last_provider_total,
+        Some(128)
+    );
+    assert!(std::iter::from_fn(|| receiver.try_recv().ok()).any(|update| matches!(update,
+        SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::UsageUpdated { usage, .. })) if usage.total_tokens == 100_000
+    )), "hosted usage remains visible even though it is not used as the next-input baseline");
 }
 
 struct BackpressuredProvider {

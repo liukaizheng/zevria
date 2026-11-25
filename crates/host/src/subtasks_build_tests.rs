@@ -58,6 +58,7 @@ fn root_tools(workspace: &Path) -> ToolServerHandle {
         CommandConfig::default(),
         131_072,
         None,
+        None,
     )
     .unwrap()
 }
@@ -293,7 +294,7 @@ async fn private_registries_have_exact_tools_and_independent_structured_roots() 
     for (path, text) in [(&a, "first"), (&b, "second")] {
         let marker = format!("private-root-{text}");
         std::fs::write(path.join(".root-marker"), &marker).unwrap();
-        let tools = build_isolated_build_tools(path, CommandConfig::default()).unwrap();
+        let tools = build_isolated_build_tools(path, CommandConfig::default(), None).unwrap();
         assert_eq!(
             tools
                 .snapshot()
@@ -421,7 +422,7 @@ async fn private_registries_have_exact_tools_and_independent_structured_roots() 
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&b, a.join("escape")).unwrap();
-        let tools = build_isolated_build_tools(&a, CommandConfig::default()).unwrap();
+        let tools = build_isolated_build_tools(&a, CommandConfig::default(), None).unwrap();
         assert!(
             !execute(
                 &tools,
@@ -601,6 +602,10 @@ fn supervisor_config(
     limit: usize,
 ) -> SubtaskSupervisorConfig {
     let models = &config;
+    let web_search = config.web_search.clone().map(|resolved| {
+        Arc::new(zevria_provider::OpenAiWebSearchExecutor::new(resolved, "root").unwrap())
+            as Arc<dyn zevria_session_api::WebSearchExecutor>
+    });
     SubtaskSupervisorConfig {
         empty_skills: Arc::new(SkillCatalog::default()),
         explore_factory: ProviderRouterFactory::new(
@@ -621,7 +626,13 @@ fn supervisor_config(
                 .reasoning_level,
             "fixture preamble",
         ),
-        explore_tools: crate::runtime::build_explore_tools(root, config.command).unwrap(),
+        explore_tools: crate::runtime::build_explore_tools(
+            root,
+            config.command,
+            web_search.clone(),
+        )
+        .unwrap(),
+        web_search,
         startup_workspace: std::fs::canonicalize(root).unwrap(),
         command_config: config.command,
         events,
@@ -638,6 +649,121 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<HttpCall>) -> HttpCall {
         .await
         .unwrap()
         .unwrap()
+}
+
+#[tokio::test]
+async fn explore_and_builder_forward_search_progress_without_hosted_child_replay() {
+    use zevria_session_api::{SessionUpdate, TurnEvent};
+    let root = tempfile::tempdir().unwrap();
+    let (url, mut http, server) = fixture().await;
+    let mut config = config(&url);
+    config.web_search = Some(
+        zevria_provider::ResolvedWebSearchConfig::new(
+            config.routing().for_role(ModelRole::Build).clone(),
+            zevria_foundation::ReasoningLevel::Low,
+            Default::default(),
+        )
+        .unwrap(),
+    );
+    let (events, mut receiver) = session_event_channel(256);
+    let channels = zevria_session_api::subtask_channels("root", events.clone());
+    let child_config = supervisor_config(&config, root.path(), events, 1);
+    let subsessions = child_config.subsessions_dir.clone();
+    let supervisor = spawn_supervisor(channels.requests, child_config, CancellationToken::new());
+    for (kind, model) in [
+        (SubtaskKind::Explore, "explore-model"),
+        (SubtaskKind::Build, "builder-model"),
+    ] {
+        let workspace = if kind == SubtaskKind::Build {
+            let path = root.path().join("builder");
+            std::fs::create_dir(&path).unwrap();
+            let path = path.canonicalize().unwrap();
+            let reservation = channels.launcher.reserve_workspace(&path).unwrap();
+            Some(ChildWorkspace::new(path, "builder".into(), reservation).unwrap())
+        } else {
+            None
+        };
+        let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new())
+            .with_build_subtasks(kind == SubtaskKind::Build);
+        let (launch, outcome) = channels
+            .launcher
+            .launch(
+                "outer",
+                0,
+                "Research",
+                kind,
+                "Check a version",
+                turn,
+                workspace,
+            )
+            .await
+            .unwrap();
+        let call = next(&mut http).await;
+        assert_eq!(call.request["model"], model);
+        let tools = call.request["tools"].as_array().unwrap();
+        assert_eq!(tools.last().unwrap()["name"], "web_search");
+        assert!(tools.iter().all(|tool| tool["type"] == "function"));
+        call.reply
+            .send(vec![function(
+                "search",
+                "web_search",
+                json!({"query":"Version?"}),
+            )])
+            .unwrap();
+        let isolated = next(&mut http).await;
+        assert_eq!(isolated.request["model"], "root-model");
+        assert_eq!(isolated.request["tools"][0]["type"], "web_search");
+        isolated.reply.send(vec![
+            json!({"type":"web_search_call","id":"ws","status":"completed","action":{"type":"open_page","url":"https://example.com"}}),
+            message("Version 2."),
+        ]).unwrap();
+        let continuation = next(&mut http).await;
+        assert_eq!(continuation.request["model"], model);
+        let inputs = continuation.request["input"].as_array().unwrap();
+        assert!(
+            inputs
+                .iter()
+                .any(|item| item["type"] == "function_call_output"
+                    && item["output"].to_string().contains("Version 2."))
+        );
+        assert!(inputs.iter().all(|item| item["type"] != "web_search_call"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(update) = receiver.recv().await {
+                if let SessionUpdate::Lifecycle(SessionEvent::Subtask(SubtaskEvent::Session {
+                    id,
+                    event,
+                })) = update
+                    && id == launch.id
+                    && let SessionEvent::Turn(TurnEvent::WebSearchProgress {
+                        call_id,
+                        activity,
+                        ..
+                    }) = *event
+                {
+                    assert_eq!(call_id, "search");
+                    assert_eq!(activity[0].action_kind(), Some("open_page"));
+                    return;
+                }
+            }
+            panic!("child event channel closed");
+        })
+        .await
+        .expect("child progress arrives while its final answer is still held");
+        continuation
+            .reply
+            .send(vec![message("Finished research")])
+            .unwrap();
+        assert!(matches!(
+            outcome.await.unwrap(),
+            SubtaskOutcome::Completed { .. }
+        ));
+        let items =
+            zevria_transcript::transcript::load(&subsessions.join(format!("{}.jsonl", launch.id)))
+                .unwrap();
+        assert!(items.iter().any(|item| matches!(item, zevria_transcript::transcript::TranscriptItem::ToolResults { metadata, .. } if metadata[0].web_search().is_some())));
+    }
+    supervisor.abort();
+    server.abort();
 }
 
 #[tokio::test]
@@ -658,6 +784,7 @@ async fn production_build_rejects_builder_launch_before_workspace_or_child_provi
         zevria_session_api::question_channels(events.clone()).requester,
         config.command,
         config.session.plan.max_artifact_bytes,
+        None,
         None,
     )
     .unwrap();
@@ -785,6 +912,7 @@ async fn ten_real_response_launches_share_limits_and_return_original_slots() {
             zevria_session_api::question_channels(events.clone()).requester,
             config.command,
             config.session.plan.max_artifact_bytes,
+            None,
             None,
         )
         .unwrap();

@@ -265,6 +265,91 @@ async fn mixed_router_switches_both_ways_and_correlates_foreign_tool_calls() {
 }
 
 #[tokio::test]
+async fn anthropic_root_dispatches_the_same_local_search_to_responses_sse() {
+    use crate::tests::web_search_tests::{executor, send_search_response, target};
+    let anthropic = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let search = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut profile = profile(format!(
+        "http://{}/v1/messages",
+        anthropic.local_addr().unwrap()
+    ));
+    if let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol {
+        Arc::make_mut(endpoint).input_token_count.enabled = false;
+    }
+    let executor = Arc::new(executor(target(format!(
+        "http://{}/responses",
+        search.local_addr().unwrap()
+    ))));
+    let backend = tokio::spawn(async move {
+        let (mut socket, _) = search.accept().await.unwrap();
+        let request = receive_http_json(&mut socket).await;
+        assert_eq!(request.body["tools"][0]["type"], "web_search");
+        assert_eq!(request.body["max_tool_calls"], 3);
+        send_search_response(&mut socket).await;
+    });
+    let root = tokio::spawn(async move {
+        let (mut socket, _) = anthropic.accept().await.unwrap();
+        let first = receive_http_json(&mut socket).await.body;
+        assert_eq!(first["tools"][0]["name"], "web_search");
+        assert!(first["tools"][0]["input_schema"].is_object());
+        send_http_response(&mut socket, "200 OK", "text/event-stream", response(
+            vec![json!({"type":"tool_use","id":"toolu_search","name":"web_search","input":{"query":"Version?"}})], "tool_use")).await;
+        let (mut socket, _) = anthropic.accept().await.unwrap();
+        let second = receive_http_json(&mut socket).await.body;
+        assert_eq!(first["tools"], second["tools"]);
+        assert_eq!(first["system"], second["system"]);
+        let result = &second["messages"].as_array().unwrap().last().unwrap()["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], "toolu_search");
+        assert!(
+            result["content"]
+                .to_string()
+                .contains("docs.example.com/version")
+        );
+        assert!(!result.to_string().contains("6200"));
+        send_http_response(&mut socket, "200 OK", "text/event-stream", answer()).await;
+    });
+    let tools = ToolServer::new()
+        .tool(zevria_tools::WebSearchTool::new(executor))
+        .run();
+    let directory = tempfile::tempdir().unwrap();
+    let writer = TranscriptWriter::create(directory.path()).unwrap();
+    let mut engine = SessionEngine::new(
+        runtime(&profile),
+        tools,
+        test_policies(),
+        writer,
+        Arc::new(SkillCatalog::default()),
+    )
+    .unwrap()
+    .with_compaction_policy(
+        zevria_model::CompactionPolicy::new(
+            Default::default(),
+            std::array::from_fn(|_| profile.context_policy()),
+        )
+        .unwrap(),
+    );
+    let (events, _receiver) = session_event_channel(256);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        engine
+            .handle_command(
+                SessionCommand::Turn(zevria_session_api::TurnCommand::Submit {
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                    text: "Research the current version".into(),
+                    mode: SessionMode::Build,
+                }),
+                &events,
+            )
+            .await
+            .unwrap();
+        backend.await.unwrap();
+        root.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopened_request() {
     struct SessionOnlySettings;
     impl zevria_model::models::ModelSettingsService for SessionOnlySettings {

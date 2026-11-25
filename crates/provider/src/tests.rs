@@ -39,11 +39,15 @@ mod session_headers;
 mod subtask_batches;
 #[path = "summary_tests.rs"]
 mod summaries;
+#[path = "web_search_tests.rs"]
+mod web_search_tests;
 #[path = "websocket_keepalive_tests.rs"]
 mod websocket_keepalive;
 use crate::connection::ContinuationState;
 use std::{
     collections::BTreeMap,
+    io,
+    net::SocketAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -95,6 +99,33 @@ use zevria_session_api::session_event_channel;
 use zevria_transcript::transcript;
 use zevria_transcript::transcript::TranscriptItem;
 use zevria_transcript::transcript::TranscriptWriter;
+
+async fn spawn_resetting_http_server(requests: usize) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind reset fixture");
+    let address = listener.local_addr().expect("reset fixture address");
+    let server = tokio::spawn(async move {
+        for _ in 0..requests {
+            let (mut stream, _) = listener.accept().await.expect("accept loopback request");
+            receive_http_request(&mut stream).await;
+            // Reset the established connection before sending any response headers.
+            stream.set_zero_linger().expect("enable abortive close");
+            drop(stream);
+        }
+    });
+    (address, server)
+}
+
+#[track_caller]
+fn expect_connection_reset(error: &anyhow::Error) -> &io::Error {
+    let cause = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<io::Error>())
+        .expect("the original socket error must be preserved");
+    assert_eq!(cause.kind(), io::ErrorKind::ConnectionReset, "{cause:?}");
+    cause
+}
 
 async fn receive_http_request(stream: &mut TcpStream) -> String {
     let mut bytes = Vec::new();
@@ -425,7 +456,6 @@ fn resolved_profile(
                 additional_params,
                 compaction,
                 input_token_count: InputTokenCountConfig::default(),
-                web_search: WebSearchConfig::default(),
             }),
             reasoning_summary_level,
         },
@@ -640,7 +670,6 @@ fn test_session_with_pump(
         responses_parameters: Some(json!({"parallel_tool_calls":true})),
         reasoning_level: ReasoningEffort::Medium,
         reasoning_summary_level: ReasoningSummaryLevel::Detailed,
-        web_search: WebSearchConfig::default(),
         compatibility: ResponsesCompatibilityConfig {
             send_reasoning: false,
             send_prompt_cache_key: false,
@@ -4639,7 +4668,6 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         responses_parameters: Some(json!({"parallel_tool_calls":true})),
         reasoning_level: ReasoningEffort::Medium,
         reasoning_summary_level: ReasoningSummaryLevel::Detailed,
-        web_search: WebSearchConfig::default(),
         compatibility: ResponsesCompatibilityConfig {
             send_reasoning: false,
             send_prompt_cache_key: false,

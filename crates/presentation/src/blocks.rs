@@ -14,6 +14,7 @@ use zevria_foundation::subtask::{SubtaskDescriptor, SubtaskStatus};
 use zevria_foundation::{
     QUESTION_TOOL_NAME, QuestionAnswer, QuestionAnswerValue, QuestionResponse,
     RECONCILE_REPORTS_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, TaskList, TaskStatus,
+    WebSearchActionSummary, WebSearchResultDetail,
 };
 use zevria_workflow::{
     AgentRunLocation, RecordedDecisionDisposition, ReportDisagreementClassification,
@@ -251,6 +252,8 @@ pub enum NativeToolCallStatus {
 pub struct NativeToolState {
     /// Live display-only state; absent on resume until a new job is started.
     pub command_job: Option<zevria_foundation::CommandJobSnapshot>,
+    /// Transient progress for a local web_search call, cleared at settlement.
+    pub web_search_activity: Vec<HostedActivity>,
     pub status: NativeToolCallStatus,
     pub result: Option<ToolResult>,
     pub metadata: Option<ToolResultMetadata>,
@@ -267,9 +270,16 @@ impl NativeToolState {
             result: None,
             metadata: None,
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: normalized_arguments(arguments),
             subtasks: std::collections::BTreeMap::new(),
         }
+    }
+
+    pub fn web_search_detail(&self) -> Option<&zevria_foundation::WebSearchResultDetail> {
+        self.metadata
+            .as_ref()
+            .and_then(ToolResultMetadata::web_search)
     }
 
     pub fn is_background_command(&self) -> bool {
@@ -804,6 +814,17 @@ pub enum WebActionKind {
     Other,
 }
 
+impl WebActionKind {
+    fn from_wire(kind: Option<&str>) -> Self {
+        match kind {
+            Some("search") => Self::Search,
+            Some("open_page") => Self::OpenPage,
+            Some("find_in_page") => Self::FindInPage,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// A readable provider-hosted action, with link safety checked before the URL
 /// is sanitized for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -819,13 +840,10 @@ pub struct WebActionPresentation {
 
 impl WebActionPresentation {
     fn from_activity(activity: &HostedActivity, status: StatusIcon) -> Self {
-        let kind = match activity.action_kind() {
-            Some("search") => WebActionKind::Search,
-            Some("open_page") => WebActionKind::OpenPage,
-            Some("find_in_page") => WebActionKind::FindInPage,
-            _ if activity.status == HostedActivityStatus::Searching => WebActionKind::Search,
-            _ => WebActionKind::Other,
-        };
+        let mut kind = WebActionKind::from_wire(activity.action_kind());
+        if kind == WebActionKind::Other && activity.status == HostedActivityStatus::Searching {
+            kind = WebActionKind::Search;
+        }
         Self {
             output_index: activity.output_index,
             kind,
@@ -837,9 +855,131 @@ impl WebActionPresentation {
         }
     }
 
+    pub fn from_summary(index: u64, summary: &WebSearchActionSummary) -> Self {
+        use zevria_content::{citations::safe_http_url, readable::sanitize_readable};
+        Self {
+            output_index: index,
+            kind: WebActionKind::from_wire(Some(&summary.kind)),
+            queries: summary
+                .queries
+                .iter()
+                .map(|query| sanitize_readable(query))
+                .filter(|query| !query.trim().is_empty())
+                .collect(),
+            url: summary.url.as_deref().map(sanitize_readable),
+            pattern: summary.pattern.as_deref().map(sanitize_readable),
+            status: StatusIcon::Done,
+            safe_url: summary.url.as_deref().and_then(safe_http_url),
+        }
+    }
+
     pub fn safe_url(&self) -> Option<&str> {
         self.safe_url.as_deref()
     }
+}
+
+pub fn web_search_actions(activity: &[HostedActivity]) -> Vec<WebActionPresentation> {
+    let mut actions = activity
+        .iter()
+        .map(|action| {
+            let status = match action.status {
+                HostedActivityStatus::InProgress | HostedActivityStatus::Searching => {
+                    StatusIcon::Running
+                }
+                HostedActivityStatus::Completed => StatusIcon::Done,
+                HostedActivityStatus::Failed => StatusIcon::Failed,
+                HostedActivityStatus::Interrupted => StatusIcon::Interrupted,
+            };
+            WebActionPresentation::from_activity(action, status)
+        })
+        .collect::<Vec<_>>();
+    actions.sort_by_key(|action| action.output_index);
+    actions
+}
+
+pub fn live_web_phrase(actions: &[WebActionPresentation]) -> Option<&'static str> {
+    let action = actions
+        .last()
+        .filter(|action| action.status == StatusIcon::Running)?;
+    Some(match action.kind {
+        WebActionKind::Search | WebActionKind::Other => "Searching the web",
+        WebActionKind::OpenPage => "Opening a page",
+        WebActionKind::FindInPage => "Finding in page",
+    })
+}
+
+pub fn web_search_running_label(activity: &[HostedActivity]) -> String {
+    let (phrase, action) = zevria_content::response::web_search_progress_step(activity);
+    let detail = action.and_then(|action| {
+        action
+            .pattern()
+            .map(|pattern| format!("“{}”", pattern.replace(['\n', '\t'], " ")))
+            .or_else(|| {
+                action
+                    .safe_url()
+                    .as_deref()
+                    .and_then(zevria_content::citations::url_display)
+                    .map(|url| url.host + &url.rest)
+            })
+    });
+    detail.map_or_else(|| phrase.into(), |detail| format!("{phrase} · {detail}"))
+}
+
+/// Hide the appended URL list only when the same links can be shown from the sidecar.
+pub fn web_search_answer(text: &str, detail: &WebSearchResultDetail) -> String {
+    const TRUNCATED: &str = "\n\n[Web search output truncated.]";
+    let body = text.strip_suffix(TRUNCATED).unwrap_or(text);
+    if detail.sources.is_empty() {
+        return text.into();
+    }
+    let Some((answer, sources)) = body.rsplit_once("\n\nSources:\n") else {
+        return text.into();
+    };
+    let sidecar_urls = detail
+        .sources
+        .iter()
+        .filter_map(|source| zevria_content::citations::safe_http_url(&source.url))
+        .collect::<std::collections::HashSet<_>>();
+    if sources.is_empty()
+        || !sources.lines().all(|line| {
+            line.strip_prefix("- <")
+                .and_then(|link| link.strip_suffix('>'))
+                .is_some_and(|url| sidecar_urls.contains(url))
+        })
+    {
+        return text.into();
+    }
+    if body.len() != text.len() {
+        format!("{answer}{TRUNCATED}")
+    } else {
+        answer.into()
+    }
+}
+
+pub fn web_search_counts(detail: &WebSearchResultDetail) -> String {
+    let mut counts = [0; 4];
+    for action in &detail.actions {
+        counts[match action.kind.as_str() {
+            "search" => 0,
+            "open_page" => 1,
+            "find_in_page" => 2,
+            _ => 3,
+        }] += 1;
+    }
+    counts
+        .into_iter()
+        .zip([
+            ("search", "searches"),
+            ("page", "pages"),
+            ("find", "finds"),
+            ("action", "actions"),
+        ])
+        .filter(|(count, _)| *count != 0)
+        .map(|(count, (singular, plural))| {
+            format!("{count} {}", if count == 1 { singular } else { plural })
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 pub fn aggregate_web_status(statuses: impl IntoIterator<Item = StatusIcon>) -> StatusIcon {
@@ -1366,6 +1506,39 @@ mod tests {
     use zevria_foundation::READ_IMAGE_TOOL_NAME;
 
     use super::*;
+
+    #[test]
+    fn web_search_answer_strips_only_source_urls_replaced_by_the_sidecar() {
+        use zevria_foundation::{WebSearchDepth, WebSearchSourceSummary};
+        let text = "Version 2.\n\nSources:\n- <https://example.com/changelog>";
+        let mut detail = WebSearchResultDetail {
+            provider: "test".into(),
+            model: "model".into(),
+            depth: WebSearchDepth::Quick,
+            actions: vec![],
+            sources: vec![],
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            total_tokens: None,
+        };
+        assert_eq!(web_search_answer(text, &detail), text);
+        detail.sources.push(WebSearchSourceSummary {
+            title: "Invalid".into(),
+            url: "javascript:alert(1)".into(),
+        });
+        assert_eq!(web_search_answer(text, &detail), text);
+        detail.sources.push(WebSearchSourceSummary {
+            title: "Changelog".into(),
+            url: "https://example.com/changelog".into(),
+        });
+        assert_eq!(web_search_answer(text, &detail), "Version 2.");
+        let truncated = format!("{text}\n\n[Web search output truncated.]");
+        assert_eq!(
+            web_search_answer(&truncated, &detail),
+            "Version 2.\n\n[Web search output truncated.]"
+        );
+    }
 
     #[test]
     fn image_summary_requires_a_successful_result() {

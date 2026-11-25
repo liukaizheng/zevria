@@ -168,7 +168,7 @@ fn render_is_a_pure_module_join() {
     );
     assert_eq!(
         modules[5],
-        format!("Hosted search\n{HOSTED_SEARCH_INSTRUCTIONS}\n")
+        format!("Web search\n{HOSTED_SEARCH_INSTRUCTIONS}\n")
     );
     assert_eq!(
         modules[6],
@@ -210,7 +210,7 @@ fn capability_sections_are_selected_exactly_once() {
         let rendered = set.render();
         for ((title, body), enabled) in [
             ("Command conventions", COMMAND_CONVENTIONS_INSTRUCTIONS),
-            ("Hosted search", HOSTED_SEARCH_INSTRUCTIONS),
+            ("Web search", HOSTED_SEARCH_INSTRUCTIONS),
             (
                 "Inspection and scratch policy",
                 INSPECTION_POLICY_INSTRUCTIONS,

@@ -12,7 +12,7 @@ pub struct InstructionSet {
 
 const CAPABILITY_MODULES: [(&str, &str); 4] = [
     ("Command conventions", COMMAND_CONVENTIONS_INSTRUCTIONS),
-    ("Hosted search", HOSTED_SEARCH_INSTRUCTIONS),
+    ("Web search", HOSTED_SEARCH_INSTRUCTIONS),
     (
         "Inspection and scratch policy",
         INSPECTION_POLICY_INSTRUCTIONS,

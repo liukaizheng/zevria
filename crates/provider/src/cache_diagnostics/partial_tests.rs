@@ -70,7 +70,6 @@ async fn synthetic_seven_turn_partial_reuse_remains_unexplained_across_increment
         });
         let (socket, _) = connect_async(&url).await.unwrap();
         let mut provider = test_session_with_url(&url, socket, None);
-        provider.web_search = serde_json::from_value(json!({"enabled":true,"external_web_access":false})).unwrap();
         provider.responses_parameters = Some(json!({"reasoning":{"effort":"high", "summary":"detailed"}}));
         let mut history = Vec::<zevria_model::OwnedModelRequestItem>::new();
         for (index, turn) in turns.iter().enumerate() {

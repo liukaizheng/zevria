@@ -144,7 +144,7 @@ as display-only evidence, never reports, decisions, permissions or workflow
 authority. Retired root display envelopes and display v1 worker events are
 unsupported; no legacy reader or automatic upgrade exists. See
 [ACP metadata](acp-agent.md#ordered-response-display-metadata) and
-[search configuration](responses-compatible.md#provider-hosted-web-search).
+[search configuration](responses-compatible.md#isolated-web-search).
 
 Replay-backed requests still own or borrow the private `ReplayMessage` pair:
 canonical conversion happens once, and trusted cloning never decodes the ledger
@@ -1972,8 +1972,9 @@ item. New or changed definitions are appended once as `Additional`, in desired
 registry order, at their durable input positions. Earlier declarations never move
 or get rewritten. Removed permissions do not remove declarations: the engine's
 existing mode denial remains authoritative, and the rendered workflow policy lists
-permitted tools. Hosted `web_search` stays a separate policy-gated top-level
-capability and is never persisted because the engine cannot deny hosted calls.
+permitted tools. Optional `web_search` is a static local function and follows the
+same declaration and permission rules. Its executor uses an isolated Responses
+request; only the bounded answer enters the conversation input.
 
 An `Initial` latches the layout for that entire window, even if incremental tools
 are later disabled. Without one, disabled windows render the current desired tools
@@ -2152,17 +2153,19 @@ receive only `command` plus an empty skill catalog. Build children receive exact
 `command`, `task`, `edit`, `write`, and `delete`, rooted at their reserved directory.
 Both child registries omit interaction, skill, planning, reconciliation, image-read, and nested
 launch tools physically, with skills disabled in both nominal mode policies.
-`read_image` is registered last in the root registry, preserving existing
-cacheable declaration bytes/order; resumed sessions append its declaration as
-`Additional`. Ensemble workers do not register it, and synthesis overrides below
-remain unchanged.
+`read_image` follows the existing root registry entries, preserving their
+cacheable declaration bytes/order. When enabled, `web_search` follows `read_image`
+in the root registry. Resumed sessions append newly available definitions as
+`Additional`. Ensemble workers do not register `read_image`.
 
 Ensemble root synthesis applies a narrower policy override without changing
-the underlying Plan and Review model roles: Ensemble Plan receives exactly
-`web_search`, `command`, `reconcile_reports`, `question`, `create_plan`, `update_plan`, `read_plan`, and `submit_plan`, while Ensemble Review receives `command` and provider-hosted `web_search`. Ordinary Plan does not allow
+the underlying Plan and Review model roles: Ensemble Plan receives
+`command`, `reconcile_reports`, `question`, `create_plan`, `update_plan`,
+`read_plan`, and `submit_plan`, while Ensemble Review receives `command`. Both
+also permit local `web_search` when enabled. Ordinary Plan does not allow
 `reconcile_reports`, even though the production registry contains it. Explore
-children use a physically command-only registry, and ACP projection classifies
-reconciliation as a thinking tool.
+children register `command` and the same optional `web_search`, and ACP
+projection classifies reconciliation as a thinking tool.
 
 The external ACP workers are separate processes and never use this root tool
 policy. `SessionEngine` first collects every terminal worker outcome and

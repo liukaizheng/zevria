@@ -670,9 +670,13 @@ async fn finalized_provider_work_is_retained_when_failure_races_cancellation() {
         matches!(items[3].ensemble_record(), Some(EnsembleRecord::Failed { run_id, .. }) if run_id == &start.run_id)
     );
     assert!(matches!(&items[4], TranscriptItem::Error { error } if error.contains("inspection")));
-    assert!(
-        matches!(collect_events(&mut receiver).await.as_slice(), [SessionEvent::Turn(TurnEvent::Failed { error, .. })] if error.contains("inspection"))
-    );
+    assert!(matches!(
+        collect_events(&mut receiver).await.as_slice(),
+        [
+            SessionEvent::Turn(TurnEvent::UsageUpdated { turn_id, usage, .. }),
+            SessionEvent::Turn(TurnEvent::Failed { error, .. })
+        ] if *turn_id == turn.id && usage.total_tokens == 123 && error.contains("inspection")
+    ));
     assert_eq!(
         zevria_transcript::transcript::load(engine.conversation.path()).unwrap(),
         items

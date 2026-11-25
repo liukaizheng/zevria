@@ -57,6 +57,7 @@ pub(crate) struct SubtaskSupervisorConfig {
     pub explore_factory: ProviderRouterFactory,
     pub builder_factory: ProviderRouterFactory,
     pub explore_tools: ToolServerHandle,
+    pub web_search: Option<Arc<dyn zevria_session_api::WebSearchExecutor>>,
     pub startup_workspace: PathBuf,
     pub empty_skills: Arc<SkillCatalog>,
     pub command_config: crate::config::CommandConfig,
@@ -273,7 +274,6 @@ mod tests {
             additional_params: Default::default(),
             compaction: RemoteCompactionConfig::default(),
             input_token_count: zevria_provider::InputTokenCountConfig::default(),
-            web_search: zevria_responses::WebSearchConfig::default(),
         });
         let modes = zevria_provider::ModeAssignments {
             build: zevria_provider::ModelAssignment {
@@ -339,6 +339,7 @@ mod tests {
                 "Test preamble",
             ),
             explore_tools: ToolServer::new().run(),
+            web_search: None,
             startup_workspace: std::fs::canonicalize(subsessions_dir.parent().unwrap()).unwrap(),
             command_config: crate::config::CommandConfig::default(),
             events,

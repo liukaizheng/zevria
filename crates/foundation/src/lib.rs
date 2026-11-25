@@ -18,6 +18,7 @@ pub mod subtask;
 pub mod task;
 pub mod tool_names;
 pub mod tool_result;
+pub mod web_search;
 #[cfg(windows)]
 pub mod windows_io;
 #[cfg(windows)]

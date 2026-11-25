@@ -22,12 +22,14 @@ mod responses;
 mod router;
 mod streaming;
 mod telemetry;
-
+mod web_search;
 mod websocket_session;
 
-#[cfg(test)]
-use zevria_responses::SearchReturnTokenBudget;
-use zevria_responses::WebSearchConfig;
+pub use web_search::{OpenAiWebSearchExecutor, ResolvedWebSearchConfig};
+pub use zevria_responses::{
+    SearchContextSize, SearchReturnTokenBudget, WebSearchConfig, WebSearchFilters,
+    WebSearchLocation,
+};
 
 fn lowercase_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;

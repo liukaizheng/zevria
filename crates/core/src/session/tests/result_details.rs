@@ -128,6 +128,7 @@ async fn dispatch_retains_details_with_partial_and_cancellation_precedence() {
             None,
             None,
             zevria_foundation::McpToolAccess::None,
+            None,
         )
         .await;
         assert_eq!(slot.metadata.outcome, expected);

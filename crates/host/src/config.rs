@@ -10,9 +10,13 @@ use zevria_acp::AcpConfig;
 use zevria_ensemble::config::EnsembleConfig;
 use zevria_foundation::config::LogConfig;
 use zevria_foundation::config::{create_default_file, models_path_for};
+use zevria_foundation::{ModelProfileRef, ReasoningLevel};
 use zevria_instructions::skill::SkillsConfig;
 use zevria_model::CompactionPolicy;
-use zevria_provider::{ModeAssignments, ModelRouting, ProviderConfig};
+use zevria_provider::{
+    ModeAssignments, ModelRouting, ProviderConfig, ResolvedWebSearchConfig, SearchContextSize,
+    SearchReturnTokenBudget, WebSearchConfig, WebSearchFilters, WebSearchLocation,
+};
 
 /// The config written on first run. It is kept as a literal so setup comments
 /// remain useful, and tests pin its intentionally incomplete, non-secret shape.
@@ -31,6 +35,25 @@ builder = { provider = "openai", model = "gpt-6-luna", reasoning_level = "max" }
 # Native Claude alternative (configure the anthropic catalog in models.jsonc):
 # build = { provider = "anthropic", model = "claude-opus-5-5", reasoning_level = "high" }
 # plan = { provider = "anthropic", model = "claude-opus-5-5", reasoning_level = "high" }
+
+# Optional external search, independent of the model assigned to each mode.
+# [web_search]
+# enabled = true
+# provider = "openai"
+# model = "gpt-6-luna"
+# reasoning_level = "low"
+# external_web_access = true
+# search_context_size = "medium"   # standard depth: low | medium | high
+# return_token_budget = "default"  # default | unlimited
+# max_tool_calls = 8
+# [web_search.filters]
+# allowed_domains = ["openai.com"]
+# blocked_domains = ["example.org"]
+# [web_search.user_location]
+# country = "GB"
+# city = "London"
+# region = "London"
+# timezone = "Europe/London"
 
 [session]
 # Override only product identity and engineering practice (docs/instructions/system-prompt.md).
@@ -157,16 +180,6 @@ pub(crate) const DEFAULT_MODELS: &str = r#"// Zevria model configuration. JSON w
   //       // "url": "https://api.openai.com/v1/responses/input_tokens",
   //       "request_timeout_seconds": 30
   //     },
-  //     // Optional provider-hosted search; disabled unless explicitly enabled.
-  //     "web_search": {
-  //       "enabled": true, "external_web_access": true,
-  //       "search_context_size": "medium", // low | medium | high
-  //       "return_token_budget": "default" // default | unlimited (GPT-5+ reasoning)
-  //       // , "filters": { "allowed_domains": ["openai.com"], "blocked_domains": ["example.org"] }
-  //       // At most 100 domains per list, no schemes/paths; both lists may coexist.
-  //       // , "user_location": { "country": "GB", "city": "London", "region": "London", "timezone": "Europe/London" }
-  //       // Location is never discovered automatically.
-  //     },
   //     // Optional gateway-specific top-level Responses fields:
   //     // "additional_params": { "gateway_routing": "preferred-pool" },
   //     "models": {
@@ -221,6 +234,8 @@ pub(crate) const DEFAULT_MODELS: &str = r#"// Zevria model configuration. JSON w
 struct ConfigFile {
     modes: ModeAssignments,
     #[serde(default)]
+    web_search: WebSearchSettings,
+    #[serde(default)]
     session: SessionConfig,
     #[serde(default)]
     skills: SkillsConfig,
@@ -236,6 +251,73 @@ struct ConfigFile {
     command: CommandConfig,
     #[serde(default)]
     log: LogConfig,
+}
+
+/// Flat TOML settings. Keep fields explicit so serde can reject unknown keys
+/// at this boundary (deny_unknown_fields is not supported with flatten).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WebSearchSettings {
+    enabled: bool,
+    provider: Option<String>,
+    model: Option<String>,
+    reasoning_level: Option<ReasoningLevel>,
+    external_web_access: Option<bool>,
+    search_context_size: Option<SearchContextSize>,
+    return_token_budget: Option<SearchReturnTokenBudget>,
+    max_tool_calls: Option<u32>,
+    filters: Option<WebSearchFilters>,
+    user_location: Option<WebSearchLocation>,
+}
+
+impl WebSearchSettings {
+    fn resolve(self, routing: &ModelRouting) -> anyhow::Result<Option<ResolvedWebSearchConfig>> {
+        let defaults = WebSearchConfig::default();
+        let options = WebSearchConfig {
+            external_web_access: self
+                .external_web_access
+                .unwrap_or(defaults.external_web_access),
+            search_context_size: self
+                .search_context_size
+                .unwrap_or(defaults.search_context_size),
+            return_token_budget: self
+                .return_token_budget
+                .unwrap_or(defaults.return_token_budget),
+            max_tool_calls: self.max_tool_calls,
+            filters: self.filters,
+            user_location: self.user_location,
+        };
+        if !self.enabled {
+            options.validate()?;
+            return Ok(None);
+        }
+        let required = |value: Option<String>, field| {
+            value
+                .filter(|value| !value.trim().is_empty())
+                .with_context(|| {
+                    format!("web_search.{field} is required when web search is enabled")
+                })
+        };
+        let profile = ModelProfileRef::new(
+            required(self.provider, "provider")?,
+            required(self.model, "model")?,
+        );
+        let reasoning_level = self
+            .reasoning_level
+            .context("web_search.reasoning_level is required when web search is enabled")?;
+        let target = routing
+            .catalog()
+            .find(|target| target.profile == profile)
+            .cloned()
+            .with_context(|| {
+                format!("web_search target {profile} is not defined in models.jsonc")
+            })?;
+        Ok(Some(ResolvedWebSearchConfig::new(
+            target,
+            reasoning_level,
+            options,
+        )?))
+    }
 }
 
 /// Name-only selection. Parsing never opens files or touches renderer state.
@@ -262,6 +344,7 @@ pub struct Config {
     pub(crate) models_path: Option<PathBuf>,
     pub(crate) providers: BTreeMap<String, ProviderConfig>,
     pub(crate) modes: ModeAssignments,
+    pub(crate) web_search: Option<ResolvedWebSearchConfig>,
     pub(crate) session: SessionConfig,
     pub(crate) skills: SkillsConfig,
     pub(crate) mcp: zevria_mcp::McpConfig,
@@ -327,6 +410,7 @@ impl Config {
             &file.modes,
             file.session.compaction.auto_trigger_percent,
         )?;
+        let web_search = file.web_search.resolve(&routing)?;
         let compaction_policy =
             CompactionPolicy::new(file.session.compaction.clone(), routing.context_policies())?;
         Ok(Self {
@@ -334,6 +418,7 @@ impl Config {
             models_path: None,
             providers: models.providers,
             modes: file.modes,
+            web_search,
             session: file.session,
             skills: file.skills,
             mcp: file.mcp,
@@ -425,6 +510,7 @@ pub(crate) fn partial_document(contents: &str) -> anyhow::Result<toml::Table> {
                     | "command"
                     | "log"
                     | "modes"
+                    | "web_search"
             ),
             "unsupported configuration key {key:?}"
         );

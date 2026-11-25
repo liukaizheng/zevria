@@ -81,6 +81,7 @@ impl LiveSession {
             | SessionEvent::Turn(TurnEvent::Started { turn_id, .. })
             | SessionEvent::Turn(TurnEvent::Intermediate { turn_id, .. })
             | SessionEvent::Turn(TurnEvent::ToolResults { turn_id, .. })
+            | SessionEvent::Turn(TurnEvent::WebSearchProgress { turn_id, .. })
             | SessionEvent::Turn(TurnEvent::UsageUpdated { turn_id, .. })
             | SessionEvent::Turn(TurnEvent::ContextUsageUpdated { turn_id, .. })
             | SessionEvent::Turn(TurnEvent::Completed { turn_id, .. })
@@ -227,6 +228,21 @@ impl LiveSession {
                 };
                 self.send_updates(stream_updates)?;
                 self.send_updates(tool_updates)?;
+            }
+            SessionEvent::Turn(TurnEvent::WebSearchProgress {
+                call_id, activity, ..
+            }) => {
+                let update = {
+                    let state = self.state.lock().expect("ACP session state poisoned");
+                    crate::project::web_search_progress(
+                        call_id,
+                        &activity,
+                        &state.projection.known_tools,
+                    )
+                };
+                if let Some(update) = update {
+                    self.send_update(update)?;
+                }
             }
             SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id,

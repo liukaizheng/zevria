@@ -77,13 +77,13 @@ fn windows_supervisor_session_cwd_preserves_checked_directory_spellings() {
             test_questions(),
         )
         .unwrap_or_else(|error| panic!("workspace {spelling:?}: {error:#}"));
+        let checked_workspace = &supervisor.inner.workspace;
         assert_eq!(
-            supervisor.workspace,
-            normalize_disk_path(&spelling).unwrap(),
+            checked_workspace,
+            &normalize_disk_path(&spelling).unwrap(),
             "checked workspace spelling must not be canonicalized: {spelling:?}"
         );
-        let request =
-            serde_json::to_value(new_session_request(&supervisor.workspace, &None)).unwrap();
+        let request = serde_json::to_value(new_session_request(checked_workspace, &None)).unwrap();
         assert_session_workspace(&request["cwd"], &spelling);
     }
 }

@@ -67,6 +67,68 @@ pub struct PlanDraftDetail {
     pub projection: Option<PathBuf>,
 }
 
+/// Per-call budget requested by the model, also shown with the result.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchDepth {
+    #[default]
+    Quick,
+    Standard,
+    Deep,
+}
+
+impl WebSearchDepth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Standard => "standard",
+            Self::Deep => "deep",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchActionSummary {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchSourceSummary {
+    pub title: String,
+    pub url: String,
+}
+
+/// Isolated search evidence, persisted for display but not replayed as input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchResultDetail {
+    pub provider: String,
+    pub model: String,
+    pub depth: WebSearchDepth,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<WebSearchActionSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<WebSearchSourceSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+}
+
 /// Cloneable Rig *call* extension carrying the assistant tool-call id into a
 /// dispatched tool. Tools that announce work to the frontend (the subtask
 /// tool) read it to correlate their events with the pending call row.
@@ -142,6 +204,7 @@ pub enum ToolResultDetail {
     CommandJob(crate::CommandJobDetail),
     PlanDraft(PlanDraftDetail),
     Mcp(crate::McpCallDetail),
+    WebSearch(WebSearchResultDetail),
     /// Input-ordered terminal slots, retaining every accepted child identity.
     Subtasks(Vec<SubtaskEntryMetadata>),
     /// Terminal root-question semantics, including frontend errors. Malformed
@@ -154,6 +217,13 @@ impl rig_core::tool::ContextValue for ToolResultDetail {
 }
 
 impl ToolResultDetail {
+    pub fn web_search(&self) -> Option<&WebSearchResultDetail> {
+        match self {
+            Self::WebSearch(detail) => Some(detail),
+            _ => None,
+        }
+    }
+
     pub fn command_job(&self) -> Option<&crate::CommandJobDetail> {
         match self {
             Self::CommandJob(job) => Some(job),
@@ -214,6 +284,10 @@ pub struct ToolResultMetadata {
 }
 
 impl ToolResultMetadata {
+    pub fn web_search(&self) -> Option<&WebSearchResultDetail> {
+        self.detail.as_ref().and_then(ToolResultDetail::web_search)
+    }
+
     pub fn mcp_call(&self) -> Option<&crate::McpCallDetail> {
         match self.detail.as_ref()? {
             ToolResultDetail::Mcp(detail) => Some(detail),

@@ -34,7 +34,6 @@ pub(super) fn tier_profile(
         additional_params,
         compaction: RemoteCompactionConfig::default(),
         input_token_count: InputTokenCountConfig::default(),
-        web_search: WebSearchConfig::default(),
     };
     let assignment = ModelAssignment {
         provider: "gateway".into(),

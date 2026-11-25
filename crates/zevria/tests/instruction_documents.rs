@@ -4,6 +4,35 @@ use zevria_instructions::prompts;
 use zevria_model::compaction::{SUMMARIZATION_PROMPT, SUMMARY_PREFIX, SUMMARY_REQUEST_PREFACE};
 
 #[test]
+fn search_guidance_is_a_capability_module_not_a_workflow_permission() {
+    use zevria_foundation::{ModelRole, TurnPolicy, WEB_SEARCH_TOOL_NAME};
+    use zevria_instructions::{DirectivePolicy, InstructionSet};
+
+    for enabled in [false, true] {
+        let names = if enabled {
+            vec![WEB_SEARCH_TOOL_NAME.to_owned()]
+        } else {
+            vec![]
+        };
+        let policy = TurnPolicy::new("Research", Some(names), ModelRole::Build, false);
+        let instructions = InstructionSet {
+            application: String::new(),
+            system: Vec::new(),
+            workflow: DirectivePolicy::new("build", &policy),
+            catalog: None,
+        }
+        .render();
+        assert_eq!(
+            instructions
+                .matches(prompts::HOSTED_SEARCH_INSTRUCTIONS)
+                .count(),
+            usize::from(enabled)
+        );
+        assert_eq!(instructions.contains("## Web search"), enabled);
+    }
+}
+
+#[test]
 fn instruction_documents_match_production_constants() {
     let embedded = [
         prompts::ENGINE_PROTOCOL_INSTRUCTIONS,

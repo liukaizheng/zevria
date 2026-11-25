@@ -20,7 +20,6 @@ pub(crate) struct ResponsesCache {
 struct ToolCache {
     digest: [u8; 32],
     compatibility: [bool; 2],
-    web_search: Option<zevria_responses::WebSearchConfig>,
     rendered: Arc<RenderedTools>,
 }
 
@@ -55,7 +54,6 @@ impl ResponsesCache {
         &mut self,
         request: &ModelRequest<'_>,
         compatibility: &crate::config::ResponsesCompatibilityConfig,
-        web_search: &zevria_responses::WebSearchConfig,
     ) -> anyhow::Result<Arc<RenderedTools>> {
         struct HashWriter(Sha256);
         impl std::io::Write for HashWriter {
@@ -77,17 +75,9 @@ impl ResponsesCache {
         }
         let digest: [u8; 32] = digest.0.finalize().into();
         let key = [compatibility.strict_tools, compatibility.additional_tools];
-        let hosted = (web_search.enabled
-            && request.allowed_tool_names.is_none_or(|names| {
-                names
-                    .iter()
-                    .any(|name| name == zevria_foundation::WEB_SEARCH_TOOL_NAME)
-            }))
-        .then_some(web_search);
         if let Some(cache) = &self.tools
             && cache.digest == digest
             && cache.compatibility == key
-            && cache.web_search.as_ref() == hosted
         {
             return Ok(cache.rendered.clone());
         }
@@ -97,15 +87,12 @@ impl ResponsesCache {
         } else {
             declarations
         };
-        let mut values = zevria_responses::tools::render(
+        let values = zevria_responses::tools::render(
             &declarations,
             ToolRendererOptions {
                 strict_tools: compatibility.strict_tools,
             },
         )?;
-        if let Some(hosted) = hosted {
-            values.push(serde_json::to_value(hosted.tool()?)?);
-        }
         let tokens = if values.is_empty() {
             0
         } else {
@@ -117,7 +104,6 @@ impl ResponsesCache {
         self.tools = Some(ToolCache {
             digest,
             compatibility: key,
-            web_search: hosted.cloned(),
             rendered: rendered.clone(),
         });
         Ok(rendered)
@@ -220,7 +206,7 @@ fn prepare_request(
     let tool_options = ToolRendererOptions {
         strict_tools: openai.compatibility.strict_tools,
     };
-    let tools = cache.rendered_tools(model_request, &openai.compatibility, &openai.web_search)?;
+    let tools = cache.rendered_tools(model_request, &openai.compatibility)?;
 
     let mut request_properties = openai
         .prepared_responses_parameters()
@@ -254,8 +240,8 @@ fn prepare_request(
             }
         }
         validate_tool_choice(properties, &declared).map_err(|error| anyhow::anyhow!(
-            "profile {}: providers.{}.additional_params.tool_choice conflicts with declared tools or hosted capabilities (check providers.{}.web_search.enabled and hosted-search task permissions): {error}",
-            openai.profile, openai.profile.provider, openai.profile.provider
+            "profile {}: providers.{}.additional_params.tool_choice conflicts with declared tools: {error}",
+            openai.profile, openai.profile.provider
         ))?;
     }
 

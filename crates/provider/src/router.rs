@@ -589,8 +589,7 @@ impl ModelProvider for ProviderRouter {
                     .lock()
                     .map_err(|_| anyhow::anyhow!("Responses slot cache lock poisoned"))?;
                 let cache = &mut cache.responses;
-                let tools =
-                    cache.rendered_tools(request, &endpoint.compatibility, &endpoint.web_search)?;
+                let tools = cache.rendered_tools(request, &endpoint.compatibility)?;
                 let folded = if endpoint.compatibility.additional_tools {
                     0
                 } else if let Some(tokens) = request

@@ -1,1 +1,1 @@
-`web_search` is provider-hosted external search when advertised, not a local function or shell service. It does not change command, workspace, or workflow permissions and does not replace required repository inspection.
+`web_search` performs external research in a separate request. It does not change command, workspace, or workflow permissions or replace required repository inspection.

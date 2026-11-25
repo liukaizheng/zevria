@@ -21,12 +21,13 @@ libc = { workspace = true, optional = true }
 uuid = { workspace = true }
 eventsource-stream = { workspace = true }
 futures-util = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
 rig-core = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 

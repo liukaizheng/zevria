@@ -20,8 +20,8 @@ use zevria_transcript::transcript::TranscriptWriter;
 
 use super::SubtaskSupervisorConfig;
 
-/// The composed Explore inspection/scratch overlay with a command-only local
-/// allow-list, identical in every nominal mode so switching cannot add tools.
+/// The Explore inspection/scratch overlay, identical in every nominal mode
+/// so switching cannot add tools. Optional search is gated at composition.
 pub(super) fn explore_policies() -> SessionPolicies {
     let policy = TurnPolicy::new(
         EXPLORE_AGENT_INSTRUCTIONS,
@@ -78,7 +78,7 @@ pub(super) async fn run_child(
     // still fails the unresolved oneshot immediately. It cancels, rather than
     // aborts, execution so command process cleanup is awaited before reuse.
     // Rig's pinned ToolServerHandle directly awaits tool futures; none of the
-    // five registered tools spawns detached mutations beyond command cleanup.
+    // registered tools spawns detached mutations beyond command cleanup.
     let child = ChildSession {
         descriptor: request.descriptor.clone(),
         prompt: std::mem::take(&mut request.prompt),
@@ -177,7 +177,10 @@ pub(super) async fn run_child_session(
             (
                 config.explore_tools.clone(),
                 &config.explore_factory,
-                explore_policies(),
+                crate::runtime::with_web_search_policy(
+                    explore_policies(),
+                    config.web_search.is_some(),
+                ),
             )
         }
         SubtaskKind::Build => {
@@ -186,9 +189,16 @@ pub(super) async fn run_child_session(
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("build child requires a reserved workspace"))?;
             (
-                crate::runtime::build_isolated_build_tools(&workspace.path, config.command_config)?,
+                crate::runtime::build_isolated_build_tools(
+                    &workspace.path,
+                    config.command_config,
+                    config.web_search.clone(),
+                )?,
                 &config.builder_factory,
-                build_policies(&workspace.path, &config.startup_workspace),
+                crate::runtime::with_web_search_policy(
+                    build_policies(&workspace.path, &config.startup_workspace),
+                    config.web_search.is_some(),
+                ),
             )
         }
     };

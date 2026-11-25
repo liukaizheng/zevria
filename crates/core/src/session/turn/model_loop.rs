@@ -89,6 +89,17 @@ struct ToolBatchRound<'a> {
     gate: &'a mut crate::session::turn::orchestration::OrchestrationGate,
 }
 
+/// Legacy/gateway output can contain hosted search evidence. Its reported
+/// total may count transient retrieval input, not the next request's history.
+pub(super) fn has_hosted_search(item: &TranscriptItem) -> bool {
+    item.provider_replay().is_some_and(|replay| {
+        replay
+            .items
+            .iter()
+            .any(|item| item["type"].as_str() == Some("web_search_call"))
+    })
+}
+
 impl<P: ModelProvider> SessionEngine<P> {
     async fn publish_attempts(
         &mut self,
@@ -402,6 +413,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             attempts,
             persistence_failure,
         } = response;
+        let hosted_search = usage.is_some() && has_hosted_search(&completed);
         let (final_item, persistence) = if disposition == ResponseDisposition::DeferredFinal {
             (Some(completed), Ok(()))
         } else {
@@ -414,7 +426,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         if disposition != ResponseDisposition::DeferredFinal
             && let Some(usage) = usage
         {
-            self.report_provider_usage(policy, usage.total_tokens)?;
+            if !hosted_search {
+                self.report_provider_usage(policy, usage.total_tokens)?;
+            }
             progress.usage_updated(usage).await;
             self.publish_usage_projection(policy, progress).await?;
         }
@@ -471,7 +485,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         } else {
             Default::default()
         };
-        let scope = ToolExecutionScope::new(self, mode, policy, turn, submission_gate);
+        let scope = ToolExecutionScope::new(self, mode, policy, turn, submission_gate)
+            .with_events(progress.events());
         let mut batch = execute_planned_tool_calls(&scope, &plan, active, submission_gate).await;
         timings.advance(crate::session::kernel::timing::RoundPhase::CommitResults);
         let previous_plan = self.plan_state()?.clone();
@@ -886,10 +901,13 @@ impl<P: ModelProvider> SessionEngine<P> {
                     run_id: run_id.clone(),
                 },
             )));
+            let hosted_search = usage.is_some() && retained.iter().any(has_hosted_search);
             let result = recoverable(self.record_completed(retained))?;
             if let Some(usage) = usage {
                 let policy = self.ensemble_policy(*workflow);
-                self.report_provider_usage(&policy, usage.total_tokens)?;
+                if !hosted_search {
+                    self.report_provider_usage(&policy, usage.total_tokens)?;
+                }
                 let progress = ProgressReporter::for_turn(
                     events.clone(),
                     turn.clone(),

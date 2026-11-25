@@ -299,6 +299,7 @@ fn command_tool_renders_shell_grammar_without_argument_wrapper() {
     )]);
     let states = vec![Some(crate::app::ToolCallState {
         command_job: None,
+        web_search_activity: Vec::new(),
         arguments: None,
         status: ToolCallStatus::Executing,
         result: None,
@@ -504,6 +505,7 @@ fn command_tool_render_handles_multiline_encoded_denied_and_invalid_calls() {
     let encoded_message = assistant_message(vec![tool_call("encoded", None, "command", encoded)]);
     let executing = vec![Some(crate::app::ToolCallState {
         command_job: None,
+        web_search_activity: Vec::new(),
         arguments: None,
         status: ToolCallStatus::Executing,
         result: None,
@@ -540,6 +542,7 @@ fn command_tool_render_handles_multiline_encoded_denied_and_invalid_calls() {
     )]);
     let denied = vec![Some(crate::app::ToolCallState {
         command_job: None,
+        web_search_activity: Vec::new(),
         arguments: None,
         status: ToolCallStatus::Finished,
         result: None,
@@ -575,6 +578,7 @@ fn command_tool_render_handles_multiline_encoded_denied_and_invalid_calls() {
     )]);
     let finished = vec![Some(crate::app::ToolCallState {
         command_job: None,
+        web_search_activity: Vec::new(),
         arguments: None,
         status: ToolCallStatus::Finished,
         result: None,
@@ -919,6 +923,7 @@ fn unsuccessful_image_reads_render_diagnostics_without_error_envelopes() {
             .with_diagnostic(diagnostic);
         let states = vec![Some(crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status,
             result: Some(result),
@@ -1000,6 +1005,7 @@ fn successful_write_and_delete_render_only_one_compact_summary_row() {
             assistant_message(vec![tool_call("compact-file", None, tool_name, arguments)]);
         let states = vec![Some(crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Finished,
             result: Some(test_tool_result("compact-file", tool_name, output)),
@@ -1071,6 +1077,7 @@ fn no_op_write_renders_only_the_zero_count_header() {
     )]);
     let states = vec![Some(crate::app::ToolCallState {
         command_job: None,
+        web_search_activity: Vec::new(),
         arguments: None,
         status: ToolCallStatus::Finished,
         result: Some(test_tool_result(
@@ -1195,6 +1202,7 @@ fn defensive_multi_change_write_and_delete_render_only_summaries_and_omission_no
         let message = assistant_message(vec![tool_call("multi-file", None, tool_name, arguments)]);
         let states = vec![Some(crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Finished,
             result: Some(test_tool_result("multi-file", tool_name, output)),
@@ -1284,6 +1292,7 @@ fn compact_write_and_delete_preserve_omission_reason_bytes_and_counts() {
         let output = "plain result for captured.dat";
         let states = vec![Some(crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Finished,
             result: Some(test_tool_result("omitted", tool_name, output)),
@@ -4110,6 +4119,7 @@ fn launch_lifecycle_suffixes_use_semantic_styles() {
     let state = |id, title, status| {
         Some(crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Executing,
             result: None,
@@ -5043,6 +5053,7 @@ fn reconcile_reports_renders_structured_rows_for_both_argument_encodings() {
             arguments,
             crate::app::ToolCallState {
                 command_job: None,
+                web_search_activity: Vec::new(),
                 arguments: None,
                 status: ToolCallStatus::Executing,
                 result: None,
@@ -5122,6 +5133,7 @@ fn reconcile_reports_lifecycle_uses_semantic_labels_and_colors() {
         &arguments,
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Executing,
             result: None,
@@ -5138,6 +5150,7 @@ fn reconcile_reports_lifecycle_uses_semantic_labels_and_colors() {
         arguments.clone(),
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Finished,
             result: Some(test_tool_result(
@@ -5170,6 +5183,7 @@ fn reconcile_reports_lifecycle_uses_semantic_labels_and_colors() {
         arguments.clone(),
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Finished,
             result: Some(test_tool_result(
@@ -5215,6 +5229,7 @@ fn reconcile_reports_lifecycle_uses_semantic_labels_and_colors() {
         &arguments,
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Finished,
             result: Some(test_tool_result(
@@ -5239,6 +5254,7 @@ fn reconcile_reports_lifecycle_uses_semantic_labels_and_colors() {
         &arguments,
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Interrupted,
             result: None,
@@ -5253,6 +5269,7 @@ fn reconcile_reports_lifecycle_uses_semantic_labels_and_colors() {
         &arguments,
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Finished,
             result: Some(test_tool_result(
@@ -5279,6 +5296,7 @@ fn reconcile_reports_count_labels_and_invalid_arguments_are_compact() {
         empty,
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Executing,
             result: None,
@@ -5317,6 +5335,7 @@ fn reconcile_reports_count_labels_and_invalid_arguments_are_compact() {
         singular,
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Executing,
             result: None,
@@ -5334,6 +5353,7 @@ fn reconcile_reports_count_labels_and_invalid_arguments_are_compact() {
         serde_json::Value::String(malformed_raw.to_string()),
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Executing,
             result: None,
@@ -5374,6 +5394,7 @@ fn reconcile_reports_bounds_untrusted_identifiers_without_rendering_controls() {
         arguments,
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Executing,
             result: None,
@@ -5408,6 +5429,7 @@ fn reconcile_reports_bounds_untrusted_identifiers_without_rendering_controls() {
         invalid_id,
         crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Executing,
             result: None,
@@ -5552,6 +5574,7 @@ fn submit_plan_tool_calls_render_compact_rows_for_both_argument_encodings() {
             assistant_message(vec![tool_call(id, None, SUBMIT_PLAN_TOOL_NAME, arguments)]);
         let states = vec![Some(crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Executing,
             result: None,
@@ -5630,6 +5653,7 @@ fn submit_plan_tool_call_lifecycle_uses_semantic_labels_and_colors() {
         )]);
         let states = vec![Some(crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status,
             result: None,
@@ -5684,6 +5708,7 @@ fn submit_plan_failure_surfaces_error_without_rendering_markdown() {
     )]);
     let states = vec![Some(crate::app::ToolCallState {
         command_job: None,
+        web_search_activity: Vec::new(),
         arguments: None,
         status: ToolCallStatus::Finished,
         result: Some(result),
@@ -5754,6 +5779,7 @@ fn submit_plan_titles_are_normalized_bounded_and_safe() {
         )]);
         let states = vec![Some(crate::app::ToolCallState {
             command_job: None,
+            web_search_activity: Vec::new(),
             arguments: None,
             status: ToolCallStatus::Finished,
             result: None,

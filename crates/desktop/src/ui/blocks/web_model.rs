@@ -104,14 +104,7 @@ pub(crate) fn label(kind: WebActionKind) -> &'static str {
 }
 
 pub(crate) fn live_phrase(actions: &[WebActionPresentation]) -> Option<&'static str> {
-    let action = actions
-        .last()
-        .filter(|action| action.status == StatusIcon::Running)?;
-    Some(match action.kind {
-        WebActionKind::Search | WebActionKind::Other => "Searching the web",
-        WebActionKind::OpenPage => "Opening a page",
-        WebActionKind::FindInPage => "Finding in page",
-    })
+    zevria_presentation::blocks::live_web_phrase(actions)
 }
 
 pub(crate) fn quoted(text: &str) -> String {

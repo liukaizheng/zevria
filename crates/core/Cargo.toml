@@ -36,6 +36,7 @@ zevria-transcript = { workspace = true, features = ["test-support"] }
 zevria-instructions = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 zevria-model = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
 criterion = { workspace = true }
 
 [[bench]]

@@ -232,7 +232,14 @@ pub fn working_activity(model: &SessionModel, cancelling: bool) -> String {
                     } =>
                 {
                     let name = match tool {
-                        zevria_presentation::blocks::PresentedTool::Native { call, .. } => {
+                        zevria_presentation::blocks::PresentedTool::Native { call, state } => {
+                            if call.function.name == zevria_foundation::WEB_SEARCH_TOOL_NAME {
+                                let (phrase, _) =
+                                    zevria_content::response::web_search_progress_step(
+                                        &state.web_search_activity,
+                                    );
+                                return phrase.into();
+                            }
                             super::blocks::tool_label(call.function.name.as_str())
                         }
                         zevria_presentation::blocks::PresentedTool::Acp(tool) => {
@@ -596,6 +603,53 @@ mod tests {
                 context_window_tokens: 128_000,
             }),
         })
+    }
+
+    #[::core::prelude::v1::test]
+    fn working_activity_tracks_search_until_sources_are_summarized() {
+        use rig_core::message::{
+            AssistantContent, AssistantMessage, CallId, ToolCall, ToolFunction, ToolName,
+        };
+        use zevria_content::{HostedActivity, HostedActivityKind, HostedActivityStatus};
+        use zevria_foundation::WEB_SEARCH_TOOL_NAME;
+        let mut model = running_model();
+        model.reduce(E::Turn(TurnEvent::ModelCallStarted {
+            turn_id: TURN,
+            call: 1,
+        }));
+        model.reduce(E::Turn(TurnEvent::Intermediate {
+            turn_id: TURN,
+            message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+                ToolCall::new(
+                    CallId::from_wire("search"),
+                    ToolFunction::new(
+                        ToolName::new(WEB_SEARCH_TOOL_NAME).unwrap(),
+                        serde_json::json!({"query":"Find the version"}),
+                    ),
+                ),
+            )])),
+            attempt_id: None,
+        }));
+        assert_eq!(working_activity(&model, false), "Searching the web");
+        for (status, label) in [
+            (HostedActivityStatus::InProgress, "Opening a page"),
+            (HostedActivityStatus::Completed, "Summarizing sources"),
+        ] {
+            model.reduce(E::Turn(TurnEvent::WebSearchProgress {
+                turn_id: TURN,
+                call_id: "search".into(),
+                activity: vec![HostedActivity {
+                    kind: HostedActivityKind::WebSearch,
+                    item_id: None,
+                    output_index: 0,
+                    status,
+                    action: Some(
+                        serde_json::json!({"type":"open_page","url":"https://example.com"}),
+                    ),
+                }],
+            }));
+            assert_eq!(working_activity(&model, false), label);
+        }
     }
 
     #[::core::prelude::v1::test]

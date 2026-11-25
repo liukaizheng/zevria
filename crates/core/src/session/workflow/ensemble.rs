@@ -346,7 +346,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         Ok(transition)
     }
     pub(in crate::session) fn ensemble_policy(&self, workflow: EnsembleWorkflow) -> TurnPolicy {
-        match workflow {
+        let mut policy = match workflow {
             EnsembleWorkflow::Plan => TurnPolicy::new(
                 ENSEMBLE_PLAN_SYNTHESIS_INSTRUCTIONS,
                 Some(vec![
@@ -375,7 +375,20 @@ impl<P: ModelProvider> SessionEngine<P> {
             )
             .with_scope("synthesis:review")
             .with_contract(WorkspaceContract::SourceReadOnlyScratch),
+        };
+        if self
+            .tools
+            .snapshot()
+            .get(zevria_foundation::WEB_SEARCH_TOOL_NAME)
+            .is_none()
+        {
+            policy
+                .allowed_tool_names
+                .as_mut()
+                .expect("synthesis has an explicit allowlist")
+                .retain(|name| name != zevria_foundation::WEB_SEARCH_TOOL_NAME);
         }
+        policy
     }
 }
 impl<P: ModelProvider> SessionEngine<P> {

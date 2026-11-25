@@ -10,6 +10,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{HANDLE, INVALID_HANDLE_VALUE},
     System::{
+        Console::GetConsoleCP,
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         },
@@ -37,6 +38,13 @@ pub fn system_executable(name: &str) -> io::Result<std::path::PathBuf> {
         return Err(io::Error::last_os_error());
     }
     Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join(name))
+}
+
+fn creation_flags(has_console: bool) -> u32 {
+    // Reuse the parent's console when possible; CREATE_NO_WINDOW can set up a
+    // separate headless console for every subprocess. GUI parents still need
+    // it to prevent Windows from opening a visible console on launch.
+    CREATE_SUSPENDED | if has_console { 0 } else { CREATE_NO_WINDOW }
 }
 
 #[derive(Debug)]
@@ -111,10 +119,11 @@ impl Job {
         command: &mut tokio::process::Command,
     ) -> io::Result<(tokio::process::Child, Self)> {
         let job = Self::new()?;
-        // Suspend until assigned to the job, and keep captured commands from
-        // opening a console when the parent (e.g. Desktop) has none.
+        // SAFETY: GetConsoleCP takes no arguments and returns zero without an
+        // attached console. This also works when stdio has been redirected.
+        let has_console = unsafe { GetConsoleCP() } != 0;
         command
-            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+            .creation_flags(creation_flags(has_console))
             .kill_on_drop(true);
         let mut child = command.spawn()?;
         let result = job.assign_and_resume(
@@ -127,5 +136,16 @@ impl Job {
             return Err(error);
         }
         Ok((child, job))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captured_processes_reuse_an_attached_console_and_hide_a_new_one() {
+        assert_eq!(creation_flags(true), CREATE_SUSPENDED);
+        assert_eq!(creation_flags(false), CREATE_SUSPENDED | CREATE_NO_WINDOW);
     }
 }

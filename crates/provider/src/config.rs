@@ -10,7 +10,6 @@ use zevria_foundation::ModelContextPolicy;
 use zevria_foundation::ModelProfileRef;
 use zevria_foundation::{ModelRole, ReasoningLevel};
 use zevria_model::openai::ReasoningSummaryLevel;
-use zevria_responses::WebSearchConfig;
 
 /// One Responses-compatible endpoint and its complete model catalog.
 #[derive(Clone, Serialize, Deserialize)]
@@ -41,8 +40,6 @@ pub struct ResponsesProviderConfig {
     pub compaction: RemoteCompactionConfig,
     #[serde(default)]
     pub input_token_count: InputTokenCountConfig,
-    #[serde(default)]
-    pub web_search: WebSearchConfig,
 }
 
 impl fmt::Debug for ResponsesProviderConfig {
@@ -62,7 +59,6 @@ impl fmt::Debug for ResponsesProviderConfig {
             .field("additional_params", &self.additional_params)
             .field("compaction", &self.compaction)
             .field("input_token_count", &self.input_token_count)
-            .field("web_search", &self.web_search)
             .finish()
     }
 }
@@ -83,7 +79,6 @@ impl ResponsesProviderConfig {
         parse_session_id_header(provider, self.session_id_header.as_deref())?;
         validate_additional_params(provider, &self.additional_params)?;
         self.network.validate(provider)?;
-        self.web_search.validate(provider)?;
         self.compaction.validate(provider)?;
         self.input_token_count.validate(provider)
     }
@@ -113,7 +108,6 @@ impl ResponsesProviderConfig {
             additional_params,
             compaction: self.compaction.clone(),
             input_token_count: self.input_token_count.clone(),
-            web_search: self.web_search.clone(),
         }
     }
 }
@@ -809,7 +803,6 @@ pub struct ProviderEndpoint {
     pub additional_params: BTreeMap<String, serde_json::Value>,
     pub compaction: RemoteCompactionConfig,
     pub input_token_count: InputTokenCountConfig,
-    pub web_search: WebSearchConfig,
 }
 
 impl ProviderEndpoint {
@@ -835,7 +828,6 @@ impl fmt::Debug for ProviderEndpoint {
             .field("additional_params", &self.additional_params)
             .field("compaction", &self.compaction)
             .field("input_token_count", &self.input_token_count)
-            .field("web_search", &self.web_search)
             .finish()
     }
 }
@@ -1096,7 +1088,6 @@ mod tests {
             additional_params: BTreeMap::new(),
             compaction: RemoteCompactionConfig::default(),
             input_token_count: InputTokenCountConfig::default(),
-            web_search: WebSearchConfig::default(),
         }
     }
 
@@ -1265,26 +1256,15 @@ mod tests {
     }
 
     #[test]
-    fn hosted_settings_propagate_through_every_selected_profile() {
-        let mut enabled = provider("https://api.openai.com/v1/responses", "key");
-        enabled.web_search.enabled = true;
-        enabled.web_search.external_web_access = false;
-        enabled.web_search.return_token_budget = crate::SearchReturnTokenBudget::Unlimited;
-        let providers = BTreeMap::from([
-            ("openai".to_string(), enabled.clone()),
-            ("gateway".to_string(), enabled.clone()),
-        ]);
-        let routing = resolve(&providers, &modes(), 90).unwrap();
-        for role in ModelRole::ALL {
-            assert_eq!(
-                routing
-                    .for_role(role)
-                    .responses_endpoint()
-                    .unwrap()
-                    .web_search,
-                enabled.web_search
-            );
-        }
+    fn provider_catalog_rejects_legacy_hosted_settings() {
+        let mut json =
+            serde_json::to_value(provider("https://api.openai.com/v1/responses", "key")).unwrap();
+        json["web_search"] = json!({"enabled":true});
+        let error = serde_json::from_value::<ProviderConfig>(json).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `web_search`"),
+            "{error}"
+        );
     }
 
     #[test]
