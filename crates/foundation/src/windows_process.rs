@@ -18,7 +18,9 @@ use windows_sys::Win32::{
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
             SetInformationJobObject, TerminateJobObject,
         },
-        Threading::{CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+        Threading::{
+            CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        },
     },
 };
 
@@ -109,7 +111,11 @@ impl Job {
         command: &mut tokio::process::Command,
     ) -> io::Result<(tokio::process::Child, Self)> {
         let job = Self::new()?;
-        command.creation_flags(CREATE_SUSPENDED).kill_on_drop(true);
+        // Suspend until assigned to the job, and keep captured commands from
+        // opening a console when the parent (e.g. Desktop) has none.
+        command
+            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+            .kill_on_drop(true);
         let mut child = command.spawn()?;
         let result = job.assign_and_resume(
             child.raw_handle().expect("live child"),

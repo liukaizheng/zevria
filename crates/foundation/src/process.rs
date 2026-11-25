@@ -143,6 +143,27 @@ pub async fn bounded_output(
     }
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_output_captures_console_streams_and_exit_status() {
+        let cmd = crate::windows_process::system_executable("cmd.exe").unwrap();
+        let mut command = Command::new(cmd);
+        command
+            .args(["/d", "/c"])
+            .raw_arg("echo stdout-marker& echo stderr-marker>&2& exit 7");
+        let output = bounded_output(&mut command, Duration::from_secs(5), 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(output.stdout, b"stdout-marker\r\n");
+        assert_eq!(output.stderr, b"stderr-marker\r\n");
+        assert_eq!(output.status.code(), Some(7));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
